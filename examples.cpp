@@ -1,0 +1,917 @@
+#include <iostream>
+#include <cstring>
+#include <ctime>
+#include "asvJSON++.hpp"
+
+void example_basic() {
+	std::cout << "=== Basic Usage ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	json.putString("name", "John Doe");
+	json.putInt("age", 30);
+	json.putDouble("height", 180.5);
+	json.putBool("isStudent", false);
+	json.putNull("middleName");
+	
+	std::cout << "Name: " << json.getString("name") << std::endl;
+	std::cout << "Age: " << json.getInt("age") << std::endl;
+	std::cout << "Height: " << json.getDouble("height") << std::endl;
+	std::cout << "Is Student: " << (json.getBool("isStudent") ? "true" : "false") << std::endl;
+	std::cout << "Middle Name is null: " << (json.isNull("middleName") ? "true" : "false") << std::endl;
+	
+	std::cout << "Serialized: " << json.serialize() << std::endl;
+	std::cout << "Pretty: " << json.serialize(true) << std::endl << std::endl;
+}
+
+void example_string_view_key() {
+	std::cout << "=== std::string_view Key Overloads ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	std::string key = "testKey";
+	std::string_view sv_key = key;
+	
+	json.putString(sv_key, "testValue");
+	json.putInt(sv_key, 42);
+	json.putDouble(sv_key, 3.14);
+	json.putBool(sv_key, true);
+	
+	std::cout << "String: " << json.getString(sv_key) << std::endl;
+	std::cout << "Int: " << json.getInt(sv_key) << std::endl;
+	std::cout << "Double: " << json.getDouble(sv_key) << std::endl;
+	std::cout << "Bool: " << (json.getBool(sv_key) ? "true" : "false") << std::endl;
+	std::cout << "Has key: " << (json.hasKey(sv_key) ? "true" : "false") << std::endl << std::endl;
+}
+
+void example_string_view_zero_copy() {
+	std::cout << "=== string_view Zero-Copy Access ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "John Doe", "data": "test data here"})";
+	json.parse(input);
+	
+	auto* v = json.get("name");
+	if (v && v->type == asvJSONValue::STRING) {
+		std::string_view sv = v->getStringView();
+		std::cout << "Zero-copy string_view: " << sv << std::endl;
+	}
+	
+	v = json.get("data");
+	if (v && v->type == asvJSONValue::STRING) {
+		std::string_view sv = v->getStringView();
+		std::cout << "Another zero-copy view: " << sv << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_optional_getters() {
+	std::cout << "=== Optional Getters ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{\"name\": \"John\"}";
+	json.parse(input);
+	
+	std::cout << "optString (exists): " << json.optString("name", "Unknown") << std::endl;
+	std::cout << "optString (missing): " << json.optString("missing", "Default") << std::endl;
+	std::cout << "optInt (missing): " << json.optInt("age", 0) << std::endl;
+	std::cout << "optBool (missing): " << (json.optBool("active", true) ? "true" : "false") << std::endl << std::endl;
+}
+
+void example_binary_data() {
+	std::cout << "=== Binary Data ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	uint8_t data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+	json.putBinary("data", data, sizeof(data));
+	
+	auto retrieved = json.getBinary("data");
+	std::cout << "Original size: " << sizeof(data) << ", Retrieved size: " << retrieved.size() << std::endl;
+	std::cout << "First byte: " << (int)retrieved[0] << std::endl;
+	std::cout << "get() method check: " << (json.get("data") ? "exists" : "null") << std::endl << std::endl;
+}
+
+void example_chunked_binary() {
+	std::cout << "=== Chunked Binary ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	std::vector<uint8_t> large_data(200, 0xAA);
+	json.putBinChunked("largeData", large_data.data(), large_data.size(), 76);
+	
+	auto retrieved = json.getBinChunked("largeData");
+	std::cout << "Original size: " << large_data.size() << ", Retrieved size: " << retrieved.size() << std::endl;
+	auto* arr = json.getArray("largeData");
+	if (arr) {
+		std::cout << "Chunked array size: " << arr->size() << std::endl;
+	}
+	std::cout << "Serialized (chunked): " << json.serialize().substr(0, 100) << "..." << std::endl << std::endl;
+}
+
+void example_datetime() {
+	std::cout << "=== DateTime ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	time_t now = time(nullptr);
+	json.putDateTime("timestamp", now);
+	
+	std::cout << "Timestamp: " << json.getDateTime("timestamp") << std::endl;
+	std::cout << "DateTime string: " << json.getDateTimeString("timestamp") << std::endl;
+	std::cout << std::endl;
+}
+
+void example_datetime_with_ms() {
+	std::cout << "=== DateTime with Milliseconds ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"timestamp": "2024-01-15T10:30:45.123Z"})";
+	json.parse(input);
+	
+	time_t ts = json.getDateTime("timestamp");
+	int ms = json.getDateTimeMs("timestamp");
+	std::cout << "Timestamp: " << ts << ", Milliseconds: " << ms << std::endl;
+	std::cout << "DateTime string: " << json.getDateTimeString("timestamp") << std::endl << std::endl;
+}
+
+void example_arrays() {
+	std::cout << "=== Arrays ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"items": ["apple", "banana", "cherry"]})";
+	json.parse(input);
+	
+	auto* arr = json.getArray("items");
+	if (arr) {
+		std::cout << "Array size: " << arr->size() << std::endl;
+		for (size_t i = 0; i < arr->size(); i++) {
+			auto* item = arr->get(i);
+			if (item && item->type == asvJSONValue::STRING) {
+				std::cout << "  [" << i << "] " << std::string(item->str_data.data(), item->str_data.size()) << std::endl;
+			}
+		}
+	}
+	std::cout << std::endl;
+}
+
+void example_nested_access() {
+	std::cout << "=== Nested Access ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"user": {"name": "John", "address": {"city": "NYC", "zip": "10001"}}})";
+	json.parse(input);
+	
+	auto* name = json.getNested("user.name");
+	auto* city = json.getNested("user.address.city");
+	auto* missing = json.getNested("user.phone");
+	
+	if (name && name->type == asvJSONValue::STRING) {
+		std::cout << "user.name: " << std::string(name->str_data.data(), name->str_data.size()) << std::endl;
+	}
+	if (city && city->type == asvJSONValue::STRING) {
+		std::cout << "user.address.city: " << std::string(city->str_data.data(), city->str_data.size()) << std::endl;
+	}
+	std::cout << "user.phone exists: " << (missing ? "true" : "false") << std::endl << std::endl;
+}
+
+void example_object_operations() {
+	std::cout << "=== Object Operations ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"a": 1, "b": 2, "c": 3})";
+	json.parse(input);
+	
+	auto keys = json.getKeys();
+	std::cout << "Keys: ";
+	for (const auto& k : keys) std::cout << k << " ";
+	std::cout << std::endl;
+	
+	std::cout << "Size: " << json.size() << std::endl;
+	std::cout << "Has 'a': " << (json.hasKey("a") ? "true" : "false") << std::endl;
+	
+	json.remove("b");
+	std::cout << "After remove 'b', size: " << json.size() << std::endl;
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_base64_custom_charset() {
+	std::cout << "=== Custom Base64 Charset ===" << std::endl;
+	
+	setBase64Chars("XYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUV");
+	
+	uint8_t data[] = {0x01, 0x02, 0x03};
+	std::string encoded = base64_encode(data, sizeof(data));
+	
+	std::cout << "Custom charset input (64 chars): XYZ..." << std::endl;
+	std::cout << "Custom charset encoded: " << encoded << std::endl;
+	std::cout << "Current charset (64 chars): " << getBase64Chars() << std::endl;
+
+	setBase64Chars("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/");
+	std::cout << "Restored default charset." << std::endl << std::endl;
+}
+
+void example_file_io() {
+	std::cout << "=== File I/O ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	json.putString("name", "John");
+	json.putInt("age", 30);
+	
+	json.writeToFile("test_output.json", true);
+	std::cout << "Written to test_output.json" << std::endl;
+	
+	asvJSON json2;
+	json2.readFromFile("test_output.json");
+	std::cout << "Read from file: " << json2.serialize() << std::endl << std::endl;
+}
+
+void example_comments() {
+	std::cout << "=== Comments ===" << std::endl;
+	
+	std::string jsonWithComments = R"({
+	// This is a single-line comment
+	"name": "John",
+	/* This is a
+	   multi-line comment */
+	"age": 30,
+	# Shell-style comment
+	"city": "NYC"
+})";
+	
+	asvJSON json;
+	bool parsed = json.parse(jsonWithComments);
+	std::cout << "Parse with comments: " << (parsed ? "success" : "failed") << std::endl;
+	std::cout << "Name: " << json.getString("name") << std::endl;
+	std::cout << "Age: " << json.getInt("age") << std::endl << std::endl;
+}
+
+void example_pretty_print() {
+	std::cout << "=== Pretty Print ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name":"John","age":30,"city":"NYC"})";
+	json.parse(input);
+	
+	std::cout << "Compact: " << json.serialize() << std::endl;
+	std::cout << "Pretty: " << json.serialize(true) << std::endl << std::endl;
+}
+
+void example_get_value() {
+	std::cout << "=== get() method ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "John", "age": 30})";
+	json.parse(input);
+	
+	auto* v = json.get("name");
+	if (v) {
+		std::cout << "Type: " << v->typeToString(v->type) << std::endl;
+		std::cout << "Value: " << (v->type == asvJSONValue::STRING ? std::string(v->str_data.data(), v->str_data.size()) : "") << std::endl;
+	}
+	
+	v = json.get("age");
+	if (v) {
+		std::cout << "Int value: " << v->getInt() << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_clear() {
+	std::cout << "=== clear() method ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "John", "age": 30})";
+	json.parse(input);
+	std::cout << "Before clear - size: " << json.size() << std::endl;
+	
+	json.clear();
+	std::cout << "After clear - size: " << json.size() << std::endl;
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_get_root() {
+	std::cout << "=== getObject() (get root) ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	auto* root = json.getObject();
+	std::cout << "Root type: " << (root ? root->typeToString(root->type) : "null") << std::endl;
+	
+	root->obj->emplace("newKey", asvJSONValue::makeString("value", 5));
+	std::cout << "After adding via root: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_regex() {
+	std::cout << "=== Regex (makeRegex) ===" << std::endl;
+	
+	auto* regex = asvJSONValue::makeRegex("\\d+", "g");
+	if (regex) {
+		std::cout << "Regex type: " << regex->typeToString(regex->type) << std::endl;
+		std::cout << "Regex value: " << std::string(regex->str_data.data(), regex->str_data.size()) << std::endl;
+		delete regex;
+	}
+	std::cout << std::endl;
+}
+
+void example_messagepack() {
+	std::cout << "=== MessagePack ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "Test", "count": 42, "active": true})";
+	json.parse(input);
+	
+	auto mp = json.toMessagePack();
+	std::cout << "JSON size: " << json.serialize().size() << " bytes" << std::endl;
+	std::cout << "MessagePack size: " << mp.size() << " bytes" << std::endl;
+	
+	asvJSON json2;
+	json2.fromMessagePack(mp.data(), mp.size());
+	std::cout << "Roundtrip - name: " << json2.getString("name") << ", count: " << json2.getInt("count") << std::endl << std::endl;
+}
+
+void example_bson() {
+	std::cout << "=== BSON ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "Test", "count": 42})";
+	json.parse(input);
+	
+	auto bson = json.toBSON();
+	std::cout << "JSON size: " << json.serialize().size() << " bytes" << std::endl;
+	std::cout << "BSON size: " << bson.size() << " bytes" << std::endl;
+	
+	asvJSON json2;
+	json2.fromBSON(bson.data(), bson.size());
+	std::cout << "Roundtrip - name: " << json2.getString("name") << ", count: " << json2.getInt("count") << std::endl << std::endl;
+}
+
+void example_json_pointer() {
+	std::cout << "=== JSON Pointer ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"user": {"name": "John", "address": {"city": "NYC"}}})";
+	json.parse(input);
+	
+	auto* v = json.getByPointer("/user/name");
+	if (v) std::cout << "getByPointer /user/name: " << (v->type == asvJSONValue::STRING ? std::string(v->str_data.data(), v->str_data.size()) : "") << std::endl;
+	
+	json.setByPointer("/user/age", asvJSONValue::makeInt(30));
+	std::cout << "After setByPointer /user/age: " << json.serialize() << std::endl;
+	
+	json.removeByPointer("/user/address");
+	std::cout << "After removeByPointer /user/address: " << json.serialize() << std::endl;
+	
+	asvJSON json2;
+	json2.parse(std::string("[1, 2, 3]"));
+	json2.setByPointer("/-", asvJSONValue::makeInt(4));
+	json2.setByPointer("/-", asvJSONValue::makeInt(5));
+	std::cout << "After array append: " << json2.serialize() << std::endl << std::endl;
+}
+
+void example_merge_patch() {
+	std::cout << "=== JSON Patch (RFC 6902) ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"title": "Hello", "author": {"name": "John"}, "oldField": "removed"})";
+	json.parse(input);
+	
+	asvJSON patch;
+	std::string patchInput = R"({"title": "World", "author": {"name": "Jane", "email": "jane@example.com"}, "newField": "added"})";
+	patch.parse(patchInput);
+	
+	json.applyPatch(patch);
+	std::cout << "After applyPatch: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_clone() {
+	std::cout << "=== Clone (cloneValue) ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "John", "age": 30})";
+	json.parse(input);
+	
+	auto* original = json.get("name");
+	if (original) {
+		auto* cloned = cloneValue(original);
+		std::cout << "Original: " << (original->type == asvJSONValue::STRING ? std::string(original->str_data.data(), original->str_data.size()) : "") << std::endl;
+		std::cout << "Cloned: " << (cloned->type == asvJSONValue::STRING ? std::string(cloned->str_data.data(), cloned->str_data.size()) : "") << std::endl;
+		delete cloned;
+	}
+	std::cout << std::endl;
+}
+
+void example_get_array() {
+	std::cout << "=== getArray() method ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"fruits": ["apple", "banana", "cherry"], "empty": []})";
+	json.parse(input);
+	
+	auto* arr = json.getArray("fruits");
+	if (arr) {
+		std::cout << "fruits array size: " << arr->size() << std::endl;
+		for (size_t i = 0; i < arr->size(); i++) {
+			auto* item = arr->get(i);
+			if (item && item->type == asvJSONValue::STRING) {
+				std::cout << "  " << std::string(item->str_data.data(), item->str_data.size()) << std::endl;
+			}
+		}
+	}
+	
+	auto* emptyArr = json.getArray("missing");
+	std::cout << "Missing array: " << (emptyArr ? "exists" : "null") << std::endl << std::endl;
+}
+
+void example_array_add() {
+	std::cout << "=== Array Add Methods ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{\"items\": []}";
+	json.parse(input);
+	
+	json.arrayAddString("items", "apple");
+	json.arrayAddInt("items", 42);
+	json.arrayAddDouble("items", 3.14);
+	json.arrayAddBool("items", true);
+	json.arrayAddNull("items");
+	
+	auto* arr = json.getArray("items");
+	if (arr) {
+		std::cout << "Array size: " << arr->size() << std::endl;
+		for (size_t i = 0; i < arr->size(); i++) {
+			auto* item = arr->get(i);
+			if (item) std::cout << "  [" << i << "] " << item->typeToString(item->type) << std::endl;
+		}
+	}
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_array_add_datetime() {
+	std::cout << "=== arrayAddDateTime ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{\"timestamps\": []}";
+	json.parse(input);
+	
+	time_t now = time(nullptr);
+	json.arrayAddDateTime("timestamps", now);
+	
+	auto* arr = json.getArray("timestamps");
+	if (arr && arr->size() > 0) {
+		auto* item = arr->get(static_cast<size_t>(0));
+		if (item && item->type == asvJSONValue::DATETIME) {
+			std::cout << "Added timestamp: " << item->timestamp << std::endl;
+		}
+	}
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_opt_datetime() {
+	std::cout << "=== Optional DateTime Methods ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"timestamp": "2024-01-15T10:30:00Z"})";
+	json.parse(input);
+	
+	time_t dt = json.optDateTime("timestamp", 0);
+	std::cout << "optDateTime (exists): " << dt << std::endl;
+	
+	time_t missing = json.optDateTime("missing", 1234567890);
+	std::cout << "optDateTime (missing): " << missing << std::endl;
+	
+	std::tm tm = json.optDateTimeTM("timestamp", std::tm{});
+	std::cout << "optDateTimeTM year: " << tm.tm_year + 1900 << std::endl << std::endl;
+}
+
+void example_type_to_string() {
+	std::cout << "=== typeToString() method ===" << std::endl;
+	
+	auto* str = asvJSONValue::makeString("test", 4);
+	auto* num = asvJSONValue::makeInt(42);
+	auto* dbl = asvJSONValue::makeDouble(1.5);
+	auto* boo = asvJSONValue::makeBool(true);
+	auto* nul = asvJSONValue::makeNull();
+	auto* obj = asvJSONValue::makeObject();
+	auto* arr = asvJSONValue::makeArray();
+	uint8_t binData[] = {'a', 'b', 'c'};
+	auto* bin = asvJSONValue::makeBinary(binData, 3);
+	auto* dt = asvJSONValue::makeDateTime(time(nullptr));
+	
+	std::cout << "string: " << str->typeToString(str->type) << std::endl;
+	std::cout << "int: " << num->typeToString(num->type) << std::endl;
+	std::cout << "double: " << dbl->typeToString(dbl->type) << std::endl;
+	std::cout << "bool: " << boo->typeToString(boo->type) << std::endl;
+	std::cout << "null: " << nul->typeToString(nul->type) << std::endl;
+	std::cout << "object: " << obj->typeToString(obj->type) << std::endl;
+	std::cout << "array: " << arr->typeToString(arr->type) << std::endl;
+	std::cout << "binary: " << bin->typeToString(bin->type) << std::endl;
+	std::cout << "datetime: " << dt->typeToString(dt->type) << std::endl;
+	
+	delete str; delete num; delete dbl; delete boo; delete nul; delete obj; delete arr; delete bin; delete dt;
+	std::cout << std::endl;
+}
+
+void example_merge() {
+	std::cout << "=== merge() method ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"a": 1, "b": 2})";
+	json.parse(input);
+	
+	asvJSON other;
+	std::string otherInput = R"({"b": 3, "c": 4})";
+	other.parse(otherInput);
+	
+	json.merge(other);
+	
+	std::cout << "After merge: " << json.serialize() << std::endl;
+	std::cout << "a=" << json.getInt("a") << ", b=" << json.getInt("b") << ", c=" << json.getInt("c") << std::endl << std::endl;
+}
+
+void example_date_time_string() {
+	std::cout << "=== getDateTimeString() ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"timestamp": "2024-01-15T10:30:45.123Z"})";
+	json.parse(input);
+	
+	std::cout << "DateTime string: " << json.getDateTimeString("timestamp") << std::endl;
+	
+	std::string missing = json.getDateTimeString("missing");
+	std::cout << "Missing key result: '" << missing << "'" << std::endl << std::endl;
+}
+
+void example_string_overloads() {
+	std::cout << "=== String Key Overloads for get/put ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = "{}";
+	json.parse(input);
+	
+	std::string key = "testKey";
+	json.putString(key, "testValue");
+	json.putInt(key, 100);
+	json.putDouble(key, 2.5);
+	json.putBool(key, true);
+	json.putNull(key);
+	
+	std::cout << "getString: " << json.getString(key) << std::endl;
+	std::cout << "getInt: " << json.getInt(key) << std::endl;
+	std::cout << "getDouble: " << json.getDouble(key) << std::endl;
+	std::cout << "getBool: " << (json.getBool(key) ? "true" : "false") << std::endl;
+	std::cout << "isNull: " << (json.isNull(key) ? "true" : "false") << std::endl;
+	std::cout << "hasKey: " << (json.hasKey(key) ? "true" : "false") << std::endl;
+	std::cout << "remove: " << json.size() << " before" << std::endl;
+	json.remove(key);
+	std::cout << "remove: " << json.size() << " after" << std::endl << std::endl;
+}
+
+void example_put_float32() {
+	std::cout << "=== putFloat32 / is_float32 ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.putFloat32("value", 3.14f);
+
+	auto* v = json.get("value");
+	if (v) {
+		std::cout << "Type: " << v->typeToString(v->type) << std::endl;
+		std::cout << "Double value: " << v->getDouble() << std::endl;
+		std::cout << "is_float32 flag: " << (v->is_float32 ? "true" : "false") << std::endl;
+	}
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_type_checks() {
+	std::cout << "=== Type Checks (isXxx) ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	uint8_t bin[] = {0x01, 0x02, 0x03};
+	json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+	json.putTimestamp("ts", 1000);
+	json.putRegex("rx", "^test$", "gi");
+	json.putBinary("bin", bin, 3);
+	json.putDateTime("dt", time(nullptr));
+
+	std::cout << "isObjectId('oid'): " << json.isObjectId("oid") << std::endl;
+	std::cout << "isTimestamp('ts'): " << json.isTimestamp("ts") << std::endl;
+	std::cout << "isRegex('rx'): " << json.isRegex("rx") << std::endl;
+	std::cout << "isBinary('bin'): " << json.isBinary("bin") << std::endl;
+	std::cout << "isDateTime('dt'): " << json.isDateTime("dt") << std::endl;
+	std::cout << "isObjectId('missing'): " << json.isObjectId("missing") << std::endl;
+	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_get_special_types() {
+	std::cout << "=== Get Special Types ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+	json.putTimestamp("ts", 1000);
+	json.putRegex("rx", "^test$", "gi");
+
+	std::cout << "getObjectId('oid'): " << json.getObjectId("oid") << std::endl;
+	std::cout << "getTimestamp('ts'): " << json.getTimestamp("ts") << std::endl;
+
+	auto rx = json.getRegex("rx");
+	std::cout << "getRegex pattern: " << rx.first << std::endl;
+	std::cout << "getRegex options: " << rx.second << std::endl;
+
+	std::string pat, opt;
+	json.getRegex("rx", pat, opt);
+	std::cout << "pattern (ref): " << pat << ", options (ref): " << opt << std::endl << std::endl;
+}
+
+void example_extension() {
+	std::cout << "=== Extension Types ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	uint8_t extData[] = {0xDE, 0xAD, 0xBE, 0xEF};
+	json.putExtension("ext", 7, extData, 4);
+
+	std::cout << "isExtension('ext'): " << json.isExtension("ext") << std::endl;
+	auto ext = json.getExtension("ext");
+	std::cout << "Extension type: " << (int)ext.first << std::endl;
+	std::cout << "Extension data size: " << ext.second.size() << std::endl;
+	std::cout << "First byte: 0x" << std::hex << (int)ext.second[0] << std::dec << std::endl << std::endl;
+}
+
+void example_nested_special_types() {
+	std::cout << "=== Nested Special Types ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.getObject()->obj->emplace("sub", std::unique_ptr<asvJSONValue>(asvJSONValue::makeObject()));
+	auto* sub = json.getRoot()->get("sub");
+	sub->obj->emplace("oid", std::unique_ptr<asvJSONValue>(asvJSONValue::makeObjectId("ABCDEF123456")));
+	sub->obj->emplace("ts", std::unique_ptr<asvJSONValue>(asvJSONValue::makeTimestamp(1000)));
+	sub->obj->emplace("rx", std::unique_ptr<asvJSONValue>(asvJSONValue::makeRegex("^test$", "gi")));
+
+	std::cout << "getNestedObjectId('sub.oid'): " << json.getNestedObjectId("sub.oid") << std::endl;
+	std::cout << "getNestedTimestamp('sub.ts'): " << json.getNestedTimestamp("sub.ts") << std::endl;
+	auto nrx = json.getNestedRegex("sub.rx");
+	std::cout << "getNestedRegex pattern: " << nrx.first << std::endl;
+	std::cout << "getNestedRegex options: " << nrx.second << std::endl << std::endl;
+}
+
+void example_static_msgpack_convert() {
+	std::cout << "=== Static MessagePack Converters ===" << std::endl;
+
+	std::string jsonInput = "{\"a\":1,\"b\":2}";
+	auto mp = asvJSON::messagePackFromString(jsonInput);
+	std::cout << "messagePackFromString size: " << mp.size() << " bytes" << std::endl;
+
+	std::string jsonOut = asvJSON::stringFromMessagePack(mp.data(), mp.size());
+	std::cout << "stringFromMessagePack: " << jsonOut << std::endl << std::endl;
+}
+
+void example_msgpack_bson_string() {
+	std::cout << "=== fromMessagePack/fromBSON with std::string ===" << std::endl;
+
+	asvJSON src;
+	src.parse(std::string("{\"x\":42}"));
+
+	auto mp = src.toMessagePack();
+	std::string mpStr(reinterpret_cast<const char*>(mp.data()), mp.size());
+	asvJSON json1;
+	json1.fromMessagePack(mpStr);
+	std::cout << "fromMessagePack(string): x=" << json1.getInt("x") << std::endl;
+
+	auto bson = src.toBSON();
+	std::string bsonStr(reinterpret_cast<const char*>(bson.data()), bson.size());
+	asvJSON json2;
+	json2.fromBSON(bsonStr);
+	std::cout << "fromBSON(string): x=" << json2.getInt("x") << std::endl << std::endl;
+}
+
+void example_valid_utf8() {
+	std::cout << "=== isValidUTF8 ===" << std::endl;
+
+	uint8_t valid[] = {'H', 'e', 'l', 'l', 'o'};
+	uint8_t invalid[] = {0xFF, 0xFE};
+	uint8_t validRussian[] = {0xD0, 0x9F, 0xD1, 0x80, 0xD0, 0xB8, 0xD0, 0xB2, 0xD0, 0xB5, 0xD1, 0x82}; // "Привет"
+	uint8_t validEmoji[] = {0xF0, 0x9F, 0x98, 0x80}; // U+1F600
+
+	std::cout << "ASCII valid: " << isValidUTF8(valid, 5) << std::endl;
+	std::cout << "Invalid bytes: " << isValidUTF8(invalid, 2) << std::endl;
+	std::cout << "Russian valid: " << isValidUTF8(validRussian, 12) << std::endl;
+	std::cout << "Emoji valid: " << isValidUTF8(validEmoji, 4) << std::endl << std::endl;
+}
+
+void example_root_array() {
+	std::cout << "=== getRootArray ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("[10, 20, 30]"));
+
+	asvJSONValue* arr = json.getRootArray();
+	if (arr) {
+		std::cout << "Root array size: " << arr->size() << std::endl;
+		std::cout << "First element: " << arr->get(static_cast<size_t>(0))->getInt() << std::endl;
+	}
+
+	const asvJSON& constRef = json;
+	const asvJSONValue* constArr = constRef.getRootArray();
+	std::cout << "Const access - root type: " << (constArr ? constArr->typeToString(constArr->type) : "null") << std::endl << std::endl;
+}
+
+void example_get_const() {
+	std::cout << "=== getConst (const-correct access) ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{\"key\": \"value\"}"));
+
+	const asvJSON& constRef = json;
+	const asvJSONValue* v = constRef.getConst("key");
+	if (v && v->type == asvJSONValue::STRING) {
+		std::cout << "Const value: " << std::string(v->str_data.data(), v->str_data.size()) << std::endl;
+	}
+
+	v = constRef.getConst(static_cast<size_t>(0));
+	std::cout << "getConst by index: " << (v ? "exists" : "null") << std::endl << std::endl;
+}
+
+void example_copy_move() {
+	std::cout << "=== Copy / Move Semantics ===" << std::endl;
+
+	asvJSON original;
+	original.parse(std::string("{\"a\": 1, \"b\": 2}"));
+
+	asvJSON copied(original); // copy constructor
+	std::cout << "Copied: " << copied.serialize() << std::endl;
+
+	asvJSON moved(std::move(original)); // move constructor
+	std::cout << "Moved: " << moved.serialize() << std::endl;
+
+	asvJSON assigned;
+	assigned = moved; // copy assignment
+	std::cout << "Copy assigned: " << assigned.serialize() << std::endl;
+
+	asvJSON moveAssigned;
+	moveAssigned = std::move(assigned); // move assignment
+	std::cout << "Move assigned: " << moveAssigned.serialize() << std::endl << std::endl;
+}
+
+void example_remove_by_pointer() {
+	std::cout << "=== removeByPointer ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{\"user\": {\"name\": \"John\", \"age\": 30, \"city\": \"NYC\"}}"));
+
+	std::cout << "Before: " << json.serialize() << std::endl;
+	json.removeByPointer("/user/age");
+	std::cout << "After remove /user/age: " << json.serialize() << std::endl;
+	json.removeByPointer("/user");
+	std::cout << "After remove /user: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_to_xml() {
+	std::cout << "=== toXML Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.putString("name", "John & Jane");
+	json.putInt("age", 30);
+	json.putBool("active", true);
+	json.putNull("nickname");
+	json.putDouble("pi", 3.14159);
+	json.parse(std::string(R"({"name":"John & Jane","age":30,"active":true,"nickname":null,"pi":3.14159,"items":[1,2,3],"meta":{"nested":true}})"));
+	std::cout << json.toXML() << std::endl;
+}
+
+void example_xml_escaped_keys() {
+	std::cout << "=== toXML with Escaped Keys ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"key with spaces":42,"data\nnewline":true,"tab\there":3.14})"));
+	std::cout << json.toXML() << std::endl;
+}
+
+void example_opt_datetime_tm_default() {
+	std::cout << "=== optDateTimeTM with default ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{\"dt\": \"2024-01-15T10:30:00Z\"}"));
+
+	std::tm tm = json.optDateTimeTM("dt");
+	std::cout << "Year: " << (tm.tm_year + 1900) << ", Month: " << (tm.tm_mon + 1) << ", Day: " << tm.tm_mday << std::endl;
+
+	std::tm def = {};
+	def.tm_year = 70;
+	std::tm missing = json.optDateTimeTM("nonexistent", def);
+	std::cout << "Missing default year: " << (missing.tm_year + 1900) << std::endl << std::endl;
+}
+
+void example_to_yaml() {
+	std::cout << "=== toYAML Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"items":[1,2,3],"meta":{"nested":true,"pi":3.14},"empty":null})"));
+	std::cout << json.toYAML() << std::endl;
+}
+
+void example_to_yaml_multiline() {
+	std::cout << "=== toYAML with Multiline Strings ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"description":"This is a\nmultiline string\nwith several lines.","key":"short"})"));
+	std::cout << json.toYAML() << std::endl;
+}
+
+void example_to_csv() {
+	std::cout << "=== toCSV Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"meta":{"city":"NYC","zip":"10001"}})"));
+	std::cout << json.toCSV() << std::endl;
+}
+
+void example_to_csv_array() {
+	std::cout << "=== toCSV with Array of Objects ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"([{"x":10,"y":20,"z":30},{"x":40,"y":50},{"y":60,"w":70}])"));
+	std::cout << json.toCSV() << std::endl;
+}
+
+int main() {
+	std::cout << "========================================" << std::endl;
+	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
+	std::cout << "========================================" << std::endl << std::endl;
+	
+	example_basic();
+	example_string_view_key();
+	example_string_view_zero_copy();
+	example_optional_getters();
+	example_binary_data();
+	example_chunked_binary();
+	example_datetime();
+	example_datetime_with_ms();
+	example_arrays();
+	example_nested_access();
+	example_object_operations();
+	example_base64_custom_charset();
+	example_file_io();
+	example_comments();
+	example_pretty_print();
+	example_get_value();
+	example_clear();
+	example_get_root();
+	example_regex();
+	example_messagepack();
+	example_bson();
+	example_json_pointer();
+	example_merge_patch();
+	example_clone();
+	example_get_array();
+	example_array_add();
+	example_array_add_datetime();
+	example_opt_datetime();
+	example_type_to_string();
+	example_merge();
+	example_date_time_string();
+	example_string_overloads();
+	example_put_float32();
+	example_type_checks();
+	example_get_special_types();
+	example_extension();
+	example_nested_special_types();
+	example_static_msgpack_convert();
+	example_msgpack_bson_string();
+	example_valid_utf8();
+	example_root_array();
+	example_get_const();
+	example_copy_move();
+	example_remove_by_pointer();
+	example_opt_datetime_tm_default();
+	example_to_xml();
+	example_xml_escaped_keys();
+	example_to_yaml();
+	example_to_yaml_multiline();
+	example_to_csv();
+	example_to_csv_array();
+	
+	std::cout << "========================================" << std::endl;
+	std::cout << "   All examples completed!" << std::endl;
+	std::cout << "========================================" << std::endl;
+	
+	return 0;
+}
