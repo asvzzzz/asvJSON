@@ -161,7 +161,7 @@ struct asvJSONValue {
 #ifdef ASVJSON_USE_ORDERED_MAP
 	using ObjectMap = std::map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::StringViewLess>;
 #else
-	using ObjectMap = std::unordered_map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::SafeHash, std::equal_to<>>;
+    using ObjectMap = std::unordered_map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::SafeHash, std::equal_to<>>;
 #endif
 	std::unique_ptr<ObjectMap> obj;
 	std::unique_ptr<std::vector<std::unique_ptr<asvJSONValue>>> arr;
@@ -1068,7 +1068,7 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 				out += buf;
 				out += std::to_string(tm.tm_sec);
 				out.push_back('.');
-				char msbuf[8];
+				char msbuf[16];
 				snprintf(msbuf, sizeof(msbuf), "%03d", datetime_ms);
 				out += msbuf;
 				out.push_back('Z');
@@ -1168,7 +1168,7 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 				out += buf;
 				out += std::to_string(tm.tm_sec);
 				out.push_back('.');
-				char msbuf[8];
+				char msbuf[16];
 				snprintf(msbuf, sizeof(msbuf), "%03d", datetime_ms);
 				out += msbuf;
 				out.push_back('Z');
@@ -1715,7 +1715,7 @@ private:
 			if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) throw asvJSONError("Invalid number: NaN or Infinity not allowed");
 			return asvJSONValue::makeDouble(d);
 		} else {
-			int64_t l;
+			long long l;
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, l);
 			if (ec != std::errc() || ptr != buf + numLen) throw asvJSONError("Invalid number");
 			return asvJSONValue::makeInt(l);
@@ -2495,10 +2495,7 @@ public:
 	 * @brief Get root array (if root is array)
 	 * @return Pointer to root array or nullptr
 	 */
-	[[nodiscard]] asvJSONValue* getRootArray() {
-		return root && root->type == asvJSONValue::ARRAY ? root : nullptr;
-	}
-	[[nodiscard]] const asvJSONValue* getRootArray() const {
+	[[nodiscard]] asvJSONValue* getRootArray() const {
 		return root && root->type == asvJSONValue::ARRAY ? root : nullptr;
 	}
 
@@ -2585,7 +2582,7 @@ public:
 				std::string result = buf;
 				result += std::to_string(tm.tm_sec);
 				result += '.';
-				char msbuf[8];
+				char msbuf[16];
 				snprintf(msbuf, sizeof(msbuf), "%03d", v->datetime_ms);
 				result += msbuf;
 				result += "Z";
@@ -2866,7 +2863,7 @@ public:
 	}
 };
 
-std::vector<uint8_t> asvJSON::toMessagePack() const {
+inline std::vector<uint8_t> asvJSON::toMessagePack() const {
 	std::vector<uint8_t> out;
 	if (!root) return out;
 	root->toMessagePack(out);
@@ -3351,7 +3348,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	return nullptr;
 }
 
-bool asvJSON::fromMessagePack(const uint8_t* data, size_t size) {
+inline bool asvJSON::fromMessagePack(const uint8_t* data, size_t size) {
 	delete root;
 	root = nullptr;
 	if (!data || size == 0) return false;
@@ -3366,14 +3363,14 @@ bool asvJSON::fromMessagePack(const uint8_t* data, size_t size) {
 	return true;
 }
 
-std::vector<uint8_t> asvJSON::toBSON() const {
+inline std::vector<uint8_t> asvJSON::toBSON() const {
 	std::vector<uint8_t> out;
 	if (!root) return out;
 	root->toBSON(out);
 	return out;
 }
 
-std::string asvJSON::toXML() const {
+inline std::string asvJSON::toXML() const {
 	std::string out;
 	if (!root) { out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root/>\n"; return out; }
 	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -3395,7 +3392,7 @@ std::string asvJSON::toXML() const {
 	return out;
 }
 
-std::string asvJSON::toYAML() const {
+inline std::string asvJSON::toYAML() const {
 	std::string out;
 	if (!root) { out += "null\n"; return out; }
 	out += "---\n";
@@ -3430,13 +3427,13 @@ inline std::string csvEscape(std::string_view s) {
 	return out;
 }
 
-std::string asvJSON::toCSV() const {
+inline std::string asvJSON::toCSV() const {
 	std::string out;
 	if (root) root->toCSV(out);
 	return out;
 }
 
-void asvJSONValue::toCSV(std::string& out) const {
+inline void asvJSONValue::toCSV(std::string& out) const {
 	auto cellValue = [](const asvJSONValue* v) -> std::string {
 		if (!v) return {};
 		using T = asvJSONValue::Type;
@@ -3452,7 +3449,7 @@ void asvJSONValue::toCSV(std::string& out) const {
 			case T::STRING: return v->str_data;
 			case T::DATETIME: {
 				char buf[40]; std::tm tm; asvjson_gmtime(&tm, &v->timestamp);
-				char ms[8] = ""; if (v->datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", v->datetime_ms);
+				char ms[16] = ""; if (v->datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", v->datetime_ms);
 				if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0) return {};
 				return std::string(buf) + ms + "Z";
 			}
@@ -3586,7 +3583,7 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
  * @param size Size of data in bytes
  * @return true on success, false on error (see lastError)
  */
-bool asvJSON::fromBSON(const uint8_t* data, size_t size) {
+inline bool asvJSON::fromBSON(const uint8_t* data, size_t size) {
 	delete root;
 	root = nullptr;
 	if (!data || size < 5) return false;
@@ -3622,7 +3619,7 @@ inline uint32_t readLE32(const uint8_t* data) {
 inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
 	if (pos + 4 > dataLen) return nullptr;
 	if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
-	uint32_t docLen = readLE32(data + pos);
+	int32_t docLen = readLE32(data + pos);
 	pos += 4;
 	if (docLen < 5 || static_cast<size_t>(docLen) > dataLen - (pos - 4)) return nullptr;
 	size_t docEnd = pos + docLen - 4;
@@ -3821,7 +3818,7 @@ inline std::string decodeJSONPointerKey(std::string_view& sv) {
 	return key;
 }
 
-const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const {
+inline const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const {
 	if (pointer.data() == nullptr || !root) return nullptr;
 	if (pointer.empty()) return root;
 	if (pointer[0] != '/') return nullptr;
@@ -3851,11 +3848,11 @@ const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const {
 	return current;
 }
 
-asvJSONValue* asvJSON::getByPointer(std::string_view pointer) {
+inline asvJSONValue* asvJSON::getByPointer(std::string_view pointer) {
 	return const_cast<asvJSONValue*>(static_cast<const asvJSON*>(this)->getByPointer(pointer));
 }
 
-bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value) {
+inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value) {
 	if (pointer.data() == nullptr || !value || pointer.empty() || pointer[0] != '/') { delete value; return false; }
 	try {
 		if (!root || (root->type != asvJSONValue::OBJECT && root->type != asvJSONValue::ARRAY)) {
@@ -3969,7 +3966,7 @@ bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value) {
 	}
 }
 
-bool asvJSON::removeByPointer(std::string_view pointer) {
+inline bool asvJSON::removeByPointer(std::string_view pointer) {
 	if (pointer.data() == nullptr || !root) return false;
 	if (pointer == "/") {
 		delete root;
@@ -4134,7 +4131,7 @@ inline asvJSONValue* mergePatchRecursive(asvJSONValue* target, const asvJSONValu
 	return cloneValue(patch);
 }
 
-void asvJSON::merge(const asvJSON& other) {
+inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
 	if (!root) { root = cloneValue(other.root); return; }
 	asvJSONValue* newRoot = mergePatchRecursive(root, other.root);
@@ -4144,7 +4141,7 @@ void asvJSON::merge(const asvJSON& other) {
 	}
 }
 
-asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
+inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
 	asvJSON result;
 	if (!root) return result;
 	if (root->type == asvJSONValue::OBJECT && patch.root && patch.root->type == asvJSONValue::OBJECT) {
@@ -4201,7 +4198,7 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 	}
 }
 
-bool asvJSON::applyPatch(const asvJSON& patch) {
+inline bool asvJSON::applyPatch(const asvJSON& patch) {
 	if (!patch.root || patch.root->type != asvJSONValue::ARRAY) return false;
 	for (size_t i = 0; i < patch.root->arr->size(); i++) {
 		auto* op = (*patch.root->arr)[i].get();
@@ -4273,7 +4270,7 @@ bool asvJSON::applyPatch(const asvJSON& patch) {
 	return true;
 }
 
-void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
+inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 	switch (type) {
 		case NULL_VAL: out.push_back(0xC0); break;
 		case BOOL_VAL: out.push_back(flag ? 0xC3 : 0xC2); break;
@@ -4543,7 +4540,7 @@ inline void writeLE64(std::vector<uint8_t>& out, uint64_t v) {
 	for (int i = 0; i < 8; i++) out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
 }
 
-void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
+inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 	switch (type) {
 		case NULL_VAL: out.push_back(0x0A); break;
 		case BOOL_VAL: out.push_back(0x08); out.push_back(flag ? 0x01 : 0x00); break;
@@ -4682,12 +4679,12 @@ void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 	}
 }
 
-void asvJSONValue::toXML(std::string& out) const {
+inline void asvJSONValue::toXML(std::string& out) const {
 	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 	toXML(out, "root", 0);
 }
 
-void asvJSONValue::toXML(std::string& out, const std::string& name, int indent) const {
+inline void asvJSONValue::toXML(std::string& out, const std::string& name, int indent) const {
 	std::string prefix(static_cast<size_t>(indent) * 2, ' ');
 	switch (type) {
 		case NULL_VAL:
@@ -4719,7 +4716,7 @@ void asvJSONValue::toXML(std::string& out, const std::string& name, int indent) 
 			char buf[40];
 			std::tm tm;
 			asvjson_gmtime(&tm, &timestamp);
-			char msbuf[8] = "";
+			char msbuf[16] = "";
 			if (datetime_ms > 0) snprintf(msbuf, sizeof(msbuf), ".%03d", datetime_ms);
 			if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0)
 				throw asvJSONError("Failed to format datetime");
@@ -4782,12 +4779,12 @@ void asvJSONValue::toXML(std::string& out, const std::string& name, int indent) 
 	}
 }
 
-void asvJSONValue::toYAML(std::string& out) const {
+inline void asvJSONValue::toYAML(std::string& out) const {
 	out += "---\n";
 	toYAML(out, 0, "", false);
 }
 
-void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const {
+inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const {
 	auto pad = [&]() { out.append(static_cast<size_t>(indent) * 2, ' '); };
 	auto startLine = [&]() { pad(); if (isArrayItem) out += "- "; else if (!key.empty()) { out += yamlQuoteKey(key); out += ": "; } };
 	auto startBlock = [&]() { pad(); if (isArrayItem) out += '-'; else if (!key.empty()) { out += yamlQuoteKey(key); out += ':'; } out += '\n'; };
@@ -4824,7 +4821,7 @@ void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, 
 		}
 		case asvJSONValue::DATETIME: {
 			char buf[40]; std::tm tm; asvjson_gmtime(&tm, &timestamp);
-			char ms[8] = ""; if (datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", datetime_ms);
+			char ms[16] = ""; if (datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", datetime_ms);
 			if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0)
 				throw asvJSONError("Failed to format datetime");
 			startLine(); out += buf; out += ms; out += "Z\n";
