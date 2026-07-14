@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <cstring>
 #include <ctime>
 #include "asvJSON++.hpp"
@@ -385,17 +385,26 @@ void example_json_pointer() {
 
 void example_merge_patch() {
 	std::cout << "=== JSON Patch (RFC 6902) ===" << std::endl;
-	
+
 	asvJSON json;
 	std::string input = R"({"title": "Hello", "author": {"name": "John"}, "oldField": "removed"})";
 	json.parse(input);
-	
+
 	asvJSON patch;
-	std::string patchInput = R"({"title": "World", "author": {"name": "Jane", "email": "jane@example.com"}, "newField": "added"})";
+	std::string patchInput = R"([
+		{"op": "replace", "path": "/title", "value": "World"},
+		{"op": "add", "path": "/author/email", "value": "jane@example.com"},
+		{"op": "add", "path": "/newField", "value": "added"},
+		{"op": "remove", "path": "/oldField"}
+	])";
 	patch.parse(patchInput);
-	
-	json.applyPatch(patch);
-	std::cout << "After applyPatch: " << json.serialize() << std::endl << std::endl;
+
+	if (json.applyPatch(patch)) {
+		std::cout << "After applyPatch: " << json.serialize() << std::endl;
+	} else {
+		std::cout << "Patch failed: " << json.getLastError() << std::endl;
+	}
+	std::cout << std::endl;
 }
 
 void example_clone() {
@@ -707,7 +716,7 @@ void example_valid_utf8() {
 
 	uint8_t valid[] = {'H', 'e', 'l', 'l', 'o'};
 	uint8_t invalid[] = {0xFF, 0xFE};
-	uint8_t validRussian[] = {0xD0, 0x9F, 0xD1, 0x80, 0xD0, 0xB8, 0xD0, 0xB2, 0xD0, 0xB5, 0xD1, 0x82}; // "Привет"
+	uint8_t validRussian[] = {0xD0, 0x9F, 0xD1, 0x80, 0xD0, 0xB8, 0xD0, 0xB2, 0xD0, 0xB5, 0xD1, 0x82}; // "Hello" in Russian
 	uint8_t validEmoji[] = {0xF0, 0x9F, 0x98, 0x80}; // U+1F600
 
 	std::cout << "ASCII valid: " << isValidUTF8(valid, 5) << std::endl;
@@ -787,12 +796,6 @@ void example_to_xml() {
 	std::cout << "=== toXML Serialization ===" << std::endl;
 
 	asvJSON json;
-	json.parse(std::string("{}"));
-	json.putString("name", "John & Jane");
-	json.putInt("age", 30);
-	json.putBool("active", true);
-	json.putNull("nickname");
-	json.putDouble("pi", 3.14159);
 	json.parse(std::string(R"({"name":"John & Jane","age":30,"active":true,"nickname":null,"pi":3.14159,"items":[1,2,3],"meta":{"nested":true}})"));
 	std::cout << json.toXML() << std::endl;
 }
@@ -852,6 +855,24 @@ void example_to_csv_array() {
 	std::cout << json.toCSV() << std::endl;
 }
 
+void example_to_toon() {
+	std::cout << "=== TOON Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}})"));
+	std::string toon = json.toTOON();
+	std::cout << "TOON output:" << std::endl << toon << std::endl;
+
+	asvJSON j2;
+	if (j2.fromTOON(std::string_view(toon))) {
+		std::cout << "Round-trip: name=" << j2.getString("name")
+		          << " age=" << j2.getInt("age")
+		          << " active=" << j2.getBool("active")
+		          << " city=" << j2.getString("address.city") << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -908,6 +929,7 @@ int main() {
 	example_to_yaml_multiline();
 	example_to_csv();
 	example_to_csv_array();
+	example_to_toon();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

@@ -1,4 +1,4 @@
-#include "asvJSON++.hpp"
+﻿#include "asvJSON++.hpp"
 #include <iostream>
 #include <cassert>
 #include <cstring>
@@ -567,7 +567,7 @@ TEST(testBSONRegex) {
 	auto* rv = v->get("re");
 	if (!rv || rv->type != asvJSONValue::REGEX) throw std::runtime_error("not a regex after roundtrip");
 
-	// regex without options (no '|' separator) — regression test for BSON toBSON bug #2
+	// regex without options (no '|' separator)  regression test for BSON toBSON bug #2
 	asvJSON js2;
 	js2.putRegex("re", "^pattern$", nullptr);
 	auto bson2 = js2.toBSON();
@@ -1933,6 +1933,161 @@ TEST(testToYAML) {
 	}
 }
 
+TEST(testToTOON) {
+	// Basic object round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"name":"John","age":30,"active":true})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(std::string(j2.getString("name")), "John");
+		ASSERT_EQ(j2.getInt("age"), 30);
+		ASSERT_EQ(j2.getBool("active"), true);
+	}
+	// Array round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[10,20,30]")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+		ASSERT_EQ(j2.getRoot()->get(0)->getInt(), int64_t(10));
+	}
+	// Nested object round-trip
+	{
+		asvJSON j;
+		std::string src = R"({"name":"John","address":{"city":"NYC"}})";
+		ASSERT(j.parse(std::string_view(src)));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(std::string(j2.getString("name")), "John");
+		ASSERT_EQ(std::string(j2.getString("address.city")), "NYC");
+	}
+	// Null, bool, int
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"s":"hi","b":false,"n":null,"i":42})")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(std::string(j2.getString("s")), "hi");
+		ASSERT_EQ(j2.getBool("b"), false);
+		ASSERT(j2.isNull("n"));
+		ASSERT_EQ(j2.getInt("i"), int64_t(42));
+	}
+	// Empty object
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+	}
+	// Array of objects (tabular)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"x":1,"y":2},{"x":3,"y":4}])")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+	}
+}
+
+TEST(testToTOONAdvanced) {
+	// Named array with nested arrays round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"matrix":[[1,2],[3,4]]})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* matrix = j2.getRoot()->getConst("matrix");
+		ASSERT(matrix != nullptr);
+		ASSERT_EQ(matrix->size(), size_t(2));
+		ASSERT_EQ(matrix->get(0)->size(), size_t(2));
+		ASSERT_EQ(matrix->get(0)->get(0)->getInt(), int64_t(1));
+	}
+	// Named array with nested objects
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[{"x":1},{"y":2}]})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* items = j2.getRoot()->getConst("items");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->size(), size_t(2));
+	}
+	// Named array with deeply nested arrays
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"data":[[1,[2,3]],[4,5]]})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* data = j2.getRoot()->getConst("data");
+		ASSERT(data != nullptr);
+		ASSERT_EQ(data->size(), size_t(2));
+		ASSERT_EQ(data->get(0)->size(), size_t(2));
+		ASSERT_EQ(data->get(0)->get(1)->size(), size_t(2));
+	}
+	// Named array with [] and list items
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[10,20,30]})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* items = j2.getRoot()->getConst("items");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->size(), size_t(3));
+		ASSERT_EQ(items->get(0)->getInt(), int64_t(10));
+	}
+	// Empty named array
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"empty":[]})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* empty = j2.getRoot()->getConst("empty");
+		ASSERT(empty != nullptr);
+		ASSERT_EQ(empty->size(), size_t(0));
+	}
+	// Empty named object
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"empty":{}})")));
+		std::string toon = j.toTOON();
+		ASSERT(!toon.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+		auto* empty = j2.getRoot()->getConst("empty");
+		ASSERT(empty != nullptr);
+		ASSERT_EQ(empty->size(), size_t(0));
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -1949,7 +2104,7 @@ TEST(testToCSV) {
 		ASSERT(csv.find("hello") != std::string::npos);
 		ASSERT(csv.find("value") == std::string::npos); // no header for scalar
 	}
-	// Object: flat keys → header + one row
+	// Object: flat keys -> header + one row
 	{
 		asvJSON json;
 		json.parse(std::string("{\"name\":\"John\",\"age\":30}"));
@@ -1984,7 +2139,7 @@ TEST(testToCSV) {
 		for (auto c : csv) if (c == '\n') newlines++;
 		ASSERT(newlines == 3);
 	}
-	// Mixed array → "value" column
+	// Mixed array -> "value" column
 	{
 		asvJSON json;
 		json.parse(std::string("[1, \"two\", null]"));
@@ -1993,7 +2148,7 @@ TEST(testToCSV) {
 		ASSERT(csv.find("1") != std::string::npos);
 		ASSERT(csv.find("two") != std::string::npos);
 	}
-	// Comma/quotes in value → proper escaping
+	// Comma/quotes in value -> proper escaping
 	{
 		asvJSON json;
 		json.parse(std::string("{\"k\":\"a,b\\\"c\"}"));
@@ -2244,6 +2399,10 @@ int main() {
 	
 	std::cout << "\n--- CSV Serialization Tests ---\n";
 	RUN(testToCSV);
+	
+	std::cout << "\n--- TOON Serialization Tests ---\n";
+	RUN(testToTOON);
+	RUN(testToTOONAdvanced);
 	
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

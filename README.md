@@ -1,12 +1,12 @@
-# asvJSON++
+﻿# asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML and CSV serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV and TOON serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
 ## License
 
-MIT license – see the `LICENSE` file for details.
+MIT license - see the `LICENSE` file for details.
 
 ## Features
 
@@ -19,9 +19,9 @@ MIT license – see the `LICENSE` file for details.
 - Type-safe accessors with `opt*` defaults
 - `std::string_view` support for all key and string operations (zero-copy where possible)
 - `noexcept` on all accessors (`getInt`, `getDouble`, `getBool`) for performance
-- Transparent `unordered_map` lookup — avoids temporary `std::string` allocation on modern compilers (GCC ≥ 9, Clang, MSVC)
+- Transparent `unordered_map` lookup - avoids temporary `std::string` allocation on modern compilers (GCC 9, Clang, MSVC)
 - `std::from_chars` for fast double parsing on C++23 compilers
-- `allowNaNInfinity` flag — parse/serialize NaN and Infinity values
+- `allowNaNInfinity` flag - parse/serialize NaN and Infinity values
 
 ### Comments
 - `//`, `/* */`, `#` style comments
@@ -34,9 +34,10 @@ MIT license – see the `LICENSE` file for details.
 - JSON (compact and pretty print)
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
-- XML — `toXML()` with element name sanitization, proper escaping, standard `&#x;` references for control chars
-- YAML — `toYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
-- CSV — `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
+- XML - `toXML()` with element name sanitization, proper escaping, standard `&#x;` references for control chars
+- YAML - `toYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
+- CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
+- TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -46,9 +47,9 @@ MIT license – see the `LICENSE` file for details.
 ### Special Data Types
 - Binary data (automatic Base64 in JSON, raw in BSON/MessagePack)
 - DateTime (milliseconds precision)
-- ObjectId (12-byte identifier) — serialized as MessagePack ext type 1
-- Regex (pattern + options) — serialized as MessagePack ext type 2
-- Timestamp (int64) — serialized as MessagePack ext type 3
+- ObjectId (12-byte identifier) - serialized as MessagePack ext type 1
+- Regex (pattern + options) - serialized as MessagePack ext type 2
+- Timestamp (int64) - serialized as MessagePack ext type 3
 - Extension types (MessagePack ext, configurable extType)
 
 ### C++17 Features
@@ -59,9 +60,9 @@ MIT license – see the `LICENSE` file for details.
 - Heterogeneous lookup helpers (`map_find`/`map_count`) with GCC < 9 fallback
 
 ### Thread Safety
-- **Reading:** Fully thread-safe — multiple threads can read the same `asvJSON` instance simultaneously.
-- **Writing:** Not thread-safe — a single `asvJSON` instance must not be written to concurrently from multiple threads.
-- **Base64 custom charset:** Protected by `std::mutex` — `setBase64Chars()` and all encoding/decoding functions are safe to call concurrently from multiple threads.
+- **Reading:** Fully thread-safe - multiple threads can read the same `asvJSON` instance simultaneously.
+- **Writing:** Not thread-safe - a single `asvJSON` instance must not be written to concurrently from multiple threads.
+- **Base64 custom charset:** Protected by `std::mutex` - `setBase64Chars()` and all encoding/decoding functions are safe to call concurrently from multiple threads.
 
 ## Limits
 
@@ -135,6 +136,8 @@ int main() {
 | `std::string toXML() const` | Serialize to XML document. |
 | `std::string toYAML() const` | Serialize to YAML document. |
 | `std::string toCSV() const` | Serialize to CSV (flattened, two-pass for arrays of objects). |
+| `std::string toTOON() const` | Serialize to TOON (token-oriented object notation). |
+| `bool fromTOON(std::string_view input)` | Parse TOON string. |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -271,8 +274,8 @@ Convenience methods combining dot-path lookup with type extraction.
 | Method | Description |
 |--------|-------------|
 | `void merge(const asvJSON& other)` | Shallow merge of object keys. |
-| `bool applyPatch(const asvJSON& patch)` | JSON Patch (RFC 6902) — array of operations. |
-| `asvJSON applyMergePatch(const asvJSON& patch) const` | JSON Merge Patch (RFC 7396) — returns new document. |
+| `bool applyPatch(const asvJSON& patch)` | JSON Patch (RFC 6902) - array of operations. |
+| `asvJSON applyMergePatch(const asvJSON& patch) const` | JSON Merge Patch (RFC 7396) - returns new document. |
 
 #### Binary Format Conversion
 
@@ -284,8 +287,8 @@ Convenience methods combining dot-path lookup with type extraction.
 | `std::vector<uint8_t> toBSON() const` | Serialise to BSON. |
 | `bool fromBSON(const uint8_t* data, size_t size)` | Parse BSON from raw bytes. |
 | `bool fromBSON(const std::string& data)` | Parse BSON from `std::string`. |
-| `static std::vector<uint8_t> messagePackFromString(const std::string& json)` | JSON string → MessagePack. |
-| `static std::string stringFromMessagePack(const uint8_t* data, size_t len)` | MessagePack → JSON string. |
+| `static std::vector<uint8_t> messagePackFromString(const std::string& json)` | JSON string -> MessagePack. |
+| `static std::string stringFromMessagePack(const uint8_t* data, size_t len)` | MessagePack -> JSON string. |
 
 ### asvJSONValue Class
 
@@ -416,6 +419,26 @@ Output (two-pass, union keys, sorted alphabetically):
 x,y,z
 1,,3
 ,2,
+```
+
+### TOON
+
+Input:
+```json
+{"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}}
+```
+
+Output:
+```toon
+name: John
+age: 30
+active: true
+items:
+  - 10
+  - 20
+  - 30
+address:
+  city: NYC
 ```
 
 ### Important Lifetime Notes
