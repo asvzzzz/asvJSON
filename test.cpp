@@ -1,4 +1,4 @@
-﻿#include "asvJSON++.hpp"
+#include "asvJSON++.hpp"
 #include <iostream>
 #include <cassert>
 #include <cstring>
@@ -2088,6 +2088,362 @@ TEST(testToTOONAdvanced) {
 	}
 }
 
+TEST(testToTRON) {
+	// Basic object (no repeated schema -> JSON fallback)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"name":"John","age":30,"active":true})")));
+		std::string tron = j.toTRON();
+		ASSERT(!tron.empty());
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(std::string(j2.getString("name")), "John");
+		ASSERT_EQ(j2.getInt("age"), 30);
+		ASSERT_EQ(j2.getBool("active"), true);
+	}
+	// Array of objects with same structure -> class + instances
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"x":1,"y":2},{"x":3,"y":4},{"x":5,"y":6}])")));
+		std::string tron = j.toTRON();
+		ASSERT(!tron.empty());
+		ASSERT(tron.find("class A:") != std::string::npos || tron.find("class A:") != std::string::npos);
+		ASSERT(tron.find("A(1,2)") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+		ASSERT_EQ(j2.getRoot()->get(0)->getConst("x")->getInt(), int64_t(1));
+		ASSERT_EQ(j2.getRoot()->get(1)->getConst("y")->getInt(), int64_t(4));
+	}
+	// Single object -> no class
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":1,"b":2})")));
+		std::string tron = j.toTRON();
+		ASSERT(tron.find("class") == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getInt("a"), int64_t(1));
+	}
+	// Object with 1 property -> no class even if repeated
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"x":1},{"x":2},{"x":3}])")));
+		std::string tron = j.toTRON();
+		ASSERT(tron.find("class") == std::string::npos);
+	}
+	// Empty object and array
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		std::string tron = j.toTRON();
+		ASSERT(tron.find("{}") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[]")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+	}
+	// Null root
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("null")));
+		std::string tron = j.toTRON();
+		ASSERT(tron == "null\n");
+	}
+	// Primitives round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"s":"hello","n":42,"d":3.14,"b":true,"v":null})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(std::string(j2.getString("s")), "hello");
+		ASSERT_EQ(j2.getInt("n"), int64_t(42));
+		ASSERT(j2.getDouble("d") > 3.13 && j2.getDouble("d") < 3.15);
+		ASSERT(j2.getBool("b"));
+		ASSERT(j2.isNull("v"));
+	}
+	// Nested objects round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"outer":{"inner":{"a":1}}})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getInt("outer.inner.a"), int64_t(1));
+	}
+}
+
+TEST(testToTRONAdvanced) {
+	// Round-trip: mixed types in array
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"a":1,"b":"x"},{"a":2,"b":"y"}])")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+		ASSERT_EQ(std::string(j2.getRoot()->get(0)->getConst("b")->getString()), "x");
+	}
+	// Strings with special characters (quotes and backslash)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{\"msg\":\"hello \\\"world\\\"\"}")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(std::string(j2.getString("msg")), "hello \"world\"");
+	}
+	// Arrays of objects inside arrays
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"groups":[[{"p":1},{"p":2}],[{"p":3}]]})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->getConst("groups")->size(), size_t(2));
+	}
+	// Repeat round-trip: array of 2-prop objects
+	{
+		asvJSON j;
+		j.parse(std::string_view(R"([{"x":1,"y":2},{"x":3,"y":4}])"));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->get(0)->getConst("x")->getInt(), int64_t(1));
+		ASSERT_EQ(j2.getRoot()->get(1)->getConst("y")->getInt(), int64_t(4));
+	}
+	// Direct TRON parsing: class definition + instances
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Point: x,y\n\nPoint(10,20)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(10));
+		ASSERT_EQ(j.getInt("y"), int64_t(20));
+	}
+	// TRON parsing: array of class instances
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: a,b\n[A(1,2),A(3,4)]\n")));
+		ASSERT_EQ(j.getRoot()->size(), size_t(2));
+		ASSERT_EQ(j.getRoot()->get(0)->getConst("a")->getInt(), int64_t(1));
+		ASSERT_EQ(j.getRoot()->get(1)->getConst("b")->getInt(), int64_t(4));
+	}
+	// TRON parsing: inheritance
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Base: id\nclass Item(Base): name,price\nItem(1,\"apple\",0.99)\n")));
+		ASSERT_EQ(j.getInt("id"), int64_t(1));
+		ASSERT_EQ(std::string(j.getString("name")), "apple");
+	}
+	// TRON parsing: named arguments
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(x=10,y=20)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(10));
+		ASSERT_EQ(j.getInt("y"), int64_t(20));
+	}
+	// TRON parsing: mixed positional + named (missing y -> null)
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y,z\nA(1, z=30)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(1));
+		ASSERT(j.isNull("y"));
+		ASSERT_EQ(j.getInt("z"), int64_t(30));
+	}
+	// TRON parsing: comments (#)
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("# this is a comment\nclass A: x,y\nA(1,2)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(1));
+	}
+	// TRON parsing: trailing commas
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(1,2,)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(1));
+	}
+	// TRON parsing: nested class instances
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Point: x,y\nclass Line: start,end\nLine(Point(1,2),Point(3,4))\n")));
+		ASSERT_EQ(j.getRoot()->getConst("start")->getConst("x")->getInt(), int64_t(1));
+		ASSERT_EQ(j.getRoot()->getConst("end")->getConst("y")->getInt(), int64_t(4));
+	}
+}
+
+TEST(testToTRONComprehensive) {
+	// 1. Round-trip: toTRON() + fromTRON() → original JSON values
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"name":"Alice","age":30,"scores":[90,85,95],"meta":{"active":true,"tag":"v1"}})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(std::string(j2.getString("name")), "Alice");
+		ASSERT_EQ(j2.getInt("age"), int64_t(30));
+		ASSERT_EQ(j2.getRoot()->getConst("scores")->size(), size_t(3));
+		ASSERT_EQ(j2.getRoot()->getConst("scores")->get(1)->getInt(), int64_t(85));
+		ASSERT(j2.getRoot()->getConst("meta")->getConst("active")->getBool());
+		ASSERT_EQ(std::string(j2.getString("meta.tag")), "v1");
+	}
+	// Round-trip: empty object/array
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"empty_obj":{},"empty_arr":[]})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getRoot()->getConst("empty_obj")->size(), size_t(0));
+		ASSERT_EQ(j2.getRoot()->getConst("empty_arr")->size(), size_t(0));
+	}
+	// Round-trip: deeply nested
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":{"b":{"c":{"d":42}}}})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getInt("a.b.c.d"), int64_t(42));
+	}
+	// 2. Class inheritance: class Child(Parent): ...
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Animal: species,age\nclass Dog(Animal): breed,name\nDog(\"Canine\",5,\"Beagle\",\"Rex\")\n")));
+		ASSERT_EQ(std::string(j.getString("species")), "Canine");
+		ASSERT_EQ(j.getInt("age"), int64_t(5));
+		ASSERT_EQ(std::string(j.getString("breed")), "Beagle");
+		ASSERT_EQ(std::string(j.getString("name")), "Rex");
+	}
+	// Inheritance with named args overriding parent keys
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Base: id,label\nclass Derived(Base): value,label\nDerived(id=1, label=\"child\", value=99)\n")));
+		ASSERT_EQ(j.getInt("id"), int64_t(1));
+		ASSERT_EQ(std::string(j.getString("label")), "child");
+		ASSERT_EQ(j.getInt("value"), int64_t(99));
+	}
+	// 3. Named arguments: mixed positional + named
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Person: name,age,city\nPerson(\"Alice\", city=\"NYC\", age=30)\n")));
+		ASSERT_EQ(std::string(j.getString("name")), "Alice");
+		ASSERT_EQ(j.getInt("age"), int64_t(30));
+		ASSERT_EQ(std::string(j.getString("city")), "NYC");
+	}
+	// All named (any order)
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Point: x,y\nPoint(y=20, x=10)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(10));
+		ASSERT_EQ(j.getInt("y"), int64_t(20));
+	}
+	// Named arg key is a TRON keyword (quoted in class def, named arg as STRING)
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A:\"class\",value\nA(\"myclass\", value=7)\n")));
+		ASSERT_EQ(std::string(j.getString("class")), "myclass");
+		ASSERT_EQ(j.getInt("value"), int64_t(7));
+	}
+	// 4. NaN/Infinity with allowNaNInfinity = true
+	{
+		asvJSON j;
+		j.putDouble("nan", std::numeric_limits<double>::quiet_NaN());
+		j.putDouble("inf", std::numeric_limits<double>::infinity());
+		j.putDouble("neg_inf", -std::numeric_limits<double>::infinity());
+		j.allowNaNInfinity = true;
+		std::string tron = j.toTRON();
+		ASSERT(tron.find("NaN") != std::string::npos || tron.find("nan") != std::string::npos);
+		ASSERT(tron.find("Infinity") != std::string::npos);
+		// Round-trip NaN/Infinity via TRON
+		asvJSON j2;
+		j2.allowNaNInfinity = true;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT(std::isnan(j2.getDouble("nan")));
+		ASSERT(std::isinf(j2.getDouble("inf")));
+		ASSERT(j2.getDouble("inf") > 0);
+		ASSERT(std::isinf(j2.getDouble("neg_inf")));
+		ASSERT(j2.getDouble("neg_inf") < 0);
+	}
+	// NaN/Infinity without allowNaNInfinity → serialized as null, parse as null
+	{
+		asvJSON j;
+		j.putDouble("nan", std::numeric_limits<double>::quiet_NaN());
+		j.putDouble("inf", std::numeric_limits<double>::infinity());
+		j.allowNaNInfinity = false;
+		std::string tron = j.toTRON();
+		ASSERT(tron.find("null") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT(j2.isNull("nan"));
+		ASSERT(j2.isNull("inf"));
+	}
+	// 5. Special types: DATETIME, BINARY, OBJECTID, REGEX, TIMESTAMP, EXTENSION
+	{
+		asvJSON j;
+		// DATETIME
+		time_t dt_val = 1705314645;
+		j.putDateTime("dt", dt_val);
+		// BINARY
+		uint8_t bin_data[] = {0xDE, 0xAD, 0xBE, 0xEF};
+		j.putBinary("bin", bin_data, 4);
+		// OBJECTID
+		j.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C", 12));
+		// REGEX
+		j.putRegex("rx", "^test$", "gi");
+		// TIMESTAMP
+		j.putTimestamp("ts", 987654321);
+		// EXTENSION
+		uint8_t ext_data[] = {0x01, 0x02, 0x03, 0x04};
+		j.putExtension("ext", 42, ext_data, 4);
+		// Round-trip via TRON
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		// Verify DATETIME (type preserved via ISO 8601 detection)
+		ASSERT_EQ(j2.getDateTime("dt"), dt_val);
+		// Verify BINARY (type preserved via __BASE64__ detection)
+		auto bin_out = j2.getBinary("bin");
+		ASSERT_EQ(bin_out.size(), size_t(4));
+		ASSERT_EQ(bin_out[0], uint8_t(0xDE));
+		ASSERT_EQ(bin_out[3], uint8_t(0xEF));
+		// Verify OBJECTID (data preserved as hex string in TRON)
+		ASSERT_EQ(std::string(j2.getString("oid")), "0102030405060708090a0b0c");
+		// Verify REGEX (data preserved as "pattern|opts" string)
+		ASSERT_EQ(std::string(j2.getString("rx")), "^test$|gi");
+		// Verify TIMESTAMP (data preserved as int)
+		ASSERT_EQ(j2.getInt("ts"), int64_t(987654321));
+		// Verify EXTENSION (type preserved via __EXT__ detection)
+		auto ext = j2.getExtension("ext");
+		ASSERT_EQ(ext.first, 42);
+		ASSERT_EQ(ext.second.size(), size_t(4));
+		ASSERT_EQ(ext.second[0], uint8_t(0x01));
+	}
+	// Round-trip: all special types inside an array context
+	{
+		asvJSON j;
+		time_t dt_val = 1700000000;
+		j.putDateTime("dt", dt_val);
+		j.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+		j.putTimestamp("ts", 1000);
+		j.putRegex("rx", "pattern", "ims");
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getDateTime("dt"), dt_val);
+		// OBJECTID round-trips as hex string
+		ASSERT_EQ(std::string(j2.getString("oid")), "414243444546313233343536");
+		// TIMESTAMP round-trips as int
+		ASSERT_EQ(j2.getInt("ts"), int64_t(1000));
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -2403,6 +2759,11 @@ int main() {
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
 	RUN(testToTOONAdvanced);
+	
+	std::cout << "\n--- TRON Serialization Tests ---\n";
+	RUN(testToTRON);
+	RUN(testToTRONAdvanced);
+	RUN(testToTRONComprehensive);
 	
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

@@ -1,6 +1,6 @@
-﻿# asvJSON++
+# asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV and TOON serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON and TRON serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -38,6 +38,7 @@ MIT license - see the `LICENSE` file for details.
 - YAML - `toYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
+- TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -103,6 +104,7 @@ int main() {
     std::string xml = json.toXML();
     std::string yaml = json.toYAML();
     std::string csv = json.toCSV();
+    std::string tron = json.toTRON();
 
     return 0;
 }
@@ -138,6 +140,8 @@ int main() {
 | `std::string toCSV() const` | Serialize to CSV (flattened, two-pass for arrays of objects). |
 | `std::string toTOON() const` | Serialize to TOON (token-oriented object notation). |
 | `bool fromTOON(std::string_view input)` | Parse TOON string. |
+| `std::string toTRON() const` | Serialize to TRON (token-reduced object notation). |
+| `bool fromTRON(std::string_view input)` | Parse TRON string (class definitions, inheritance, named args). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -440,6 +444,30 @@ items:
 address:
   city: NYC
 ```
+
+### TRON
+
+TRON (Token Reduced Object Notation) is a JSON superset that reduces token count by defining reusable class schemas for repeated object structures.
+
+Input:
+```json
+[{"name":"Alice","age":30},{"name":"Bob","age":25}]
+```
+
+Output:
+```tron
+class A: name,age
+[A(Alice,30),A(Bob,25)]
+```
+
+TRON features:
+- **Class definitions** hoist repeated property sets into a header
+- **Class instantiation** uses positional or named arguments: `A(1,2)` or `A(x=1,y=2)`
+- **Inheritance**: `class B(A): z` creates class B with A's properties plus `z`
+- **Comments**: `#` to end of line
+- Trailing commas allowed in arrays, objects, and class instances
+- Objects with 1 property or 1 occurrence are serialized as plain JSON `{"key":val}`
+- Full round-trip: `toTRON()` then `fromTRON()` returns the original data
 
 ### Important Lifetime Notes
 

@@ -1,5 +1,5 @@
-﻿#pragma once
-// asvJSON++ v1.1.0 - C++17 JSON library
+#pragma once
+// asvJSON++ v1.2.0 - C++17 JSON library
 // 
 // Configuration:
 //   - Define ASVJSON_USE_ORDERED_MAP before including header for:
@@ -1228,6 +1228,87 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 	}
 }
 
+/** Try to parse ISO 8601 datetime string */
+inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
+	if (sv.size() < 20) return false;
+
+	auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+
+	if (!isDigit(sv[0]) || !isDigit(sv[1]) || !isDigit(sv[2]) || !isDigit(sv[3]) ||
+		sv[4] != '-' || !isDigit(sv[5]) || !isDigit(sv[6]) || sv[7] != '-' ||
+		!isDigit(sv[8]) || !isDigit(sv[9]) || sv[10] != 'T' ||
+		!isDigit(sv[11]) || !isDigit(sv[12]) || sv[13] != ':' ||
+		!isDigit(sv[14]) || !isDigit(sv[15]) || sv[16] != ':' ||
+		!isDigit(sv[17]) || !isDigit(sv[18])) return false;
+
+	std::tm tm = {};
+	int year = (sv[0] - '0') * 1000 + (sv[1] - '0') * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
+	int month = (sv[5] - '0') * 10 + (sv[6] - '0');
+	int day = (sv[8] - '0') * 10 + (sv[9] - '0');
+	int hour = (sv[11] - '0') * 10 + (sv[12] - '0');
+	int minute = (sv[14] - '0') * 10 + (sv[15] - '0');
+	int second = (sv[17] - '0') * 10 + (sv[18] - '0');
+
+	if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return false;
+	static constexpr int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+	int maxDay = daysInMonth[month - 1];
+	if (month == 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))) maxDay = 29;
+	if (day > maxDay) return false;
+
+	tm.tm_year = year - 1900;
+	tm.tm_mon = month - 1;
+	tm.tm_mday = day;
+	tm.tm_hour = hour;
+	tm.tm_min = minute;
+	tm.tm_sec = second;
+	tm.tm_isdst = 0;
+
+	int ms = 0;
+	size_t tz_pos = 19;
+	if (tz_pos < sv.size() && sv[tz_pos] == '.') {
+		size_t p = tz_pos + 1;
+		size_t digits = 0;
+		while (p < sv.size() && sv[p] >= '0' && sv[p] <= '9' && digits < 3) {
+			ms = ms * 10 + (sv[p] - '0');
+			p++;
+			digits++;
+		}
+		if (digits < 3) ms *= (digits == 1 ? 100 : 10);
+		if (digits == 3 && p < sv.size() && sv[p] >= '0' && sv[p] <= '9') return false;
+		while (p < sv.size() && sv[p] >= '0' && sv[p] <= '9') p++;
+		tz_pos = p;
+	}
+
+	int tz_offset = 0;
+	if (tz_pos < sv.size()) {
+		if (sv[tz_pos] == 'Z') {
+			tz_offset = 0;
+			tz_pos++;
+		} else if (sv[tz_pos] == '+' || sv[tz_pos] == '-') {
+			int sign = (sv[tz_pos] == '+') ? 1 : -1;
+			size_t tz_start = tz_pos + 1;
+			if (tz_start + 4 <= sv.size() && sv[tz_start + 2] == ':') {
+				int h = (sv[tz_start] - '0') * 10 + (sv[tz_start + 1] - '0');
+				int m = (sv[tz_start + 3] - '0') * 10 + (sv[tz_start + 4] - '0');
+				tz_offset = sign * (h * 60 + m);
+				tz_pos = tz_start + 5;
+			} else if (tz_start + 3 <= sv.size()) {
+				int h = (sv[tz_start] - '0') * 10 + (sv[tz_start + 1] - '0');
+				int m = (sv[tz_start + 2] - '0') * 10 + (sv[tz_start + 3] - '0');
+				tz_offset = sign * (h * 60 + m);
+				tz_pos = tz_start + 4;
+			}
+		}
+	}
+
+	time_t t = asvjson_timegm(&tm);
+	if (t == -1) return false;
+	t -= tz_offset * 60;
+	out = t;
+	if (ms_out) *ms_out = ms;
+	return tz_pos == sv.size();
+}
+
 class asvJSON {
 public:
 	/** @brief Error message from the last failed operation */
@@ -1385,87 +1466,6 @@ private:
 		}
 		if (!isValidUTF8(reinterpret_cast<const uint8_t*>(unescaped.data()), unescaped.size())) throw asvJSONError("Invalid UTF-8 in object key");
 		return unescaped;
-	}
-
-	/** Try to parse ISO 8601 datetime string */
-	bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
-		if (sv.size() < 20) return false;
-
-		auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
-
-		if (!isDigit(sv[0]) || !isDigit(sv[1]) || !isDigit(sv[2]) || !isDigit(sv[3]) ||
-			sv[4] != '-' || !isDigit(sv[5]) || !isDigit(sv[6]) || sv[7] != '-' ||
-			!isDigit(sv[8]) || !isDigit(sv[9]) || sv[10] != 'T' ||
-			!isDigit(sv[11]) || !isDigit(sv[12]) || sv[13] != ':' ||
-			!isDigit(sv[14]) || !isDigit(sv[15]) || sv[16] != ':' ||
-			!isDigit(sv[17]) || !isDigit(sv[18])) return false;
-
-		std::tm tm = {};
-		int year = (sv[0] - '0') * 1000 + (sv[1] - '0') * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
-		int month = (sv[5] - '0') * 10 + (sv[6] - '0');
-		int day = (sv[8] - '0') * 10 + (sv[9] - '0');
-		int hour = (sv[11] - '0') * 10 + (sv[12] - '0');
-		int minute = (sv[14] - '0') * 10 + (sv[15] - '0');
-		int second = (sv[17] - '0') * 10 + (sv[18] - '0');
-
-		if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return false;
-		static constexpr int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-		int maxDay = daysInMonth[month - 1];
-		if (month == 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))) maxDay = 29;
-		if (day > maxDay) return false;
-
-		tm.tm_year = year - 1900;
-		tm.tm_mon = month - 1;
-		tm.tm_mday = day;
-		tm.tm_hour = hour;
-		tm.tm_min = minute;
-		tm.tm_sec = second;
-		tm.tm_isdst = 0;
-
-		int ms = 0;
-		size_t tz_pos = 19;
-		if (tz_pos < sv.size() && sv[tz_pos] == '.') {
-			size_t p = tz_pos + 1;
-			size_t digits = 0;
-			while (p < sv.size() && sv[p] >= '0' && sv[p] <= '9' && digits < 3) {
-				ms = ms * 10 + (sv[p] - '0');
-				p++;
-				digits++;
-			}
-			if (digits < 3) ms *= (digits == 1 ? 100 : 10);
-			if (digits == 3 && p < sv.size() && sv[p] >= '0' && sv[p] <= '9') return false;
-			while (p < sv.size() && sv[p] >= '0' && sv[p] <= '9') p++;
-			tz_pos = p;
-		}
-
-		int tz_offset = 0;
-		if (tz_pos < sv.size()) {
-			if (sv[tz_pos] == 'Z') {
-				tz_offset = 0;
-				tz_pos++;
-			} else if (sv[tz_pos] == '+' || sv[tz_pos] == '-') {
-				int sign = (sv[tz_pos] == '+') ? 1 : -1;
-				size_t tz_start = tz_pos + 1;
-				if (tz_start + 4 <= sv.size() && sv[tz_start + 2] == ':') {
-					int h = (sv[tz_start] - '0') * 10 + (sv[tz_start + 1] - '0');
-					int m = (sv[tz_start + 3] - '0') * 10 + (sv[tz_start + 4] - '0');
-					tz_offset = sign * (h * 60 + m);
-					tz_pos = tz_start + 5;
-				} else if (tz_start + 3 <= sv.size()) {
-					int h = (sv[tz_start] - '0') * 10 + (sv[tz_start + 1] - '0');
-					int m = (sv[tz_start + 2] - '0') * 10 + (sv[tz_start + 3] - '0');
-					tz_offset = sign * (h * 60 + m);
-					tz_pos = tz_start + 4;
-				}
-			}
-		}
-
-		time_t t = asvjson_timegm(&tm);
-		if (t == -1) return false;
-		t -= tz_offset * 60;
-		out = t;
-		if (ms_out) *ms_out = ms;
-		return tz_pos == sv.size();
 	}
 
 	asvJSONValue* parseValue() {
@@ -1846,6 +1846,17 @@ public:
 	 * @return true on success, false on error (see lastError)
 	 */
 	bool fromTOON(std::string_view input);
+		/**
+	 * @brief Serialize to TRON string
+	 * @return TRON string representation
+	 */
+	std::string toTRON() const;
+	/**
+	 * @brief Parse TRON string
+	 * @param input TRON string
+	 * @return true on success, false on error (see lastError)
+	 */
+	bool fromTRON(std::string_view input);
 	/**
 	 * @brief Serialize to JSON string
 	 * @param pretty Enable pretty printing with indentation
@@ -5287,6 +5298,660 @@ inline std::string asvJSON::toTOON() const {
 inline bool asvJSON::fromTOON(std::string_view input) {
 	std::string json = toonToJson(input);
 	return parse(std::string_view(json));
+}
+
+// ======================= TRON =======================
+
+// --- TRON Encoder ---
+
+static std::string tronSchemaSignature(const asvJSONValue* v) {
+	if (!v || v->type != asvJSONValue::OBJECT || v->obj->empty()) return {};
+	std::vector<std::string> keys;
+	keys.reserve(v->obj->size());
+	for (const auto& [k, _] : *v->obj) keys.push_back(k);
+	std::sort(keys.begin(), keys.end());
+	std::string r;
+	for (size_t i = 0; i < keys.size(); i++) {
+		if (i > 0) r += ',';
+		r += keys[i];
+	}
+	return r;
+}
+
+static void tronDiscoverSchemas(const asvJSONValue* v,
+		std::unordered_map<std::string, std::vector<std::string>>& firstKeys,
+		std::unordered_map<std::string, size_t>& counts,
+		std::unordered_set<const asvJSONValue*>& visited) {
+	if (!v) return;
+	if (v->type == asvJSONValue::OBJECT && !v->obj->empty()) {
+		if (visited.count(v)) return;
+		visited.insert(v);
+		auto sig = tronSchemaSignature(v);
+		counts[sig]++;
+		if (!firstKeys.count(sig)) {
+			std::vector<std::string> orig;
+			orig.reserve(v->obj->size());
+			for (const auto& [k, _] : *v->obj) orig.push_back(k);
+			firstKeys[sig] = std::move(orig);
+		}
+		for (const auto& [_, child] : *v->obj)
+			tronDiscoverSchemas(child.get(), firstKeys, counts, visited);
+	} else if (v->type == asvJSONValue::ARRAY) {
+		for (size_t i = 0; i < v->size(); i++)
+			tronDiscoverSchemas(v->get(i), firstKeys, counts, visited);
+	}
+}
+
+static std::string tronClassName(int idx) {
+	std::string r(1, static_cast<char>('A' + (idx % 26)));
+	int n = idx / 26;
+	if (n > 0) r += std::to_string(n);
+	return r;
+}
+
+static void tronSerializeVal(const asvJSONValue* v,
+		const std::unordered_map<std::string, std::string>& sigToClass,
+		const std::unordered_map<std::string, std::vector<std::string>>& classKeys,
+		std::string& out, bool allowNaNInfinity = false) {
+	if (!v) { out += "null"; return; }
+	switch (v->type) {
+		case asvJSONValue::NULL_VAL: out += "null"; break;
+		case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
+		case asvJSONValue::INT: out += std::to_string(v->num); break;
+		case asvJSONValue::DOUBLE: {
+			double d = v->dbl;
+			if (std::isnan(d) || std::isinf(d)) {
+				if (!allowNaNInfinity) { out += "null"; break; }
+				if (std::isnan(d)) { out += "NaN"; break; }
+				if (d > 0) { out += "Infinity"; break; }
+				else { out += "-Infinity"; break; }
+			}
+			if (d == std::floor(d) && d >= std::numeric_limits<int64_t>::min() && d <= std::numeric_limits<int64_t>::max()) {
+				out += std::to_string(static_cast<int64_t>(d));
+			} else {
+				char buf[64];
+				int n = snprintf(buf, sizeof(buf), "%.17g", d);
+				if (n > 0) out.append(buf, static_cast<size_t>(n));
+				else out += "null";
+			}
+			break;
+		}
+		case asvJSONValue::STRING:
+			out += '"' + toonJsonEscape(v->str_data) + '"';
+			break;
+		case asvJSONValue::ARRAY: {
+			out += '[';
+			for (size_t i = 0; i < v->size(); i++) {
+				if (i > 0) out += ',';
+				tronSerializeVal(v->get(i), sigToClass, classKeys, out, allowNaNInfinity);
+			}
+			out += ']';
+			break;
+		}
+		case asvJSONValue::DATETIME: {
+			char buf[40];
+			char msbuf[16];
+			std::tm tm;
+			asvjson_gmtime(&tm, &v->timestamp);
+			if (v->datetime_ms > 0) {
+				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
+				snprintf(msbuf, sizeof(msbuf), "%03d", v->datetime_ms);
+				out += '"' + std::string(buf) + std::to_string(tm.tm_sec) + "." + msbuf + "Z\"";
+			} else {
+				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+				out += '"' + std::string(buf) + '"';
+			}
+			break;
+		}
+		case asvJSONValue::BINARY: {
+			if (v->bin_data.empty()) { out += "null"; break; }
+			out += "\"__BASE64__" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			break;
+		}
+		case asvJSONValue::OBJECTID: {
+			char hex[25] = {0};
+			for (size_t i = 0; i < v->str_data.size() && i < 12; i++)
+				snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", static_cast<unsigned char>(v->str_data[i]));
+			out += '"' + std::string(hex) + '"';
+			break;
+		}
+		case asvJSONValue::REGEX: {
+			size_t sep = v->str_data.find('|');
+			if (sep != std::string::npos) {
+				out += '"' + toonJsonEscape(std::string(v->str_data.data(), sep)) + '|' + toonJsonEscape(v->str_data.substr(sep + 1)) + '"';
+			} else {
+				out += '"' + toonJsonEscape(v->str_data) + '"';
+			}
+			break;
+		}
+		case asvJSONValue::TIMESTAMP:
+			out += std::to_string(v->num);
+			break;
+		case asvJSONValue::EXTENSION: {
+			if (v->bin_data.empty()) { out += "null"; break; }
+			out += "\"__EXT__" + std::to_string(v->ext_type) + "_" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			break;
+		}
+		case asvJSONValue::OBJECT: {
+			if (v->obj->empty()) { out += "{}"; break; }
+			auto sig = tronSchemaSignature(v);
+			auto it = sigToClass.find(sig);
+			if (it != sigToClass.end()) {
+				auto kit = classKeys.find(it->second);
+				if (kit != classKeys.end()) {
+					out += it->second + '(';
+					for (size_t i = 0; i < kit->second.size(); i++) {
+						if (i > 0) out += ',';
+						auto* child = v->getConst(kit->second[i]);
+						if (child) tronSerializeVal(child, sigToClass, classKeys, out, allowNaNInfinity);
+						else out += "null";
+					}
+					out += ')';
+					break;
+				}
+			}
+			out += '{';
+			bool first = true;
+			for (const auto& [k, child] : *v->obj) {
+				if (!first) out += ',';
+				first = false;
+				out += '"' + toonJsonEscape(k) + "\":";
+				tronSerializeVal(child.get(), sigToClass, classKeys, out, allowNaNInfinity);
+			}
+			out += '}';
+			break;
+		}
+		default: out += "null"; break;
+	}
+}
+
+inline std::string asvJSON::toTRON() const {
+	if (!root) return "null";
+	std::unordered_map<std::string, std::vector<std::string>> firstKeys;
+	std::unordered_map<std::string, size_t> counts;
+	std::unordered_set<const asvJSONValue*> visited;
+	tronDiscoverSchemas(root, firstKeys, counts, visited);
+	std::vector<std::pair<std::string, std::vector<std::string>>> qualified;
+	for (const auto& [sig, keys] : firstKeys) {
+		auto cit = counts.find(sig);
+		if (cit != counts.end() && keys.size() > 1 && cit->second > 1)
+			qualified.push_back({sig, keys});
+	}
+	std::unordered_map<std::string, std::string> sigToClass;
+	std::unordered_map<std::string, std::vector<std::string>> classKeys;
+	int idx = 0;
+	for (auto& [sig, keys] : qualified) {
+		std::string name = tronClassName(idx++);
+		sigToClass[sig] = name;
+		classKeys[name] = std::move(keys);
+	}
+	// Build header: collect class defs sorted by name
+	std::vector<std::string> classNames;
+	for (const auto& [name, _] : classKeys) classNames.push_back(name);
+	std::sort(classNames.begin(), classNames.end(),
+		[&](const std::string& a, const std::string& b) {
+			size_t sa = classKeys.at(a).size();
+			size_t sb = classKeys.at(b).size();
+			if (sa != sb) return sa < sb;
+			return a < b;
+		});
+	std::string out;
+	for (const auto& name : classNames) {
+		out += "class " + name + ":";
+		for (size_t i = 0; i < classKeys.at(name).size(); i++) {
+			if (i > 0) out += ',';
+			out += '"' + toonJsonEscape(classKeys.at(name)[i]) + '"';
+		}
+		out += '\n';
+	}
+	if (!classNames.empty()) out += '\n';
+	tronSerializeVal(root, sigToClass, classKeys, out, allowNaNInfinity);
+	out += '\n';
+	return out;
+}
+
+// --- TRON Decoder ---
+
+enum class TronTokType {
+	CLASS, IDENT, STRING, NUMBER, TRUE, FALSE, NUL, NAN_VAL, INF_VAL,
+	LPAREN, RPAREN, LBRACKET, RBRACKET, LBRACE, RBRACE,
+	COMMA, COLON, SEMICOLON, EQUALS, NEWLINE, END
+};
+
+struct TronTok {
+	TronTokType type;
+	std::string text;
+};
+
+static std::string tronUnescape(const std::string& s) {
+	std::string r;
+	r.reserve(s.size());
+	for (size_t i = 0; i < s.size(); i++) {
+		if (s[i] == '\\' && i + 1 < s.size()) {
+			switch (s[++i]) {
+				case '"': r += '"'; break;
+				case '\\': r += '\\'; break;
+				case '/': r += '/'; break;
+				case 'b': r += '\b'; break;
+				case 'f': r += '\f'; break;
+				case 'n': r += '\n'; break;
+				case 'r': r += '\r'; break;
+				case 't': r += '\t'; break;
+				case 'u': {
+					if (i + 4 < s.size()) {
+						std::string hex = s.substr(i + 1, 4);
+						bool valid = true;
+						for (int h = 0; h < 4; h++) if (!((hex[h] >= '0' && hex[h] <= '9') || (hex[h] >= 'a' && hex[h] <= 'f') || (hex[h] >= 'A' && hex[h] <= 'F'))) valid = false;
+						if (!valid) { r += '?'; i += 4; break; }
+						if (valid) {
+							char* end = nullptr;
+							long cp = std::strtol(hex.c_str(), &end, 16);
+							if (end == hex.c_str() + 4 && cp >= 0) {
+								if (cp >= 0xD800 && cp <= 0xDBFF) {
+									if (i + 10 < s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
+										std::string lowHex = s.substr(i + 7, 4);
+										bool lowValid = true;
+										for (int h = 0; h < 4; h++) if (!((lowHex[h] >= '0' && lowHex[h] <= '9') || (lowHex[h] >= 'a' && lowHex[h] <= 'f') || (lowHex[h] >= 'A' && lowHex[h] <= 'F'))) lowValid = false;
+										if (lowValid) {
+											long low = std::strtol(lowHex.c_str(), &end, 16);
+											if (end == lowHex.c_str() + 4 && low >= 0xDC00 && low <= 0xDFFF) {
+												cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+												i += 6;
+											}
+										}
+									}
+								}
+								if (cp < 0x80) r += static_cast<char>(cp);
+								else if (cp < 0x800) { r += static_cast<char>(0xC0 | (cp >> 6)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
+								else if (cp < 0x10000) { r += static_cast<char>(0xE0 | (cp >> 12)); r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
+								else { r += static_cast<char>(0xF0 | (cp >> 18)); r += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
+							}
+						}
+						i += 4;
+					} else {
+						r += '?';
+					}
+					break;
+				}
+				default: r += s[i]; break;
+			}
+		} else {
+			r += s[i];
+		}
+	}
+	return r;
+}
+
+static std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfinity = false) {
+	std::vector<TronTok> toks;
+	size_t i = 0;
+	auto add = [&](TronTokType t, std::string s = {}) { toks.push_back({t, std::move(s)}); };
+	while (i < in.size()) {
+		char c = in[i];
+		if (c == '\r') { i++; continue; }
+		if (c == '#') { while (i < in.size() && in[i] != '\n') i++; continue; }
+		if (c == '\n') { i++; add(TronTokType::NEWLINE); continue; }
+		if (c == ' ' || c == '\t') { i++; continue; }
+		if (c == '"') {
+			i++;
+			std::string s;
+			while (i < in.size() && in[i] != '"') {
+				if (in[i] == '\\' && i + 1 < in.size()) { s += in[i++]; s += in[i++]; }
+				else s += in[i++];
+			}
+			if (i < in.size()) i++;
+			add(TronTokType::STRING, s);
+			continue;
+		}
+		if (allowNaNInfinity && c == '-' && i + 8 < in.size() && in.substr(i + 1, 8) == "Infinity") {
+			add(TronTokType::INF_VAL, "-Infinity");
+			i += 9; continue;
+		}
+		if (allowNaNInfinity && c == '+' && i + 8 < in.size() && in.substr(i + 1, 8) == "Infinity") {
+			add(TronTokType::INF_VAL, "+Infinity");
+			i += 9; continue;
+		}
+		if (c == '-' || (c >= '0' && c <= '9')) {
+			size_t start = i;
+			if (c == '-') i++;
+			while (i < in.size() && in[i] >= '0' && in[i] <= '9') i++;
+			if (i < in.size() && in[i] == '.') { i++; while (i < in.size() && in[i] >= '0' && in[i] <= '9') i++; }
+			if (i < in.size() && (in[i] == 'e' || in[i] == 'E')) {
+				i++; if (i < in.size() && (in[i] == '+' || in[i] == '-')) i++;
+				while (i < in.size() && in[i] >= '0' && in[i] <= '9') i++;
+			}
+			add(TronTokType::NUMBER, std::string(in.substr(start, i - start)));
+			continue;
+		}
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+			size_t start = i;
+			while (i < in.size() && ((in[i] >= 'a' && in[i] <= 'z') || (in[i] >= 'A' && in[i] <= 'Z') || (in[i] >= '0' && in[i] <= '9') || in[i] == '_')) i++;
+			std::string word(in.substr(start, i - start));
+			if (word == "class") add(TronTokType::CLASS);
+			else if (word == "true") add(TronTokType::TRUE);
+			else if (word == "false") add(TronTokType::FALSE);
+			else if (word == "null") add(TronTokType::NUL);
+			else if (allowNaNInfinity && word == "NaN") add(TronTokType::NAN_VAL);
+			else if (allowNaNInfinity && word == "Infinity") add(TronTokType::INF_VAL, word);
+			else add(TronTokType::IDENT, word);
+			continue;
+		}
+		switch (c) {
+			case '(': add(TronTokType::LPAREN); break;
+			case ')': add(TronTokType::RPAREN); break;
+			case '[': add(TronTokType::LBRACKET); break;
+			case ']': add(TronTokType::RBRACKET); break;
+			case '{': add(TronTokType::LBRACE); break;
+			case '}': add(TronTokType::RBRACE); break;
+			case ',': add(TronTokType::COMMA); break;
+			case ':': add(TronTokType::COLON); break;
+			case ';': add(TronTokType::SEMICOLON); break;
+			case '=': add(TronTokType::EQUALS); break;
+			default: i++; continue;
+		}
+		i++;
+	}
+	add(TronTokType::END);
+	return toks;
+}
+
+struct TronClassInfo {
+	std::vector<std::string> props;
+};
+
+struct TronParseState {
+	const std::vector<TronTok>& toks;
+	size_t pos = 0;
+	std::unordered_map<std::string, TronClassInfo> classes;
+	std::string err;
+	asvJSONValue* root = nullptr;
+	bool ok = true;
+
+	TronParseState(const std::vector<TronTok>& t) : toks(t) {}
+
+	const TronTok& peek() { return toks[pos]; }
+	const TronTok& advance() { return toks[pos++]; }
+	bool match(TronTokType t) { if (toks[pos].type == t) { pos++; return true; } return false; }
+	void skipNewlines() { while (toks[pos].type == TronTokType::NEWLINE || toks[pos].type == TronTokType::SEMICOLON) pos++; }
+
+	asvJSONValue* parseValue();
+
+	asvJSONValue* parseObject() {
+		advance(); // '{'
+		auto* obj = asvJSONValue::makeObject();
+		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
+		skipNewlines();
+		if (peek().type == TronTokType::RBRACE) { advance(); return obj; }
+		bool first = true;
+		while (true) {
+			if (!first) {
+				if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
+				else break;
+			}
+			first = false;
+			if (peek().type == TronTokType::RBRACE) break;
+			if (peek().type != TronTokType::STRING) { ok = false; err = "expected string key"; delete obj; return nullptr; }
+			std::string key = tronUnescape(advance().text);
+			if (!match(TronTokType::COLON)) { ok = false; err = "expected ':'"; delete obj; return nullptr; }
+			skipNewlines();
+			asvJSONValue* val = parseValue();
+			if (!val && !ok) { delete obj; return nullptr; }
+			if (val) obj->obj->emplace(key, std::unique_ptr<asvJSONValue>(val));
+			skipNewlines();
+		}
+		if (!match(TronTokType::RBRACE)) { ok = false; err = "expected '}' or ',' in object"; delete obj; return nullptr; }
+		return obj;
+	}
+
+	asvJSONValue* parseArray() {
+		advance(); // '['
+		auto* arr = asvJSONValue::makeArray();
+		if (!arr) { ok = false; err = "out of memory"; return nullptr; }
+		skipNewlines();
+		if (peek().type == TronTokType::RBRACKET) { advance(); return arr; }
+		bool first = true;
+		while (true) {
+			if (!first) {
+				if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
+				else break;
+			}
+			first = false;
+			if (peek().type == TronTokType::RBRACKET) break;
+			asvJSONValue* val = parseValue();
+			if (!val && !ok) { delete arr; return nullptr; }
+			if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
+			skipNewlines();
+		}
+		if (!match(TronTokType::RBRACKET)) { ok = false; err = "expected ']' or ',' in array"; delete arr; return nullptr; }
+		return arr;
+	}
+
+	asvJSONValue* parseInstance() {
+		std::string className = advance().text;
+		auto it = classes.find(className);
+		if (it == classes.end()) {
+			ok = false; err = "undefined class: " + className;
+			return nullptr;
+		}
+		const auto& props = it->second.props;
+		if (!match(TronTokType::LPAREN)) { ok = false; err = "expected '('"; return nullptr; }
+		skipNewlines();
+		std::unique_ptr<asvJSONValue> obj(asvJSONValue::makeObject());
+		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
+		std::vector<std::unique_ptr<asvJSONValue>> posArgs;
+		std::unordered_map<std::string, std::unique_ptr<asvJSONValue>> namedArgs;
+		bool namedMode = false;
+		while (peek().type != TronTokType::RPAREN && peek().type != TronTokType::END) {
+			if (!posArgs.empty() || !namedArgs.empty()) {
+				if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); continue; }
+			}
+			skipNewlines();
+			if ((peek().type == TronTokType::IDENT || peek().type == TronTokType::STRING) && pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::EQUALS) {
+				namedMode = true;
+				std::string propName;
+				if (peek().type == TronTokType::STRING) propName = tronUnescape(advance().text);
+				else propName = advance().text;
+				advance(); // '='
+				skipNewlines();
+				asvJSONValue* val = parseValue();
+				if (!val && !ok) return nullptr;
+				namedArgs[propName] = std::unique_ptr<asvJSONValue>(val);
+			} else {
+				if (namedMode) { ok = false; err = "positional arg after named"; return nullptr; }
+				asvJSONValue* val = parseValue();
+				if (!val && !ok) return nullptr;
+				posArgs.push_back(std::unique_ptr<asvJSONValue>(val));
+			}
+			skipNewlines();
+		}
+		if (!match(TronTokType::RPAREN)) { ok = false; err = "expected ')'"; return nullptr; }
+		for (size_t i = 0; i < props.size(); i++) {
+			std::unique_ptr<asvJSONValue> valPtr;
+			if (i < posArgs.size()) {
+				valPtr = std::move(posArgs[i]);
+			} else {
+				auto nit = namedArgs.find(props[i]);
+				if (nit != namedArgs.end()) valPtr = std::move(nit->second);
+			}
+			if (!valPtr) {
+				obj->obj->emplace(props[i], std::unique_ptr<asvJSONValue>(asvJSONValue::makeNull()));
+			} else {
+				obj->obj->emplace(props[i], std::move(valPtr));
+			}
+		}
+		return obj.release();
+	}
+};
+
+asvJSONValue* TronParseState::parseValue() {
+	skipNewlines();
+	auto& tok = peek();
+	static const double tronNaN = std::numeric_limits<double>::quiet_NaN();
+	static const double tronInf = std::numeric_limits<double>::infinity();
+	switch (tok.type) {
+		case TronTokType::LBRACE: return parseObject();
+		case TronTokType::LBRACKET: return parseArray();
+		case TronTokType::STRING: {
+			std::string raw = advance().text;
+			std::string s = tronUnescape(raw);
+			// Check __BASE64__ prefix
+			if (s.size() > 10 && s.compare(0, 10, "__BASE64__") == 0) {
+				auto data = base64_decode_fast(s.data() + 10, s.size() - 10);
+				auto* v = asvJSONValue::makeBinary(data.data(), data.size());
+				if (!v) { ok = false; err = "out of memory"; }
+				return v;
+			}
+			// Check __EXT__ prefix: "__EXT__<type>_<base64>"
+			if (s.size() > 7 && s.compare(0, 7, "__EXT__") == 0) {
+				size_t sep = s.find('_', 7);
+				if (sep != std::string::npos && sep > 7) {
+					char* end = nullptr;
+					long extType = std::strtol(s.c_str() + 7, &end, 10);
+					if (end == s.c_str() + 7 || static_cast<size_t>(end - s.c_str()) != sep) {
+						ok = false; err = "invalid extension type";
+						return nullptr;
+					}
+					auto data = base64_decode_fast(s.data() + sep + 1, s.size() - sep - 1);
+					auto* v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
+					if (!v) { ok = false; err = "out of memory"; }
+					return v;
+				}
+			}
+			// Check ISO 8601 date
+			if (s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T') {
+				time_t ts;
+				int ms = 0;
+				if (tryParseDateTime(s, ts, &ms)) {
+					auto* v = asvJSONValue::makeDateTime(ts, ms);
+					if (!v) { ok = false; err = "out of memory"; }
+					return v;
+				}
+			}
+			auto* v = asvJSONValue::makeStringView(s);
+			if (!v) { ok = false; err = "out of memory"; }
+			return v;
+		}
+		case TronTokType::NUMBER: {
+			std::string n = advance().text;
+			bool isDbl = n.find('.') != std::string::npos || n.find('e') != std::string::npos || n.find('E') != std::string::npos;
+			if (isDbl) {
+				char* end;
+				errno = 0;
+				double d = std::strtod(n.c_str(), &end);
+				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
+				auto* v = asvJSONValue::makeDouble(d);
+				if (!v) { ok = false; err = "out of memory"; }
+				return v;
+			} else {
+				char* end;
+				errno = 0;
+				long long l = std::strtoll(n.c_str(), &end, 10);
+				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
+				auto* v = asvJSONValue::makeInt(l);
+				if (!v) { ok = false; err = "out of memory"; }
+				return v;
+			}
+		}
+		case TronTokType::TRUE: advance(); return asvJSONValue::makeBool(true);
+		case TronTokType::FALSE: advance(); return asvJSONValue::makeBool(false);
+		case TronTokType::NUL: advance(); return asvJSONValue::makeNull();
+		case TronTokType::NAN_VAL: advance(); return asvJSONValue::makeDouble(tronNaN);
+		case TronTokType::INF_VAL: {
+			bool isNeg = tok.text.size() > 0 && tok.text[0] == '-';
+			advance();
+			return asvJSONValue::makeDouble(isNeg ? -tronInf : tronInf);
+		}
+		case TronTokType::IDENT: {
+			if (pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN)
+				return parseInstance();
+			ok = false; err = "unexpected identifier: " + tok.text;
+			return nullptr;
+		}
+		default:
+			ok = false; err = "unexpected token";
+			return nullptr;
+	}
+}
+
+inline bool asvJSON::fromTRON(std::string_view input) {
+	auto toks = tronTokenize(input, allowNaNInfinity);
+	TronParseState state(toks);
+	state.skipNewlines();
+	// Parse class definitions
+	while (state.peek().type == TronTokType::CLASS) {
+		state.advance(); // 'class'
+		if (state.peek().type != TronTokType::IDENT) {
+			lastError = "expected class name";
+			return false;
+		}
+		std::string name = state.advance().text;
+		// Check for inheritance: Name(Parent)
+		std::vector<std::string> parentProps;
+		if (state.peek().type == TronTokType::LPAREN) {
+			state.advance(); // '('
+			if (state.peek().type != TronTokType::IDENT) {
+				lastError = "expected parent class name";
+				return false;
+			}
+			std::string pname = state.advance().text;
+			auto pit = state.classes.find(pname);
+			if (pit == state.classes.end()) {
+				lastError = "parent class not found: " + pname;
+				return false;
+			}
+			parentProps = pit->second.props;
+			if (!state.match(TronTokType::RPAREN)) {
+				lastError = "expected ')' after parent name";
+				return false;
+			}
+		}
+		if (!state.match(TronTokType::COLON)) {
+			lastError = "expected ':' in class definition";
+			return false;
+		}
+		state.skipNewlines();
+		// Parse property list
+		std::vector<std::string> props;
+		while (state.peek().type == TronTokType::IDENT || state.peek().type == TronTokType::STRING) {
+			if (state.peek().type == TronTokType::STRING) {
+				props.push_back(tronUnescape(state.advance().text));
+			} else {
+				props.push_back(state.advance().text);
+			}
+			state.skipNewlines();
+			if (state.peek().type == TronTokType::COMMA) { state.advance(); state.skipNewlines(); }
+			else if (state.peek().type == TronTokType::NEWLINE) { state.advance(); state.skipNewlines(); if (state.peek().type != TronTokType::IDENT && state.peek().type != TronTokType::STRING) break; }
+			else break;
+		}
+		if (props.empty()) {
+			lastError = "class requires at least one property";
+			return false;
+		}
+		// Merge parent props (child overrides parent)
+		std::vector<std::string> allProps = std::move(parentProps);
+		for (const auto& p : props) {
+			if (std::find(allProps.begin(), allProps.end(), p) == allProps.end())
+				allProps.push_back(p);
+		}
+		state.classes[name] = {std::move(allProps)};
+	}
+	// Parse root value
+	state.root = state.parseValue();
+	if (!state.ok || !state.root) {
+		lastError = state.err.empty() ? "parse error" : state.err;
+		delete state.root;
+		root = nullptr;
+		return false;
+	}
+	state.skipNewlines();
+	if (state.peek().type != TronTokType::END) {
+		lastError = "trailing tokens after root value";
+		delete state.root;
+		root = nullptr;
+		return false;
+	}
+	root = state.root;
+	return true;
 }
 
 #endif

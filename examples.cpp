@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <cstring>
 #include <ctime>
 #include "asvJSON++.hpp"
@@ -873,6 +873,26 @@ void example_to_toon() {
 	std::cout << std::endl;
 }
 
+void example_to_tron() {
+	std::cout << "=== TRON Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"([{"name":"Alice","age":30},{"name":"Bob","age":25}])"));
+	std::string tron = json.toTRON();
+	std::cout << "TRON output:" << std::endl << tron << std::endl;
+
+	asvJSON j2;
+	if (j2.fromTRON(std::string_view(tron))) {
+		std::cout << "Round-trip:" << std::endl;
+		for (size_t i = 0; i < j2.getRoot()->size(); i++) {
+			auto* item = j2.getRoot()->get(i);
+			std::cout << "  name=" << item->getConst("name")->getString()
+			          << " age=" << item->getConst("age")->getInt() << std::endl;
+		}
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -930,6 +950,7 @@ int main() {
 	example_to_csv();
 	example_to_csv_array();
 	example_to_toon();
+	example_to_tron();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;
