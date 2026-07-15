@@ -301,6 +301,8 @@ Convenience methods combining dot-path lookup with type extraction.
 
 #### Static Factory Methods
 
+Factory methods return `std::unique_ptr<asvJSONValue>`. Automatic lifetime management.
+
 | Method | Description |
 |--------|-------------|
 | `makeString(const char* s, size_t len)` | Create a string value. |

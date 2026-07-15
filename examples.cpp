@@ -320,11 +320,10 @@ void example_get_root() {
 void example_regex() {
 	std::cout << "=== Regex (makeRegex) ===" << std::endl;
 	
-	auto* regex = asvJSONValue::makeRegex("\\d+", "g");
+	auto regex = asvJSONValue::makeRegex("\\d+", "g");
 	if (regex) {
 		std::cout << "Regex type: " << regex->typeToString(regex->type) << std::endl;
 		std::cout << "Regex value: " << std::string(regex->str_data.data(), regex->str_data.size()) << std::endl;
-		delete regex;
 	}
 	std::cout << std::endl;
 }
@@ -371,7 +370,7 @@ void example_json_pointer() {
 	auto* v = json.getByPointer("/user/name");
 	if (v) std::cout << "getByPointer /user/name: " << (v->type == asvJSONValue::STRING ? std::string(v->str_data.data(), v->str_data.size()) : "") << std::endl;
 	
-	json.setByPointer("/user/age", asvJSONValue::makeInt(30));
+	json.setByPointer("/user/age", asvJSONValue::makeInt(30).release());
 	std::cout << "After setByPointer /user/age: " << json.serialize() << std::endl;
 	
 	json.removeByPointer("/user/address");
@@ -379,8 +378,8 @@ void example_json_pointer() {
 	
 	asvJSON json2;
 	json2.parse(std::string("[1, 2, 3]"));
-	json2.setByPointer("/-", asvJSONValue::makeInt(4));
-	json2.setByPointer("/-", asvJSONValue::makeInt(5));
+	json2.setByPointer("/-", asvJSONValue::makeInt(4).release());
+	json2.setByPointer("/-", asvJSONValue::makeInt(5).release());
 	std::cout << "After array append: " << json2.serialize() << std::endl << std::endl;
 }
 
@@ -417,10 +416,9 @@ void example_clone() {
 	
 	auto* original = json.get("name");
 	if (original) {
-		auto* cloned = cloneValue(original);
+		auto cloned = cloneValue(original);
 		std::cout << "Original: " << (original->type == asvJSONValue::STRING ? std::string(original->str_data.data(), original->str_data.size()) : "") << std::endl;
 		std::cout << "Cloned: " << (cloned->type == asvJSONValue::STRING ? std::string(cloned->str_data.data(), cloned->str_data.size()) : "") << std::endl;
-		delete cloned;
 	}
 	std::cout << std::endl;
 }
@@ -511,17 +509,17 @@ void example_opt_datetime() {
 void example_type_to_string() {
 	std::cout << "=== typeToString() method ===" << std::endl;
 	
-	auto* str = asvJSONValue::makeString("test", 4);
-	auto* num = asvJSONValue::makeInt(42);
-	auto* dbl = asvJSONValue::makeDouble(1.5);
-	auto* boo = asvJSONValue::makeBool(true);
-	auto* nul = asvJSONValue::makeNull();
-	auto* obj = asvJSONValue::makeObject();
-	auto* arr = asvJSONValue::makeArray();
+	auto str = asvJSONValue::makeString("test", 4);
+	auto num = asvJSONValue::makeInt(42);
+	auto dbl = asvJSONValue::makeDouble(1.5);
+	auto boo = asvJSONValue::makeBool(true);
+	auto nul = asvJSONValue::makeNull();
+	auto obj = asvJSONValue::makeObject();
+	auto arr = asvJSONValue::makeArray();
 	uint8_t binData[] = {'a', 'b', 'c'};
-	auto* bin = asvJSONValue::makeBinary(binData, 3);
-	auto* dt = asvJSONValue::makeDateTime(time(nullptr));
-	
+	auto bin = asvJSONValue::makeBinary(binData, 3);
+	auto dt = asvJSONValue::makeDateTime(time(nullptr));
+
 	std::cout << "string: " << str->typeToString(str->type) << std::endl;
 	std::cout << "int: " << num->typeToString(num->type) << std::endl;
 	std::cout << "double: " << dbl->typeToString(dbl->type) << std::endl;
@@ -531,8 +529,6 @@ void example_type_to_string() {
 	std::cout << "array: " << arr->typeToString(arr->type) << std::endl;
 	std::cout << "binary: " << bin->typeToString(bin->type) << std::endl;
 	std::cout << "datetime: " << dt->typeToString(dt->type) << std::endl;
-	
-	delete str; delete num; delete dbl; delete boo; delete nul; delete obj; delete arr; delete bin; delete dt;
 	std::cout << std::endl;
 }
 

@@ -49,105 +49,92 @@ struct ValueGuard {
 };
 
 TEST(testMakeString) {
-	auto* v = asvJSONValue::makeString("hello", 5);
+	auto v = asvJSONValue::makeString("hello", 5);
 	ASSERT(v->type == asvJSONValue::STRING);
 	ASSERT_EQ(v->str_data.size(), 5);
 	ASSERT(strncmp(v->str_data.data(), "hello", 5) == 0);
-	delete v;
 }
 
 TEST(testMakeInt) {
-	auto* v = asvJSONValue::makeInt(42);
+	auto v = asvJSONValue::makeInt(42);
 	ASSERT(v->type == asvJSONValue::INT);
 	ASSERT_EQ(v->num, 42);
-	delete v;
 }
 
 TEST(testMakeDouble) {
-	auto* v = asvJSONValue::makeDouble(3.14);
+	auto v = asvJSONValue::makeDouble(3.14);
 	ASSERT(v->type == asvJSONValue::DOUBLE);
 	ASSERT(v->dbl > 3.13 && v->dbl < 3.15);
-	delete v;
 }
 
 TEST(testMakeBool) {
-	auto* vt = asvJSONValue::makeBool(true);
+	auto vt = asvJSONValue::makeBool(true);
 	ASSERT(vt->type == asvJSONValue::BOOL_VAL);
 	ASSERT(vt->flag == true);
-	delete vt;
 	
-	auto* vf = asvJSONValue::makeBool(false);
+	auto vf = asvJSONValue::makeBool(false);
 	ASSERT(vf->type == asvJSONValue::BOOL_VAL);
 	ASSERT(vf->flag == false);
-	delete vf;
 }
 
 TEST(testMakeNull) {
-	auto* v = asvJSONValue::makeNull();
+	auto v = asvJSONValue::makeNull();
 	ASSERT(v->type == asvJSONValue::NULL_VAL);
-	delete v;
 }
 
 TEST(testMakeObject) {
-	auto* v = asvJSONValue::makeObject();
+	auto v = asvJSONValue::makeObject();
 	ASSERT(v->type == asvJSONValue::OBJECT);
 	ASSERT(v->obj != nullptr);
 	ASSERT_EQ(v->size(), 0);
-	delete v;
 }
 
 TEST(testMakeArray) {
-	auto* v = asvJSONValue::makeArray();
+	auto v = asvJSONValue::makeArray();
 	ASSERT(v->type == asvJSONValue::ARRAY);
 	ASSERT(v->arr != nullptr);
 	ASSERT_EQ(v->size(), 0);
-	delete v;
 }
 
 TEST(testMakeDateTime) {
 	time_t now = time(nullptr);
-	auto* v = asvJSONValue::makeDateTime(now, 500);
+	auto v = asvJSONValue::makeDateTime(now, 500);
 	ASSERT(v->type == asvJSONValue::DATETIME);
 	ASSERT_EQ(v->timestamp, now);
 	ASSERT_EQ(v->datetime_ms, 500);
-	delete v;
 }
 
 TEST(testMakeBinary) {
 	uint8_t data[] = {0x01, 0x02, 0x03};
-	auto* v = asvJSONValue::makeBinary(data, 3);
+	auto v = asvJSONValue::makeBinary(data, 3);
 	ASSERT(v->type == asvJSONValue::BINARY);
 	ASSERT_EQ(v->bin_data.size(), 3);
 	ASSERT(v->bin_data.data()[0] == 0x01);
-	delete v;
 }
 
 TEST(testMakeObjectId) {
 	const char oid[12] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C};
-	auto* v = asvJSONValue::makeObjectId(std::string_view(oid, 12));
+	auto v = asvJSONValue::makeObjectId(std::string_view(oid, 12));
 	ASSERT(v->type == asvJSONValue::OBJECTID);
 	ASSERT_EQ(v->str_data.size(), 12);
-	delete v;
 }
 
 TEST(testMakeTimestamp) {
-	auto* v = asvJSONValue::makeTimestamp(1234567890);
+	auto v = asvJSONValue::makeTimestamp(1234567890);
 	ASSERT(v->type == asvJSONValue::TIMESTAMP);
 	ASSERT_EQ(v->num, 1234567890);
-	delete v;
 }
 
 TEST(testMakeRegex) {
-	auto* v = asvJSONValue::makeRegex("pattern", "i");
+	auto v = asvJSONValue::makeRegex("pattern", "i");
 	ASSERT(v->type == asvJSONValue::REGEX);
 	ASSERT(v->str_data.size() > 0);
-	delete v;
 }
 
 TEST(testObjectGet) {
-	auto* obj = asvJSONValue::makeObject();
-	auto* val = asvJSONValue::makeInt(100);
-	obj->obj->emplace("key", val);
+	auto obj = asvJSONValue::makeObject();
+	auto val = asvJSONValue::makeInt(100);
+	obj->obj->emplace("key", std::move(val));
 	
 	auto* result = obj->get("key");
 	ASSERT(result != nullptr);
@@ -156,49 +143,44 @@ TEST(testObjectGet) {
 	auto* missing = obj->get("nonexistent");
 	ASSERT(missing == nullptr);
 	
-	delete obj;
 }
 
 TEST(testArrayGet) {
-	auto* arr = asvJSONValue::makeArray();
-	arr->arr->push_back(std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(1)));
-	arr->arr->push_back(std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(2)));
-	arr->arr->push_back(std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(3)));
+	auto arr = asvJSONValue::makeArray();
+	arr->arr->push_back(asvJSONValue::makeInt(1));
+	arr->arr->push_back(asvJSONValue::makeInt(2));
+	arr->arr->push_back(asvJSONValue::makeInt(3));
 	
 	ASSERT_EQ(arr->get(size_t(0))->num, 1);
 	ASSERT_EQ(arr->get(size_t(1))->num, 2);
 	ASSERT_EQ(arr->get(size_t(2))->num, 3);
 	ASSERT(arr->get(size_t(10)) == nullptr);
 	
-	delete arr;
 }
 
 TEST(testSize) {
-	auto* obj = asvJSONValue::makeObject();
+	auto obj = asvJSONValue::makeObject();
 	ASSERT_EQ(obj->size(), 0);
 	obj->obj->emplace("a", asvJSONValue::makeInt(1));
 	ASSERT_EQ(obj->size(), 1);
 	obj->obj->emplace("b", asvJSONValue::makeInt(2));
 	ASSERT_EQ(obj->size(), 2);
-	delete obj;
 	
-	auto* arr = asvJSONValue::makeArray();
+	auto arr = asvJSONValue::makeArray();
 	ASSERT_EQ(arr->size(), 0);
-	arr->arr->push_back(std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(1)));
+	arr->arr->push_back(asvJSONValue::makeInt(1));
 	ASSERT_EQ(arr->size(), 1);
-	arr->arr->push_back(std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(2)));
+	arr->arr->push_back(asvJSONValue::makeInt(2));
 	ASSERT_EQ(arr->size(), 2);
-	delete arr;
 }
 
 TEST(testValueHasKey) {
-	auto* obj = asvJSONValue::makeObject();
+	auto obj = asvJSONValue::makeObject();
 	obj->obj->emplace("exists", asvJSONValue::makeInt(1));
 	
 	ASSERT(obj->hasKey("exists") == true);
 	ASSERT(obj->hasKey("nonexistent") == false);
 	
-	delete obj;
 }
 
 TEST(testTypeToString) {
@@ -213,48 +195,41 @@ TEST(testTypeToString) {
 }
 
 TEST(testGetStringLen) {
-	auto* v = asvJSONValue::makeString("hello", 5);
+	auto v = asvJSONValue::makeString("hello", 5);
 	ASSERT_EQ(v->getStringLen(), 5);
-	delete v;
 }
 
 TEST(testValueGetInt) {
-	auto* v = asvJSONValue::makeInt(12345);
+	auto v = asvJSONValue::makeInt(12345);
 	ASSERT_EQ(v->getInt(), 12345);
-	delete v;
 }
 
 TEST(testValueGetDouble) {
-	auto* v = asvJSONValue::makeDouble(2.718);
+	auto v = asvJSONValue::makeDouble(2.718);
 	ASSERT(v->getDouble() > 2.717 && v->getDouble() < 2.719);
-	delete v;
 }
 
 TEST(testValueGetBool) {
-	auto* vt = asvJSONValue::makeBool(true);
+	auto vt = asvJSONValue::makeBool(true);
 	ASSERT(vt->getBool() == true);
-	delete vt;
 	
-	auto* vf = asvJSONValue::makeBool(false);
+	auto vf = asvJSONValue::makeBool(false);
 	ASSERT(vf->getBool() == false);
-	delete vf;
 }
 
 TEST(testGetDateTime) {
 	time_t now = time(nullptr);
-	auto* v = asvJSONValue::makeDateTime(now, 100);
+	auto v = asvJSONValue::makeDateTime(now, 100);
 	ASSERT_EQ(v->getDateTime(), now);
 	ASSERT_EQ(v->getDateTimeMs(), 100);
-	delete v;
 }
 
 TEST(testGetBinary) {
 	uint8_t data[] = {0xAA, 0xBB, 0xCC};
-	auto* v = asvJSONValue::makeBinary(data, 3);
+	auto v = asvJSONValue::makeBinary(data, 3);
 	auto bin = v->getBinary();
 	ASSERT_EQ(bin.size(), 3);
 	ASSERT_EQ(bin[0], 0xAA);
-	delete v;
 }
 
 TEST(testParseString) {
@@ -618,8 +593,7 @@ TEST(testSetByPointer) {
 	asvJSON json;
 	json.parse(std::string("{\"name\": \"Test\"}"));
 	
-	auto* newVal = asvJSONValue::makeString("Updated", 7);
-	json.setByPointer("/name", newVal);
+	json.setByPointer("/name", asvJSONValue::makeString("Updated", 7).release());
 	
 	ASSERT_EQ(json.getString("name"), "Updated");
 }
@@ -628,8 +602,7 @@ TEST(testSetByPointerArrayExpand) {
 	asvJSON json;
 	json.parse(std::string("{\"arr\": [1]}"));
 	
-	auto* newVal = asvJSONValue::makeInt(2);
-	json.setByPointer("/arr/5", newVal);
+	json.setByPointer("/arr/5", asvJSONValue::makeInt(2).release());
 	
 	auto* arr = json.getArray("arr");
 	if (!arr) throw std::runtime_error("array not found");
@@ -640,8 +613,7 @@ TEST(testSetByPointerArrayAppend) {
 	asvJSON json;
 	json.parse(std::string("[1, 2, 3]"));
 	
-	auto* newVal = asvJSONValue::makeInt(4);
-	json.setByPointer("/-", newVal);
+	json.setByPointer("/-", asvJSONValue::makeInt(4).release());
 	
 	auto* root = json.getRoot();
 	if (!root || root->type != asvJSONValue::ARRAY) throw std::runtime_error("root not array");
@@ -800,7 +772,7 @@ TEST(testNestingDepthLimit) {
 
 TEST(testStringTooLarge) {
 	std::string huge(11 * 1024 * 1024, 'x');
-	auto* v = asvJSONValue::makeString(huge.c_str(), huge.size());
+	auto v = asvJSONValue::makeString(huge.c_str(), huge.size());
 	ASSERT(v == nullptr);
 }
 
@@ -824,12 +796,11 @@ TEST(testBasicParse) {
 }
 
 TEST(testControlCharsEscaped) {
-	auto* v = asvJSONValue::makeString("\x00\x01\x1F", 3);
+	auto v = asvJSONValue::makeString("\x00\x01\x1F", 3);
 	ASSERT(v != nullptr);
 	std::string out;
 	v->serialize(out);
 	ASSERT(out.find("\\u0000") != std::string::npos);
-	delete v;
 }
 
 TEST(testGetRoot) {
@@ -871,13 +842,13 @@ TEST(testJSONPointerEscape) {
 TEST(testJSONPointerArrayAppend) {
 	asvJSON json;
 	json.parse(std::string("{\"arr\": [1, 2, 3]}"));
-	bool ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(4));
+	bool ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(4).release());
 	ASSERT(ok);
 	auto* arr = json.getArray("arr");
 	ASSERT(arr != nullptr);
 	ASSERT_EQ(arr->size(), 4);
 	ASSERT_EQ(arr->get(3)->getInt(), 4);
-	ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(5));
+	ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(5).release());
 	ASSERT(ok);
 	arr = json.getArray("arr");
 	ASSERT_EQ(arr->size(), 5);
@@ -1099,16 +1070,14 @@ TEST(testGetConst) {
 }
 
 TEST(testCloneValueDirect) {
-	auto* original = asvJSONValue::makeObject();
-	original->obj->emplace("key", std::unique_ptr<asvJSONValue>(asvJSONValue::makeInt(42)));
-	auto* cloned = cloneValue(original);
+	auto original = asvJSONValue::makeObject();
+	original->obj->emplace("key", asvJSONValue::makeInt(42));
+	auto cloned = cloneValue(original.get());
 	ASSERT(cloned != nullptr);
 	ASSERT_EQ(cloned->get("key")->getInt(), 42);
-	auto* newVal = asvJSONValue::makeInt(99);
-	original->obj->find("key")->second.reset(newVal);
+	auto newVal = asvJSONValue::makeInt(99);
+	original->obj->find("key")->second.reset(newVal.release());
 	ASSERT_EQ(cloned->get("key")->getInt(), 42);
-	delete original;
-	delete cloned;
 }
 
 TEST(testStressLargeArray) {
@@ -1293,11 +1262,10 @@ TEST(testStringViewRemove) {
 }
 
 TEST(testValueGetStringView) {
-	auto* v = asvJSONValue::makeString("test", 4);
+	auto v = asvJSONValue::makeString("test", 4);
 	std::string_view sv = v->getStringView();
 	ASSERT(sv == "test");
 	ASSERT(sv.length() == 4);
-	delete v;
 }
 
 TEST(testValueGetConstSizeT) {
@@ -1620,9 +1588,9 @@ TEST(testAPICoverage) {
 	{
 		asvJSON json2;
 		const unsigned char oidBytes[12] = {0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0x00, 0x00};
-		json2.setByPointer("/sub/oid", asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(oidBytes), 12)));
-		json2.setByPointer("/sub/ts", asvJSONValue::makeTimestamp(1000));
-		json2.setByPointer("/sub/rx", asvJSONValue::makeRegex("^test$", "gi"));
+		json2.setByPointer("/sub/oid", asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(oidBytes), 12)).release());
+		json2.setByPointer("/sub/ts", asvJSONValue::makeTimestamp(1000).release());
+		json2.setByPointer("/sub/rx", asvJSONValue::makeRegex("^test$", "gi").release());
 		ASSERT_EQ(json2.getNestedObjectId("sub.oid"), std::string(reinterpret_cast<const char*>(oidBytes), 12));
 		ASSERT_EQ(json2.getNestedTimestamp("sub.ts"), 1000);
 		auto nrx = json2.getNestedRegex("sub.rx");
@@ -1832,13 +1800,12 @@ TEST(testToXML) {
 	}
 	// asvJSONValue::toXML (direct)
 	{
-		auto* v = asvJSONValue::makeString("test", 4);
+		auto v = asvJSONValue::makeString("test", 4);
 		std::string out;
 		v->toXML(out);
 		ASSERT(!out.empty());
 		ASSERT(out.find("test") != std::string::npos);
 		ASSERT(out.find("<root>") != std::string::npos);
-		delete v;
 	}
 }
 
@@ -1908,13 +1875,12 @@ TEST(testToYAML) {
 	}
 	// asvJSONValue::toYAML (direct)
 	{
-		auto* v = asvJSONValue::makeString("test", 4);
+		auto v = asvJSONValue::makeString("test", 4);
 		std::string out;
 		v->toYAML(out);
 		ASSERT(!out.empty());
 		ASSERT(out.find("---") != std::string::npos);
 		ASSERT(out.find("test") != std::string::npos);
-		delete v;
 	}
 	// Quoting
 	{
@@ -2656,12 +2622,11 @@ TEST(testToCSV) {
 	}
 	// asvJSONValue::toCSV (direct)
 	{
-		auto* v = asvJSONValue::makeString("test", 4);
+		auto v = asvJSONValue::makeString("test", 4);
 		std::string out;
 		v->toCSV(out);
 		ASSERT(out.find("test") != std::string::npos);
 		ASSERT(out.find("value") == std::string::npos); // no header
-		delete v;
 	}
 	// Empty object
 	{

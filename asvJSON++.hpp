@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.3.0 - C++17 JSON library
+// asvJSON++ v1.4.0 - C++17 JSON library
 // 
 // Configuration:
 //   - Define ASVJSON_USE_ORDERED_MAP before including header for:
@@ -26,8 +26,8 @@
 // 
 // Architecture:
 //   - Header-only library, C++17 standard
-//   - unique_ptr for internal containers (obj/arr)
-//   - Factory methods return raw pointers - caller manages deletion
+//   - unique_ptr for internal containers (obj/arr) and factory methods
+//   - Factory methods return std::unique_ptr - automatic lifetime management
 //   - Big-endian byte order for MessagePack float/double (MessagePack spec)
 // 
 // Example:
@@ -157,6 +157,11 @@ struct asvJSONValue {
 	static constexpr size_t MAX_ARRAY_SIZE = 1000000;
 	static constexpr size_t MAX_OBJECT_SIZE = 1000000;
 
+	static bool checkStringLen(size_t len) noexcept { return len <= MAX_STRING_LEN; }
+	static bool checkArraySize(size_t n) noexcept { return n <= MAX_ARRAY_SIZE; }
+	static bool checkObjectSize(size_t n) noexcept { return n <= MAX_OBJECT_SIZE; }
+	static bool checkNestingDepth(int depth) noexcept { return depth <= static_cast<int>(MAX_NESTING_DEPTH); }
+
 	enum Type { NULL_VAL, STRING, OBJECT, ARRAY, INT, BOOL_VAL, DOUBLE, DATETIME, BINARY, OBJECTID, REGEX, TIMESTAMP, EXTENSION };
 	Type type = NULL_VAL;
 
@@ -247,12 +252,12 @@ struct asvJSONValue {
 	 * @param len Length of string
 	 * @return New string value or nullptr on error
 	 */
-	[[nodiscard]] static asvJSONValue* makeString(const char* s, size_t len) {
-		if (len > MAX_STRING_LEN) return nullptr;
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeString(const char* s, size_t len) {
+		if (!asvJSONValue::checkStringLen(len)) return nullptr;
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = STRING;
-		try { v->str_data.assign(s, len); } catch (...) { delete v; return nullptr; }
+		try { v->str_data.assign(s, len); } catch (...) { return nullptr; }
 		return v;
 	}
 
@@ -262,17 +267,17 @@ struct asvJSONValue {
 	 * @param len Length of string
 	 * @return New string value or nullptr on error
 	 */
-	[[nodiscard]] static asvJSONValue* makeStringOwned(char* s, size_t len) {
-		if (!s || len > MAX_STRING_LEN) { delete[] s; return nullptr; }
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeStringOwned(char* s, size_t len) {
+		if (!s || !asvJSONValue::checkStringLen(len)) { delete[] s; return nullptr; }
 		std::unique_ptr<char[]> guard(s);
-		auto* v = new(std::nothrow) asvJSONValue();
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = STRING;
-		try { v->str_data.assign(guard.get(), len); } catch (...) { delete v; return nullptr; }
+		try { v->str_data.assign(guard.get(), len); } catch (...) { return nullptr; }
 		return v;
 	}
 
-	[[nodiscard]] static asvJSONValue* makeStringView(std::string_view sv) {
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeStringView(std::string_view sv) {
 		return makeString(sv.data(), sv.size());
 	}
 
@@ -280,14 +285,13 @@ struct asvJSONValue {
 	 * @brief Create an empty object value
 	 * @return New object value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeObject() {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeObject() {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = OBJECT;
 		try {
 			v->obj.reset(new ObjectMap());
 		} catch (...) {
-			delete v;
 			return nullptr;
 		}
 		return v;
@@ -297,14 +301,13 @@ struct asvJSONValue {
 	 * @brief Create an empty array value
 	 * @return New array value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeArray() {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeArray() {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = ARRAY;
 		try {
 			v->arr.reset(new std::vector<std::unique_ptr<asvJSONValue>>());
 		} catch (...) {
-			delete v;
 			return nullptr;
 		}
 		return v;
@@ -315,8 +318,8 @@ struct asvJSONValue {
 	 * @param n Integer value
 	 * @return New integer value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeInt(int64_t n) {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeInt(int64_t n) {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = INT;
 		v->num = n;
@@ -330,8 +333,8 @@ struct asvJSONValue {
 	 * @param b Boolean value
 	 * @return New boolean value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeBool(bool b) {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeBool(bool b) {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = BOOL_VAL;
 		v->flag = b;
@@ -345,8 +348,8 @@ struct asvJSONValue {
 	 * @param d Double value
 	 * @return New double value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeDouble(double d) {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeDouble(double d) {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = DOUBLE;
 		v->dbl = d;
@@ -358,8 +361,8 @@ struct asvJSONValue {
 	 * @brief Create a null value
 	 * @return New null value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeNull() {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeNull() {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = NULL_VAL;
 		return v;
@@ -371,8 +374,8 @@ struct asvJSONValue {
 	 * @param ms Milliseconds (0-999, default: 0)
 	 * @return New datetime value or nullptr on allocation failure
 	 */
-	[[nodiscard]] static asvJSONValue* makeDateTime(time_t ts, int ms = 0) {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeDateTime(time_t ts, int ms = 0) {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = DATETIME;
 		v->timestamp = ts + (ms / 1000);
@@ -390,14 +393,14 @@ struct asvJSONValue {
 	 * @param len Length of binary data
 	 * @return New binary value or nullptr if too long
 	 */
-	[[nodiscard]] static asvJSONValue* makeBinary(const uint8_t* data, size_t len) {
-		if (len > MAX_STRING_LEN || (len > 0 && data == nullptr)) return nullptr;
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeBinary(const uint8_t* data, size_t len) {
+		if (!asvJSONValue::checkStringLen(len) || (len > 0 && data == nullptr)) return nullptr;
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = BINARY;
 		try {
 			if (len > 0) v->bin_data.assign(data, data + len);
-		} catch (...) { delete v; return nullptr; }
+		} catch (...) { return nullptr; }
 		return v;
 	}
 
@@ -408,15 +411,15 @@ struct asvJSONValue {
 	 * @param len Length of extension data
 	 * @return New extension value or nullptr on error
 	 */
-	[[nodiscard]] static asvJSONValue* makeExtension(int8_t extType, const uint8_t* data, size_t len) {
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeExtension(int8_t extType, const uint8_t* data, size_t len) {
 		if (!data && len > 0) return nullptr;
-		auto* v = new(std::nothrow) asvJSONValue();
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = EXTENSION;
 		v->ext_type = extType;
 		try {
 			if (len > 0) v->bin_data.assign(data, data + len);
-		} catch (...) { delete v; return nullptr; }
+		} catch (...) { return nullptr; }
 		return v;
 	}
 
@@ -425,17 +428,17 @@ struct asvJSONValue {
 	 * @param oid Pointer to 12-byte ObjectId data (copied)
 	 * @return New ObjectId value or nullptr on error
 	 */
-	[[nodiscard]] static asvJSONValue* makeObjectId(std::string_view oid) {
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeObjectId(std::string_view oid) {
 		if (oid.size() != 12) return nullptr;
-		auto* v = new(std::nothrow) asvJSONValue();
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = OBJECTID;
-		try { v->str_data.assign(oid.data(), oid.size()); } catch (...) { delete v; return nullptr; }
+		try { v->str_data.assign(oid.data(), oid.size()); } catch (...) { return nullptr; }
 		return v;
 	}
 
-	[[nodiscard]] static asvJSONValue* makeTimestamp(int64_t ts) {
-		auto* v = new(std::nothrow) asvJSONValue();
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeTimestamp(int64_t ts) {
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = TIMESTAMP;
 		v->num = ts;
@@ -448,13 +451,13 @@ struct asvJSONValue {
 	 * @param options Regex options (e.g., "i" for case-insensitive)
 	 * @return New regex value or nullptr on error
 	 */
-	[[nodiscard]] static asvJSONValue* makeRegex(const char* pattern, const char* options) {
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeRegex(const char* pattern, const char* options) {
 		if (!pattern) return nullptr;
 		size_t patLen = strlen(pattern);
 		if (patLen == 0) return nullptr;
 		size_t optLen = options ? strlen(options) : 0;
-		if (patLen > MAX_STRING_LEN || optLen > MAX_STRING_LEN || patLen + optLen > MAX_STRING_LEN - 2) return nullptr;
-		auto* v = new(std::nothrow) asvJSONValue();
+		if (!asvJSONValue::checkStringLen(patLen) || !asvJSONValue::checkStringLen(optLen) || patLen + optLen > MAX_STRING_LEN - 2) return nullptr;
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = REGEX;
 		try {
@@ -462,7 +465,7 @@ struct asvJSONValue {
 			v->str_data.append(pattern, patLen);
 			v->str_data.push_back('|');
 			if (optLen > 0) v->str_data.append(options, optLen);
-		} catch (...) { delete v; return nullptr; }
+		} catch (...) { return nullptr; }
 		return v;
 	}
 
@@ -640,7 +643,7 @@ struct asvJSONValue {
  * @param v Value to clone (can be nullptr)
  * @return New cloned value or nullptr
  */
-inline asvJSONValue* cloneValue(const asvJSONValue* v);
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v);
 
 // C++17 inline base64 charset
 inline constexpr char ASVJSON_BASE64_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -749,20 +752,6 @@ inline bool isValidUTF8(const uint8_t* data, size_t len) noexcept {
 }
 
 /**
- * @brief Decode base64 char to value (standard RFC 4648 table)
- * @param c Character to decode
- * @return Value 0-63 or -1
- */
-[[maybe_unused]] inline int base64_decode_value_char(char c) {
-	if (c >= 'A' && c <= 'Z') return c - 'A';
-	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-	if (c >= '0' && c <= '9') return c - '0' + 52;
-	if (c == '+') return 62;
-	if (c == '/') return 63;
-	return -1;
-}
-
-/**
  * @brief Decode base64 char to value (custom charset)
  * @param c Character to decode
  * @return Value 0-63 or -1
@@ -848,6 +837,26 @@ inline std::vector<uint8_t> base64_decode_fast(const char* str, size_t len, bool
 		}
 	}
 	return result;
+}
+
+/**
+ * @brief Append base64 with "__BASE64__" prefix and JSON quotes
+ */
+static void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
+  out += "\"__BASE64__";
+  out += base64_encode(data, len);
+  out += '"';
+}
+
+/**
+ * @brief Append extension with "__EXT__" prefix, type, and JSON quotes
+ */
+static void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
+  out += "\"__EXT__";
+  out += std::to_string(type);
+  out += '_';
+  out += base64_encode(data, len);
+  out += '"';
 }
 
 /**
@@ -1026,6 +1035,14 @@ inline void appendJsonEscaped(std::string& out, std::string_view s) {
 	}
 }
 
+// Forward declarations for type-formatting helpers (defined before TOON section)
+static void fmtDoubleVal(double d, std::string& out);
+static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out);
+static void fmtDateTimeVal(time_t ts, int ms, std::string& out);
+static void fmtObjectIdHexVal(std::string_view s, std::string& out);
+static void fmtRegexVal(std::string_view s, std::string& out);
+static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out);
+
 inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) const {
 	switch (type) {
 		case NULL_VAL: out += "null"; break;
@@ -1039,55 +1056,19 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 		case INT: out += std::to_string(num); break;
 		case BOOL_VAL: out += flag ? "true" : "false"; break;
 		case DOUBLE: {
-			if (std::isnan(dbl) || std::isinf(dbl)) {
-				if (!allowNaNInfinity) { out += "null"; break; }
-				if (std::isnan(dbl)) { out += "NaN"; break; }
-				if (dbl > 0) { out += "Infinity"; break; }
-				else { out += "-Infinity"; break; }
-			}
-			if (dbl == std::floor(dbl) && dbl >= std::numeric_limits<int64_t>::min() && dbl <= std::numeric_limits<int64_t>::max()) {
-				out += std::to_string(static_cast<int64_t>(dbl));
-			} else {
-			char buf[32];
-			int n = snprintf(buf, sizeof(buf), "%.17g", dbl);
-			if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
-				out += buf;
-			} else if (n > 0) {
-				std::string fallback(static_cast<size_t>(n) + 1, '\0');
-				snprintf(&fallback[0], fallback.size(), "%.17g", dbl);
-				out += fallback.c_str();
-			} else {
-				out += "null";
-			}
-			}
+			if (fmtNaNInfVal(dbl, allowNaNInfinity, out)) break;
+			fmtDoubleVal(dbl, out);
 			break;
 		}
 		case DATETIME: {
 			out.push_back('"');
-			char buf[40];
-			std::tm tm;
-			asvjson_gmtime(&tm, &timestamp);
-			if (datetime_ms > 0) {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
-				out += buf;
-				out += std::to_string(tm.tm_sec);
-				out.push_back('.');
-				char msbuf[16];
-				snprintf(msbuf, sizeof(msbuf), "%03d", datetime_ms);
-				out += msbuf;
-				out.push_back('Z');
-			} else {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-				out += buf;
-			}
+			fmtDateTimeVal(timestamp, datetime_ms, out);
 			out.push_back('"');
 			break;
 		}
 		case BINARY: {
 			if (bin_data.empty()) { out += "null"; break; }
-			out += "\"__BASE64__";
-			out += base64_encode(bin_data.data(), bin_data.size());
-			out.push_back('"');
+			fmtBase64JsonVal(bin_data.data(), bin_data.size(), out);
 			break;
 		}
 		case OBJECT: {
@@ -1139,55 +1120,19 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 		case INT: out += std::to_string(num); break;
 		case BOOL_VAL: out += flag ? "true" : "false"; break;
 		case DOUBLE: {
-			if (std::isnan(dbl) || std::isinf(dbl)) {
-				if (!allowNaNInfinity) { out += "null"; break; }
-				if (std::isnan(dbl)) { out += "NaN"; break; }
-				if (dbl > 0) { out += "Infinity"; break; }
-				else { out += "-Infinity"; break; }
-			}
-			if (dbl == std::floor(dbl) && dbl >= std::numeric_limits<int64_t>::min() && dbl <= std::numeric_limits<int64_t>::max()) {
-				out += std::to_string(static_cast<int64_t>(dbl));
-				break;
-			}
-			char buf[64];
-			int n = snprintf(buf, sizeof(buf), "%.17g", dbl);
-			if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
-				out += buf;
-			} else if (n > 0) {
-				std::string fallback(static_cast<size_t>(n) + 1, '\0');
-				snprintf(&fallback[0], fallback.size(), "%.17g", dbl);
-				out += fallback.c_str();
-			} else {
-				out += "null";
-			}
+			if (fmtNaNInfVal(dbl, allowNaNInfinity, out)) break;
+			fmtDoubleVal(dbl, out);
 			break;
 		}
 		case DATETIME: {
 			out.push_back('"');
-			char buf[40];
-			std::tm tm;
-			asvjson_gmtime(&tm, &timestamp);
-			if (datetime_ms > 0) {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
-				out += buf;
-				out += std::to_string(tm.tm_sec);
-				out.push_back('.');
-				char msbuf[16];
-				snprintf(msbuf, sizeof(msbuf), "%03d", datetime_ms);
-				out += msbuf;
-				out.push_back('Z');
-			} else {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-				out += buf;
-			}
+			fmtDateTimeVal(timestamp, datetime_ms, out);
 			out.push_back('"');
 			break;
 		}
 		case BINARY: {
 			if (bin_data.empty()) { out += "null"; break; }
-			out += "\"__BASE64__";
-			out += base64_encode(bin_data.data(), bin_data.size());
-			out.push_back('"');
+			fmtBase64JsonVal(bin_data.data(), bin_data.size(), out);
 			break;
 		}
 		case OBJECT: {
@@ -1312,6 +1257,107 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 	return tz_pos == sv.size();
 }
 
+static void appendUtf8Codepoint(std::string& out, unsigned int cp) {
+  if (cp < 0x80) out += static_cast<char>(cp);
+  else if (cp < 0x800) {
+    out += static_cast<char>(0xC0 | (cp >> 6));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else if (cp < 0x10000) {
+    out += static_cast<char>(0xE0 | (cp >> 12));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else {
+    out += static_cast<char>(0xF0 | (cp >> 18));
+    out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  }
+}
+
+static std::string unescapeJsonString(std::string_view s, bool strict = true) {
+  if (s.find('\\') == std::string_view::npos) {
+    if (strict) {
+      for (size_t i = 0; i < s.size(); i++) {
+        if (static_cast<unsigned char>(s[i]) < 0x20)
+          throw asvJSONError("Control character in string");
+      }
+      if (!isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size()))
+        throw asvJSONError("Invalid UTF-8 in string");
+    }
+    return std::string(s);
+  }
+  std::string r;
+  r.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ) {
+    if (s[i] == '\\' && i + 1 < s.size()) {
+      i++;
+      if (s[i] == 'u' && i + 4 < s.size()) {
+        unsigned int cp = 0;
+        for (int j = 0; j < 4; j++) {
+          cp <<= 4;
+          int v = hexDigitValue(s[i + 1 + j]);
+          if (v < 0) {
+            if (strict) throw asvJSONError("Invalid Unicode escape");
+            cp = 0xFFFD; break;
+          }
+          cp += static_cast<unsigned int>(v);
+        }
+        if (cp == 0xFFFD) { r += '?'; i += 5; continue; }
+        if (cp > 0x10FFFF) {
+          if (strict) throw asvJSONError("Unicode code point out of range");
+          r += '?'; i += 5; continue;
+        }
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+          if (i + 10 < s.size() && s[i+5] == '\\' && s[i+6] == 'u') {
+            unsigned int low = 0;
+            bool lowOk = true;
+            for (int j = 0; j < 4; j++) {
+              low <<= 4;
+              int v = hexDigitValue(s[i + 7 + j]);
+              if (v < 0) { lowOk = false; break; }
+              low += static_cast<unsigned int>(v);
+            }
+            if (lowOk && low >= 0xDC00 && low <= 0xDFFF) {
+              cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+              appendUtf8Codepoint(r, cp);
+              i += 11; continue;
+            }
+          }
+          if (strict) throw asvJSONError("Invalid lone surrogate");
+          r += '?'; i += 5; continue;
+        }
+        if (cp >= 0xDC00 && cp <= 0xDFFF) {
+          if (strict) throw asvJSONError("Invalid lone surrogate");
+          r += '?'; i += 5; continue;
+        }
+        appendUtf8Codepoint(r, cp);
+        i += 5;
+        continue;
+      } else {
+        switch (s[i]) {
+          case 'n': r += '\n'; break;
+          case 'r': r += '\r'; break;
+          case 't': r += '\t'; break;
+          case 'b': r += '\b'; break;
+          case 'f': r += '\f'; break;
+          case '"': r += '"'; break;
+          case '\\': r += '\\'; break;
+          case '/': r += '/'; break;
+          default: r += s[i]; break;
+        }
+      }
+      i++;
+    } else {
+      if (strict && static_cast<unsigned char>(s[i]) < 0x20)
+        throw asvJSONError("Control character in string");
+      r += s[i]; i++;
+    }
+  }
+  if (strict && !isValidUTF8(reinterpret_cast<const uint8_t*>(r.data()), r.size()))
+    throw asvJSONError("Invalid UTF-8 sequence");
+  return r;
+}
+
 class asvJSON {
 public:
 	/** @brief Error message from the last failed operation */
@@ -1320,7 +1366,7 @@ public:
 	bool allowNaNInfinity = false;
 
 private:
-	asvJSONValue* root = nullptr;
+	std::unique_ptr<asvJSONValue> root;
 	std::string jsonBuf;
 	std::string_view json;
 	size_t pos = 0;
@@ -1367,111 +1413,18 @@ private:
 		}
 		if (pos >= json.size() || json[pos] != '"') throw asvJSONError("Unclosed string");
 		size_t len = pos - start;
-		if (len > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("String too long");
+		if (!asvJSONValue::checkStringLen(len)) throw asvJSONError("String too long");
 		next(); // skip closing quote
 		return json.substr(start, len);
 	}
 
 	std::string parseStringKey() {
 		std::string_view raw = parseStringRaw();
-		if (raw.size() > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("Object key too long");
-		if (raw.find('\\') == std::string_view::npos) {
-			for (size_t i = 0; i < raw.size(); i++) {
-				if (static_cast<unsigned char>(raw[i]) < 0x20) throw asvJSONError("Control character in object key");
-			}
-			if (!isValidUTF8(reinterpret_cast<const uint8_t*>(raw.data()), raw.size())) throw asvJSONError("Invalid UTF-8 in object key");
-			return std::string(raw);
-		}
-		std::string unescaped;
-		unescaped.reserve(raw.size());
-		for (size_t i = 0; i < raw.size();) {
-			if (raw[i] == '\\' && i + 1 < raw.size()) {
-				i++;
-				if (raw[i] == 'u' && i + 4 < raw.size()) {
-					unsigned int cp = 0;
-					bool valid = true;
-			for (int j = 0; j < 4; j++) {
-					cp <<= 4;
-					int v = hexDigitValue(raw[i + 1 + j]);
-					if (v < 0) { valid = false; break; }
-					cp += static_cast<unsigned int>(v);
-				}
-					if (!valid) throw asvJSONError("Invalid Unicode escape in object key");
-					if (cp > 0x10FFFF) throw asvJSONError("Unicode code point out of range");
-					if (cp >= 0xD800 && cp <= 0xDBFF) {
-						if (i + 10 < raw.size() && raw[i + 5] == '\\' && raw[i + 6] == 'u') {
-							unsigned int low = 0;
-							bool low_valid = true;
-							for (int j = 0; j < 4; j++) {
-								low <<= 4;
-								int v = hexDigitValue(raw[i + 7 + j]);
-								if (v < 0) { low_valid = false; break; }
-								low += static_cast<unsigned int>(v);
-							}
-							if (low_valid && low >= 0xDC00 && low <= 0xDFFF) {
-								cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-								if (cp < 0x80) unescaped.push_back(static_cast<char>(cp));
-								else if (cp < 0x800) {
-									unescaped.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-									unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-								} else if (cp < 0x10000) {
-									unescaped.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-									unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-									unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-								} else {
-									unescaped.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-									unescaped.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-									unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-									unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-								}
-								i += 11;
-								continue;
-							}
-						}
-						throw asvJSONError("Invalid lone surrogate in object key");
-					}
-					if (cp >= 0xDC00 && cp <= 0xDFFF) throw asvJSONError("Invalid lone surrogate in object key");
-					if (cp < 0x80) unescaped.push_back(static_cast<char>(cp));
-					else if (cp < 0x800) {
-						unescaped.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-						unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-					} else if (cp < 0x10000) {
-						unescaped.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-						unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-						unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-					} else {
-						unescaped.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-						unescaped.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-						unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-						unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-					}
-					i += 5;
-					continue;
-				} else {
-					switch (raw[i]) {
-						case 'n': unescaped.push_back('\n'); break;
-						case 'r': unescaped.push_back('\r'); break;
-						case 't': unescaped.push_back('\t'); break;
-						case 'b': unescaped.push_back('\b'); break;
-						case 'f': unescaped.push_back('\f'); break;
-						case '"': unescaped.push_back('"'); break;
-						case '\\': unescaped.push_back('\\'); break;
-						case '/': unescaped.push_back('/'); break;
-						default: unescaped.push_back(raw[i]); break;
-					}
-				}
-				i++;
-			} else {
-				if (static_cast<unsigned char>(raw[i]) < 0x20) throw asvJSONError("Control character in object key");
-				unescaped.push_back(raw[i]);
-				i++;
-			}
-		}
-		if (!isValidUTF8(reinterpret_cast<const uint8_t*>(unescaped.data()), unescaped.size())) throw asvJSONError("Invalid UTF-8 in object key");
-		return unescaped;
+		if (!asvJSONValue::checkStringLen(raw.size())) throw asvJSONError("Object key too long");
+		return unescapeJsonString(raw, true);
 	}
 
-	asvJSONValue* parseValue() {
+	std::unique_ptr<asvJSONValue> parseValue() {
 		skip();
 		char c = cur();
 		if (c == '{') return parseObject();
@@ -1520,14 +1473,13 @@ private:
 		throw asvJSONError(std::string("Unexpected: ") + c);
 	}
 
-	asvJSONValue* parseStringOrSpecial() {
+	std::unique_ptr<asvJSONValue> parseStringOrSpecial() {
 		std::string_view raw = parseStringRaw();
 
 		// Check Base64 first (must precede date parse to avoid false positives)
 		if (raw.size() > 10 && raw.compare(0, 10, "__BASE64__") == 0) {
 			auto data = base64_decode_fast(raw.data() + 10, raw.size() - 10);
-			auto* v = asvJSONValue::makeBinary(data.data(), data.size());
-			if (!v) throw asvJSONError("Failed to allocate binary");
+			auto v = asvJSONValue::makeBinary(data.data(), data.size());
 			return v;
 		}
 
@@ -1539,95 +1491,16 @@ private:
 			}
 		}
 
-		// Check for escape without copying
-		if (raw.find('\\') == std::string_view::npos) {
-			for (size_t i = 0; i < raw.size(); i++) {
-				if (static_cast<unsigned char>(raw[i]) < 0x20) throw asvJSONError("Control character in string");
-			}
-			if (!isValidUTF8(reinterpret_cast<const uint8_t*>(raw.data()), raw.size())) throw asvJSONError("Invalid UTF-8 in string");
-			auto* v = asvJSONValue::makeString(raw.data(), raw.size());
-			if (!v) throw asvJSONError("Failed to allocate string");
-			return v;
-		}
-
-		// Process escapes
-		std::string unescaped;
-		unescaped.reserve(raw.size());
-		for (size_t i = 0; i < raw.size(); ) {
-			if (raw[i] == '\\' && i + 1 < raw.size()) {
-				i++;
-				if (raw[i] == 'u' && i + 4 < raw.size()) {
-					unsigned int cp = 0;
-					bool valid = true;
-			for (int j = 0; j < 4; j++) {
-					cp <<= 4;
-					int v = hexDigitValue(raw[i + 1 + j]);
-					if (v < 0) { valid = false; break; }
-					cp += static_cast<unsigned int>(v);
-				}
-					if (valid && cp <= 0x10FFFF) {
-						if (cp >= 0xD800 && cp <= 0xDBFF) {
-							if (i + 10 < raw.size() && raw[i+5] == '\\' && raw[i+6] == 'u') {
-								unsigned int low = 0;
-								bool low_valid = true;
-								for (int j = 0; j < 4; j++) {
-									low <<= 4;
-									int v = hexDigitValue(raw[i + 7 + j]);
-									if (v < 0) { low_valid = false; break; }
-									low += static_cast<unsigned int>(v);
-								}
-								if (low_valid && low >= 0xDC00 && low <= 0xDFFF) {
-									cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-									unescaped.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-									unescaped.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-									unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-									unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-									i += 11;
-									continue;
-								}
-							}
-							throw asvJSONError("Invalid lone surrogate in string");
-						}
-						if (cp >= 0xDC00 && cp <= 0xDFFF) throw asvJSONError("Invalid lone surrogate in string");
-						if (cp < 0x80) unescaped.push_back(static_cast<char>(cp));
-						else if (cp < 0x800) { unescaped.push_back(static_cast<char>(0xC0 | (cp >> 6))); unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
-						else if (cp < 0x10000) { unescaped.push_back(static_cast<char>(0xE0 | (cp >> 12))); unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
-						else { unescaped.push_back(static_cast<char>(0xF0 | (cp >> 18))); unescaped.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F))); unescaped.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); unescaped.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
-						i += 5;
-						continue;
-					} else throw asvJSONError("Invalid Unicode escape sequence");
-				} else {
-					switch (raw[i]) {
-						case 'n': unescaped.push_back('\n'); break;
-						case 'r': unescaped.push_back('\r'); break;
-						case 't': unescaped.push_back('\t'); break;
-						case 'b': unescaped.push_back('\b'); break;
-						case 'f': unescaped.push_back('\f'); break;
-						case '"': unescaped.push_back('"'); break;
-						case '\\': unescaped.push_back('\\'); break;
-						default: unescaped.push_back(raw[i]);
-					}
-				}
-				i++;
-			} else {
-				if (static_cast<unsigned char>(raw[i]) < 0x20) throw asvJSONError("Control character in string");
-				unescaped.push_back(raw[i]); i++;
-			}
-		}
-		if (!isValidUTF8(reinterpret_cast<const uint8_t*>(unescaped.data()), unescaped.size())) {
-			throw asvJSONError("Invalid UTF-8 sequence");
-		}
-		auto* v = asvJSONValue::makeString(unescaped.c_str(), unescaped.size());
-		if (!v) throw asvJSONError("Failed to allocate string");
-		return v;
+		std::string unescaped = unescapeJsonString(raw, true);
+		return asvJSONValue::makeString(unescaped.c_str(), unescaped.size());
 	}
 
-	asvJSONValue* parseObject() {
-		if (++parseDepth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+	std::unique_ptr<asvJSONValue> parseObject() {
+		if (!asvJSONValue::checkNestingDepth(++parseDepth)) {
 			--parseDepth;
 			throw asvJSONError("Maximum nesting depth exceeded");
 		}
-		auto* obj = asvJSONValue::makeObject();
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) { --parseDepth; throw asvJSONError("Failed to allocate object"); }
 		next(); // skip '{'
 		size_t objSize = 0;
@@ -1635,23 +1508,18 @@ private:
 			while (true) {
 				skip();
 				if (cur() == '}') { next(); break; }
-				if (objSize >= asvJSONValue::MAX_OBJECT_SIZE) { --parseDepth; throw asvJSONError("Object too large"); }
+				if (!asvJSONValue::checkObjectSize(objSize + 1)) { --parseDepth; throw asvJSONError("Object too large"); }
 				std::string key = parseStringKey();
 				skip();
 				if (cur() != ':') throw asvJSONError("Expected ':'");
 				next();
-				asvJSONValue* val = parseValue();
+				auto val = parseValue();
 				if (!val) { --parseDepth; throw asvJSONError("Failed to parse object value"); }
 			auto it = map_find(*(obj->obj), key);
 			if (it != obj->obj->end()) {
-				it->second.reset(val);
+				it->second = std::move(val);
 			} else {
-				try {
-					obj->obj->emplace(std::move(key), std::unique_ptr<asvJSONValue>(val));
-				} catch (...) {
-					delete val;
-					throw;
-				}
+				obj->obj->emplace(std::move(key), std::move(val));
 				objSize++;
 			}
 			skip();
@@ -1659,27 +1527,27 @@ private:
 				if (cur() == ',') next();
 				else throw asvJSONError("Expected ',' or '}'");
 			}
-		} catch (...) { delete obj; --parseDepth; throw; }
+		} catch (...) { --parseDepth; throw; }
 		--parseDepth;
 		return obj;
 	}
 
-	asvJSONValue* parseArray() {
-		if (++parseDepth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+	std::unique_ptr<asvJSONValue> parseArray() {
+		if (!asvJSONValue::checkNestingDepth(++parseDepth)) {
 			--parseDepth;
 			throw asvJSONError("Maximum nesting depth exceeded");
 		}
-		auto* arr = asvJSONValue::makeArray();
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) { --parseDepth; throw asvJSONError("Failed to allocate array"); }
 		arr->arr->reserve(16);
 		next(); // skip '['
 		while (true) {
 			skip();
 			if (cur() == ']') { next(); break; }
-			if (arr->arr->size() >= asvJSONValue::MAX_ARRAY_SIZE) { delete arr; --parseDepth; throw asvJSONError("Array too large"); }
-			auto* val = parseValue();
-			if (!val) { delete arr; throw asvJSONError("Failed to parse array element"); }
-			arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
+			if (!asvJSONValue::checkArraySize(arr->arr->size() + 1)) { --parseDepth; throw asvJSONError("Array too large"); }
+			auto val = parseValue();
+			if (!val) { --parseDepth; throw asvJSONError("Failed to parse array element"); }
+			arr->arr->push_back(std::move(val));
 			skip();
 			if (cur() == ']') { next(); break; }
 			if (cur() == ',') next();
@@ -1689,7 +1557,7 @@ private:
 		return arr;
 	}
 
-	asvJSONValue* parseNumber() {
+	std::unique_ptr<asvJSONValue> parseNumber() {
 		size_t start = pos;
 		auto isDigit = [](char c) { return std::isdigit(static_cast<unsigned char>(c)); };
 		if (cur() == '-') next();
@@ -1730,13 +1598,13 @@ public:
 	/** Default constructor - creates an empty (null) document */
 	asvJSON() = default;
 	/** Destructor */
-	~asvJSON() { delete root; }
+	~asvJSON() = default;
 	/**
 	 * @brief Copy constructor - deep clones the document
 	 * @param other Document to copy
 	 */
 	asvJSON(const asvJSON& other) {
-		root = cloneValue(other.root);
+		root = cloneValue(other.root.get());
 	}
 	/**
 	 * @brief Copy assignment - deep clones the document
@@ -1745,8 +1613,7 @@ public:
 	 */
 	asvJSON& operator=(const asvJSON& other) {
 		if (this != &other) {
-			delete root;
-			root = cloneValue(other.root);
+			root = cloneValue(other.root.get());
 		}
 		return *this;
 	}
@@ -1757,12 +1624,11 @@ public:
 	asvJSON(asvJSON&& other) noexcept
 		: lastError(std::move(other.lastError)),
 		  allowNaNInfinity(other.allowNaNInfinity),
-		  root(other.root),
+		  root(std::move(other.root)),
 		  jsonBuf(std::move(other.jsonBuf)),
 		  json(jsonBuf),
 		  pos(other.pos),
 		  parseDepth(other.parseDepth) {
-		other.root = nullptr;
 		other.pos = 0;
 		other.parseDepth = 0;
 		other.json = std::string_view();
@@ -1774,15 +1640,13 @@ public:
 	 */
 	asvJSON& operator=(asvJSON&& other) noexcept {
 		if (this != &other) {
-			delete root;
-			root = other.root;
+			root = std::move(other.root);
 			jsonBuf = std::move(other.jsonBuf);
 			json = jsonBuf;
 			pos = other.pos;
 			parseDepth = other.parseDepth;
 			lastError = std::move(other.lastError);
 			allowNaNInfinity = other.allowNaNInfinity;
-			other.root = nullptr;
 			other.pos = 0;
 			other.parseDepth = 0;
 			other.json = std::string_view();
@@ -1796,7 +1660,6 @@ public:
 	 * @return true if parsing succeeded, false on error (see lastError)
 	 */
 	bool parse(const std::string& s) {
-		delete root;
 		root = nullptr;
 		jsonBuf = s;
 		json = jsonBuf;
@@ -1804,11 +1667,10 @@ public:
 		try {
 			root = parseValue();
 			skip();
-			if (pos != json.size()) { delete root; root = nullptr; lastError = "Trailing chars"; return false; }
+			if (pos != json.size()) { root = nullptr; lastError = "Trailing chars"; return false; }
 			return root != nullptr;
 		} catch (const asvJSONError& e) {
 			lastError = e.what();
-			delete root;
 			root = nullptr;
 			return false;
 		}
@@ -1820,7 +1682,6 @@ public:
 	 * @return true if parsing succeeded, false on error (see lastError)
 	 */
 	bool parse(std::string_view s) {
-		delete root;
 		root = nullptr;
 		jsonBuf.assign(s.data(), s.size());
 		json = jsonBuf;
@@ -1828,11 +1689,10 @@ public:
 		try {
 			root = parseValue();
 			skip();
-			if (pos != json.size()) { delete root; root = nullptr; lastError = "Trailing chars"; return false; }
+			if (pos != json.size()) { root = nullptr; lastError = "Trailing chars"; return false; }
 			return root != nullptr;
 		} catch (const asvJSONError& e) {
 			lastError = e.what();
-			delete root;
 			root = nullptr;
 			return false;
 		}
@@ -2021,13 +1881,13 @@ public:
 	 */
 	template<typename F>
 	void setValue(std::string_view key, F&& factory) {
-		if (!root || root->type != asvJSONValue::OBJECT) { delete root; root = asvJSONValue::makeObject(); }
+		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return;
-		auto* v = factory();
+		auto v = factory();
 		if (!v) return;
 		auto it = map_find(*root->obj, key);
-		if (it != root->obj->end()) { it->second.reset(v); }
-		else { root->obj->emplace(std::string(key), std::unique_ptr<asvJSONValue>(v)); }
+		if (it != root->obj->end()) { it->second = std::move(v); }
+		else { root->obj->emplace(std::string(key), std::move(v)); }
 	}
 
 	/**
@@ -2063,7 +1923,7 @@ public:
 	 * @param value Float value
 	 */
 	void putFloat32(std::string_view key, float value) {
-		setValue(key, [value]{ auto* v = asvJSONValue::makeDouble(static_cast<double>(value)); if (v) v->is_float32 = true; return v; });
+		setValue(key, [value]{ auto v = asvJSONValue::makeDouble(static_cast<double>(value)); if (v) v->is_float32 = true; return v; });
 	}
 
 	/**
@@ -2118,19 +1978,19 @@ public:
 	 * @param chunk_size Size of each base64 chunk in bytes (default: 76 per RFC 2045)
 	 */
 	void putBinChunked(std::string_view key, const uint8_t* data, size_t size, size_t chunk_size = 76) {
-		if (!root || root->type != asvJSONValue::OBJECT) { delete root; root = asvJSONValue::makeObject(); }
+		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return;
-		auto* arr = asvJSONValue::makeArray();
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) return;
 		size_t bytes_per_chunk = (chunk_size / 4) * 3;
 		for (size_t i = 0; i < size; i += bytes_per_chunk) {
 			size_t chunk = std::min(bytes_per_chunk, size - i);
 			std::string encoded = base64_encode(data + i, chunk);
-			auto* v = asvJSONValue::makeString(encoded.c_str(), encoded.length());
-			if (!v) { delete arr; return; }
-			arr->arr->emplace_back(std::unique_ptr<asvJSONValue>(v));
+			auto v = asvJSONValue::makeString(encoded.c_str(), encoded.length());
+			if (!v) return;
+			arr->arr->emplace_back(std::move(v));
 		}
-		root->obj->emplace(std::string(key), std::unique_ptr<asvJSONValue>(arr));
+		root->obj->emplace(std::string(key), std::move(arr));
 	}
 
 	/**
@@ -2380,7 +2240,7 @@ public:
 	 */
 	[[nodiscard]] const asvJSONValue* get(std::string_view key) const {
 		if (!root) return nullptr;
-		if (key.empty()) return root;
+		if (key.empty()) return root.get();
 		if (root->type != asvJSONValue::OBJECT) return nullptr;
 		return root->get(key);
 	}
@@ -2396,7 +2256,7 @@ public:
 	 */
 	[[nodiscard]] const asvJSONValue* getNested(std::string_view path) const {
 		if (!root) return nullptr;
-		const asvJSONValue* current = root;
+		const asvJSONValue* current = root.get();
 		size_t start = 0;
 		while (start < path.size()) {
 			size_t dot = std::string_view::npos;
@@ -2458,7 +2318,7 @@ public:
 	/**
 	 * @brief Clear document (delete root, set to null)
 	 */
-	void clear() { delete root; root = nullptr; }
+	void clear() { root = nullptr; }
 
 	/**
 	 * @brief Get number of keys (for objects) or elements (for arrays)
@@ -2484,10 +2344,9 @@ public:
 	 */
 	[[nodiscard]] asvJSONValue* getObject() {
 		if (!root || root->type != asvJSONValue::OBJECT) {
-			delete root;
 			root = asvJSONValue::makeObject();
 		}
-		return root;
+		return root.get();
 	}
 
 	/**
@@ -2497,7 +2356,7 @@ public:
 	 */
 	[[nodiscard]] const asvJSONValue* getConst(std::string_view key) const {
 		if (!root) return nullptr;
-		if (key.empty()) return root;
+		if (key.empty()) return root.get();
 		if (root->type != asvJSONValue::OBJECT) return nullptr;
 		return root->getConst(key);
 	}
@@ -2533,11 +2392,11 @@ public:
 	 * @return Pointer to root array or nullptr
 	 */
 	[[nodiscard]] asvJSONValue* getRootArray() const {
-		return root && root->type == asvJSONValue::ARRAY ? root : nullptr;
+		return root && root->type == asvJSONValue::ARRAY ? root.get() : nullptr;
 	}
 
-	[[nodiscard]] asvJSONValue* getRoot() { return root; }
-	[[nodiscard]] const asvJSONValue* getRoot() const { return root; }
+	[[nodiscard]] asvJSONValue* getRoot() { return root.get(); }
+	[[nodiscard]] const asvJSONValue* getRoot() const { return root.get(); }
 
 	/**
 	 * @brief Get string value or default
@@ -2672,26 +2531,28 @@ public:
 	 */
 	template<typename F>
 	void arrayAddValue(std::string_view key, F&& factory) {
-		if (!root || root->type != asvJSONValue::OBJECT) { delete root; root = asvJSONValue::makeObject(); }
+		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return;
 		auto it = map_find(*root->obj, key);
 		asvJSONValue* arr;
 		if (it == root->obj->end()) {
-			arr = asvJSONValue::makeArray();
-			if (!arr) return;
-			root->obj->emplace(std::string(key), std::unique_ptr<asvJSONValue>(arr));
+			auto newArr = asvJSONValue::makeArray();
+			if (!newArr) return;
+			arr = newArr.get();
+			root->obj->emplace(std::string(key), std::move(newArr));
 		} else {
 			arr = it->second.get();
 			if (!arr || arr->type != asvJSONValue::ARRAY) {
-				arr = asvJSONValue::makeArray();
-				if (!arr) { it->second.reset(); return; }
-				it->second.reset(arr);
+				auto newArr = asvJSONValue::makeArray();
+				if (!newArr) { it->second.reset(); return; }
+				arr = newArr.get();
+				it->second = std::move(newArr);
 			}
 		}
 		if (!arr || !arr->arr) return;
-		auto* v = factory();
+		auto v = factory();
 		if (!v) return;
-		arr->arr->push_back(std::unique_ptr<asvJSONValue>(v));
+		arr->arr->push_back(std::move(v));
 	}
 
 	/**
@@ -2938,9 +2799,9 @@ inline double readLE64_double(const uint8_t* data) {
  * @param depth Current nesting depth
  * @return Parsed value or nullptr
  */
-inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth = 0) {
+inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth = 0) {
 	if (pos >= dataLen) return nullptr;
-	if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+	if (!asvJSONValue::checkNestingDepth(static_cast<int>(depth))) return nullptr;
 	uint8_t type = data[pos++];
 
 	if (type == 0xC0) return asvJSONValue::makeNull();
@@ -2951,7 +2812,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	if (type >= 0xA0 && type <= 0xBF) {
 		size_t strLen = type & 0x1F;
 		if (pos + strLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
+		auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
 		pos += strLen;
 		return v;
 	}
@@ -2965,7 +2826,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		pos += 4;
 		float f;
 		std::memcpy(&f, &bits, sizeof(f));
-		auto* v = asvJSONValue::makeDouble(static_cast<double>(f));
+		auto v = asvJSONValue::makeDouble(static_cast<double>(f));
 		v->is_float32 = true;
 		return v;
 	}
@@ -2981,12 +2842,12 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	if (type >= 0x90 && type <= 0x9F) {
 		size_t count = type & 0x0F;
 		if (pos + count > dataLen) return nullptr;
-		auto* arr = asvJSONValue::makeArray();
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) return nullptr;
 		for (size_t i = 0; i < count; i++) {
-			auto* v = parseMessagePack(data, pos, dataLen, depth + 1);
-			if (!v) { delete arr; return nullptr; }
-			arr->arr->push_back(std::unique_ptr<asvJSONValue>(v));
+			auto v = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!v) return nullptr;
+			arr->arr->push_back(std::move(v));
 		}
 		return arr;
 	}
@@ -2995,13 +2856,13 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 2 > dataLen) return nullptr;
 		size_t arrLen = (static_cast<size_t>(data[pos]) << 8) | data[pos + 1];
 		pos += 2;
-		if (arrLen > asvJSONValue::MAX_ARRAY_SIZE) return nullptr;
-		auto* arr = asvJSONValue::makeArray();
+		if (!asvJSONValue::checkArraySize(arrLen)) return nullptr;
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) return nullptr;
 		for (uint16_t i = 0; i < arrLen; i++) {
-			auto* v = parseMessagePack(data, pos, dataLen, depth + 1);
-			if (!v) { delete arr; return nullptr; }
-			arr->arr->push_back(std::unique_ptr<asvJSONValue>(v));
+			auto v = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!v) return nullptr;
+			arr->arr->push_back(std::move(v));
 		}
 		return arr;
 	}
@@ -3010,13 +2871,13 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 4 > dataLen) return nullptr;
 		uint32_t arrLen = (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3];
 		pos += 4;
-		if (arrLen > asvJSONValue::MAX_ARRAY_SIZE) return nullptr;
-		auto* arr = asvJSONValue::makeArray();
+		if (!asvJSONValue::checkArraySize(arrLen)) return nullptr;
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) return nullptr;
 		for (uint32_t i = 0; i < arrLen; i++) {
-			auto* v = parseMessagePack(data, pos, dataLen, depth + 1);
-			if (!v) { delete arr; return nullptr; }
-			arr->arr->push_back(std::unique_ptr<asvJSONValue>(v));
+			auto v = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!v) return nullptr;
+			arr->arr->push_back(std::move(v));
 		}
 		return arr;
 	}
@@ -3025,14 +2886,14 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 2 > dataLen) return nullptr;
 		size_t mapLen = (static_cast<size_t>(data[pos]) << 8) | data[pos + 1];
 		pos += 2;
-		if (mapLen > asvJSONValue::MAX_OBJECT_SIZE) return nullptr;
-		auto* obj = asvJSONValue::makeObject();
+		if (!asvJSONValue::checkObjectSize(mapLen)) return nullptr;
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) return nullptr;
 		for (uint16_t i = 0; i < mapLen; i++) {
-			std::unique_ptr<asvJSONValue> key(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!key || key->type != asvJSONValue::STRING) { delete obj; return nullptr; }
-			std::unique_ptr<asvJSONValue> val(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!val) { delete obj; return nullptr; }
+			auto key = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!key || key->type != asvJSONValue::STRING) return nullptr;
+			auto val = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!val) return nullptr;
 			obj->obj->emplace(std::string(key->str_data.data(), key->str_data.size()), std::move(val));
 		}
 		return obj;
@@ -3041,8 +2902,8 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	if (type == 0xD9) {
 		if (pos >= dataLen) return nullptr;
 		size_t strLen = data[pos++];
-		if (strLen > asvJSONValue::MAX_STRING_LEN || pos + strLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
+		if (!asvJSONValue::checkStringLen(strLen) || pos + strLen > dataLen) return nullptr;
+		auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
 		pos += strLen;
 		return v;
 	}
@@ -3051,8 +2912,8 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 2 > dataLen) return nullptr;
 		size_t strLen = (static_cast<size_t>(data[pos]) << 8) | data[pos + 1];
 		pos += 2;
-		if (strLen > asvJSONValue::MAX_STRING_LEN || pos + strLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
+		if (!asvJSONValue::checkStringLen(strLen) || pos + strLen > dataLen) return nullptr;
+		auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
 		pos += strLen;
 		return v;
 	}
@@ -3061,8 +2922,8 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 4 > dataLen) return nullptr;
 		size_t strLen = (static_cast<size_t>(data[pos]) << 24) | (static_cast<size_t>(data[pos + 1]) << 16) | (static_cast<size_t>(data[pos + 2]) << 8) | data[pos + 3];
 		pos += 4;
-		if (strLen > asvJSONValue::MAX_STRING_LEN || pos + strLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
+		if (!asvJSONValue::checkStringLen(strLen) || pos + strLen > dataLen) return nullptr;
+		auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), strLen);
 		pos += strLen;
 		return v;
 	}
@@ -3125,14 +2986,14 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	}
 
 	if (type >= 0x80 && type <= 0x8F) {
-		auto* obj = asvJSONValue::makeObject();
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) return nullptr;
 		int count = type & 0x0F;
 		for (int i = 0; i < count; i++) {
-			std::unique_ptr<asvJSONValue> key(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!key || key->type != asvJSONValue::STRING) { delete obj; return nullptr; }
-			std::unique_ptr<asvJSONValue> val(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!val) { delete obj; return nullptr; }
+			auto key = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!key || key->type != asvJSONValue::STRING) return nullptr;
+			auto val = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!val) return nullptr;
 			obj->obj->emplace(std::string(key->str_data.data(), key->str_data.size()), std::move(val));
 		}
 		return obj;
@@ -3142,14 +3003,14 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 4 > dataLen) return nullptr;
 		size_t objLen = (static_cast<size_t>(data[pos]) << 24) | (static_cast<size_t>(data[pos + 1]) << 16) | (static_cast<size_t>(data[pos + 2]) << 8) | data[pos + 3];
 		pos += 4;
-		if (objLen > asvJSONValue::MAX_OBJECT_SIZE) return nullptr;
-		auto* obj = asvJSONValue::makeObject();
+		if (!asvJSONValue::checkObjectSize(objLen)) return nullptr;
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) return nullptr;
 		for (size_t i = 0; i < objLen; i++) {
-			std::unique_ptr<asvJSONValue> key(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!key || key->type != asvJSONValue::STRING) { delete obj; return nullptr; }
-			std::unique_ptr<asvJSONValue> val(parseMessagePack(data, pos, dataLen, depth + 1));
-			if (!val) { delete obj; return nullptr; }
+			auto key = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!key || key->type != asvJSONValue::STRING) return nullptr;
+			auto val = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!val) return nullptr;
 			obj->obj->emplace(std::string(key->str_data.data(), key->str_data.size()), std::move(val));
 		}
 		return obj;
@@ -3159,7 +3020,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 5 > dataLen) return nullptr;
 		uint8_t extType = data[pos++];
 		if (extType != 0xFF) {
-			auto* v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 4);
+			auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 4);
 			if (!v) return nullptr;
 			pos += 4;
 			return v;
@@ -3179,7 +3040,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 			return asvJSONValue::makeTimestamp(ts);
 		}
 		if (extType != 0xFF) {
-			auto* v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 8);
+			auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 8);
 			if (!v) return nullptr;
 			pos += 8;
 			return v;
@@ -3196,13 +3057,13 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 17 > dataLen) return nullptr;
 		uint8_t extType = data[pos++];
 		if (extType == 1) {
-			auto* v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
+			auto v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 			if (!v) return nullptr;
 			pos += 16;
 			return v;
 		}
 		if (extType != 0xFF) {
-			auto* v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 16);
+			auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + pos, 16);
 			if (!v) return nullptr;
 			pos += 16;
 			return v;
@@ -3231,7 +3092,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (extType == 1) {
 			// ObjectId
 			if (len != 12 || pos + 12 > dataLen) return nullptr;
-			auto* v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
+			auto v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 			if (!v) return nullptr;
 			pos += 12;
 			return v;
@@ -3247,21 +3108,17 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 				s[sep] = '\0';
 				if (sep + 1 < s.size()) optPtr = s.c_str() + sep + 1;
 			}
-			auto* v = asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
-			if (!v) return nullptr;
-			return v;
+			return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
 		}
 		if (extType == 3) {
 			// Timestamp: stored as 8-byte int64
 			if (len < 8 || pos + 8 > dataLen) return nullptr;
 			int64_t ts = 0;
 			for (int i = 7; i >= 0; i--) ts = (ts << 8) | static_cast<int64_t>(data[pos++]);
-			auto* v = asvJSONValue::makeTimestamp(ts);
-			if (!v) return nullptr;
-			return v;
+			return asvJSONValue::makeTimestamp(ts);
 		}
 		if (pos + len > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeExtension(extType, data + pos, len);
+		auto v = asvJSONValue::makeExtension(extType, data + pos, len);
 		if (!v) return nullptr;
 		pos += len;
 		return v;
@@ -3270,7 +3127,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 	if (type == 0xD4) {
 			if (pos + 2 > dataLen) return nullptr;
 			int8_t extType = static_cast<int8_t>(data[pos++]);
-			auto* v = asvJSONValue::makeExtension(extType, data + pos, 1);
+			auto v = asvJSONValue::makeExtension(extType, data + pos, 1);
 			if (!v) return nullptr;
 			pos++;
 			return v;
@@ -3279,7 +3136,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (type == 0xD5) {
 			if (pos + 3 > dataLen) return nullptr;
 			int8_t extType = static_cast<int8_t>(data[pos++]);
-			auto* v = asvJSONValue::makeExtension(extType, data + pos, 2);
+			auto v = asvJSONValue::makeExtension(extType, data + pos, 2);
 			if (!v) return nullptr;
 			pos += 2;
 			return v;
@@ -3289,7 +3146,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos >= dataLen) return nullptr;
 		uint8_t binLen = data[pos++];
 		if (pos + binLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeBinary(data + pos, binLen);
+		auto v = asvJSONValue::makeBinary(data + pos, binLen);
 		pos += binLen;
 		return v;
 	}
@@ -3298,8 +3155,8 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 2 > dataLen) return nullptr;
 		size_t binLen = (static_cast<size_t>(data[pos]) << 8) | data[pos + 1];
 		pos += 2;
-		if (binLen > asvJSONValue::MAX_STRING_LEN || pos + binLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeBinary(data + pos, binLen);
+		if (!asvJSONValue::checkStringLen(binLen) || pos + binLen > dataLen) return nullptr;
+		auto v = asvJSONValue::makeBinary(data + pos, binLen);
 		pos += binLen;
 		return v;
 	}
@@ -3308,8 +3165,8 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 4 > dataLen) return nullptr;
 		size_t binLen = (static_cast<size_t>(data[pos]) << 24) | (static_cast<size_t>(data[pos + 1]) << 16) | (static_cast<size_t>(data[pos + 2]) << 8) | data[pos + 3];
 		pos += 4;
-		if (binLen > asvJSONValue::MAX_STRING_LEN || pos + binLen > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeBinary(data + pos, binLen);
+		if (!asvJSONValue::checkStringLen(binLen) || pos + binLen > dataLen) return nullptr;
+		auto v = asvJSONValue::makeBinary(data + pos, binLen);
 		pos += binLen;
 		return v;
 	}
@@ -3323,7 +3180,7 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (extType == 1) {
 			// ObjectId
 			if (len != 12 || pos + 12 > dataLen) return nullptr;
-			auto* v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
+			auto v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 			if (!v) return nullptr;
 			pos += 12;
 			return v;
@@ -3338,12 +3195,10 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 				s[sep] = '\0';
 				if (sep + 1 < s.size()) optPtr = s.c_str() + sep + 1;
 			}
-			auto* v = asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
-			if (!v) return nullptr;
-			return v;
+			return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
 		}
 		if (pos + len > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeExtension(extType, data + pos, len);
+		auto v = asvJSONValue::makeExtension(extType, data + pos, len);
 		if (!v) return nullptr;
 		pos += len;
 		return v;
@@ -3352,11 +3207,11 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 		if (pos + 4 > dataLen) return nullptr;
 		uint32_t len = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 		pos += 4;
-		if (len > static_cast<uint32_t>(asvJSONValue::MAX_STRING_LEN) || pos + 1 + len > dataLen) return nullptr;
+		if (!asvJSONValue::checkStringLen(len) || pos + 1 + len > dataLen) return nullptr;
 		int8_t extType = static_cast<int8_t>(data[pos++]);
 		if (extType == 1) {
 			if (len != 12 || pos + 12 > dataLen) return nullptr;
-			auto* v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
+			auto v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 			if (!v) return nullptr;
 			pos += 12;
 			return v;
@@ -3371,12 +3226,10 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 				s[sep] = '\0';
 				if (sep + 1 < s.size()) optPtr = s.c_str() + sep + 1;
 			}
-			auto* v = asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
-			if (!v) return nullptr;
-			return v;
+			return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
 		}
 		if (pos + len > dataLen) return nullptr;
-		auto* v = asvJSONValue::makeExtension(extType, data + pos, len);
+		auto v = asvJSONValue::makeExtension(extType, data + pos, len);
 		if (!v) return nullptr;
 		pos += len;
 		return v;
@@ -3386,13 +3239,11 @@ inline asvJSONValue* parseMessagePack(const uint8_t* data, size_t& pos, size_t d
 }
 
 inline bool asvJSON::fromMessagePack(const uint8_t* data, size_t size) {
-	delete root;
 	root = nullptr;
 	if (!data || size == 0) return false;
 	size_t pos = 0;
 	root = parseMessagePack(data, pos, size);
 	if (!root || pos != size) {
-		delete root;
 		root = nullptr;
 		lastError = pos != size ? "Trailing bytes" : "Parse failed";
 		return false;
@@ -3612,7 +3463,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 	}
 }
 
-inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
+inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
 
 /**
  * @brief Parse BSON binary format
@@ -3621,14 +3472,12 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
  * @return true on success, false on error (see lastError)
  */
 inline bool asvJSON::fromBSON(const uint8_t* data, size_t size) {
-	delete root;
 	root = nullptr;
 	if (!data || size < 5) return false;
 
 	size_t pos = 0;
 	root = parseBSON(data, pos, size, 0);
 	if (!root || pos != size) {
-		delete root;
 		root = nullptr;
 		lastError = pos != size ? "Trailing bytes" : "Parse failed";
 		return false;
@@ -3653,43 +3502,43 @@ inline uint32_t readLE32(const uint8_t* data) {
  * @param depth Current nesting depth
  * @return Parsed value or nullptr
  */
-inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
+inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
 	if (pos + 4 > dataLen) return nullptr;
-	if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+	if (!asvJSONValue::checkNestingDepth(static_cast<int>(depth))) return nullptr;
 	int32_t docLen = readLE32(data + pos);
 	pos += 4;
 	if (docLen < 5 || static_cast<size_t>(docLen) > dataLen - (pos - 4)) return nullptr;
 	size_t docEnd = pos + docLen - 4;
-	asvJSONValue* obj = asvJSONValue::makeObject();
+	auto obj = asvJSONValue::makeObject();
 	while (pos < docEnd) {
 		std::string key;
 		while (pos < dataLen && data[pos] != 0) {
-			if (key.length() > asvJSONValue::MAX_STRING_LEN) { delete obj; return nullptr; }
+			if (!asvJSONValue::checkStringLen(key.length())) return nullptr;
 			key += static_cast<char>(data[pos++]);
 		}
 		pos++;
 		if (key.empty()) break;
-		if (pos >= dataLen) { delete obj; return nullptr; }
+		if (pos >= dataLen) return nullptr;
 		uint8_t type = data[pos++];
 		if (type == 0) break;
-		asvJSONValue* val = nullptr;
+		std::unique_ptr<asvJSONValue> val;
 		switch (type) {
 			case 0x01: {
-				if (pos + 8 > dataLen) { delete obj; return nullptr; }
+				if (pos + 8 > dataLen) return nullptr;
 				double d = readLE64_double(data + pos);
 				pos += 8;
 				val = asvJSONValue::makeDouble(d);
 				break;
 			}
 			case 0x02: {
-				if (pos + 4 > dataLen) { delete obj; return nullptr; }
+				if (pos + 4 > dataLen) return nullptr;
 				int32_t strLen = readLE32(data + pos);
 				pos += 4;
-				if (strLen <= 0 || strLen > static_cast<int32_t>(asvJSONValue::MAX_STRING_LEN)) { delete obj; return nullptr; }
-				if (static_cast<size_t>(strLen) > dataLen - pos) { delete obj; return nullptr; }
-				if (data[pos + strLen - 1] != 0) { delete obj; return nullptr; }
+				if (strLen <= 0 || !asvJSONValue::checkStringLen(static_cast<size_t>(strLen))) return nullptr;
+				if (static_cast<size_t>(strLen) > dataLen - pos) return nullptr;
+				if (data[pos + strLen - 1] != 0) return nullptr;
 				val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(strLen - 1));
-				if (!val) { delete obj; return nullptr; }
+				if (!val) return nullptr;
 				pos += strLen;
 				break;
 			}
@@ -3699,10 +3548,9 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 			}
 			case 0x04: {
 				val = parseBSON(data, pos, dataLen, depth + 1);
-				if (!val) { delete obj; return nullptr; }
+				if (!val) return nullptr;
 				if (val->type == asvJSONValue::OBJECT) {
 					if (val->obj->empty()) {
-						delete val;
 						val = asvJSONValue::makeArray();
 						break;
 					}
@@ -3717,19 +3565,17 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 					}
 					if (sequential) {
 						try {
-							asvJSONValue* arr = asvJSONValue::makeArray();
-							if (!arr) { delete val; delete obj; return nullptr; }
+							auto arr = asvJSONValue::makeArray();
+							if (!arr) return nullptr;
 							arr->arr->resize(count);
 							for (size_t i = 0; i < count; i++) {
 								auto [ptr, ec] = std::to_chars(idxBuf, idxBuf + sizeof(idxBuf), i);
-								if (ec != std::errc()) { delete val; delete obj; return nullptr; }
+								if (ec != std::errc()) return nullptr;
 								auto it = map_find(*val->obj, std::string_view(idxBuf, static_cast<size_t>(ptr - idxBuf)));
 								(*arr->arr)[i] = std::move(it->second);
 							}
-							delete val;
-							val = arr;
+							val = std::move(arr);
 						} catch (...) {
-							delete val; delete obj;
 							return nullptr;
 						}
 					}
@@ -3737,18 +3583,18 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 				break;
 			}
 			case 0x05: {
-				if (pos + 5 > dataLen) { delete obj; return nullptr; }
+				if (pos + 5 > dataLen) return nullptr;
 				int32_t binLen = readLE32(data + pos);
 				pos += 4;
 				uint8_t subtype = data[pos++];
-				if (binLen < 0 || binLen > static_cast<int32_t>(asvJSONValue::MAX_STRING_LEN)) { delete obj; return nullptr; }
-				if (static_cast<size_t>(binLen) > dataLen - pos) { delete obj; return nullptr; }
+				if (binLen < 0 || !asvJSONValue::checkStringLen(static_cast<size_t>(binLen))) return nullptr;
+				if (static_cast<size_t>(binLen) > dataLen - pos) return nullptr;
 				if (subtype == 0x80) {
 					val = asvJSONValue::makeExtension(subtype, data + pos, binLen);
 				} else {
 					val = asvJSONValue::makeBinary(data + pos, binLen);
 				}
-				if (!val) { delete obj; return nullptr; }
+				if (!val) return nullptr;
 				pos += binLen;
 				break;
 			}
@@ -3757,7 +3603,7 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 				break;
 			}
 			case 0x09: {
-				if (pos + 8 > dataLen) { delete obj; return nullptr; }
+				if (pos + 8 > dataLen) return nullptr;
 				int64_t ms = static_cast<int64_t>(readLE64(data + pos));
 				pos += 8;
 				time_t ts = static_cast<time_t>(ms / 1000);
@@ -3766,14 +3612,14 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 				break;
 			}
 			case 0x10: {
-				if (pos + 4 > dataLen) { delete obj; return nullptr; }
+				if (pos + 4 > dataLen) return nullptr;
 				int32_t n = readLE32(data + pos);
 				pos += 4;
 				val = asvJSONValue::makeInt(n);
 				break;
 			}
 			case 0x12: {
-				if (pos + 8 > dataLen) { delete obj; return nullptr; }
+				if (pos + 8 > dataLen) return nullptr;
 				int64_t n = static_cast<int64_t>(readLE64(data + pos));
 				pos += 8;
 				val = asvJSONValue::makeInt(n);
@@ -3784,13 +3630,13 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 				break;
 			}
 			case 0x07: {
-				if (pos + 12 > dataLen) { delete obj; return nullptr; }
+				if (pos + 12 > dataLen) return nullptr;
 				val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += 12;
 				break;
 			}
 			case 0x11: {
-				if (pos + 8 > dataLen) { delete obj; return nullptr; }
+				if (pos + 8 > dataLen) return nullptr;
 				// BSON Timestamp: 4 bytes increment (LE) + 4 bytes seconds (LE)
 				uint32_t increment = readLE32(data + pos);
 				pos += 4;
@@ -3801,34 +3647,32 @@ inline asvJSONValue* parseBSON(const uint8_t* data, size_t& pos, size_t dataLen,
 				break;
 			}
 			case 0x0B: {
-				if (pos + 2 > dataLen) { delete obj; return nullptr; }
+				if (pos + 2 > dataLen) return nullptr;
 				std::string pattern;
 				while (pos < dataLen && data[pos] != 0) {
-					if (pattern.length() > asvJSONValue::MAX_STRING_LEN) { delete obj; return nullptr; }
+					if (!asvJSONValue::checkStringLen(pattern.length())) return nullptr;
 					pattern += static_cast<char>(data[pos++]);
 				}
-				if (pos >= dataLen) { delete obj; return nullptr; }
+				if (pos >= dataLen) return nullptr;
 				pos++;
 				std::string options;
 				while (pos < dataLen && data[pos] != 0) {
-					if (options.length() > asvJSONValue::MAX_STRING_LEN) { delete obj; return nullptr; }
+					if (!asvJSONValue::checkStringLen(options.length())) return nullptr;
 					options += static_cast<char>(data[pos++]);
 				}
-				if (pos >= dataLen) { delete obj; return nullptr; }
+				if (pos >= dataLen) return nullptr;
 				pos++;
 				const char* optPtr = options.empty() ? nullptr : options.c_str();
 				val = asvJSONValue::makeRegex(pattern.c_str(), optPtr);
-				if (!val) { delete obj; return nullptr; }
+				if (!val) return nullptr;
 				break;
 			}
 			default: {
-				delete obj;
 				return nullptr;
 			}
 		}
-		std::unique_ptr<asvJSONValue> guard(val);
-		if (!guard) continue;
-		(*obj->obj)[key] = std::move(guard);
+		if (!val) continue;
+		(*obj->obj)[key] = std::move(val);
 	}
 	if (pos < dataLen && data[pos] == 0) pos++;
 	return obj;
@@ -3857,11 +3701,11 @@ inline std::string decodeJSONPointerKey(std::string_view& sv) {
 
 inline const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const {
 	if (pointer.data() == nullptr || !root) return nullptr;
-	if (pointer.empty()) return root;
+	if (pointer.empty()) return root.get();
 	if (pointer[0] != '/') return nullptr;
 
 	pointer.remove_prefix(1);
-	const asvJSONValue* current = root;
+	const asvJSONValue* current = root.get();
 
 	while (true) {
 		std::string key = decodeJSONPointerKey(pointer);
@@ -3890,12 +3734,12 @@ inline asvJSONValue* asvJSON::getByPointer(std::string_view pointer) {
 }
 
 inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value) {
-	if (pointer.data() == nullptr || !value || pointer.empty() || pointer[0] != '/') { delete value; return false; }
+	auto valueGuard = std::unique_ptr<asvJSONValue>(value);
+	if (pointer.data() == nullptr || !valueGuard || pointer.empty() || pointer[0] != '/') return false;
 	try {
 		if (!root || (root->type != asvJSONValue::OBJECT && root->type != asvJSONValue::ARRAY)) {
-			delete root;
 			root = asvJSONValue::makeObject();
-			if (!root) { delete value; return false; }
+			if (!root) return false;
 		}
 
 		pointer.remove_prefix(1);
@@ -3904,68 +3748,63 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 			keys.push_back(decodeJSONPointerKey(pointer));
 			if (pointer.empty()) break;
 		}
-		if (keys.empty()) { delete value; return false; }
+		if (keys.empty()) return false;
 
-		asvJSONValue* current = root;
+		asvJSONValue* current = root.get();
 		for (size_t i = 0; i + 1 < keys.size(); i++) {
 			std::string& key = keys[i];
 
 			if (current->type == asvJSONValue::ARRAY) {
 				if (key == "-") {
-					auto* n = asvJSONValue::makeNull();
-					if (!n) { delete value; return false; }
-					current->arr->push_back(std::unique_ptr<asvJSONValue>(n));
+					auto n = asvJSONValue::makeNull();
+					if (!n) return false;
+					current->arr->push_back(std::move(n));
 					current = current->arr->back().get();
 				} else {
 					errno = 0;
 					char* end;
 					unsigned long rawIdx = strtoul(key.c_str(), &end, 10);
-					if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length()) { delete value; return false; }
+					if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length()) return false;
 					size_t idx = static_cast<size_t>(rawIdx);
-					if (idx > current->arr->max_size()) { delete value; return false; }
+					if (idx > current->arr->max_size()) return false;
 					if (idx >= current->arr->size()) {
 						current->arr->resize(idx + 1);
 					}
 					if (!(*current->arr)[idx]) {
-						(*current->arr)[idx] = std::unique_ptr<asvJSONValue>(asvJSONValue::makeNull());
+						(*current->arr)[idx] = asvJSONValue::makeNull();
 					}
 					current = (*current->arr)[idx].get();
 				}
 			} else if (current->type == asvJSONValue::OBJECT) {
 				auto it = map_find(*current->obj, key);
 				if (it == current->obj->end()) {
-					auto* newObj = asvJSONValue::makeObject();
-					if (!newObj) { delete value; return false; }
-					try {
-						current->obj->emplace(key, std::unique_ptr<asvJSONValue>(newObj));
-					} catch (...) {
-						delete newObj;
-						delete value;
-						return false;
-					}
-					current = newObj;
+					auto newObj = asvJSONValue::makeObject();
+					if (!newObj) return false;
+					current->obj->emplace(key, std::move(newObj));
+					current = current->obj->find(key)->second.get();
 				} else {
 					current = it->second.get();
 					if (!current) {
-						current = asvJSONValue::makeObject();
-						if (!current) { delete value; return false; }
-						it->second.reset(current);
+						auto newObj = asvJSONValue::makeObject();
+						if (!newObj) return false;
+						current = newObj.get();
+						it->second = std::move(newObj);
 					} else if (current->type != asvJSONValue::OBJECT && current->type != asvJSONValue::ARRAY) {
 						if (i + 2 < keys.size() && isArrayIndex(keys[i + 1])) {
-							it->second.reset();
-							current = asvJSONValue::makeArray();
-							if (!current) { delete value; return false; }
-							it->second.reset(current);
+							auto newArr = asvJSONValue::makeArray();
+							if (!newArr) return false;
+							current = newArr.get();
+							it->second = std::move(newArr);
 						} else {
-							it->second.reset();
-							current = asvJSONValue::makeObject();
-							if (!current) { delete value; return false; }
-							it->second.reset(current);
+							auto newObj = asvJSONValue::makeObject();
+							if (!newObj) return false;
+							current = newObj.get();
+							it->second = std::move(newObj);
 						}
 					}
 				}
 			} else {
-				delete value; return false;
+				return false;
 			}
 		}
 
@@ -3979,26 +3818,24 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 				errno = 0;
 				char* end;
 				idx = static_cast<size_t>(strtoul(lastKey.c_str(), &end, 10));
-				if (errno == ERANGE || *end != 0) { delete value; return false; }
+				if (errno == ERANGE || *end != 0) return false;
 			}
-			if (idx >= asvJSONValue::MAX_ARRAY_SIZE) { delete value; return false; }
+			if (!asvJSONValue::checkArraySize(idx + 1)) return false;
 			if (idx >= current->arr->size()) {
 				current->arr->resize(idx + 1);
 			}
-			(*current->arr)[idx].reset(value);
+			(*current->arr)[idx] = std::move(valueGuard);
 		} else if (current->type == asvJSONValue::OBJECT) {
 			auto it = current->obj->find(lastKey);
-			if (it != current->obj->end()) { it->second.reset(value); }
-			else { current->obj->emplace(lastKey, std::unique_ptr<asvJSONValue>(value)); }
+			if (it != current->obj->end()) { it->second = std::move(valueGuard); }
+			else { current->obj->emplace(lastKey, std::move(valueGuard)); }
 		} else {
-			delete value; return false;
+			return false;
 		}
 		return true;
 	} catch (const std::bad_alloc&) {
-		delete value;
 		return false;
 	} catch (...) {
-		delete value;
 		return false;
 	}
 }
@@ -4006,7 +3843,6 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 inline bool asvJSON::removeByPointer(std::string_view pointer) {
 	if (pointer.data() == nullptr || !root) return false;
 	if (pointer == "/") {
-		delete root;
 		root = nullptr;
 		return true;
 	}
@@ -4066,14 +3902,14 @@ inline bool asvJSON::removeByPointer(std::string_view pointer) {
 	return true;
 }
 
-inline asvJSONValue* cloneValue(const asvJSONValue* v) {
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 	if (!v) return nullptr;
 	switch (v->type) {
 		case asvJSONValue::NULL_VAL: return asvJSONValue::makeNull();
 		case asvJSONValue::BOOL_VAL: return asvJSONValue::makeBool(v->flag);
 		case asvJSONValue::INT: return asvJSONValue::makeInt(v->num);
 		case asvJSONValue::DOUBLE: {
-			auto* result = asvJSONValue::makeDouble(v->dbl);
+			auto result = asvJSONValue::makeDouble(v->dbl);
 			if (result) result->is_float32 = v->is_float32;
 			return result;
 		}
@@ -4084,47 +3920,43 @@ inline asvJSONValue* cloneValue(const asvJSONValue* v) {
 		case asvJSONValue::TIMESTAMP: return asvJSONValue::makeTimestamp(v->num);
 		case asvJSONValue::REGEX: {
 			if (v->str_data.empty()) {
-				auto* result = new(std::nothrow) asvJSONValue();
-				if (!result) return nullptr;
-				result->type = asvJSONValue::REGEX;
+				auto result = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
+				if (result) result->type = asvJSONValue::REGEX;
 				return result;
 			}
 			std::string s(v->str_data.data(), v->str_data.size());
 			size_t sep = s.find('|');
 			if (sep == std::string::npos) {
 				// No separator: treat whole string as pattern, no options
-				auto* result = asvJSONValue::makeRegex(s.c_str(), nullptr);
-				return result ? result : asvJSONValue::makeNull();
+				return asvJSONValue::makeRegex(s.c_str(), nullptr);
 			}
 			if (sep == 0) return asvJSONValue::makeNull(); // separator at start is invalid
 			const char* optPtr = nullptr;
 			if (sep + 1 < s.length()) {
 				optPtr = s.c_str() + sep + 1;
 			}
-			auto* result = asvJSONValue::makeRegex(s.substr(0, sep).c_str(), optPtr);
-			if (!result) return asvJSONValue::makeNull();
-			return result;
+			return asvJSONValue::makeRegex(s.substr(0, sep).c_str(), optPtr);
 		}
 		case asvJSONValue::EXTENSION: {
 			return asvJSONValue::makeExtension(v->ext_type, v->bin_data.data(), v->bin_data.size());
 		}
 		case asvJSONValue::ARRAY: {
-			auto* arr = asvJSONValue::makeArray();
+			auto arr = asvJSONValue::makeArray();
 			if (!arr) return nullptr;
 			for (auto& item : *v->arr) {
-				auto* cloned = cloneValue(item.get());
-				if (!cloned) { delete arr; return nullptr; }
-				arr->arr->emplace_back(std::unique_ptr<asvJSONValue>(cloned));
+				auto cloned = cloneValue(item.get());
+				if (!cloned) return nullptr;
+				arr->arr->emplace_back(std::move(cloned));
 			}
 			return arr;
 		}
 		case asvJSONValue::OBJECT: {
-			auto* obj = asvJSONValue::makeObject();
+			auto obj = asvJSONValue::makeObject();
 			if (!obj) return nullptr;
 			for (const auto& [kv_key, kv_val] : *v->obj) {
-				auto* cloned = cloneValue(kv_val.get());
-				if (!cloned) { delete obj; return nullptr; }
-				obj->obj->emplace(kv_key, std::unique_ptr<asvJSONValue>(cloned));
+				auto cloned = cloneValue(kv_val.get());
+				if (!cloned) return nullptr;
+				obj->obj->emplace(kv_key, std::move(cloned));
 			}
 			return obj;
 		}
@@ -4138,8 +3970,8 @@ inline asvJSONValue* cloneValue(const asvJSONValue* v) {
  * @param patch Patch value to apply
  * @return Patched value (usually target)
  */
-inline asvJSONValue* mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch) {
-	if (!target || !patch) return target;
+inline std::unique_ptr<asvJSONValue> mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch) {
+	if (!target || !patch) return nullptr;
 	if (target->type == asvJSONValue::OBJECT && patch->type == asvJSONValue::OBJECT) {
 		for (const auto& [kv_key, kv_val] : *patch->obj) {
 			auto it = target->obj->find(kv_key);
@@ -4147,44 +3979,39 @@ inline asvJSONValue* mergePatchRecursive(asvJSONValue* target, const asvJSONValu
 				if (kv_val->type == asvJSONValue::NULL_VAL) {
 					target->obj->erase(it);
 				} else if (it->second && it->second->type == asvJSONValue::OBJECT && kv_val->type == asvJSONValue::OBJECT) {
-					asvJSONValue* merged = mergePatchRecursive(it->second.get(), kv_val.get());
-					if (merged != it->second.get()) {
-						it->second.reset(merged);
-					}
+					auto merged = mergePatchRecursive(it->second.get(), kv_val.get());
+					if (merged) it->second = std::move(merged);
 				} else {
-					asvJSONValue* cloned = cloneValue(kv_val.get());
-					if (cloned) it->second.reset(cloned);
-					else it->second.reset(asvJSONValue::makeNull());
+					it->second = cloneValue(kv_val.get());
 				}
 			} else {
 				if (kv_val->type != asvJSONValue::NULL_VAL) {
-					asvJSONValue* cloned = cloneValue(kv_val.get());
-					if (cloned) target->obj->emplace(kv_key, std::unique_ptr<asvJSONValue>(cloned));
+					target->obj->emplace(kv_key, cloneValue(kv_val.get()));
 				}
 			}
 		}
-		return target;
+		return nullptr; // target modified in-place
 	}
-	return cloneValue(patch);
+	return cloneValue(patch); // full replacement
 }
 
 inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
-	if (!root) { root = cloneValue(other.root); return; }
-	asvJSONValue* newRoot = mergePatchRecursive(root, other.root);
-	if (newRoot != root) {
-		delete root;
-		root = newRoot;
-	}
+	if (!root) { root = cloneValue(other.root.get()); return; }
+	auto newRoot = mergePatchRecursive(root.get(), other.root.get());
+	if (newRoot) root = std::move(newRoot);
 }
 
 inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
 	asvJSON result;
 	if (!root) return result;
 	if (root->type == asvJSONValue::OBJECT && patch.root && patch.root->type == asvJSONValue::OBJECT) {
-		result.root = mergePatchRecursive(cloneValue(root), patch.root);
+		auto cloned = cloneValue(root.get());
+		auto replacement = mergePatchRecursive(cloned.get(), patch.root.get());
+		if (replacement) result.root = std::move(replacement);
+		else result.root = std::move(cloned);
 	} else {
-		result.root = cloneValue(patch.root ? patch.root : root);
+		result.root = cloneValue(patch.root ? patch.root.get() : root.get());
 	}
 	return result;
 }
@@ -4252,19 +4079,19 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 		} else if (opStr == "replace") {
 			auto* val = op->get("value");
 			if (!val) return false;
-			auto cloned = std::unique_ptr<asvJSONValue>(cloneValue(val));
+			auto cloned = cloneValue(val);
 			if (!cloned) return false;
 			if (!setByPointer(pathStr, cloned.release())) { return false; }
 		} else if (opStr == "add") {
 			auto* val = op->get("value");
 			if (!val) return false;
-			auto cloned = std::unique_ptr<asvJSONValue>(cloneValue(val));
+			auto cloned = cloneValue(val);
 			if (!cloned) return false;
 			if (!pathStr.empty() && pathStr.back() == '-') {
 				std::string parentPath = pathStr.substr(0, pathStr.length() - 1);
 				asvJSONValue* parent = getByPointer(parentPath);
 				if (parent && parent->type == asvJSONValue::ARRAY) {
-					if (parent->arr->size() >= asvJSONValue::MAX_ARRAY_SIZE) return false;
+					if (!asvJSONValue::checkArraySize(parent->arr->size() + 1)) return false;
 					parent->arr->emplace_back(std::move(cloned));
 				} else { return false; }
 			} else {
@@ -4276,7 +4103,7 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			std::string fromPath(fromVal->str_data.data(), fromVal->str_data.size());
 			asvJSONValue* from = getByPointer(fromPath);
 			if (!from) return false;
-			auto cloned = std::unique_ptr<asvJSONValue>(cloneValue(from));
+			auto cloned = cloneValue(from);
 			if (!cloned) return false;
 			if (!setByPointer(pathStr, cloned.release())) { return false; }
 		} else if (opStr == "move") {
@@ -4286,9 +4113,9 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			if (fromPath == pathStr) continue;
 			asvJSONValue* from = getByPointer(fromPath);
 			if (!from) return false;
-			auto cloned = std::unique_ptr<asvJSONValue>(cloneValue(from));
+			auto cloned = cloneValue(from);
 			if (!cloned) return false;
-			std::unique_ptr<asvJSONValue> backup(cloneValue(from));
+			auto backup = cloneValue(from);
 			if (!backup) return false;
 			if (!removeByPointer(fromPath)) { return false; }
 			if (!setByPointer(pathStr, cloned.release())) {
@@ -4305,6 +4132,41 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 	}
 
 	return true;
+}
+
+static void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uint8_t* data, size_t len) {
+  if (len == 1) {
+    out.push_back(0xD4); out.push_back(static_cast<uint8_t>(extType)); out.push_back(data[0]);
+  } else if (len == 2) {
+    out.push_back(0xD5); out.push_back(static_cast<uint8_t>(extType));
+    out.push_back(data[0]); out.push_back(data[1]);
+  } else if (len == 4) {
+    out.push_back(0xD6); out.push_back(static_cast<uint8_t>(extType));
+    out.push_back(data[0]); out.push_back(data[1]); out.push_back(data[2]); out.push_back(data[3]);
+  } else if (len == 8) {
+    out.push_back(0xD7); out.push_back(static_cast<uint8_t>(extType));
+    out.insert(out.end(), data, data + len);
+  } else if (len == 16) {
+    out.push_back(0xD8); out.push_back(static_cast<uint8_t>(extType));
+    out.insert(out.end(), data, data + len);
+  } else if (len <= 255) {
+    out.push_back(0xC7); out.push_back(static_cast<uint8_t>(len)); out.push_back(static_cast<uint8_t>(extType));
+    out.insert(out.end(), data, data + len);
+  } else if (len <= 65535) {
+    out.push_back(0xC8);
+    out.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(len & 0xFF));
+    out.push_back(static_cast<uint8_t>(extType));
+    out.insert(out.end(), data, data + len);
+  } else {
+    out.push_back(0xC9);
+    out.push_back(static_cast<uint8_t>((len >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((len >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(len & 0xFF));
+    out.push_back(static_cast<uint8_t>(extType));
+    out.insert(out.end(), data, data + len);
+  }
 }
 
 inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
@@ -4379,7 +4241,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			}
 			for (const auto& [key, val] : *obj) {
 				size_t key_len = key.length();
-				if (key_len > MAX_STRING_LEN) throw asvJSONError("MessagePack key too long");
+				if (!asvJSONValue::checkStringLen(key_len)) throw asvJSONError("MessagePack key too long");
 				if (key_len <= 31) {
 					out.push_back(0xA0 | static_cast<uint8_t>(key_len));
 				} else if (key_len <= 255) {
@@ -4462,86 +4324,17 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 		}
 		case EXTENSION: {
 			if (bin_data.empty()) { out.push_back(0xC0); break; }
-			if (bin_data.size() == 1) {
-				out.push_back(0xD4);
-				out.push_back(ext_type);
-				out.push_back(bin_data.data()[0]);
-			} else if (bin_data.size() == 2) {
-				out.push_back(0xD5);
-				out.push_back(ext_type);
-				out.push_back(bin_data.data()[0]);
-				out.push_back(bin_data.data()[1]);
-			} else if (bin_data.size() == 4) {
-				out.push_back(0xD6);
-				out.push_back(ext_type);
-				out.push_back(bin_data.data()[0]);
-				out.push_back(bin_data.data()[1]);
-				out.push_back(bin_data.data()[2]);
-				out.push_back(bin_data.data()[3]);
-			} else if (bin_data.size() == 8) {
-				out.push_back(0xD7);
-				out.push_back(ext_type);
-				out.insert(out.end(), bin_data.data(), bin_data.data() + bin_data.size());
-			} else if (bin_data.size() == 16) {
-				out.push_back(0xD8);
-				out.push_back(ext_type);
-				out.insert(out.end(), bin_data.data(), bin_data.data() + bin_data.size());
-			} else if (bin_data.size() <= 255) {
-				out.push_back(0xC7);
-				out.push_back(static_cast<uint8_t>(bin_data.size()));
-				out.push_back(ext_type);
-				out.insert(out.end(), bin_data.data(), bin_data.data() + bin_data.size());
-			} else if (bin_data.size() <= 65535) {
-				out.push_back(0xC8);
-				out.push_back(static_cast<uint8_t>((bin_data.size() >> 8) & 0xFF));
-				out.push_back(static_cast<uint8_t>(bin_data.size() & 0xFF));
-				out.push_back(ext_type);
-				out.insert(out.end(), bin_data.data(), bin_data.data() + bin_data.size());
-			} else {
-				out.push_back(0xC9);
-				out.push_back(static_cast<uint8_t>((bin_data.size() >> 24) & 0xFF));
-				out.push_back(static_cast<uint8_t>((bin_data.size() >> 16) & 0xFF));
-				out.push_back(static_cast<uint8_t>((bin_data.size() >> 8) & 0xFF));
-				out.push_back(static_cast<uint8_t>(bin_data.size() & 0xFF));
-				out.push_back(ext_type);
-				out.insert(out.end(), bin_data.data(), bin_data.data() + bin_data.size());
-			}
+			writeMsgPackExt(out, ext_type, bin_data.data(), bin_data.size());
 			break;
 		}
 		case OBJECTID: {
 			if (str_data.size() != 12) { out.push_back(0xC0); break; }
-			// Store as ext8 (0xC7) with type 1 for roundtrip preservation
-			if (str_data.size() <= 255) {
-				out.push_back(0xC7);
-				out.push_back(static_cast<uint8_t>(str_data.size()));
-			} else if (str_data.size() <= 65535) {
-				out.push_back(0xC8);
-				out.push_back(static_cast<uint8_t>((str_data.size() >> 8) & 0xFF));
-				out.push_back(static_cast<uint8_t>(str_data.size() & 0xFF));
-			} else {
-				out.push_back(0xC9);
-				for (int i = 3; i >= 0; i--) out.push_back(static_cast<uint8_t>((str_data.size() >> (i * 8)) & 0xFF));
-			}
-			out.push_back(1); // extType=1 for ObjectId
-			out.insert(out.end(), reinterpret_cast<const uint8_t*>(str_data.data()), reinterpret_cast<const uint8_t*>(str_data.data()) + str_data.size());
+			writeMsgPackExt(out, 1, reinterpret_cast<const uint8_t*>(str_data.data()), str_data.size());
 			break;
 		}
 		case REGEX: {
 			if (str_data.empty()) { out.push_back(0xC0); break; }
-			// Store as ext with type 2 for roundtrip preservation
-			if (str_data.size() <= 255) {
-				out.push_back(0xC7);
-				out.push_back(static_cast<uint8_t>(str_data.size()));
-			} else if (str_data.size() <= 65535) {
-				out.push_back(0xC8);
-				out.push_back(static_cast<uint8_t>((str_data.size() >> 8) & 0xFF));
-				out.push_back(static_cast<uint8_t>(str_data.size() & 0xFF));
-			} else {
-				out.push_back(0xC9);
-				for (int i = 3; i >= 0; i--) out.push_back(static_cast<uint8_t>((str_data.size() >> (i * 8)) & 0xFF));
-			}
-			out.push_back(2); // extType=2 for Regex
-			out.insert(out.end(), reinterpret_cast<const uint8_t*>(str_data.data()), reinterpret_cast<const uint8_t*>(str_data.data()) + str_data.size());
+			writeMsgPackExt(out, 2, reinterpret_cast<const uint8_t*>(str_data.data()), str_data.size());
 			break;
 		}
 		case TIMESTAMP: {
@@ -4739,10 +4532,9 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			} else if (std::isinf(dbl)) {
 				out += prefix + "<" + name + ">" + std::string(dbl > 0 ? "Infinity" : "-Infinity") + "</" + name + ">\n";
 			} else {
-				char buf[32];
-				int n = snprintf(buf, sizeof(buf), "%.17g", dbl);
-				if (n > 0) out += prefix + "<" + name + ">" + std::string(buf, static_cast<size_t>(n)) + "</" + name + ">\n";
-				else out += prefix + "<" + name + "/>\n";
+				std::string dblStr;
+				fmtDoubleVal(dbl, dblStr);
+				out += prefix + "<" + name + ">" + dblStr + "</" + name + ">\n";
 			}
 			break;
 		}
@@ -4750,14 +4542,9 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			out += prefix + "<" + name + ">" + xmlEscapeContent(str_data) + "</" + name + ">\n";
 			break;
 		case DATETIME: {
-			char buf[40];
-			std::tm tm;
-			asvjson_gmtime(&tm, &timestamp);
-			char msbuf[16] = "";
-			if (datetime_ms > 0) snprintf(msbuf, sizeof(msbuf), ".%03d", datetime_ms);
-			if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0)
-				throw asvJSONError("Failed to format datetime");
-			out += prefix + "<" + name + " type=\"datetime\">" + buf + msbuf + "Z</" + name + ">\n";
+			std::string dtStr;
+			fmtDateTimeVal(timestamp, datetime_ms, dtStr);
+			out += prefix + "<" + name + " type=\"datetime\">" + dtStr + "</" + name + ">\n";
 			break;
 		}
 		case BINARY: {
@@ -4767,11 +4554,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 		}
 		case OBJECTID: {
 			std::string hex;
-			for (size_t i = 0; i < str_data.size() && i < 12; i++) {
-				char hb[4];
-				snprintf(hb, sizeof(hb), "%02x", static_cast<unsigned char>(str_data[i]));
-				hex += hb;
-			}
+			fmtObjectIdHexVal(str_data, hex);
 			out += prefix + "<" + name + " type=\"objectid\">" + hex + "</" + name + ">\n";
 			break;
 		}
@@ -4835,8 +4618,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 		case asvJSONValue::DOUBLE: {
 			if (std::isnan(dbl)) { startLine(); out += ".nan\n"; break; }
 			if (std::isinf(dbl)) { startLine(); out += (dbl > 0 ? ".inf" : "-.inf"); out += '\n'; break; }
-			char buf[32]; int n = snprintf(buf, sizeof(buf), "%.17g", dbl);
-			startLine(); out.append(buf, static_cast<size_t>(n > 0 ? n : 0)); out += '\n';
+			startLine(); fmtDoubleVal(dbl, out); out += '\n';
 			break;
 		}
 		case asvJSONValue::STRING: {
@@ -4857,11 +4639,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 			break;
 		}
 		case asvJSONValue::DATETIME: {
-			char buf[40]; std::tm tm; asvjson_gmtime(&tm, &timestamp);
-			char ms[16] = ""; if (datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", datetime_ms);
-			if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0)
-				throw asvJSONError("Failed to format datetime");
-			startLine(); out += buf; out += ms; out += "Z\n";
+			startLine(); fmtDateTimeVal(timestamp, datetime_ms, out); out += '\n';
 			break;
 		}
 		case asvJSONValue::BINARY: {
@@ -4870,11 +4648,9 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 			break;
 		}
 		case asvJSONValue::OBJECTID: {
-			std::string hex;
-			for (size_t i = 0; i < str_data.size() && i < 12; i++) {
-				char hb[4]; snprintf(hb, sizeof(hb), "%02x", static_cast<unsigned char>(str_data[i])); hex += hb;
-			}
-			startLine(); out += "!objectid "; out += yamlQuote(hex); out += '\n';
+			startLine(); out += "!objectid ";
+			fmtObjectIdHexVal(str_data, out);
+			out += '\n';
 			break;
 		}
 		case asvJSONValue::REGEX: {
@@ -4906,28 +4682,130 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 	}
 }
 
+// ======================= Type Formatting Helpers =======================
+
+static void fmtDoubleVal(double d, std::string& out) {
+  if (d == std::floor(d) && d >= std::numeric_limits<int64_t>::min() && d <= std::numeric_limits<int64_t>::max()) {
+    out += std::to_string(static_cast<int64_t>(d));
+  } else {
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%.17g", d);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
+      out += buf;
+    } else if (n > 0) {
+      std::string fallback(static_cast<size_t>(n) + 1, '\0');
+      snprintf(&fallback[0], fallback.size(), "%.17g", d);
+      out += fallback.c_str();
+    } else {
+      out += "null";
+    }
+  }
+}
+
+static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
+  if (std::isnan(d) || std::isinf(d)) {
+    if (!allowNaNInfinity) { out += "null"; }
+    else if (std::isnan(d)) { out += "NaN"; }
+    else if (d > 0) { out += "Infinity"; }
+    else { out += "-Infinity"; }
+    return true;
+  }
+  return false;
+}
+
+static void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
+  char buf[40]; std::tm tm; asvjson_gmtime(&tm, &ts);
+  if (ms > 0) {
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
+    out += buf;
+    out += std::to_string(tm.tm_sec);
+    out.push_back('.');
+    char msbuf[16];
+    snprintf(msbuf, sizeof(msbuf), "%03d", ms);
+    out += msbuf;
+    out.push_back('Z');
+  } else {
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    out += buf;
+  }
+}
+
+static void fmtObjectIdHexVal(std::string_view s, std::string& out) {
+  char hex[25] = {0};
+  for (size_t i = 0; i < s.size() && i < 12; i++)
+    snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", static_cast<unsigned char>(s[i]));
+  out += hex;
+}
+
+static void fmtRegexVal(std::string_view s, std::string& out) {
+  size_t sep = s.find('|');
+  if (sep != std::string::npos) {
+    appendJsonEscaped(out, std::string(s.data(), sep));
+    out.push_back('|');
+    appendJsonEscaped(out, std::string(s.substr(sep + 1)));
+  } else {
+    appendJsonEscaped(out, std::string(s));
+  }
+}
+
+static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
+  out += std::to_string(type);
+  out.push_back('_');
+  out += base64_encode(data, len);
+}
+
+// ======================= Shared Text Format Utilities =======================
+
+struct FormatFrame {
+  char type;
+  bool first;
+  int indent;
+  bool isRoot;
+};
+
+static std::vector<std::string> splitLines(std::string_view input) {
+  std::vector<std::string> lines;
+  std::string cur;
+  for (size_t i = 0; i < input.size(); i++) {
+    if (input[i] == '\n') { lines.push_back(cur); cur.clear(); }
+    else if (input[i] != '\r') cur += input[i];
+  }
+  if (!cur.empty()) lines.push_back(cur);
+  while (!lines.empty() && lines.back().empty()) lines.pop_back();
+  return lines;
+}
+
+static int countIndent(const std::string& s) {
+  int n = 0;
+  for (char c : s) if (c == ' ') n++; else break;
+  return n;
+}
+
+static std::string_view stripIndent(const std::string& s) {
+  size_t i = 0;
+  while (i < s.size() && s[i] == ' ') i++;
+  return std::string_view(s).substr(i);
+}
+
+static void closeFrames(std::vector<FormatFrame>& stack, std::string& out, int indent) {
+  while (!stack.empty()) {
+    auto& f = stack.back();
+    if (f.isRoot || f.indent < indent) break;
+    out += (f.type == 'O') ? '}' : ']';
+    stack.pop_back();
+  }
+}
+
+static void addComma(std::vector<FormatFrame>& stack, std::string& out) {
+  if (!stack.empty() && !stack.back().first) out += ',';
+}
+
 // ======================= TOON (JSON-intermediate) =======================
 
 static std::string toonJsonEscape(const std::string& s) {
 	std::string r;
 	r.reserve(s.size() + 4);
-	for (char c : s) {
-		switch (c) {
-			case '"': r += "\\\""; break;
-			case '\\': r += "\\\\"; break;
-			case '\n': r += "\\n"; break;
-			case '\r': r += "\\r"; break;
-			case '\t': r += "\\t"; break;
-			case '\b': r += "\\b"; break;
-			case '\f': r += "\\f"; break;
-			default:
-				if (static_cast<unsigned char>(c) < 0x20) {
-					char buf[8];
-					snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-					r += buf;
-				} else r += c;
-		}
-	}
+	appendJsonEscaped(r, s);
 	return r;
 }
 
@@ -4968,12 +4846,7 @@ static std::string toonLeafVal(const asvJSONValue* v) {
 		case asvJSONValue::DOUBLE: {
 			double d = v->dbl;
 			if (std::isnan(d) || std::isinf(d)) return "null";
-			if (d == std::floor(d) && d >= std::numeric_limits<int64_t>::min() && d <= std::numeric_limits<int64_t>::max())
-				return std::to_string(static_cast<int64_t>(d));
-			char buf[64];
-			int n = snprintf(buf, sizeof(buf), "%.17g", d);
-			if (n > 0) return std::string(buf, static_cast<size_t>(n));
-			return "null";
+			std::string r; fmtDoubleVal(d, r); return r;
 		}
 		case asvJSONValue::OBJECT: {
 			std::string r = "{";
@@ -5003,7 +4876,7 @@ static std::string toonLeafVal(const asvJSONValue* v) {
 
 static void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
 	if (!v) return;
-	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
+	if (!asvJSONValue::checkNestingDepth(depth)) return;
 	std::string pad(static_cast<size_t>(indent) * 2, ' ');
 	if (v->type == asvJSONValue::OBJECT) {
 		if (v->obj->empty()) {
@@ -5088,29 +4961,8 @@ static std::vector<std::string> toonSplitCommas(std::string_view s) {
 
 // TOON -> JSON text converter
 static std::string toonToJson(std::string_view input) {
-	// split lines
-	std::vector<std::string> lines;
-	{
-		std::string cur;
-		for (size_t i = 0; i < input.size(); i++) {
-			if (input[i] == '\n') { lines.push_back(cur); cur.clear(); }
-			else if (input[i] != '\r') cur += input[i];
-		}
-		if (!cur.empty()) lines.push_back(cur);
-	}
-	while (!lines.empty() && lines.back().empty()) lines.pop_back();
+	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
-
-	auto countIndent = [](const std::string& s) -> int {
-		int n = 0;
-		for (char c : s) if (c == ' ') n++; else break;
-		return n;
-	};
-	auto stripIndent = [](const std::string& s) -> std::string_view {
-		size_t i = 0;
-		while (i < s.size() && s[i] == ' ') i++;
-		return std::string_view(s).substr(i);
-	};
 
 	size_t firstNonEmpty = 0;
 	while (firstNonEmpty < lines.size() && lines[firstNonEmpty].empty()) firstNonEmpty++;
@@ -5120,28 +4972,8 @@ static std::string toonToJson(std::string_view input) {
 	bool rootIsArr = (firstContent.size() >= 2 && firstContent[0] == '[') || (firstContent.size() >= 1 && firstContent[0] == '-');
 
 	std::string out;
-	struct JsonFrame {
-		char type;
-		bool first;
-		int indent;
-		bool isRoot;
-	};
-	std::vector<JsonFrame> stack;
+	std::vector<FormatFrame> stack;
 	int rootIndent = countIndent(lines[firstNonEmpty]);
-
-	auto closeFrames = [&](int indent) {
-		while (!stack.empty()) {
-			auto& f = stack.back();
-			if (f.isRoot || f.indent < indent) break;
-			if (f.type == 'O') out += '}';
-			else out += ']';
-			stack.pop_back();
-		}
-	};
-
-	auto addComma = [&]() {
-		if (!stack.empty() && !stack.back().first) out += ',';
-	};
 
 	out = rootIsArr ? '[' : '{';
 	stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true});
@@ -5152,7 +4984,7 @@ static std::string toonToJson(std::string_view input) {
 		int indent = countIndent(line);
 		std::string_view content = stripIndent(line);
 
-		closeFrames(indent);
+		closeFrames(stack, out, indent);
 		if (stack.empty()) break;
 		auto& curFrame = stack.back();
 
@@ -5177,10 +5009,10 @@ static std::string toonToJson(std::string_view input) {
 					}
 				}
 				if (afterB < content.size() && content[afterB] == ':') {
-					addComma();
-					if (!stack.empty()) stack.back().first = false;
-					out += '[';
-					stack.push_back({'A', true, indent, false});
+		addComma(stack, out);
+		if (!stack.empty()) stack.back().first = false;
+		out += '[';
+		stack.push_back({'A', true, indent, false});
 					size_t afterColon = afterB + 1;
 					while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
 					if (hasFields) {
@@ -5242,7 +5074,7 @@ static std::string toonToJson(std::string_view input) {
 
 		// list item: - value
 		if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 			std::string_view val = content.substr(2);
 			out += toonJsonQuoteBare(val);
@@ -5250,7 +5082,7 @@ static std::string toonToJson(std::string_view input) {
 		}
 		// bare "-" means an inline object list item
 		if (content == "-") {
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 			out += '{';
 			stack.push_back({'O', true, indent, false});
@@ -5273,7 +5105,7 @@ static std::string toonToJson(std::string_view input) {
 			std::string_view valPart = content.substr(colonPos + 1);
 			while (!valPart.empty() && valPart.front() == ' ') valPart = valPart.substr(1);
 
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 
 			if (valPart.empty()) {
@@ -5292,8 +5124,7 @@ static std::string toonToJson(std::string_view input) {
 
 	// Close all remaining frames (EOF)
 	while (!stack.empty()) {
-		if (stack.back().type == 'O') out += '}';
-		else out += ']';
+		out += (stack.back().type == 'O') ? '}' : ']';
 		stack.pop_back();
 	}
 
@@ -5305,7 +5136,7 @@ static std::string toonToJson(std::string_view input) {
 inline std::string asvJSON::toTOON() const {
 	if (!root) return "null\n";
 	std::string out;
-	valToToon(root, out, 0, "");
+	valToToon(root.get(), out, 0, "");
 	return out;
 }
 
@@ -5373,21 +5204,8 @@ static void tronSerializeVal(const asvJSONValue* v,
 		case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
 		case asvJSONValue::INT: out += std::to_string(v->num); break;
 		case asvJSONValue::DOUBLE: {
-			double d = v->dbl;
-			if (std::isnan(d) || std::isinf(d)) {
-				if (!allowNaNInfinity) { out += "null"; break; }
-				if (std::isnan(d)) { out += "NaN"; break; }
-				if (d > 0) { out += "Infinity"; break; }
-				else { out += "-Infinity"; break; }
-			}
-			if (d == std::floor(d) && d >= std::numeric_limits<int64_t>::min() && d <= std::numeric_limits<int64_t>::max()) {
-				out += std::to_string(static_cast<int64_t>(d));
-			} else {
-				char buf[64];
-				int n = snprintf(buf, sizeof(buf), "%.17g", d);
-				if (n > 0) out.append(buf, static_cast<size_t>(n));
-				else out += "null";
-			}
+			if (fmtNaNInfVal(v->dbl, allowNaNInfinity, out)) break;
+			fmtDoubleVal(v->dbl, out);
 			break;
 		}
 		case asvJSONValue::STRING:
@@ -5403,39 +5221,20 @@ static void tronSerializeVal(const asvJSONValue* v,
 			break;
 		}
 		case asvJSONValue::DATETIME: {
-			char buf[40];
-			char msbuf[16];
-			std::tm tm;
-			asvjson_gmtime(&tm, &v->timestamp);
-			if (v->datetime_ms > 0) {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
-				snprintf(msbuf, sizeof(msbuf), "%03d", v->datetime_ms);
-				out += '"' + std::string(buf) + std::to_string(tm.tm_sec) + "." + msbuf + "Z\"";
-			} else {
-				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-				out += '"' + std::string(buf) + '"';
-			}
+			out += '"'; fmtDateTimeVal(v->timestamp, v->datetime_ms, out); out += '"';
 			break;
 		}
 		case asvJSONValue::BINARY: {
 			if (v->bin_data.empty()) { out += "null"; break; }
-			out += "\"__BASE64__" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			fmtBase64JsonVal(v->bin_data.data(), v->bin_data.size(), out);
 			break;
 		}
 		case asvJSONValue::OBJECTID: {
-			char hex[25] = {0};
-			for (size_t i = 0; i < v->str_data.size() && i < 12; i++)
-				snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", static_cast<unsigned char>(v->str_data[i]));
-			out += '"' + std::string(hex) + '"';
+			out += '"'; fmtObjectIdHexVal(v->str_data, out); out += '"';
 			break;
 		}
 		case asvJSONValue::REGEX: {
-			size_t sep = v->str_data.find('|');
-			if (sep != std::string::npos) {
-				out += '"' + toonJsonEscape(std::string(v->str_data.data(), sep)) + '|' + toonJsonEscape(v->str_data.substr(sep + 1)) + '"';
-			} else {
-				out += '"' + toonJsonEscape(v->str_data) + '"';
-			}
+			out += '"'; fmtRegexVal(v->str_data, out); out += '"';
 			break;
 		}
 		case asvJSONValue::TIMESTAMP:
@@ -5443,7 +5242,7 @@ static void tronSerializeVal(const asvJSONValue* v,
 			break;
 		case asvJSONValue::EXTENSION: {
 			if (v->bin_data.empty()) { out += "null"; break; }
-			out += "\"__EXT__" + std::to_string(v->ext_type) + "_" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), out);
 			break;
 		}
 		case asvJSONValue::OBJECT: {
@@ -5484,7 +5283,7 @@ inline std::string asvJSON::toTRON() const {
 	std::unordered_map<std::string, std::vector<std::string>> firstKeys;
 	std::unordered_map<std::string, size_t> counts;
 	std::unordered_set<const asvJSONValue*> visited;
-	tronDiscoverSchemas(root, firstKeys, counts, visited);
+	tronDiscoverSchemas(root.get(), firstKeys, counts, visited);
 	std::vector<std::pair<std::string, std::vector<std::string>>> qualified;
 	for (const auto& [sig, keys] : firstKeys) {
 		auto cit = counts.find(sig);
@@ -5519,7 +5318,7 @@ inline std::string asvJSON::toTRON() const {
 		out += '\n';
 	}
 	if (!classNames.empty()) out += '\n';
-	tronSerializeVal(root, sigToClass, classKeys, out, allowNaNInfinity);
+	tronSerializeVal(root.get(), sigToClass, classKeys, out, allowNaNInfinity);
 	out += '\n';
 	return out;
 }
@@ -5538,62 +5337,7 @@ struct TronTok {
 };
 
 static std::string tronUnescape(const std::string& s) {
-	std::string r;
-	r.reserve(s.size());
-	for (size_t i = 0; i < s.size(); i++) {
-		if (s[i] == '\\' && i + 1 < s.size()) {
-			switch (s[++i]) {
-				case '"': r += '"'; break;
-				case '\\': r += '\\'; break;
-				case '/': r += '/'; break;
-				case 'b': r += '\b'; break;
-				case 'f': r += '\f'; break;
-				case 'n': r += '\n'; break;
-				case 'r': r += '\r'; break;
-				case 't': r += '\t'; break;
-				case 'u': {
-					if (i + 4 < s.size()) {
-						std::string hex = s.substr(i + 1, 4);
-						bool valid = true;
-						for (int h = 0; h < 4; h++) if (!((hex[h] >= '0' && hex[h] <= '9') || (hex[h] >= 'a' && hex[h] <= 'f') || (hex[h] >= 'A' && hex[h] <= 'F'))) valid = false;
-						if (!valid) { r += '?'; i += 4; break; }
-						if (valid) {
-							char* end = nullptr;
-							long cp = std::strtol(hex.c_str(), &end, 16);
-							if (end == hex.c_str() + 4 && cp >= 0) {
-								if (cp >= 0xD800 && cp <= 0xDBFF) {
-									if (i + 10 < s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
-										std::string lowHex = s.substr(i + 7, 4);
-										bool lowValid = true;
-										for (int h = 0; h < 4; h++) if (!((lowHex[h] >= '0' && lowHex[h] <= '9') || (lowHex[h] >= 'a' && lowHex[h] <= 'f') || (lowHex[h] >= 'A' && lowHex[h] <= 'F'))) lowValid = false;
-										if (lowValid) {
-											long low = std::strtol(lowHex.c_str(), &end, 16);
-											if (end == lowHex.c_str() + 4 && low >= 0xDC00 && low <= 0xDFFF) {
-												cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-												i += 6;
-											}
-										}
-									}
-								}
-								if (cp < 0x80) r += static_cast<char>(cp);
-								else if (cp < 0x800) { r += static_cast<char>(0xC0 | (cp >> 6)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
-								else if (cp < 0x10000) { r += static_cast<char>(0xE0 | (cp >> 12)); r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
-								else { r += static_cast<char>(0xF0 | (cp >> 18)); r += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); r += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); r += static_cast<char>(0x80 | (cp & 0x3F)); }
-							}
-						}
-						i += 4;
-					} else {
-						r += '?';
-					}
-					break;
-				}
-				default: r += s[i]; break;
-			}
-		} else {
-			r += s[i];
-		}
-	}
-	return r;
+  return unescapeJsonString(s, false);
 }
 
 static std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfinity = false) {
@@ -5692,10 +5436,10 @@ struct TronParseState {
 
 	asvJSONValue* parseObject() {
 		advance(); // '{'
-		auto* obj = asvJSONValue::makeObject();
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
 		skipNewlines();
-		if (peek().type == TronTokType::RBRACE) { advance(); return obj; }
+		if (peek().type == TronTokType::RBRACE) { advance(); return obj.release(); }
 		bool first = true;
 		while (true) {
 			if (!first) {
@@ -5704,25 +5448,25 @@ struct TronParseState {
 			}
 			first = false;
 			if (peek().type == TronTokType::RBRACE) break;
-			if (peek().type != TronTokType::STRING) { ok = false; err = "expected string key"; delete obj; return nullptr; }
+			if (peek().type != TronTokType::STRING) { ok = false; err = "expected string key"; return nullptr; }
 			std::string key = tronUnescape(advance().text);
-			if (!match(TronTokType::COLON)) { ok = false; err = "expected ':'"; delete obj; return nullptr; }
+			if (!match(TronTokType::COLON)) { ok = false; err = "expected ':'"; return nullptr; }
 			skipNewlines();
 			asvJSONValue* val = parseValue();
-			if (!val && !ok) { delete obj; return nullptr; }
+			if (!val && !ok) return nullptr;
 			if (val) obj->obj->emplace(key, std::unique_ptr<asvJSONValue>(val));
 			skipNewlines();
 		}
-		if (!match(TronTokType::RBRACE)) { ok = false; err = "expected '}' or ',' in object"; delete obj; return nullptr; }
-		return obj;
+		if (!match(TronTokType::RBRACE)) { ok = false; err = "expected '}' or ',' in object"; return nullptr; }
+		return obj.release();
 	}
 
 	asvJSONValue* parseArray() {
 		advance(); // '['
-		auto* arr = asvJSONValue::makeArray();
+		auto arr = asvJSONValue::makeArray();
 		if (!arr) { ok = false; err = "out of memory"; return nullptr; }
 		skipNewlines();
-		if (peek().type == TronTokType::RBRACKET) { advance(); return arr; }
+		if (peek().type == TronTokType::RBRACKET) { advance(); return arr.release(); }
 		bool first = true;
 		while (true) {
 			if (!first) {
@@ -5732,12 +5476,12 @@ struct TronParseState {
 			first = false;
 			if (peek().type == TronTokType::RBRACKET) break;
 			asvJSONValue* val = parseValue();
-			if (!val && !ok) { delete arr; return nullptr; }
+			if (!val && !ok) return nullptr;
 			if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
 			skipNewlines();
 		}
-		if (!match(TronTokType::RBRACKET)) { ok = false; err = "expected ']' or ',' in array"; delete arr; return nullptr; }
-		return arr;
+		if (!match(TronTokType::RBRACKET)) { ok = false; err = "expected ']' or ',' in array"; return nullptr; }
+		return arr.release();
 	}
 
 	asvJSONValue* parseInstance() {
@@ -5750,7 +5494,7 @@ struct TronParseState {
 		const auto& props = it->second.props;
 		if (!match(TronTokType::LPAREN)) { ok = false; err = "expected '('"; return nullptr; }
 		skipNewlines();
-		std::unique_ptr<asvJSONValue> obj(asvJSONValue::makeObject());
+		auto obj = asvJSONValue::makeObject();
 		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
 		std::vector<std::unique_ptr<asvJSONValue>> posArgs;
 		std::unordered_map<std::string, std::unique_ptr<asvJSONValue>> namedArgs;
@@ -5788,7 +5532,7 @@ struct TronParseState {
 				if (nit != namedArgs.end()) valPtr = std::move(nit->second);
 			}
 			if (!valPtr) {
-				obj->obj->emplace(props[i], std::unique_ptr<asvJSONValue>(asvJSONValue::makeNull()));
+				obj->obj->emplace(props[i], asvJSONValue::makeNull());
 			} else {
 				obj->obj->emplace(props[i], std::move(valPtr));
 			}
@@ -5811,9 +5555,9 @@ asvJSONValue* TronParseState::parseValue() {
 			// Check __BASE64__ prefix
 			if (s.size() > 10 && s.compare(0, 10, "__BASE64__") == 0) {
 				auto data = base64_decode_fast(s.data() + 10, s.size() - 10);
-				auto* v = asvJSONValue::makeBinary(data.data(), data.size());
+				auto v = asvJSONValue::makeBinary(data.data(), data.size());
 				if (!v) { ok = false; err = "out of memory"; }
-				return v;
+				return v.release();
 			}
 			// Check __EXT__ prefix: "__EXT__<type>_<base64>"
 			if (s.size() > 7 && s.compare(0, 7, "__EXT__") == 0) {
@@ -5826,9 +5570,9 @@ asvJSONValue* TronParseState::parseValue() {
 						return nullptr;
 					}
 					auto data = base64_decode_fast(s.data() + sep + 1, s.size() - sep - 1);
-					auto* v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
+					auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
 					if (!v) { ok = false; err = "out of memory"; }
-					return v;
+					return v.release();
 				}
 			}
 			// Check ISO 8601 date
@@ -5836,14 +5580,14 @@ asvJSONValue* TronParseState::parseValue() {
 				time_t ts;
 				int ms = 0;
 				if (tryParseDateTime(s, ts, &ms)) {
-					auto* v = asvJSONValue::makeDateTime(ts, ms);
+					auto v = asvJSONValue::makeDateTime(ts, ms);
 					if (!v) { ok = false; err = "out of memory"; }
-					return v;
+					return v.release();
 				}
 			}
-			auto* v = asvJSONValue::makeStringView(s);
+			auto v = asvJSONValue::makeStringView(s);
 			if (!v) { ok = false; err = "out of memory"; }
-			return v;
+			return v.release();
 		}
 		case TronTokType::NUMBER: {
 			std::string n = advance().text;
@@ -5853,27 +5597,28 @@ asvJSONValue* TronParseState::parseValue() {
 				errno = 0;
 				double d = std::strtod(n.c_str(), &end);
 				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
-				auto* v = asvJSONValue::makeDouble(d);
+				auto v = asvJSONValue::makeDouble(d);
 				if (!v) { ok = false; err = "out of memory"; }
-				return v;
+				return v.release();
 			} else {
 				char* end;
 				errno = 0;
 				long long l = std::strtoll(n.c_str(), &end, 10);
 				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
-				auto* v = asvJSONValue::makeInt(l);
+				auto v = asvJSONValue::makeInt(l);
 				if (!v) { ok = false; err = "out of memory"; }
-				return v;
+				return v.release();
 			}
 		}
-		case TronTokType::TRUE: advance(); return asvJSONValue::makeBool(true);
-		case TronTokType::FALSE: advance(); return asvJSONValue::makeBool(false);
-		case TronTokType::NUL: advance(); return asvJSONValue::makeNull();
-		case TronTokType::NAN_VAL: advance(); return asvJSONValue::makeDouble(tronNaN);
+		case TronTokType::TRUE: advance(); { auto v = asvJSONValue::makeBool(true); return v.release(); }
+		case TronTokType::FALSE: advance(); { auto v = asvJSONValue::makeBool(false); return v.release(); }
+		case TronTokType::NUL: advance(); { auto v = asvJSONValue::makeNull(); return v.release(); }
+		case TronTokType::NAN_VAL: advance(); { auto v = asvJSONValue::makeDouble(tronNaN); return v.release(); }
 		case TronTokType::INF_VAL: {
 			bool isNeg = tok.text.size() > 0 && tok.text[0] == '-';
 			advance();
-			return asvJSONValue::makeDouble(isNeg ? -tronInf : tronInf);
+			auto v = asvJSONValue::makeDouble(isNeg ? -tronInf : tronInf);
+			return v.release();
 		}
 		case TronTokType::IDENT: {
 			if (pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN)
@@ -5964,7 +5709,7 @@ inline bool asvJSON::fromTRON(std::string_view input) {
 		root = nullptr;
 		return false;
 	}
-	root = state.root;
+	root.reset(state.root);
 	return true;
 }
 
@@ -5989,32 +5734,26 @@ static std::string goonFormatSpecial(const asvJSONValue* v) {
 	if (!v) return "_";
 	switch (v->type) {
 		case asvJSONValue::DATETIME: {
-			char buf[40]; char ms[16] = ""; std::tm tm; asvjson_gmtime(&tm, &v->timestamp);
-			if (v->datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", v->datetime_ms);
-			if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0) return "_";
-			return '"' + std::string(buf) + ms + "Z\"";
+			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+			return '"' + dt + '"';
 		}
 		case asvJSONValue::BINARY: {
 			if (v->bin_data.empty()) return "\"\"";
-			return "\"__BASE64__" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			std::string r; fmtBase64JsonVal(v->bin_data.data(), v->bin_data.size(), r); return r;
 		}
 		case asvJSONValue::OBJECTID: {
-			char hex[25] = {0};
-			for (size_t i = 0; i < v->str_data.size() && i < 12; i++)
-				snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", static_cast<unsigned char>(v->str_data[i]));
-			return '"' + std::string(hex) + '"';
+			std::string hex; fmtObjectIdHexVal(v->str_data, hex);
+			return '"' + hex + '"';
 		}
 		case asvJSONValue::REGEX: {
-			size_t sep = v->str_data.find('|');
-			if (sep != std::string::npos)
-				return '"' + toonJsonEscape(std::string(v->str_data.data(), sep)) + '|' + toonJsonEscape(v->str_data.substr(sep + 1)) + '"';
-			return '"' + toonJsonEscape(v->str_data) + '"';
+			std::string re; fmtRegexVal(v->str_data, re);
+			return '"' + re + '"';
 		}
 		case asvJSONValue::TIMESTAMP:
 			return std::to_string(v->num);
 		case asvJSONValue::EXTENSION: {
 			if (v->bin_data.empty()) return "\"\"";
-			return "\"__EXT__" + std::to_string(v->ext_type) + "_" + base64_encode(v->bin_data.data(), v->bin_data.size()) + '"';
+			std::string r; fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), r); return r;
 		}
 		default: return {};
 	}
@@ -6046,7 +5785,7 @@ static void goonWriteString(const std::string& s, std::string& out, const std::u
 
 // Build dictionary of frequently occurring strings for GOON compact mode
 static void goonBuildDictWalk(const asvJSONValue* v, std::unordered_map<std::string, int>& freq, int depth) {
-	if (!v || depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
+	if (!v || !asvJSONValue::checkNestingDepth(depth)) return;
 	switch (v->type) {
 		case asvJSONValue::STRING:
 			if (!v->str_data.empty()) freq[v->str_data]++;
@@ -6258,7 +5997,7 @@ static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 
 static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict) {
 	if (!v) return;
-	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
+	if (!asvJSONValue::checkNestingDepth(depth)) return;
 	std::string pad(static_cast<size_t>(indent) * 2, ' ');
 	std::string lit = goonLiteral(v);
 	if (!lit.empty()) {
@@ -6278,12 +6017,13 @@ static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
 				else out += pad + "_\n";
 				break;
 			}
-			char buf[64];
-			int n = snprintf(buf, sizeof(buf), "%.17g", d);
-			if (n > 0) {
-				if (!key.empty()) out += pad + toonJsonEscape(key) + ": " + std::string(buf, static_cast<size_t>(n)) + "\n";
-				else out += pad + std::string(buf, static_cast<size_t>(n)) + "\n";
+			if (!key.empty()) {
+				out += pad + toonJsonEscape(key) + ": ";
+				fmtDoubleVal(d, out);
+			} else {
+				fmtDoubleVal(d, out);
 			}
+			out += '\n';
 			break;
 		}
 		case asvJSONValue::STRING: {
@@ -6328,10 +6068,9 @@ static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
 
 inline std::string asvJSON::toGOON() const {
 	if (!root) return "_\n";
-	auto dict = goonBuildDict(root);
+	auto dict = goonBuildDict(root.get());
 	std::string out;
-	goonWriteDictHeader(dict, out);
-	goonSerializeVal(root, out, 0, "", 0, &dict);
+	goonSerializeVal(root.get(), out, 0, "", 0, &dict);
 	return out;
 }
 
@@ -6339,17 +6078,7 @@ inline std::string asvJSON::toGOON() const {
 
 // GOON → JSON text converter
 static std::string goonToJson(std::string_view input) {
-	// Split lines
-	std::vector<std::string> lines;
-	{
-		std::string cur;
-		for (size_t i = 0; i < input.size(); i++) {
-			if (input[i] == '\n') { lines.push_back(cur); cur.clear(); }
-			else if (input[i] != '\r') cur += input[i];
-		}
-		if (!cur.empty()) lines.push_back(cur);
-	}
-	while (!lines.empty() && lines.back().empty()) lines.pop_back();
+	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 
 	// Parse dictionary
@@ -6404,17 +6133,6 @@ static std::string goonToJson(std::string_view input) {
 		return std::string(s);
 	};
 
-	auto countIndent = [](const std::string& s) -> int {
-		int n = 0;
-		for (char c : s) if (c == ' ') n++; else break;
-		return n;
-	};
-	auto stripIndent = [](const std::string& s) -> std::string_view {
-		size_t i = 0;
-		while (i < s.size() && s[i] == ' ') i++;
-		return std::string_view(s).substr(i);
-	};
-
 	// Find first content line
 	size_t firstLine = lineStart;
 	while (firstLine < lines.size() && lines[firstLine].empty()) firstLine++;
@@ -6426,28 +6144,8 @@ static std::string goonToJson(std::string_view input) {
 		(firstContent.size() >= 1 && firstContent[0] == '-');
 
 	std::string out;
-	struct GoonFrame {
-		char type; // 'O' object, 'A' array
-		bool first;
-		int indent;
-		bool isRoot;
-	};
-	std::vector<GoonFrame> stack;
+	std::vector<FormatFrame> stack;
 	int rootIndent = countIndent(lines[firstLine]);
-
-	auto closeFrames = [&](int indent) {
-		while (!stack.empty()) {
-			auto& f = stack.back();
-			if (f.isRoot || f.indent < indent) break;
-			if (f.type == 'O') out += '}';
-			else out += ']';
-			stack.pop_back();
-		}
-	};
-
-	auto addComma = [&]() {
-		if (!stack.empty() && !stack.back().first) out += ',';
-	};
 
 	auto expandCell = [&](std::string_view raw) -> std::string {
 		std::string s = resolveRef(raw);
@@ -6493,7 +6191,7 @@ static std::string goonToJson(std::string_view input) {
 		int indent = countIndent(line);
 		std::string_view content = stripIndent(line);
 
-		closeFrames(indent);
+		closeFrames(stack, out, indent);
 		if (stack.empty()) break;
 		auto& curFrame = stack.back();
 
@@ -6536,7 +6234,7 @@ static std::string goonToJson(std::string_view input) {
 						if (afterB < content.size() && content[afterB] == ':') {
 					bool rootArr = !stack.empty() && stack.back().isRoot && stack.back().type == 'A';
 					if (!rootArr) {
-						addComma();
+						addComma(stack, out);
 						if (!stack.empty()) stack.back().first = false;
 						// Emit key name before [ if present
 						if (openB > 0) {
@@ -6703,7 +6401,7 @@ static std::string goonToJson(std::string_view input) {
 		// Plain []: with no fields → list (rare, but spec allows)
 		if (content.size() >= 2 && content.compare(0, 2, "[]") == 0 && content.find(':') != std::string_view::npos) {
 			size_t colon = content.find(':');
-			addComma();
+			addComma(stack, out);
 			if (!stack.empty()) stack.back().first = false;
 			out += '[';
 			stack.push_back({'A', true, indent, false});
@@ -6761,14 +6459,14 @@ static std::string goonToJson(std::string_view input) {
 
 		// List item: - value
 		if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 			out += expandCell(content.substr(2));
 			continue;
 		}
 		// Bare "-" means an inline object
 		if (content == "-") {
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 			out += '{';
 			stack.push_back({'O', true, indent, false});
@@ -6789,7 +6487,7 @@ static std::string goonToJson(std::string_view input) {
 			std::string_view valPart = content.substr(colonPos + 1);
 			while (!valPart.empty() && valPart.front() == ' ') valPart = valPart.substr(1);
 
-			addComma();
+			addComma(stack, out);
 			curFrame.first = false;
 
 			if (valPart.empty()) {
@@ -6807,8 +6505,7 @@ static std::string goonToJson(std::string_view input) {
 
 	// Close all remaining frames
 	while (!stack.empty()) {
-		if (stack.back().type == 'O') out += '}';
-		else out += ']';
+		out += (stack.back().type == 'O') ? '}' : ']';
 		stack.pop_back();
 	}
 
