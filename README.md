@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON and TRON serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON and GOON serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -39,6 +39,7 @@ MIT license - see the `LICENSE` file for details.
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
+- GOON - `toGOON()` / `fromGOON()` - greatly optimized object notation with YAML-like indentation, tabular arrays, inline/inference-based lists, single-char literals (T/F/_/~), dictionary references, round-trip support
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -142,6 +143,8 @@ int main() {
 | `bool fromTOON(std::string_view input)` | Parse TOON string. |
 | `std::string toTRON() const` | Serialize to TRON (token-reduced object notation). |
 | `bool fromTRON(std::string_view input)` | Parse TRON string (class definitions, inheritance, named args). |
+| `std::string toGOON() const` | Serialize to GOON (greatly optimized object notation). |
+| `bool fromGOON(std::string_view input)` | Parse GOON string (indentation-based, tabular arrays, dictionary refs). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -468,6 +471,45 @@ TRON features:
 - Trailing commas allowed in arrays, objects, and class instances
 - Objects with 1 property or 1 occurrence are serialized as plain JSON `{"key":val}`
 - Full round-trip: `toTRON()` then `fromTRON()` returns the original data
+
+### GOON
+
+GOON (Greatly Optimized Object Notation) is a JSON superset with YAML-like indentation, designed for human-friendly data entry.
+
+Input:
+```json
+{"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}}
+```
+
+Output:
+```goon
+name: John
+age: 30
+active: T
+items[]:
+  - 10
+  - 20
+  - 30
+address:
+  city: NYC
+```
+
+Tabular arrays (array of objects with same keys) use a compact header:
+```goon
+[2]{x,y}:
+  1,2
+  3,4
+```
+
+GOON features:
+- **Indentation-based** nesting (2-space indentation)
+- **Single-char literals**: `T`=true, `F`=false, `_`=null, `~`=empty string
+- **Inline lists**: `[N]: val1,val2,val3` or `[]:` with `- value` items on subsequent lines
+- **Tabular arrays**: `name[N]{col1,col2}:` header with comma-separated rows
+- **Dictionary references**: `$: $1="value"` on first line, `$1` resolves later
+- **Comments**: `#` to end of line
+- `#` prefix forces quoting to avoid comment ambiguity
+- Full round-trip: `toGOON()` then `fromGOON()` returns the original data
 
 ### Important Lifetime Notes
 

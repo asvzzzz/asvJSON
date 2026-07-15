@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include "asvJSON++.hpp"
 
 void example_basic() {
@@ -312,7 +313,7 @@ void example_get_root() {
 	auto* root = json.getObject();
 	std::cout << "Root type: " << (root ? root->typeToString(root->type) : "null") << std::endl;
 	
-	root->obj->emplace("newKey", asvJSONValue::makeString("value", 5));
+	json.putString("newKey", "value");
 	std::cout << "After adding via root: " << json.serialize() << std::endl << std::endl;
 }
 
@@ -383,7 +384,7 @@ void example_json_pointer() {
 	std::cout << "After array append: " << json2.serialize() << std::endl << std::endl;
 }
 
-void example_merge_patch() {
+void example_json_patch() {
 	std::cout << "=== JSON Patch (RFC 6902) ===" << std::endl;
 
 	asvJSON json;
@@ -604,6 +605,20 @@ void example_put_float32() {
 		std::cout << "is_float32 flag: " << (v->is_float32 ? "true" : "false") << std::endl;
 	}
 	std::cout << "Serialized: " << json.serialize() << std::endl << std::endl;
+}
+
+void example_nan_infinity() {
+	std::cout << "=== NaN and Infinity Handling ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.putDouble("nan_val", std::numeric_limits<double>::quiet_NaN());
+	json.putDouble("inf_val", std::numeric_limits<double>::infinity());
+
+	std::cout << "Default serialization: " << json.serialize() << std::endl;
+
+	json.allowNaNInfinity = true;
+	std::cout << "With allowNaNInfinity: " << json.serialize() << std::endl << std::endl;
 }
 
 void example_type_checks() {
@@ -893,6 +908,35 @@ void example_to_tron() {
 	std::cout << std::endl;
 }
 
+void example_to_goon() {
+	std::cout << "=== GOON Serialization ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}})"));
+	std::string goon = json.toGOON();
+	std::cout << "GOON output:" << std::endl << goon << std::endl;
+
+	asvJSON j2;
+	if (j2.fromGOON(std::string_view(goon))) {
+		std::cout << "Round-trip: name=" << j2.getString("name")
+		          << " age=" << j2.getInt("age")
+		          << " active=" << j2.getBool("active")
+		          << " city=" << j2.getString("address.city") << std::endl;
+	}
+
+	// Tabular array example
+	asvJSON tabJson;
+	tabJson.parse(std::string(R"([{"x":1,"y":2},{"x":3,"y":4}])"));
+	std::string tabGoon = tabJson.toGOON();
+	std::cout << "Tabular GOON:" << std::endl << tabGoon << std::endl;
+
+	asvJSON j3;
+	if (j3.fromGOON(std::string_view(tabGoon))) {
+		std::cout << "Tabular round-trip OK" << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -920,7 +964,7 @@ int main() {
 	example_messagepack();
 	example_bson();
 	example_json_pointer();
-	example_merge_patch();
+	example_json_patch();
 	example_clone();
 	example_get_array();
 	example_array_add();
@@ -931,6 +975,7 @@ int main() {
 	example_date_time_string();
 	example_string_overloads();
 	example_put_float32();
+	example_nan_infinity();
 	example_type_checks();
 	example_get_special_types();
 	example_extension();
@@ -951,6 +996,7 @@ int main() {
 	example_to_csv_array();
 	example_to_toon();
 	example_to_tron();
+	example_to_goon();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

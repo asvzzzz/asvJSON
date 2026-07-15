@@ -567,7 +567,7 @@ TEST(testBSONRegex) {
 	auto* rv = v->get("re");
 	if (!rv || rv->type != asvJSONValue::REGEX) throw std::runtime_error("not a regex after roundtrip");
 
-	// regex without options (no '|' separator)  regression test for BSON toBSON bug #2
+	// regex without options (no '|' separator) - regression test for BSON toBSON bug #2
 	asvJSON js2;
 	js2.putRegex("re", "^pattern$", nullptr);
 	auto bson2 = js2.toBSON();
@@ -2444,6 +2444,149 @@ TEST(testToTRONComprehensive) {
 	}
 }
 
+TEST(testToGOON) {
+	// Round-trip: plain object
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"name":"Alice","age":30})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.getString("name")), "Alice");
+		ASSERT_EQ(j2.getInt("age"), int64_t(30));
+	}
+	// Round-trip: booleans, null, empty string
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":true,"b":false,"c":null,"d":""})")));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find('T') != std::string::npos);
+		ASSERT(goon.find('F') != std::string::npos);
+		ASSERT(goon.find('_') != std::string::npos);
+		ASSERT(goon.find('~') != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getBool("a"));
+		ASSERT(!j2.getBool("b"));
+		ASSERT(j2.isNull("c"));
+		ASSERT_EQ(std::string(j2.getString("d")), "");
+	}
+	// Tabular array round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"x":1,"y":2},{"x":3,"y":4}])")));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("[2]") != std::string::npos);
+		ASSERT(goon.find("{") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+		ASSERT_EQ(j2.getRoot()->get(0)->getConst("x")->getInt(), int64_t(1));
+		ASSERT_EQ(j2.getRoot()->get(1)->getConst("y")->getInt(), int64_t(4));
+	}
+	// Round-trip: nested objects
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"outer":{"inner":{"a":1}}})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getInt("outer.inner.a"), int64_t(1));
+	}
+	// Mixed array (list format)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[1,"two",true,null]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getRoot()->getConst("items")->size(), size_t(4));
+		ASSERT_EQ(j2.getRoot()->getConst("items")->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("items")->get(1)->getString()), "two");
+	}
+	// Direct GOON parsing: tabular array
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("users[2]{name,age}:\n  Alice,30\n  Bob,25\n")));
+		ASSERT_EQ(j.getRoot()->size(), size_t(1));
+		ASSERT(j.getRoot()->hasKey("users"));
+		ASSERT_EQ(j.getRoot()->getConst("users")->size(), size_t(2));
+		ASSERT_EQ(std::string(j.getRoot()->getConst("users")->get(0)->getConst("name")->getString()), "Alice");
+		ASSERT_EQ(j.getRoot()->getConst("users")->get(1)->getConst("age")->getInt(), int64_t(25));
+	}
+	// Direct GOON parsing: literals
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: T\nb: F\nc: _\nd: ~\n")));
+		ASSERT(j.getBool("a"));
+		ASSERT(!j.getBool("b"));
+		ASSERT(j.isNull("c"));
+		ASSERT_EQ(std::string(j.getString("d")), "");
+	}
+	// Direct GOON parsing: nested object with indentation
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("outer:\n  inner:\n    a: 42\n")));
+		ASSERT_EQ(j.getInt("outer.inner.a"), int64_t(42));
+	}
+	// Direct GOON parsing: list array with inline values
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("items[]: 10,20,30\n")));
+		ASSERT_EQ(j.getRoot()->getConst("items")->size(), size_t(3));
+		ASSERT_EQ(j.getRoot()->getConst("items")->get(0)->getInt(), int64_t(10));
+		ASSERT_EQ(j.getRoot()->getConst("items")->get(2)->getInt(), int64_t(30));
+	}
+	// Direct GOON parsing: list array with - items
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("items[]:\n  - 10\n  - 20\n  - 30\n")));
+		ASSERT_EQ(j.getRoot()->getConst("items")->size(), size_t(3));
+		ASSERT_EQ(j.getRoot()->getConst("items")->get(1)->getInt(), int64_t(20));
+	}
+	// Direct GOON parsing: dictionary $N references
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("$:$0=admin,$1=user\nusers[2]{name,role}:\n  Alice,$0\n  Bob,$1\n")));
+		ASSERT_EQ(j.getRoot()->size(), size_t(1));
+		ASSERT(j.getRoot()->hasKey("users"));
+		ASSERT_EQ(j.getRoot()->getConst("users")->size(), size_t(2));
+		ASSERT_EQ(std::string(j.getRoot()->getConst("users")->get(0)->getConst("role")->getString()), "admin");
+		ASSERT_EQ(std::string(j.getRoot()->getConst("users")->get(1)->getConst("role")->getString()), "user");
+	}
+	// Direct GOON parsing: run-length encoding *N
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("flags[3]{enabled}:\n  T*3\n")));
+		ASSERT_EQ(j.getRoot()->size(), size_t(1));
+		ASSERT(j.getRoot()->hasKey("flags"));
+		ASSERT_EQ(j.getRoot()->getConst("flags")->size(), size_t(3));
+		for (size_t i = 0; i < 3; i++)
+			ASSERT(j.getRoot()->getConst("flags")->get(i)->getConst("enabled")->getBool());
+	}
+	// Round-trip: double values
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"pi":3.14,"neg":-2.5})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getDouble("pi") > 3.13 && j2.getDouble("pi") < 3.15);
+		ASSERT(j2.getDouble("neg") > -2.51 && j2.getDouble("neg") < -2.49);
+	}
+	// Round-trip: array of objects with same schema → tabular
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[{"id":1,"val":"a"},{"id":2,"val":"b"}]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getRoot()->getConst("items")->size(), size_t(2));
+		ASSERT_EQ(j2.getRoot()->getConst("items")->get(0)->getConst("id")->getInt(), int64_t(1));
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("items")->get(1)->getConst("val")->getString()), "b");
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -2764,6 +2907,9 @@ int main() {
 	RUN(testToTRON);
 	RUN(testToTRONAdvanced);
 	RUN(testToTRONComprehensive);
+	
+	std::cout << "\n--- GOON Serialization Tests ---\n";
+	RUN(testToGOON);
 	
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
