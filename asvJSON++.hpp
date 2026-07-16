@@ -5177,6 +5177,7 @@ static void tronDiscoverSchemas(const asvJSONValue* v,
 			std::vector<std::string> orig;
 			orig.reserve(v->obj->size());
 			for (const auto& [k, _] : *v->obj) orig.push_back(k);
+			std::sort(orig.begin(), orig.end());
 			firstKeys[sig] = std::move(orig);
 		}
 		for (const auto& [_, child] : *v->obj)
