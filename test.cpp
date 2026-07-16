@@ -2640,6 +2640,115 @@ TEST(testToCSV) {
 	}
 }
 
+TEST(testFromCSV) {
+  // Empty input
+  {
+    asvJSON json;
+    bool ok = json.fromCSV(std::string_view(""));
+    ASSERT(!ok);
+  }
+  // Basic array of objects
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("x,y\n1,2\n3,4")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("x")->getInt(), 1);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("y")->getInt(), 2);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("x")->getInt(), 3);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("y")->getInt(), 4);
+  }
+  // Quoted field with comma
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("name,desc\n\"Smith, John\",\"a,b,c\"")));
+    auto r = json.getRoot()->get(static_cast<size_t>(0));
+    ASSERT_EQ(std::string(r->get("name")->getString()), "Smith, John");
+    ASSERT_EQ(std::string(r->get("desc")->getString()), "a,b,c");
+  }
+  // Escaped quotes inside quoted field
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("k\n\"a\"\"b\"\"c\"")));
+    ASSERT_EQ(std::string(json.getRoot()->get(static_cast<size_t>(0))->get("k")->getString()), "a\"b\"c");
+  }
+  // Type detection: int, double, bool, null, string
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b,c,d,e\n42,3.14,TRUE,_,hello")));
+    auto r = json.getRoot()->get(static_cast<size_t>(0));
+    ASSERT_EQ(r->get("a")->getInt(), 42);
+    ASSERT_EQ(r->get("b")->getDouble(), 3.14);
+    ASSERT(r->get("c")->getBool());
+    ASSERT(r->get("d")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(std::string(r->get("e")->getString()), "hello");
+  }
+  // Empty cell → null
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("x,y\n1,\n,2")));
+    ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("x")->getInt() == 1);
+    ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("y")->type == asvJSONValue::NULL_VAL);
+    ASSERT(json.getRoot()->get(static_cast<size_t>(1))->get("x")->type == asvJSONValue::NULL_VAL);
+    ASSERT(json.getRoot()->get(static_cast<size_t>(1))->get("y")->getInt() == 2);
+  }
+  // Empty lines ignored
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a\n1\n\n2\n")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+  }
+  // CRLF line endings
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b\r\n1,2\r\n3,4\r\n")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+  }
+  // Missing fields → null
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b,c\n1,2")));
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("a")->getInt(), 1);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("b")->getInt(), 2);
+    ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("c")->type == asvJSONValue::NULL_VAL);
+  }
+  // Single column named "value" → handles array-of-scalars pattern
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("value\n1\nhello\n\n")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("value")->getInt(), 1);
+    ASSERT_EQ(std::string(json.getRoot()->get(static_cast<size_t>(1))->get("value")->getString()), "hello");
+  }
+  // Error: header only
+  {
+    asvJSON json;
+    ASSERT(!json.fromCSV(std::string_view("a,b,c")));
+  }
+  // Multi-line quoted field (RFC 4180: newline inside quotes)
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("text\n\"hello\nworld\"\nfoo")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+    ASSERT_EQ(std::string(json.getRoot()->get(static_cast<size_t>(0))->get("text")->getString()), "hello\nworld");
+    ASSERT_EQ(std::string(json.getRoot()->get(static_cast<size_t>(1))->get("text")->getString()), "foo");
+  }
+  // Multi-line with CRLF and quoted commas
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b\r\n1,\"x\r\ny\"\r\n2,3")));
+    ASSERT_EQ(json.getRoot()->arr->size(), 2U);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("a")->getInt(), 1);
+    ASSERT_EQ(std::string(json.getRoot()->get(static_cast<size_t>(0))->get("b")->getString()), "x\r\ny");
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("a")->getInt(), 2);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("b")->getInt(), 3);
+  }
+  // Unclosed quote → error
+  {
+    asvJSON json;
+    ASSERT(!json.fromCSV(std::string_view("a\n\"unclosed")));
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -2866,6 +2975,7 @@ int main() {
 	
 	std::cout << "\n--- CSV Serialization Tests ---\n";
 	RUN(testToCSV);
+	RUN(testFromCSV);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);

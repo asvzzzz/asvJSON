@@ -866,6 +866,24 @@ void example_to_csv_array() {
 	std::cout << json.toCSV() << std::endl;
 }
 
+void example_from_csv() {
+	std::cout << "=== fromCSV Parsing ===" << std::endl;
+
+	asvJSON json;
+	std::string csv = "name,age,city\nAlice,30,\"New York\"\nBob,25,London\n";
+	if (json.fromCSV(std::string_view(csv))) {
+		std::cout << json.serialize(true) << std::endl;
+		for (size_t i = 0; i < json.getRoot()->arr->size(); i++) {
+			auto row = json.getRoot()->get(i);
+			std::cout << "  name=" << row->get("name")->getString()
+			          << " age=" << row->get("age")->getInt()
+			          << " city=" << row->get("city")->getString() << std::endl;
+		}
+	} else {
+		std::cout << "Parse failed: " << json.getLastError() << std::endl;
+	}
+}
+
 void example_to_toon() {
 	std::cout << "=== TOON Serialization ===" << std::endl;
 
@@ -990,6 +1008,7 @@ int main() {
 	example_to_yaml_multiline();
 	example_to_csv();
 	example_to_csv_array();
+	example_from_csv();
 	example_to_toon();
 	example_to_tron();
 	example_to_goon();

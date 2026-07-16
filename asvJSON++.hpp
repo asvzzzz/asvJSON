@@ -2635,6 +2635,12 @@ public:
 	 */
 	std::string toCSV() const;
 	/**
+	 * @brief Parse CSV text format (RFC 4180)
+	 * @param input CSV data (first row = header, subsequent rows = data)
+	 * @return true on success, false on error (see lastError)
+	 */
+	bool fromCSV(std::string_view input);
+	/**
 	 * @brief Parse BSON binary format
 	 * @param data Pointer to BSON data
 	 * @param size Size of data in bytes
@@ -3306,6 +3312,119 @@ inline std::string csvEscape(std::string_view s) {
 }
 } // namespace asvJSONInternal
 using namespace asvJSONInternal;
+
+/**
+ * @brief Split CSV line into fields respecting RFC 4180 quotes and escapes
+ */
+static std::vector<std::string> csvSplitLine(std::string_view line) {
+	std::vector<std::string> fields;
+	std::string cur;
+	bool inQuotes = false;
+	for (size_t i = 0; i < line.size(); i++) {
+		char c = line[i];
+		if (!inQuotes && c == '"') { inQuotes = true; continue; }
+		if (inQuotes && c == '"') {
+			if (i + 1 < line.size() && line[i + 1] == '"') { cur += '"'; i++; continue; }
+			inQuotes = false; continue;
+		}
+		if (!inQuotes && c == ',') { fields.push_back(std::move(cur)); cur.clear(); continue; }
+		cur += c;
+	}
+	fields.push_back(std::move(cur));
+	return fields;
+}
+
+/**
+ * @brief Detect JSON value type from CSV cell string
+ */
+static std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
+	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
+	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
+	if (s == "false" || s == "FALSE" || s == "F") return asvJSONValue::makeBool(false);
+	if (!s.empty() && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
+		long long v;
+		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+		if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeInt(v);
+		double d;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+		auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
+		if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
+#else
+		char* end; errno = 0;
+		d = std::strtod(s.data(), &end);
+		if (errno != ERANGE && end == s.data() + s.size()) return asvJSONValue::makeDouble(d);
+#endif
+	}
+	return asvJSONValue::makeString(s.data(), s.size());
+}
+
+inline bool asvJSON::fromCSV(std::string_view input) {
+	try {
+		if (input.empty()) throw asvJSONError("empty input");
+
+		// Split into lines, respecting quoted multi-line fields (RFC 4180)
+		std::vector<std::string_view> lines;
+		size_t start = 0;
+		bool inQuotes = false;
+		for (size_t i = 0; i <= input.size(); i++) {
+			if (i == input.size()) {
+				if (!inQuotes) {
+					size_t end = (i > start && input[i - 1] == '\r') ? (i - 1) : i;
+					if (end > start) lines.push_back(input.substr(start, end - start));
+				}
+				break;
+			}
+			if (input[i] == '"') {
+				if (i + 1 < input.size() && input[i + 1] == '"') { i++; continue; }
+				inQuotes = !inQuotes;
+			} else if (!inQuotes && input[i] == '\n') {
+				size_t end = (i > start && input[i - 1] == '\r') ? (i - 1) : i;
+				if (end > start) lines.push_back(input.substr(start, end - start));
+				start = i + 1;
+			}
+		}
+		if (inQuotes) throw asvJSONError("unclosed quote in CSV");
+
+		if (lines.empty()) throw asvJSONError("empty CSV data");
+
+		std::vector<std::string> headers = csvSplitLine(lines[0]);
+		if (headers.empty()) throw asvJSONError("empty CSV header");
+
+		auto arr = asvJSONValue::makeArray();
+		if (!arr) throw asvJSONError("out of memory");
+
+		for (size_t li = 1; li < lines.size(); li++) {
+			if (lines[li].empty()) continue;
+			auto fields = csvSplitLine(lines[li]);
+			auto obj = asvJSONValue::makeObject();
+			if (!obj) throw asvJSONError("out of memory");
+			for (size_t fi = 0; fi < headers.size(); fi++) {
+				std::string val = fi < fields.size() ? std::string(fields[fi]) : std::string();
+				// Unescape RFC 4180 quoted fields
+				std::string unescaped;
+				if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+					for (size_t vi = 1; vi < val.size() - 1; vi++) {
+						if (val[vi] == '"' && vi + 1 < val.size() - 1 && val[vi + 1] == '"') { unescaped += '"'; vi++; }
+						else unescaped += val[vi];
+					}
+				} else {
+					unescaped = std::move(val);
+				}
+				obj->obj->emplace(headers[fi], csvDetectType(unescaped));
+			}
+			arr->arr->push_back(std::move(obj));
+		}
+
+		if (arr->arr->empty()) throw asvJSONError("no data rows");
+
+		root = std::move(arr);
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
+		root = nullptr;
+		return false;
+	}
+}
 
 inline std::string asvJSON::toCSV() const {
 	std::string out;
