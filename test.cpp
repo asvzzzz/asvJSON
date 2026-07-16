@@ -894,10 +894,13 @@ TEST(testJSONPatchCopyMove) {
 TEST(testJSONPatchTestIntDouble) {
 	asvJSON json;
 	json.parse(std::string("{\"x\": 1}"));
-	// "test" with 1.0 (DOUBLE) should match INT 1
+	// "test" with 1.0 (DOUBLE) should NOT match INT 1 (strict typing per RFC 6902)
 	asvJSON patch;
 	patch.parse(std::string("[{\"op\": \"test\", \"path\": \"/x\", \"value\": 1.0}]"));
-	if (!json.applyPatch(patch)) throw std::runtime_error("INT 1 should match DOUBLE 1.0");
+	if (json.applyPatch(patch)) throw std::runtime_error("INT 1 should NOT match DOUBLE 1.0");
+	// "test" with 1 (INT) should match INT 1
+	patch.parse(std::string("[{\"op\": \"test\", \"path\": \"/x\", \"value\": 1}]"));
+	if (!json.applyPatch(patch)) throw std::runtime_error("INT 1 should match INT 1");
 	// "test" with 2 (INT) should NOT match 1 (INT)
 	patch.parse(std::string("[{\"op\": \"test\", \"path\": \"/x\", \"value\": 2}]"));
 	if (json.applyPatch(patch)) throw std::runtime_error("INT 2 should NOT match INT 1");
@@ -946,13 +949,13 @@ TEST(testGetConstOverloads) {
 
 TEST(testBase64Encode) {
 	uint8_t data[] = {0x01, 0x02, 0x03};
-	std::string encoded = base64_encode(data, 3);
+	std::string encoded = encodeBase64(data, 3);
 	ASSERT_EQ(encoded, "AQID");
 }
 
 TEST(testBase64Decode) {
 	std::string encoded = "AQID";
-	auto decoded = base64_decode_fast(encoded.c_str(), encoded.length());
+	auto decoded = decodeBase64Fast(encoded.c_str(), encoded.length());
 	ASSERT_EQ(decoded.size(), 3);
 	ASSERT_EQ(decoded[0], 0x01);
 	ASSERT_EQ(decoded[1], 0x02);
@@ -962,8 +965,8 @@ TEST(testBase64Decode) {
 TEST(testBase64Roundtrip) {
 	setBase64Chars("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/");
 	uint8_t data[] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9};
-	std::string encoded = base64_encode(data, sizeof(data));
-	auto decoded = base64_decode_fast(encoded.c_str(), encoded.length());
+	std::string encoded = encodeBase64(data, sizeof(data));
+	auto decoded = decodeBase64Fast(encoded.c_str(), encoded.length());
 	ASSERT_EQ(decoded.size(), sizeof(data));
 	for (size_t i = 0; i < sizeof(data); i++) {
 		ASSERT_EQ(decoded[i], data[i]);
@@ -981,8 +984,8 @@ TEST(testBase64CustomCharset) {
 	ASSERT_EQ(charset.length(), 64U);
 	
 	uint8_t data[] = {0x01, 0x02, 0x03};
-	std::string encoded = base64_encode(data, 3);
-	auto decoded = base64_decode_fast(encoded.c_str(), encoded.length());
+	std::string encoded = encodeBase64(data, 3);
+	auto decoded = decodeBase64Fast(encoded.c_str(), encoded.length());
 	ASSERT_EQ(decoded.size(), 3);
 	ASSERT_EQ(decoded[0], 0x01);
 	ASSERT_EQ(decoded[1], 0x02);

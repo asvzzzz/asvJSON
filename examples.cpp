@@ -212,7 +212,7 @@ void example_base64_custom_charset() {
 	setBase64Chars("XYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUV");
 	
 	uint8_t data[] = {0x01, 0x02, 0x03};
-	std::string encoded = base64_encode(data, sizeof(data));
+	std::string encoded = encodeBase64(data, sizeof(data));
 	
 	std::cout << "Custom charset input (64 chars): XYZ..." << std::endl;
 	std::cout << "Custom charset encoded: " << encoded << std::endl;

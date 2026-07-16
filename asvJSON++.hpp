@@ -80,14 +80,19 @@
 #include <charconv>
 
 #ifdef _WIN32
-inline void asvjson_gmtime(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_s(tm, &tt); }
-inline void asvjson_localtime(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_s(tm, &tt); }
+namespace asvJSONInternal {
+inline void gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_s(tm, &tt); }
+inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_s(tm, &tt); }
+} // namespace asvJSONInternal
 #define asvjson_timegm _mkgmtime
 #else
-inline void asvjson_gmtime(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_r(&tt, tm); }
-inline void asvjson_localtime(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_r(&tt, tm); }
+namespace asvJSONInternal {
+inline void gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_r(&tt, tm); }
+inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_r(&tt, tm); }
+} // namespace asvJSONInternal
 #define asvjson_timegm timegm
 #endif
+using namespace asvJSONInternal;
 
 // Object map type - default uses unordered_map for O(1) lookups
 // Define ASVJSON_USE_ORDERED_MAP before including header for std::map (deterministic output)
@@ -119,31 +124,31 @@ struct SafeHash {
 };
 } // namespace asvJSONInternal
 
-// Heterogeneous lookup helpers for unordered_map.
-// map_find/map_count pass string_view directly on modern compilers (no allocation).
-// On GCC < 9 (no P0919R3), a temporary string is needed for the find call.
+namespace asvJSONInternal {
 #ifdef ASVJSON_USE_ORDERED_MAP
-inline constexpr std::string_view asvjson_key(std::string_view sv) { return sv; }
-inline const std::string& asvjson_key(const std::string& s) { return s; }
-inline constexpr const char* asvjson_key(const char* s) { return s; }
-inline std::string_view asvjson_key(const char* data, size_t len) { return std::string_view(data, len); }
+inline constexpr std::string_view keyForLookup(std::string_view sv) { return sv; }
+inline const std::string& keyForLookup(const std::string& s) { return s; }
+inline constexpr const char* keyForLookup(const char* s) { return s; }
+inline std::string_view keyForLookup(const char* data, size_t len) { return std::string_view(data, len); }
 template<typename Map, typename Key>
-inline auto map_find(Map& m, const Key& k) { return m.find(k); }
+inline auto mapFind(Map& m, const Key& k) { return m.find(k); }
 template<typename Map, typename Key>
-inline auto map_count(Map& m, const Key& k) { return m.count(k); }
+inline auto mapCount(Map& m, const Key& k) { return m.count(k); }
 #else
 #if defined(__cpp_lib_generic_unordered_lookup) && __cpp_lib_generic_unordered_lookup >= 201811L
 template<typename Map>
-inline auto map_find(Map& m, std::string_view k) { return m.find(k); }
+inline auto mapFind(Map& m, std::string_view k) { return m.find(k); }
 template<typename Map>
-inline auto map_count(Map& m, std::string_view k) { return m.count(k); }
+inline auto mapCount(Map& m, std::string_view k) { return m.count(k); }
 #else
 template<typename Map>
-inline auto map_find(Map& m, std::string_view k) { return m.find(std::string(k)); }
+inline auto mapFind(Map& m, std::string_view k) { return m.find(std::string(k)); }
 template<typename Map>
-inline auto map_count(Map& m, std::string_view k) { return m.count(std::string(k)); }
+inline auto mapCount(Map& m, std::string_view k) { return m.count(std::string(k)); }
 #endif
 #endif
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 class asvJSONError : public std::runtime_error {
 public:
@@ -477,7 +482,7 @@ struct asvJSONValue {
 	 */
 	[[nodiscard]] asvJSONValue* get(std::string_view key) const {
 		if (key.empty() || type != OBJECT || !obj) return nullptr;
-		auto it = map_find(*obj, key);
+		auto it = mapFind(*obj, key);
 		return (it != obj->end()) ? it->second.get() : nullptr;
 	}
 
@@ -488,7 +493,7 @@ struct asvJSONValue {
 
 	const asvJSONValue* getConst(std::string_view key) const {
 		if (key.empty() || type != OBJECT || !obj) return nullptr;
-		auto it = map_find(*obj, key);
+		auto it = mapFind(*obj, key);
 		return (it != obj->end()) ? it->second.get() : nullptr;
 	}
 
@@ -509,7 +514,7 @@ struct asvJSONValue {
 	 * @return true if key exists in object
 	 */
 	[[nodiscard]] bool hasKey(std::string_view key) const {
-		return type == OBJECT && obj && map_count(*obj, key) > 0;
+		return type == OBJECT && obj && mapCount(*obj, key) > 0;
 	}
 
 
@@ -638,21 +643,16 @@ struct asvJSONValue {
 	void toCSV(std::string& out) const;
 };
 
-/**
- * @brief Clone a JSON value (deep copy)
- * @param v Value to clone (can be nullptr)
- * @return New cloned value or nullptr
- */
-inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v);
 
+namespace asvJSONInternal {
 // C++17 inline base64 charset
 inline constexpr char ASVJSON_BASE64_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-inline std::string asvjson_custom_base64_chars;
+inline std::string customBase64Chars;
 /**
  * @brief Get global mutex for base64 charset access
  * @return Reference to static mutex
  */
-inline std::mutex& asvjson_base64_mutex() {
+inline std::mutex& base64Mutex() {
 	static std::mutex mtx;
 	return mtx;
 }
@@ -661,7 +661,7 @@ inline std::mutex& asvjson_base64_mutex() {
  * @brief Version counter for custom charset changes
  * @return Reference to global version counter
  */
-inline std::atomic<int>& asvjson_base64_version() {
+inline std::atomic<int>& base64Version() {
 	static std::atomic<int> version{0};
 	return version;
 }
@@ -670,16 +670,16 @@ inline std::atomic<int>& asvjson_base64_version() {
  * @brief Get decode table, building per-thread on first access and when charset changes
  * @return Pointer to 256-entry decode table
  */
-inline const int8_t* asvjson_get_decode_table() {
+inline const int8_t* getDecodeTable() {
 	thread_local int8_t table[256];
 	thread_local int local_version = -1;
-	int global_version = asvjson_base64_version();
+	int global_version = base64Version();
 	if (local_version != global_version) {
 		std::memset(table, -1, sizeof(table));
 		std::string charset_copy;
 		{
-			std::lock_guard<std::mutex> lock(asvjson_base64_mutex());
-			charset_copy = asvjson_custom_base64_chars;
+			std::lock_guard<std::mutex> lock(base64Mutex());
+			charset_copy = customBase64Chars;
 		}
 		const char* charset = charset_copy.empty() ? ASVJSON_BASE64_CHARS : charset_copy.c_str();
 		for (int i = 0; i < 64; i++) {
@@ -691,8 +691,8 @@ inline const int8_t* asvjson_get_decode_table() {
 }
 
 /** @brief Force rebuild of the decode table (call after changing charset) */
-inline void asvjson_rebuild_decode_table() {
-	++asvjson_base64_version();
+inline void rebuildDecodeTable() {
+	++base64Version();
 }
 
 /**
@@ -701,9 +701,9 @@ inline void asvjson_rebuild_decode_table() {
  */
 inline void setBase64Chars(const std::string& chars) {
 	if (chars.length() >= 64) {
-		std::lock_guard<std::mutex> lock(asvjson_base64_mutex());
-		asvjson_custom_base64_chars = chars.length() > 64 ? chars.substr(0, 64) : chars;
-		asvjson_rebuild_decode_table();
+		std::lock_guard<std::mutex> lock(base64Mutex());
+		customBase64Chars = chars.length() > 64 ? chars.substr(0, 64) : chars;
+		rebuildDecodeTable();
 	}
 }
 
@@ -712,9 +712,9 @@ inline void setBase64Chars(const std::string& chars) {
  * @return Charset string (64 chars)
  */
 inline const char* getBase64Chars() {
-	asvjson_get_decode_table();
-	std::lock_guard<std::mutex> lock(asvjson_base64_mutex());
-	return asvjson_custom_base64_chars.empty() ? ASVJSON_BASE64_CHARS : asvjson_custom_base64_chars.c_str();
+	getDecodeTable();
+	std::lock_guard<std::mutex> lock(base64Mutex());
+	return customBase64Chars.empty() ? ASVJSON_BASE64_CHARS : customBase64Chars.c_str();
 }
 
 /**
@@ -756,8 +756,8 @@ inline bool isValidUTF8(const uint8_t* data, size_t len) noexcept {
  * @param c Character to decode
  * @return Value 0-63 or -1
  */
-inline int base64_decode_value_custom(char c) {
-	return asvjson_get_decode_table()[static_cast<unsigned char>(c)];
+inline int decodeBase64Value(char c) {
+	return getDecodeTable()[static_cast<unsigned char>(c)];
 }
 
 /**
@@ -766,19 +766,24 @@ inline int base64_decode_value_custom(char c) {
  * @param len Length of data
  * @return Base64-encoded string
  */
-inline std::string base64_encode(const uint8_t* input, size_t len) {
+inline std::string encodeBase64(const uint8_t* input, size_t len) {
 	if (!input || len > SIZE_MAX / 3) return "";
-	const char* chars = getBase64Chars();
+	std::string chars;
+	{
+		std::lock_guard<std::mutex> lock(base64Mutex());
+		chars = customBase64Chars.empty() ? ASVJSON_BASE64_CHARS : customBase64Chars;
+	}
+	const char* charset = chars.c_str();
 	std::string result;
 	result.reserve((len + 2) / 3 * 4);
 	for (size_t i = 0; i < len; i += 3) {
 		int b0 = input[i];
 		int b1 = i + 1 < len ? input[i + 1] : 0;
 		int b2 = i + 2 < len ? input[i + 2] : 0;
-		result.push_back(chars[(b0 >> 2)]);
-		result.push_back(chars[((b0 & 0x3) << 4) | (b1 >> 4)]);
-		result.push_back(i + 1 < len ? chars[((b1 & 0xF) << 2) | (b2 >> 6)] : '=');
-		result.push_back(i + 2 < len ? chars[b2 & 0x3F] : '=');
+		result.push_back(charset[(b0 >> 2)]);
+		result.push_back(charset[((b0 & 0x3) << 4) | (b1 >> 4)]);
+		result.push_back(i + 1 < len ? charset[((b1 & 0xF) << 2) | (b2 >> 6)] : '=');
+		result.push_back(i + 2 < len ? charset[b2 & 0x3F] : '=');
 	}
 	return result;
 }
@@ -790,10 +795,10 @@ inline std::string base64_encode(const uint8_t* input, size_t len) {
  * @param error Error flag output
  * @return Decoded bytes or empty
  */
-inline std::vector<uint8_t> base64_decode_fast(const char* str, size_t len, bool* error = nullptr) {
+inline std::vector<uint8_t> decodeBase64Fast(const char* str, size_t len, bool* error = nullptr) {
 	if (error) *error = false;
 	if (!str || len == 0) return {};
-	asvjson_get_decode_table();
+	getDecodeTable();
 	size_t realLen = len;
 	while (realLen > 0 && str[realLen - 1] == '=') {
 		realLen--;
@@ -807,25 +812,25 @@ inline std::vector<uint8_t> base64_decode_fast(const char* str, size_t len, bool
 	int values[4] = {-1, -1, -1, -1};
 	size_t i = 0;
 	while (i < realLen) {
-		values[0] = base64_decode_value_custom(str[i]);
+		values[0] = decodeBase64Value(str[i]);
 		if (values[0] < 0) { if (error) *error = true; return {}; }
 		i++;
 		if (i >= realLen || str[i] == '=') {
 			values[1] = -1;
 		} else {
-			values[1] = base64_decode_value_custom(str[i]);
+			values[1] = decodeBase64Value(str[i]);
 			i++;
 		}
 		if (i >= realLen || str[i] == '=') {
 			values[2] = -1;
 		} else {
-			values[2] = base64_decode_value_custom(str[i]);
+			values[2] = decodeBase64Value(str[i]);
 			i++;
 		}
 		if (i >= realLen || str[i] == '=') {
 			values[3] = -1;
 		} else {
-			values[3] = base64_decode_value_custom(str[i]);
+			values[3] = decodeBase64Value(str[i]);
 			i++;
 		}
 		result.push_back((values[0] << 2) | ((values[1] >= 0) ? (values[1] >> 4) : 0));
@@ -844,7 +849,7 @@ inline std::vector<uint8_t> base64_decode_fast(const char* str, size_t len, bool
  */
 static void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
   out += "\"__BASE64__";
-  out += base64_encode(data, len);
+  out += encodeBase64(data, len);
   out += '"';
 }
 
@@ -855,7 +860,7 @@ static void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::str
   out += "\"__EXT__";
   out += std::to_string(type);
   out += '_';
-  out += base64_encode(data, len);
+  out += encodeBase64(data, len);
   out += '"';
 }
 
@@ -1035,42 +1040,28 @@ inline void appendJsonEscaped(std::string& out, std::string_view s) {
 	}
 }
 
-// Forward declarations for type-formatting helpers (defined before TOON section)
+// Forward declarations for type-formatting helpers
+static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity);
 static void fmtDoubleVal(double d, std::string& out);
 static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out);
 static void fmtDateTimeVal(time_t ts, int ms, std::string& out);
 static void fmtObjectIdHexVal(std::string_view s, std::string& out);
 static void fmtRegexVal(std::string_view s, std::string& out);
 static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out);
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) const {
 	switch (type) {
-		case NULL_VAL: out += "null"; break;
-		case STRING: {
-			out.reserve(out.size() + str_data.size() * 6 + 2);
-			out.push_back('"');
-			appendJsonEscaped(out, str_data);
-			out.push_back('"');
+		case NULL_VAL:
+		case STRING:
+		case INT:
+		case BOOL_VAL:
+		case DOUBLE:
+		case DATETIME:
+		case BINARY:
+			appendJsonToken(out, this, allowNaNInfinity);
 			break;
-		}
-		case INT: out += std::to_string(num); break;
-		case BOOL_VAL: out += flag ? "true" : "false"; break;
-		case DOUBLE: {
-			if (fmtNaNInfVal(dbl, allowNaNInfinity, out)) break;
-			fmtDoubleVal(dbl, out);
-			break;
-		}
-		case DATETIME: {
-			out.push_back('"');
-			fmtDateTimeVal(timestamp, datetime_ms, out);
-			out.push_back('"');
-			break;
-		}
-		case BINARY: {
-			if (bin_data.empty()) { out += "null"; break; }
-			fmtBase64JsonVal(bin_data.data(), bin_data.size(), out);
-			break;
-		}
 		case OBJECT: {
 			if (obj->size() < SIZE_MAX / 32) out.reserve(out.size() + obj->size() * 32);
 			out.push_back('{');
@@ -1110,31 +1101,15 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 	std::string prefix(indent * 4, ' ');
 	std::string indentNext((indent + 1) * 4, ' ');
 	switch (type) {
-		case NULL_VAL: out += "null"; break;
-		case STRING: {
-			out.push_back('"');
-			appendJsonEscaped(out, str_data);
-			out.push_back('"');
+		case NULL_VAL:
+		case STRING:
+		case INT:
+		case BOOL_VAL:
+		case DOUBLE:
+		case DATETIME:
+		case BINARY:
+			appendJsonToken(out, this, allowNaNInfinity);
 			break;
-		}
-		case INT: out += std::to_string(num); break;
-		case BOOL_VAL: out += flag ? "true" : "false"; break;
-		case DOUBLE: {
-			if (fmtNaNInfVal(dbl, allowNaNInfinity, out)) break;
-			fmtDoubleVal(dbl, out);
-			break;
-		}
-		case DATETIME: {
-			out.push_back('"');
-			fmtDateTimeVal(timestamp, datetime_ms, out);
-			out.push_back('"');
-			break;
-		}
-		case BINARY: {
-			if (bin_data.empty()) { out += "null"; break; }
-			fmtBase64JsonVal(bin_data.data(), bin_data.size(), out);
-			break;
-		}
 		case OBJECT: {
 			out.push_back('{');
 			if (!obj->empty()) {
@@ -1176,6 +1151,7 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 	}
 }
 
+namespace asvJSONInternal {
 /** Try to parse ISO 8601 datetime string */
 inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 	if (sv.size() < 20) return false;
@@ -1221,9 +1197,9 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 			p++;
 			digits++;
 		}
+		if (digits == 0) return false;
 		if (digits < 3) ms *= (digits == 1 ? 100 : 10);
-		if (digits == 3 && p < sv.size() && sv[p] >= '0' && sv[p] <= '9') return false;
-		while (p < sv.size() && sv[p] >= '0' && sv[p] <= '9') p++;
+		if (p < sv.size() && sv[p] >= '0' && sv[p] <= '9') return false;
 		tz_pos = p;
 	}
 
@@ -1357,6 +1333,14 @@ static std::string unescapeJsonString(std::string_view s, bool strict = true) {
     throw asvJSONError("Invalid UTF-8 sequence");
   return r;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
+
+// Forward declarations for functions defined later in the file
+namespace asvJSONInternal {
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v);
+}
+using namespace asvJSONInternal;
 
 class asvJSON {
 public:
@@ -1478,7 +1462,7 @@ private:
 
 		// Check Base64 first (must precede date parse to avoid false positives)
 		if (raw.size() > 10 && raw.compare(0, 10, "__BASE64__") == 0) {
-			auto data = base64_decode_fast(raw.data() + 10, raw.size() - 10);
+			auto data = decodeBase64Fast(raw.data() + 10, raw.size() - 10);
 			auto v = asvJSONValue::makeBinary(data.data(), data.size());
 			return v;
 		}
@@ -1515,7 +1499,7 @@ private:
 				next();
 				auto val = parseValue();
 				if (!val) { --parseDepth; throw asvJSONError("Failed to parse object value"); }
-			auto it = map_find(*(obj->obj), key);
+			auto it = mapFind(*(obj->obj), key);
 			if (it != obj->obj->end()) {
 				it->second = std::move(val);
 			} else {
@@ -1573,7 +1557,7 @@ private:
 		const char* buf = json.data() + start;
 		if (isDouble) {
 			double d;
-		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || __GNUC__ >= 11)
+		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
 			if (ec != std::errc() || ptr != buf + numLen) throw asvJSONError("Invalid number");
 		#else
@@ -1798,7 +1782,7 @@ public:
 		if (v->type == asvJSONValue::DATETIME) {
 			char buf[32];
 			std::tm tm;
-			asvjson_gmtime(&tm, &v->timestamp);
+			gmtimeSafe(&tm, &v->timestamp);
 			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
 			return std::string(buf);
 		}
@@ -1885,7 +1869,7 @@ public:
 		if (!root) return;
 		auto v = factory();
 		if (!v) return;
-		auto it = map_find(*root->obj, key);
+		auto it = mapFind(*root->obj, key);
 		if (it != root->obj->end()) { it->second = std::move(v); }
 		else { root->obj->emplace(std::string(key), std::move(v)); }
 	}
@@ -1985,7 +1969,7 @@ public:
 		size_t bytes_per_chunk = (chunk_size / 4) * 3;
 		for (size_t i = 0; i < size; i += bytes_per_chunk) {
 			size_t chunk = std::min(bytes_per_chunk, size - i);
-			std::string encoded = base64_encode(data + i, chunk);
+			std::string encoded = encodeBase64(data + i, chunk);
 			auto v = asvJSONValue::makeString(encoded.c_str(), encoded.length());
 			if (!v) return;
 			arr->arr->emplace_back(std::move(v));
@@ -2006,7 +1990,7 @@ public:
 			auto* chunk = arr->get(i);
 			if (chunk && chunk->type == asvJSONValue::STRING) {
 				bool decode_error = false;
-				auto decoded = base64_decode_fast(chunk->str_data.data(), chunk->str_data.size(), &decode_error);
+				auto decoded = decodeBase64Fast(chunk->str_data.data(), chunk->str_data.size(), &decode_error);
 				if (decode_error) return {};
 				result.insert(result.end(), decoded.begin(), decoded.end());
 			}
@@ -2302,7 +2286,7 @@ public:
 	 */
 	[[nodiscard]] bool hasKey(std::string_view key) const noexcept {
 		if (!root || root->type != asvJSONValue::OBJECT) return false;
-		return map_count(*root->obj, key) > 0;
+		return mapCount(*root->obj, key) > 0;
 	}
 
 	/**
@@ -2311,7 +2295,7 @@ public:
 	 */
 	inline void remove(std::string_view key) {
 		if (!root || root->type != asvJSONValue::OBJECT) return;
-		auto it = map_find(*root->obj, key);
+		auto it = mapFind(*root->obj, key);
 		if (it != root->obj->end()) root->obj->erase(it);
 	}
 
@@ -2472,7 +2456,7 @@ public:
 		if (v && v->type == asvJSONValue::DATETIME) {
 			char buf[40];
 			std::tm tm;
-			asvjson_gmtime(&tm, &v->timestamp);
+			gmtimeSafe(&tm, &v->timestamp);
 			if (v->datetime_ms > 0) {
 				std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
 				std::string result = buf;
@@ -2522,7 +2506,7 @@ public:
 		if (!v || v->type != asvJSONValue::DATETIME) return defaultValue;
 		std::tm tm = {};
 		int64_t ts = v->getDateTime();
-		asvjson_localtime(&tm, &ts);
+		localtimeSafe(&tm, &ts);
 		return tm;
 	}
 
@@ -2533,7 +2517,7 @@ public:
 	void arrayAddValue(std::string_view key, F&& factory) {
 		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return;
-		auto it = map_find(*root->obj, key);
+		auto it = mapFind(*root->obj, key);
 		asvJSONValue* arr;
 		if (it == root->obj->end()) {
 			auto newArr = asvJSONValue::makeArray();
@@ -2663,17 +2647,15 @@ public:
 	 * @return Pointer to value or nullptr
 	 */
 	// Helper: check if a string can be interpreted as a non-negative integer (for JSON Pointer array indices)
-	static bool isArrayIndex(const std::string& s) {
-		if (s.empty()) return false;
-		for (char c : s) {
-			if (c < '0' || c > '9') return false;
-		}
-		// Check it's not too large (within size_t range)
-		errno = 0;
-		char* end;
-		(void)strtoul(s.c_str(), &end, 10);
-		return (errno != ERANGE && *end == '\0' && end == s.c_str() + s.length());
+static bool isArrayIndex(const std::string& s) {
+	if (s.empty()) return false;
+	for (char c : s) {
+		if (c < '0' || c > '9') return false;
 	}
+	size_t val;
+	auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
+	return (ec == std::errc() && ptr == s.data() + s.size());
+}
 
 	/**
 	 * @brief Get value by JSON Pointer (const)
@@ -2768,6 +2750,7 @@ inline std::vector<uint8_t> asvJSON::toMessagePack() const {
 	return out;
 }
 
+namespace asvJSONInternal {
 /**
  * @brief Read 64-bit little-endian integer
  * @param data Pointer to data
@@ -2784,7 +2767,7 @@ inline uint64_t readLE64(const uint8_t* data) {
  * @param data Pointer to data
  * @return Double value
  */
-inline double readLE64_double(const uint8_t* data) {
+inline double readLE64Double(const uint8_t* data) {
 	uint64_t u = readLE64(data);
 	double d;
 	memcpy(&d, &u, sizeof(d));
@@ -3237,18 +3220,24 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 
 	return nullptr;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline bool asvJSON::fromMessagePack(const uint8_t* data, size_t size) {
 	root = nullptr;
 	if (!data || size == 0) return false;
-	size_t pos = 0;
-	root = parseMessagePack(data, pos, size);
-	if (!root || pos != size) {
-		root = nullptr;
-		lastError = pos != size ? "Trailing bytes" : "Parse failed";
+	try {
+		size_t pos = 0;
+		root = parseMessagePack(data, pos, size);
+		if (!root || pos != size) {
+			root = nullptr;
+			throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed");
+		}
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
 		return false;
 	}
-	return true;
 }
 
 inline std::vector<uint8_t> asvJSON::toBSON() const {
@@ -3297,6 +3286,7 @@ inline std::string asvJSON::toYAML() const {
 }
 
 // ---------- CSV helpers ----------
+namespace asvJSONInternal {
 /**
  * @brief Escape a string for CSV output
  * @param s Input string view
@@ -3314,6 +3304,8 @@ inline std::string csvEscape(std::string_view s) {
 	out += '"';
 	return out;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline std::string asvJSON::toCSV() const {
 	std::string out;
@@ -3331,30 +3323,22 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			case T::INT: return std::to_string(v->num);
 			case T::DOUBLE: {
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return {};
-				char buf[32]; int n = snprintf(buf, sizeof(buf), "%.17g", v->dbl);
-				return (n > 0) ? std::string(buf, static_cast<size_t>(n)) : std::string{};
+				std::string s; fmtDoubleVal(v->dbl, s); return s;
 			}
 			case T::STRING: return v->str_data;
 			case T::DATETIME: {
-				char buf[40]; std::tm tm; asvjson_gmtime(&tm, &v->timestamp);
-				char ms[16] = ""; if (v->datetime_ms > 0) snprintf(ms, sizeof(ms), ".%03d", v->datetime_ms);
-				if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm) == 0) return {};
-				return std::string(buf) + ms + "Z";
+				std::string s; fmtDateTimeVal(v->timestamp, v->datetime_ms, s); return s;
 			}
-			case T::BINARY: return base64_encode(v->bin_data.data(), v->bin_data.size());
+			case T::BINARY: return encodeBase64(v->bin_data.data(), v->bin_data.size());
 			case T::OBJECTID: {
-				std::string hex;
-				for (size_t i = 0; i < v->str_data.size() && i < 12; i++) {
-					char hb[4]; snprintf(hb, sizeof(hb), "%02x", static_cast<unsigned char>(v->str_data[i])); hex += hb;
-				}
-				return hex;
+				std::string s; fmtObjectIdHexVal(v->str_data, s); return s;
 			}
 			case T::REGEX: {
 				size_t sep = v->str_data.find('|');
 				return (sep != std::string_view::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
 			}
 			case T::TIMESTAMP: return std::to_string(v->num);
-			case T::EXTENSION: return base64_encode(v->bin_data.data(), v->bin_data.size());
+			case T::EXTENSION: return encodeBase64(v->bin_data.data(), v->bin_data.size());
 			case T::ARRAY:
 			case T::OBJECT: {
 				std::string s;
@@ -3463,7 +3447,10 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 	}
 }
 
+namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 /**
  * @brief Parse BSON binary format
@@ -3474,17 +3461,21 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 inline bool asvJSON::fromBSON(const uint8_t* data, size_t size) {
 	root = nullptr;
 	if (!data || size < 5) return false;
-
-	size_t pos = 0;
-	root = parseBSON(data, pos, size, 0);
-	if (!root || pos != size) {
-		root = nullptr;
-		lastError = pos != size ? "Trailing bytes" : "Parse failed";
+	try {
+		size_t pos = 0;
+		root = parseBSON(data, pos, size, 0);
+		if (!root || pos != size) {
+			root = nullptr;
+			throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed");
+		}
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
 		return false;
 	}
-	return true;
 }
 
+namespace asvJSONInternal {
 /**
  * @brief Read 32-bit little-endian integer
  * @param data Pointer to data
@@ -3525,7 +3516,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		switch (type) {
 			case 0x01: {
 				if (pos + 8 > dataLen) return nullptr;
-				double d = readLE64_double(data + pos);
+				double d = readLE64Double(data + pos);
 				pos += 8;
 				val = asvJSONValue::makeDouble(d);
 				break;
@@ -3557,11 +3548,12 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 					size_t count = val->obj->size();
 					bool sequential = true;
 					char idxBuf[32];
+					std::vector<std::string> keys(count);
 					for (size_t i = 0; i < count; i++) {
 						auto [ptr, ec] = std::to_chars(idxBuf, idxBuf + sizeof(idxBuf), i);
 						if (ec != std::errc()) { sequential = false; break; }
-						auto it = map_find(*val->obj, std::string_view(idxBuf, static_cast<size_t>(ptr - idxBuf)));
-						if (it == val->obj->end()) { sequential = false; break; }
+						keys[i] = std::string(idxBuf, static_cast<size_t>(ptr - idxBuf));
+						if (mapFind(*val->obj, keys[i]) == val->obj->end()) { sequential = false; break; }
 					}
 					if (sequential) {
 						try {
@@ -3569,9 +3561,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 							if (!arr) return nullptr;
 							arr->arr->resize(count);
 							for (size_t i = 0; i < count; i++) {
-								auto [ptr, ec] = std::to_chars(idxBuf, idxBuf + sizeof(idxBuf), i);
-								if (ec != std::errc()) return nullptr;
-								auto it = map_find(*val->obj, std::string_view(idxBuf, static_cast<size_t>(ptr - idxBuf)));
+								auto it = mapFind(*val->obj, keys[i]);
 								(*arr->arr)[i] = std::move(it->second);
 							}
 							val = std::move(arr);
@@ -3677,7 +3667,10 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 	if (pos < dataLen && data[pos] == 0) pos++;
 	return obj;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
+namespace asvJSONInternal {
 /**
  * @brief Decode a single JSON Pointer key segment
  * @param sv View updated to after the segment and trailing '/'
@@ -3698,6 +3691,8 @@ inline std::string decodeJSONPointerKey(std::string_view& sv) {
 	if (!sv.empty() && sv[0] == '/') sv.remove_prefix(1);
 	return key;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const {
 	if (pointer.data() == nullptr || !root) return nullptr;
@@ -3710,14 +3705,13 @@ inline const asvJSONValue* asvJSON::getByPointer(std::string_view pointer) const
 	while (true) {
 		std::string key = decodeJSONPointerKey(pointer);
 		if (current->type == asvJSONValue::ARRAY) {
-			errno = 0;
-			char* end;
-			unsigned long idx = strtoul(key.c_str(), &end, 10);
-			if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length() || idx >= current->arr->size()) return nullptr;
+			size_t idx;
+			auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), idx);
+			if (ec != std::errc() || ptr != key.data() + key.size() || idx >= current->arr->size()) return nullptr;
 			current = (*current->arr)[idx].get();
 			if (!current) return nullptr;
 		} else if (current->type == asvJSONValue::OBJECT) {
-			auto it = map_find(*current->obj, key);
+			auto it = mapFind(*current->obj, key);
 			if (it == current->obj->end() || !it->second) return nullptr;
 			current = it->second.get();
 		} else {
@@ -3761,11 +3755,9 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 					current->arr->push_back(std::move(n));
 					current = current->arr->back().get();
 				} else {
-					errno = 0;
-					char* end;
-					unsigned long rawIdx = strtoul(key.c_str(), &end, 10);
-					if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length()) return false;
-					size_t idx = static_cast<size_t>(rawIdx);
+					size_t idx;
+					auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), idx);
+					if (ec != std::errc() || ptr != key.data() + key.size()) return false;
 					if (idx > current->arr->max_size()) return false;
 					if (idx >= current->arr->size()) {
 						current->arr->resize(idx + 1);
@@ -3776,7 +3768,7 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 					current = (*current->arr)[idx].get();
 				}
 			} else if (current->type == asvJSONValue::OBJECT) {
-				auto it = map_find(*current->obj, key);
+				auto it = mapFind(*current->obj, key);
 				if (it == current->obj->end()) {
 					auto newObj = asvJSONValue::makeObject();
 					if (!newObj) return false;
@@ -3815,10 +3807,8 @@ inline bool asvJSON::setByPointer(std::string_view pointer, asvJSONValue* value)
 			if (lastKey == "-") {
 				idx = current->arr->size();
 			} else {
-				errno = 0;
-				char* end;
-				idx = static_cast<size_t>(strtoul(lastKey.c_str(), &end, 10));
-				if (errno == ERANGE || *end != 0) return false;
+				auto [ptr, ec] = std::from_chars(lastKey.data(), lastKey.data() + lastKey.size(), idx);
+				if (ec != std::errc() || ptr != lastKey.data() + lastKey.size()) return false;
 			}
 			if (!asvJSONValue::checkArraySize(idx + 1)) return false;
 			if (idx >= current->arr->size()) {
@@ -3867,15 +3857,13 @@ inline bool asvJSON::removeByPointer(std::string_view pointer) {
 
 		if (pos == 0) {
 		if (root->type == asvJSONValue::ARRAY) {
-			errno = 0;
-			char* end;
-			unsigned long rawIdx = strtoul(key.c_str(), &end, 10);
-			if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length()) return false;
-			size_t idx = static_cast<size_t>(rawIdx);
-			if (idx >= root->arr->size()) return false;
-			root->arr->erase(root->arr->begin() + static_cast<ptrdiff_t>(idx));
+		size_t idx;
+		auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), idx);
+		if (ec != std::errc() || ptr != key.data() + key.size()) return false;
+		if (idx >= root->arr->size()) return false;
+		root->arr->erase(root->arr->begin() + static_cast<ptrdiff_t>(idx));
 		} else if (root->type == asvJSONValue::OBJECT) {
-			auto it = map_find(*root->obj, key);
+			auto it = mapFind(*root->obj, key);
 			if (it == root->obj->end()) return false;
 			root->obj->erase(it);
 		}
@@ -3885,15 +3873,13 @@ inline bool asvJSON::removeByPointer(std::string_view pointer) {
 	asvJSONValue* parent = getByPointer(path.substr(0, pos));
 	if (!parent) return false;
 	if (parent->type == asvJSONValue::ARRAY) {
-		errno = 0;
-		char* end;
-		unsigned long rawIdx = strtoul(key.c_str(), &end, 10);
-		if (errno == ERANGE || *end != 0 || end != key.c_str() + key.length()) return false;
-		size_t idx = static_cast<size_t>(rawIdx);
+		size_t idx;
+		auto [ptr, ec] = std::from_chars(key.data(), key.data() + key.size(), idx);
+		if (ec != std::errc() || ptr != key.data() + key.size()) return false;
 		if (idx >= parent->arr->size()) return false;
 		parent->arr->erase(parent->arr->begin() + idx);
 	} else if (parent->type == asvJSONValue::OBJECT) {
-		auto it = map_find(*parent->obj, key);
+		auto it = mapFind(*parent->obj, key);
 		if (it == parent->obj->end()) return false;
 		parent->obj->erase(it);
 	} else {
@@ -3902,6 +3888,7 @@ inline bool asvJSON::removeByPointer(std::string_view pointer) {
 	return true;
 }
 
+namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 	if (!v) return nullptr;
 	switch (v->type) {
@@ -3994,6 +3981,8 @@ inline std::unique_ptr<asvJSONValue> mergePatchRecursive(asvJSONValue* target, c
 	}
 	return cloneValue(patch); // full replacement
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
@@ -4016,6 +4005,7 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
 	return result;
 }
 
+namespace asvJSONInternal {
 /**
  * @brief Deep equality comparison of two asvJSONValue trees
  * @param a First value (can be nullptr)
@@ -4024,13 +4014,7 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
  */
 inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 	if (!a || !b) return false;
-	if (a->type != b->type) {
-		if (a->type == asvJSONValue::INT && b->type == asvJSONValue::DOUBLE)
-			return static_cast<double>(a->num) == b->dbl;
-		if (a->type == asvJSONValue::DOUBLE && b->type == asvJSONValue::INT)
-			return a->dbl == static_cast<double>(b->num);
-		return false;
-	}
+	if (a->type != b->type) return false;
 	switch (a->type) {
 		case asvJSONValue::NULL_VAL: return true;
 		case asvJSONValue::BOOL_VAL: return a->flag == b->flag;
@@ -4061,6 +4045,8 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 		default: return false;
 	}
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline bool asvJSON::applyPatch(const asvJSON& patch) {
 	if (!patch.root || patch.root->type != asvJSONValue::ARRAY) return false;
@@ -4134,6 +4120,7 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 	return true;
 }
 
+namespace asvJSONInternal {
 static void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uint8_t* data, size_t len) {
   if (len == 1) {
     out.push_back(0xD4); out.push_back(static_cast<uint8_t>(extType)); out.push_back(data[0]);
@@ -4168,6 +4155,8 @@ static void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uin
     out.insert(out.end(), data, data + len);
   }
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 	switch (type) {
@@ -4349,6 +4338,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 	}
 }
 
+namespace asvJSONInternal {
 /**
  * @brief Write 32-bit little-endian integer
  * @param out Output vector
@@ -4369,6 +4359,8 @@ inline void writeLE32(std::vector<uint8_t>& out, uint32_t v) {
 inline void writeLE64(std::vector<uint8_t>& out, uint64_t v) {
 	for (int i = 0; i < 8; i++) out.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 	switch (type) {
@@ -4548,7 +4540,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			break;
 		}
 		case BINARY: {
-			auto encoded = base64_encode(bin_data.data(), bin_data.size());
+			auto encoded = encodeBase64(bin_data.data(), bin_data.size());
 			out += prefix + "<" + name + " type=\"binary\">" + encoded + "</" + name + ">\n";
 			break;
 		}
@@ -4572,7 +4564,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			out += prefix + "<" + name + " type=\"timestamp\">" + std::to_string(num) + "</" + name + ">\n";
 			break;
 		case EXTENSION: {
-			auto encoded = base64_encode(bin_data.data(), bin_data.size());
+			auto encoded = encodeBase64(bin_data.data(), bin_data.size());
 			out += prefix + "<" + name + " type=\"extension\" extType=\"" + std::to_string(ext_type) + "\">" + encoded + "</" + name + ">\n";
 			break;
 		}
@@ -4643,7 +4635,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 			break;
 		}
 		case asvJSONValue::BINARY: {
-			auto enc = base64_encode(bin_data.data(), bin_data.size());
+			auto enc = encodeBase64(bin_data.data(), bin_data.size());
 			startLine(); out += "!!binary \""; out += enc; out += "\"\n";
 			break;
 		}
@@ -4663,7 +4655,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 		case asvJSONValue::TIMESTAMP:
 			startLine(); out += std::to_string(num); out += '\n'; break;
 		case asvJSONValue::EXTENSION: {
-			auto enc = base64_encode(bin_data.data(), bin_data.size());
+			auto enc = encodeBase64(bin_data.data(), bin_data.size());
 			startLine(); out += "!ext " + std::to_string(ext_type) + ' '; out += yamlQuote(enc); out += '\n';
 			break;
 		}
@@ -4683,6 +4675,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 }
 
 // ======================= Type Formatting Helpers =======================
+namespace asvJSONInternal {
 
 static void fmtDoubleVal(double d, std::string& out) {
   if (d == std::floor(d) && d >= std::numeric_limits<int64_t>::min() && d <= std::numeric_limits<int64_t>::max()) {
@@ -4714,7 +4707,7 @@ static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 }
 
 static void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
-  char buf[40]; std::tm tm; asvjson_gmtime(&tm, &ts);
+  char buf[40]; std::tm tm; gmtimeSafe(&tm, &ts);
   if (ms > 0) {
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:", &tm);
     out += buf;
@@ -4751,7 +4744,60 @@ static void fmtRegexVal(std::string_view s, std::string& out) {
 static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
   out += std::to_string(type);
   out.push_back('_');
-  out += base64_encode(data, len);
+  out += encodeBase64(data, len);
+}
+
+static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity) {
+  if (!v) { out += "null"; return; }
+  switch (v->type) {
+    case asvJSONValue::NULL_VAL: out += "null"; break;
+    case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
+    case asvJSONValue::INT: out += std::to_string(v->num); break;
+    case asvJSONValue::DOUBLE: {
+      if (fmtNaNInfVal(v->dbl, allowNaNInfinity, out)) break;
+      fmtDoubleVal(v->dbl, out);
+      break;
+    }
+    case asvJSONValue::STRING: {
+      out.reserve(out.size() + v->str_data.size() * 6 + 2);
+      out.push_back('"');
+      appendJsonEscaped(out, v->str_data);
+      out.push_back('"');
+      break;
+    }
+    case asvJSONValue::DATETIME: {
+      out.push_back('"');
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      out.push_back('"');
+      break;
+    }
+    case asvJSONValue::BINARY: {
+      if (v->bin_data.empty()) { out += "null"; break; }
+      fmtBase64JsonVal(v->bin_data.data(), v->bin_data.size(), out);
+      break;
+    }
+    case asvJSONValue::OBJECTID: {
+      out.push_back('"');
+      fmtObjectIdHexVal(v->str_data, out);
+      out.push_back('"');
+      break;
+    }
+    case asvJSONValue::REGEX: {
+      out.push_back('"');
+      fmtRegexVal(v->str_data, out);
+      out.push_back('"');
+      break;
+    }
+    case asvJSONValue::TIMESTAMP:
+      out += std::to_string(v->num);
+      break;
+    case asvJSONValue::EXTENSION: {
+      if (v->bin_data.empty()) { out += "null"; break; }
+      fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), out);
+      break;
+    }
+    default: out += "null"; break;
+  }
 }
 
 // ======================= Shared Text Format Utilities =======================
@@ -5132,6 +5178,8 @@ static std::string toonToJson(std::string_view input) {
 
 	return out;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline std::string asvJSON::toTOON() const {
 	if (!root) return "null\n";
@@ -5148,6 +5196,7 @@ inline bool asvJSON::fromTOON(std::string_view input) {
 // ======================= TRON =======================
 
 // --- TRON Encoder ---
+namespace asvJSONInternal {
 
 static std::string tronSchemaSignature(const asvJSONValue* v) {
 	if (!v || v->type != asvJSONValue::OBJECT || v->obj->empty()) return {};
@@ -5201,16 +5250,18 @@ static void tronSerializeVal(const asvJSONValue* v,
 		std::string& out, bool allowNaNInfinity = false) {
 	if (!v) { out += "null"; return; }
 	switch (v->type) {
-		case asvJSONValue::NULL_VAL: out += "null"; break;
-		case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
-		case asvJSONValue::INT: out += std::to_string(v->num); break;
-		case asvJSONValue::DOUBLE: {
-			if (fmtNaNInfVal(v->dbl, allowNaNInfinity, out)) break;
-			fmtDoubleVal(v->dbl, out);
-			break;
-		}
+		case asvJSONValue::NULL_VAL:
+		case asvJSONValue::BOOL_VAL:
+		case asvJSONValue::INT:
+		case asvJSONValue::DOUBLE:
 		case asvJSONValue::STRING:
-			out += '"' + toonJsonEscape(v->str_data) + '"';
+		case asvJSONValue::DATETIME:
+		case asvJSONValue::BINARY:
+		case asvJSONValue::OBJECTID:
+		case asvJSONValue::REGEX:
+		case asvJSONValue::TIMESTAMP:
+		case asvJSONValue::EXTENSION:
+			appendJsonToken(out, v, allowNaNInfinity);
 			break;
 		case asvJSONValue::ARRAY: {
 			out += '[';
@@ -5219,31 +5270,6 @@ static void tronSerializeVal(const asvJSONValue* v,
 				tronSerializeVal(v->get(i), sigToClass, classKeys, out, allowNaNInfinity);
 			}
 			out += ']';
-			break;
-		}
-		case asvJSONValue::DATETIME: {
-			out += '"'; fmtDateTimeVal(v->timestamp, v->datetime_ms, out); out += '"';
-			break;
-		}
-		case asvJSONValue::BINARY: {
-			if (v->bin_data.empty()) { out += "null"; break; }
-			fmtBase64JsonVal(v->bin_data.data(), v->bin_data.size(), out);
-			break;
-		}
-		case asvJSONValue::OBJECTID: {
-			out += '"'; fmtObjectIdHexVal(v->str_data, out); out += '"';
-			break;
-		}
-		case asvJSONValue::REGEX: {
-			out += '"'; fmtRegexVal(v->str_data, out); out += '"';
-			break;
-		}
-		case asvJSONValue::TIMESTAMP:
-			out += std::to_string(v->num);
-			break;
-		case asvJSONValue::EXTENSION: {
-			if (v->bin_data.empty()) { out += "null"; break; }
-			fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), out);
 			break;
 		}
 		case asvJSONValue::OBJECT: {
@@ -5278,6 +5304,8 @@ static void tronSerializeVal(const asvJSONValue* v,
 		default: out += "null"; break;
 	}
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline std::string asvJSON::toTRON() const {
 	if (!root) return "null";
@@ -5336,6 +5364,8 @@ struct TronTok {
 	TronTokType type;
 	std::string text;
 };
+
+namespace asvJSONInternal {
 
 static std::string tronUnescape(const std::string& s) {
   return unescapeJsonString(s, false);
@@ -5418,13 +5448,11 @@ struct TronClassInfo {
 	std::vector<std::string> props;
 };
 
-struct TronParseState {
-	const std::vector<TronTok>& toks;
-	size_t pos = 0;
-	std::unordered_map<std::string, TronClassInfo> classes;
-	std::string err;
-	asvJSONValue* root = nullptr;
-	bool ok = true;
+	struct TronParseState {
+		const std::vector<TronTok>& toks;
+		size_t pos = 0;
+		std::unordered_map<std::string, TronClassInfo> classes;
+		asvJSONValue* root = nullptr;
 
 	TronParseState(const std::vector<TronTok>& t) : toks(t) {}
 
@@ -5438,7 +5466,7 @@ struct TronParseState {
 	asvJSONValue* parseObject() {
 		advance(); // '{'
 		auto obj = asvJSONValue::makeObject();
-		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
+		if (!obj) throw asvJSONError("out of memory");
 		skipNewlines();
 		if (peek().type == TronTokType::RBRACE) { advance(); return obj.release(); }
 		bool first = true;
@@ -5449,23 +5477,22 @@ struct TronParseState {
 			}
 			first = false;
 			if (peek().type == TronTokType::RBRACE) break;
-			if (peek().type != TronTokType::STRING) { ok = false; err = "expected string key"; return nullptr; }
+			if (peek().type != TronTokType::STRING) throw asvJSONError("expected string key");
 			std::string key = tronUnescape(advance().text);
-			if (!match(TronTokType::COLON)) { ok = false; err = "expected ':'"; return nullptr; }
+			if (!match(TronTokType::COLON)) throw asvJSONError("expected ':'");
 			skipNewlines();
 			asvJSONValue* val = parseValue();
-			if (!val && !ok) return nullptr;
 			if (val) obj->obj->emplace(key, std::unique_ptr<asvJSONValue>(val));
 			skipNewlines();
 		}
-		if (!match(TronTokType::RBRACE)) { ok = false; err = "expected '}' or ',' in object"; return nullptr; }
+		if (!match(TronTokType::RBRACE)) throw asvJSONError("expected '}' or ',' in object");
 		return obj.release();
 	}
 
 	asvJSONValue* parseArray() {
 		advance(); // '['
 		auto arr = asvJSONValue::makeArray();
-		if (!arr) { ok = false; err = "out of memory"; return nullptr; }
+		if (!arr) throw asvJSONError("out of memory");
 		skipNewlines();
 		if (peek().type == TronTokType::RBRACKET) { advance(); return arr.release(); }
 		bool first = true;
@@ -5477,26 +5504,22 @@ struct TronParseState {
 			first = false;
 			if (peek().type == TronTokType::RBRACKET) break;
 			asvJSONValue* val = parseValue();
-			if (!val && !ok) return nullptr;
 			if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
 			skipNewlines();
 		}
-		if (!match(TronTokType::RBRACKET)) { ok = false; err = "expected ']' or ',' in array"; return nullptr; }
+		if (!match(TronTokType::RBRACKET)) throw asvJSONError("expected ']' or ',' in array");
 		return arr.release();
 	}
 
 	asvJSONValue* parseInstance() {
 		std::string className = advance().text;
 		auto it = classes.find(className);
-		if (it == classes.end()) {
-			ok = false; err = "undefined class: " + className;
-			return nullptr;
-		}
+		if (it == classes.end()) throw asvJSONError("undefined class: " + className);
 		const auto& props = it->second.props;
-		if (!match(TronTokType::LPAREN)) { ok = false; err = "expected '('"; return nullptr; }
+		if (!match(TronTokType::LPAREN)) throw asvJSONError("expected '('");
 		skipNewlines();
 		auto obj = asvJSONValue::makeObject();
-		if (!obj) { ok = false; err = "out of memory"; return nullptr; }
+		if (!obj) throw asvJSONError("out of memory");
 		std::vector<std::unique_ptr<asvJSONValue>> posArgs;
 		std::unordered_map<std::string, std::unique_ptr<asvJSONValue>> namedArgs;
 		bool namedMode = false;
@@ -5513,17 +5536,15 @@ struct TronParseState {
 				advance(); // '='
 				skipNewlines();
 				asvJSONValue* val = parseValue();
-				if (!val && !ok) return nullptr;
 				namedArgs[propName] = std::unique_ptr<asvJSONValue>(val);
 			} else {
-				if (namedMode) { ok = false; err = "positional arg after named"; return nullptr; }
+				if (namedMode) throw asvJSONError("positional arg after named");
 				asvJSONValue* val = parseValue();
-				if (!val && !ok) return nullptr;
 				posArgs.push_back(std::unique_ptr<asvJSONValue>(val));
 			}
 			skipNewlines();
 		}
-		if (!match(TronTokType::RPAREN)) { ok = false; err = "expected ')'"; return nullptr; }
+		if (!match(TronTokType::RPAREN)) throw asvJSONError("expected ')'");
 		for (size_t i = 0; i < props.size(); i++) {
 			std::unique_ptr<asvJSONValue> valPtr;
 			if (i < posArgs.size()) {
@@ -5555,24 +5576,22 @@ asvJSONValue* TronParseState::parseValue() {
 			std::string s = tronUnescape(raw);
 			// Check __BASE64__ prefix
 			if (s.size() > 10 && s.compare(0, 10, "__BASE64__") == 0) {
-				auto data = base64_decode_fast(s.data() + 10, s.size() - 10);
+				auto data = decodeBase64Fast(s.data() + 10, s.size() - 10);
 				auto v = asvJSONValue::makeBinary(data.data(), data.size());
-				if (!v) { ok = false; err = "out of memory"; }
+				if (!v) throw asvJSONError("out of memory");
 				return v.release();
 			}
 			// Check __EXT__ prefix: "__EXT__<type>_<base64>"
 			if (s.size() > 7 && s.compare(0, 7, "__EXT__") == 0) {
 				size_t sep = s.find('_', 7);
 				if (sep != std::string::npos && sep > 7) {
-					char* end = nullptr;
-					long extType = std::strtol(s.c_str() + 7, &end, 10);
-					if (end == s.c_str() + 7 || static_cast<size_t>(end - s.c_str()) != sep) {
-						ok = false; err = "invalid extension type";
-						return nullptr;
-					}
-					auto data = base64_decode_fast(s.data() + sep + 1, s.size() - sep - 1);
+					int extType;
+					auto [ptr, ec] = std::from_chars(s.data() + 7, s.data() + sep, extType);
+					if (ec != std::errc() || ptr != s.data() + sep)
+						throw asvJSONError("invalid extension type");
+					auto data = decodeBase64Fast(s.data() + sep + 1, s.size() - sep - 1);
 					auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
-					if (!v) { ok = false; err = "out of memory"; }
+					if (!v) throw asvJSONError("out of memory");
 					return v.release();
 				}
 			}
@@ -5582,32 +5601,37 @@ asvJSONValue* TronParseState::parseValue() {
 				int ms = 0;
 				if (tryParseDateTime(s, ts, &ms)) {
 					auto v = asvJSONValue::makeDateTime(ts, ms);
-					if (!v) { ok = false; err = "out of memory"; }
+					if (!v) throw asvJSONError("out of memory");
 					return v.release();
 				}
 			}
 			auto v = asvJSONValue::makeStringView(s);
-			if (!v) { ok = false; err = "out of memory"; }
+			if (!v) throw asvJSONError("out of memory");
 			return v.release();
 		}
 		case TronTokType::NUMBER: {
 			std::string n = advance().text;
 			bool isDbl = n.find('.') != std::string::npos || n.find('e') != std::string::npos || n.find('E') != std::string::npos;
 			if (isDbl) {
+				double d;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+				auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), d);
+				if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("invalid number: " + n);
+#else
 				char* end;
 				errno = 0;
-				double d = std::strtod(n.c_str(), &end);
-				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
+				d = std::strtod(n.c_str(), &end);
+				if (errno == ERANGE || end != n.c_str() + n.size()) throw asvJSONError("invalid number: " + n);
+#endif
 				auto v = asvJSONValue::makeDouble(d);
-				if (!v) { ok = false; err = "out of memory"; }
+				if (!v) throw asvJSONError("out of memory");
 				return v.release();
 			} else {
-				char* end;
-				errno = 0;
-				long long l = std::strtoll(n.c_str(), &end, 10);
-				if (errno == ERANGE || end != n.c_str() + n.size()) { ok = false; err = "invalid number: " + n; return nullptr; }
+				long long l;
+				auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), l);
+				if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("invalid number: " + n);
 				auto v = asvJSONValue::makeInt(l);
-				if (!v) { ok = false; err = "out of memory"; }
+				if (!v) throw asvJSONError("out of memory");
 				return v.release();
 			}
 		}
@@ -5624,99 +5648,88 @@ asvJSONValue* TronParseState::parseValue() {
 		case TronTokType::IDENT: {
 			if (pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN)
 				return parseInstance();
-			ok = false; err = "unexpected identifier: " + tok.text;
-			return nullptr;
+			throw asvJSONError("unexpected identifier: " + tok.text);
 		}
 		default:
-			ok = false; err = "unexpected token";
-			return nullptr;
+			throw asvJSONError("unexpected token");
 	}
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline bool asvJSON::fromTRON(std::string_view input) {
-	auto toks = tronTokenize(input, allowNaNInfinity);
-	TronParseState state(toks);
-	state.skipNewlines();
-	// Parse class definitions
-	while (state.peek().type == TronTokType::CLASS) {
-		state.advance(); // 'class'
-		if (state.peek().type != TronTokType::IDENT) {
-			lastError = "expected class name";
-			return false;
+	try {
+		auto toks = tronTokenize(input, allowNaNInfinity);
+		TronParseState state(toks);
+		state.skipNewlines();
+		// Parse class definitions
+		while (state.peek().type == TronTokType::CLASS) {
+			state.advance(); // 'class'
+			if (state.peek().type != TronTokType::IDENT)
+				throw asvJSONError("expected class name");
+			std::string name = state.advance().text;
+			// Check for inheritance: Name(Parent)
+			std::vector<std::string> parentProps;
+			if (state.peek().type == TronTokType::LPAREN) {
+				state.advance(); // '('
+				if (state.peek().type != TronTokType::IDENT)
+					throw asvJSONError("expected parent class name");
+				std::string pname = state.advance().text;
+				auto pit = state.classes.find(pname);
+				if (pit == state.classes.end())
+					throw asvJSONError("parent class not found: " + pname);
+				parentProps = pit->second.props;
+				if (!state.match(TronTokType::RPAREN))
+					throw asvJSONError("expected ')' after parent name");
+			}
+			if (!state.match(TronTokType::COLON))
+				throw asvJSONError("expected ':' in class definition");
+			state.skipNewlines();
+			// Parse property list
+			std::vector<std::string> props;
+			while (state.peek().type == TronTokType::IDENT || state.peek().type == TronTokType::STRING) {
+				if (state.peek().type == TronTokType::STRING) {
+					props.push_back(tronUnescape(state.advance().text));
+				} else {
+					props.push_back(state.advance().text);
+				}
+				state.skipNewlines();
+				if (state.peek().type == TronTokType::COMMA) { state.advance(); state.skipNewlines(); }
+				else if (state.peek().type == TronTokType::NEWLINE) { state.advance(); state.skipNewlines(); if (state.peek().type != TronTokType::IDENT && state.peek().type != TronTokType::STRING) break; }
+				else break;
+			}
+			if (props.empty())
+				throw asvJSONError("class requires at least one property");
+			// Merge parent props (child overrides parent)
+			std::vector<std::string> allProps = std::move(parentProps);
+			for (const auto& p : props) {
+				if (std::find(allProps.begin(), allProps.end(), p) == allProps.end())
+					allProps.push_back(p);
+			}
+			state.classes[name] = {std::move(allProps)};
 		}
-		std::string name = state.advance().text;
-		// Check for inheritance: Name(Parent)
-		std::vector<std::string> parentProps;
-		if (state.peek().type == TronTokType::LPAREN) {
-			state.advance(); // '('
-			if (state.peek().type != TronTokType::IDENT) {
-				lastError = "expected parent class name";
-				return false;
-			}
-			std::string pname = state.advance().text;
-			auto pit = state.classes.find(pname);
-			if (pit == state.classes.end()) {
-				lastError = "parent class not found: " + pname;
-				return false;
-			}
-			parentProps = pit->second.props;
-			if (!state.match(TronTokType::RPAREN)) {
-				lastError = "expected ')' after parent name";
-				return false;
-			}
-		}
-		if (!state.match(TronTokType::COLON)) {
-			lastError = "expected ':' in class definition";
+		// Parse root value
+		state.root = state.parseValue();
+		if (!state.root) {
+			root = nullptr;
 			return false;
 		}
 		state.skipNewlines();
-		// Parse property list
-		std::vector<std::string> props;
-		while (state.peek().type == TronTokType::IDENT || state.peek().type == TronTokType::STRING) {
-			if (state.peek().type == TronTokType::STRING) {
-				props.push_back(tronUnescape(state.advance().text));
-			} else {
-				props.push_back(state.advance().text);
-			}
-			state.skipNewlines();
-			if (state.peek().type == TronTokType::COMMA) { state.advance(); state.skipNewlines(); }
-			else if (state.peek().type == TronTokType::NEWLINE) { state.advance(); state.skipNewlines(); if (state.peek().type != TronTokType::IDENT && state.peek().type != TronTokType::STRING) break; }
-			else break;
-		}
-		if (props.empty()) {
-			lastError = "class requires at least one property";
-			return false;
-		}
-		// Merge parent props (child overrides parent)
-		std::vector<std::string> allProps = std::move(parentProps);
-		for (const auto& p : props) {
-			if (std::find(allProps.begin(), allProps.end(), p) == allProps.end())
-				allProps.push_back(p);
-		}
-		state.classes[name] = {std::move(allProps)};
-	}
-	// Parse root value
-	state.root = state.parseValue();
-	if (!state.ok || !state.root) {
-		lastError = state.err.empty() ? "parse error" : state.err;
-		delete state.root;
+		if (state.peek().type != TronTokType::END)
+			throw asvJSONError("trailing tokens after root value");
+		root.reset(state.root);
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
 		root = nullptr;
 		return false;
 	}
-	state.skipNewlines();
-	if (state.peek().type != TronTokType::END) {
-		lastError = "trailing tokens after root value";
-		delete state.root;
-		root = nullptr;
-		return false;
-	}
-	root.reset(state.root);
-	return true;
 }
 
 // ======================= GOON =======================
 
 // GOON single-char literals
+namespace asvJSONInternal {
 static std::string goonLiteral(const asvJSONValue* v) {
 	if (!v) return "_";
 	switch (v->type) {
@@ -5805,17 +5818,13 @@ static void goonBuildDictWalk(const asvJSONValue* v, std::unordered_map<std::str
 }
 
 static std::unordered_map<std::string, int> goonBuildDict(const asvJSONValue* root) {
-	std::unordered_map<std::string, int> freq;
-	goonBuildDictWalk(root, freq, 0);
-	std::vector<std::pair<std::string, int>> sorted(freq.begin(), freq.end());
-	std::sort(sorted.begin(), sorted.end(),
-		[](auto& a, auto& b) { return a.second > b.second; });
-	std::unordered_map<std::string, int> dict;
-	int idx = 0;
-	for (auto& [s, count] : sorted)
-		if (count >= 2)
-			dict[s] = idx++;
-	return dict;
+  std::unordered_map<std::string, int> freq;
+  goonBuildDictWalk(root, freq, 0);
+  std::unordered_map<std::string, int> dict;
+  int idx = 0;
+  for (const auto& [s, count] : freq)
+    if (count >= 2) dict[s] = idx++;
+  return dict;
 }
 
 static void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict, std::string& out) {
@@ -5892,12 +5901,7 @@ static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 					else if (child->type == asvJSONValue::DOUBLE) {
 						double d = child->dbl;
 						if (std::isnan(d) || std::isinf(d)) cell = "_";
-						else {
-							char buf[64];
-							int n = snprintf(buf, sizeof(buf), "%.17g", d);
-							if (n > 0) cell.append(buf, static_cast<size_t>(n));
-							else cell = "_";
-						}
+						else { fmtDoubleVal(d, cell); }
 					} else if (child->type == asvJSONValue::STRING) {
 						goonWriteString(child->str_data, cell, dict);
 					} else {
@@ -5963,11 +5967,7 @@ static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 						if (!spec.empty()) out += spec;
 						else if (el->type == asvJSONValue::INT) out += std::to_string(el->num);
 						else if (el->type == asvJSONValue::DOUBLE) {
-							double d = el->dbl;
-							char buf[64];
-							int n = snprintf(buf, sizeof(buf), "%.17g", d);
-							if (n > 0) out.append(buf, static_cast<size_t>(n));
-							else out += "_";
+							fmtDoubleVal(el->dbl, out);
 						} else {
 							goonWriteString(el->str_data, out, dict);
 						}
@@ -5979,11 +5979,7 @@ static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 			out += pad + "  - ";
 			if (child->type == asvJSONValue::INT) out += std::to_string(child->num);
 			else if (child->type == asvJSONValue::DOUBLE) {
-				double d = child->dbl;
-				char buf[64];
-				int n = snprintf(buf, sizeof(buf), "%.17g", d);
-				if (n > 0) out.append(buf, static_cast<size_t>(n));
-				else out += "_";
+				fmtDoubleVal(child->dbl, out);
 			} else {
 				std::string spec = goonFormatSpecial(child);
 				if (!spec.empty()) out += spec;
@@ -6066,6 +6062,8 @@ static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
 		}
 	}
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline std::string asvJSON::toGOON() const {
 	if (!root) return "_\n";
@@ -6078,6 +6076,7 @@ inline std::string asvJSON::toGOON() const {
 // ======================= GOON Decoder =======================
 
 // GOON → JSON text converter
+namespace asvJSONInternal {
 static std::string goonToJson(std::string_view input) {
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
@@ -6218,17 +6217,14 @@ static std::string goonToJson(std::string_view input) {
 							size_t closeBr = content.find('}', afterB);
 							if (closeBr != std::string_view::npos) {
 								std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
-								std::string curf;
-								for (size_t fi = 0; fi < fc.size(); fi++) {
-									if (fc[fi] == ',' && (fi == 0 || fc[fi-1] != '\\')) {
-										while (!curf.empty() && curf.back() == ' ') curf.pop_back();
-										while (!curf.empty() && curf.front() == ' ') curf.erase(curf.begin());
-										fields.push_back(curf); curf.clear();
-									} else curf += fc[fi];
+								auto fieldParts = toonSplitCommas(fc);
+								for (auto& f : fieldParts) {
+									size_t fs = 0;
+									while (fs < f.size() && f[fs] == ' ') fs++;
+									size_t fe = f.size();
+									while (fe > fs && f[fe - 1] == ' ') fe--;
+									fields.push_back(f.substr(fs, fe - fs));
 								}
-								while (!curf.empty() && curf.back() == ' ') curf.pop_back();
-								while (!curf.empty() && curf.front() == ' ') curf.erase(curf.begin());
-								if (!curf.empty()) fields.push_back(curf);
 								afterB = closeBr + 1;
 							}
 						}
@@ -6278,15 +6274,18 @@ static std::string goonToJson(std::string_view input) {
 							for (int ri = 0; ri < repeat; ri++) {
 								// Split by comma (respecting quotes)
 								std::vector<std::string> vals;
-								{
-									std::string cur2;
-									bool inQ = false;
-									for (size_t ci = 0; ci < rowStr.size(); ci++) {
-										char c2 = rowStr[ci];
-										if (c2 == '"') { if (ci == 0 || rowStr[ci-1] != '\\') inQ = !inQ; cur2 += c2; continue; }
-										if (c2 == ',' && !inQ) { vals.push_back(cur2); cur2.clear(); continue; }
-										cur2 += c2;
-									}
+									{
+										std::string cur2;
+										bool inQ = false;
+										bool escape = false;
+										for (size_t ci = 0; ci < rowStr.size(); ci++) {
+											char c2 = rowStr[ci];
+											if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
+											if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
+											escape = false;
+											if (c2 == ',' && !inQ) { vals.push_back(cur2); cur2.clear(); continue; }
+											cur2 += c2;
+										}
 									vals.push_back(cur2);
 								}
 								if (!stack.empty() && !stack.back().first) out += ',';
@@ -6297,7 +6296,10 @@ static std::string goonToJson(std::string_view input) {
 									out += '"' + toonJsonEscape(fields[fi]) + "\":";
 									if (fi < vals.size()) {
 										std::string cell = vals[fi];
-										if (cell == "^" && !prevValues[fi].empty()) {
+										if (cell == "\"^\"") {
+											cell = "^";
+											prevValues[fi] = "^";
+										} else if (cell == "^" && !prevValues[fi].empty()) {
 											cell = prevValues[fi];
 										} else if (cell != "^") {
 											prevValues[fi] = cell;
@@ -6323,9 +6325,12 @@ static std::string goonToJson(std::string_view input) {
 						{
 							std::string cur2;
 							bool inQ = false;
+							bool escape = false;
 							for (size_t ci = 0; ci < inlineContent.size(); ci++) {
 								char c2 = inlineContent[ci];
-								if (c2 == '"') { if (ci == 0 || inlineContent[ci-1] != '\\') inQ = !inQ; cur2 += c2; continue; }
+								if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
+								if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
+								escape = false;
 								if (c2 == ',' && !inQ) {
 									size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
 									size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
@@ -6413,18 +6418,21 @@ static std::string goonToJson(std::string_view input) {
 				std::vector<std::string> inlineVals;
 				{
 					std::string cur2;
-					bool inQ = false;
-					for (size_t ci = 0; ci < rest.size(); ci++) {
-						char c2 = rest[ci];
-						if (c2 == '"') { if (ci == 0 || rest[ci-1] != '\\') inQ = !inQ; cur2 += c2; continue; }
-						if (c2 == ',' && !inQ) {
-							size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
-							size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
-							inlineVals.push_back(cur2.substr(vs, ve - vs));
-							cur2.clear(); continue;
-						}
-						cur2 += c2;
+				bool inQ = false;
+				bool escape = false;
+				for (size_t ci = 0; ci < rest.size(); ci++) {
+					char c2 = rest[ci];
+					if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
+					if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
+					escape = false;
+					if (c2 == ',' && !inQ) {
+						size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
+						size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
+						inlineVals.push_back(cur2.substr(vs, ve - vs));
+						cur2.clear(); continue;
 					}
+					cur2 += c2;
+				}
 					size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
 					size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
 					if (!cur2.empty()) inlineVals.push_back(cur2.substr(vs, ve - vs));
@@ -6514,11 +6522,18 @@ static std::string goonToJson(std::string_view input) {
 
 	return out;
 }
+} // namespace asvJSONInternal
+using namespace asvJSONInternal;
 
 inline bool asvJSON::fromGOON(std::string_view input) {
-	if (input.empty()) { lastError = "empty input"; return false; }
-	std::string json = goonToJson(input);
-	return parse(std::string_view(json));
+	try {
+		if (input.empty()) throw asvJSONError("empty input");
+		std::string json = goonToJson(input);
+		return parse(std::string_view(json));
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
+		return false;
+	}
 }
 
 #endif
