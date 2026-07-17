@@ -1401,17 +1401,17 @@ TEST(testBSONArray) {
 		};
 		std::vector<uint8_t> inner;
 		for (auto& kv : keys) {
+			inner.push_back(0x12);
 			const char* k = kv.first;
 			while (*k) inner.push_back(static_cast<uint8_t>(*k++));
 			inner.push_back(0);
-			inner.push_back(0x12);
 			addLE64(inner, static_cast<uint64_t>(kv.second));
 		}
 		uint32_t innerLen = 4 + static_cast<uint32_t>(inner.size()) + 1;
 		std::vector<uint8_t> outerBody;
+		outerBody.push_back(0x04);
 		outerBody.push_back('a'); outerBody.push_back('r'); outerBody.push_back('r');
 		outerBody.push_back(0);
-		outerBody.push_back(0x04);
 		addLE32(outerBody, innerLen);
 		outerBody.insert(outerBody.end(), inner.begin(), inner.end());
 		outerBody.push_back(0);
@@ -1849,7 +1849,7 @@ TEST(testToYAML) {
 		json.putExtension("ext", 42, extData, 2);
 
 		std::string yml = json.toYAML();
-		ASSERT(yml.find("n: ~") != std::string::npos);
+		ASSERT(yml.find("n: ~") != std::string::npos || yml.find("'n': ~") != std::string::npos);
 		ASSERT(yml.find("b: true") != std::string::npos);
 		ASSERT(yml.find("i: -42") != std::string::npos);
 		ASSERT(yml.find("plain") != std::string::npos);

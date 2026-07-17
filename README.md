@@ -513,6 +513,38 @@ GOON features:
 - `#` prefix forces quoting to avoid comment ambiguity
 - Full round-trip: `toGOON()` then `fromGOON()` returns the original data
 
+## Changelog
+
+### 1.5.0 (2026-07-17)
+
+- **Modular structure:** Refactored monolithic header into `asvjson/` module directory  -  `core.hpp`, `detail/*.hpp`, `formats/*.hpp`. The top-level `asvJSON++.hpp` remains as a backward-compat wrapper.
+- **Bugfix  -  Base64 custom charset:** `decodeBase64Fast` now uses `getDecodeTable()`, fixing round-trip when a custom charset is set via `setBase64Chars()`.
+- **Bugfix  -  Namespace pollution:** Global symbols (`FormatFrame`, `splitLines`, `countIndent`, `stripIndent`, `closeFrames`, `addComma`) moved into `asvJSONInternal` namespace.
+- **Bugfix  -  Strict literal parsing:** Reject non-standard identifiers after `true`/`false`/`null`/`NaN`/`Infinity` (e.g., `trueX`, `false123`).
+- **Fix  -  XML output:** Added `<?xml version="1.0" encoding="UTF-8"?>` declaration and `type="..."` attributes for special types.
+- **Fix  -  YAML output:** Added `---` document separator, proper tags (`!!binary`, `!objectid`, `!regex`, `!ext`), and multiline `|` block scalar for strings with newlines.
+- **Fix  -  TOON/GOON frame management:** Corrected `addComma` `!first` check, root frame `hasVal`, and sub-frame push with `first=true`.
+- **Fix  -  BSON test:** Corrected element type byte order (type before key, per BSON spec).
+
+### 1.4.0 (2026-07-16)
+
+- **New format  -  CSV parser:** Added `fromCSV()`  -  RFC 4180 CSV parser with typed value detection and multi-line quoted field support.
+- **Error handling unification:** All parsers (JSON, MessagePack, BSON, TOON, TRON, GOON) now throw `asvJSONError` uniformly, with top-level try/catch in public methods.
+- **TRON key order fix:** Sorted keys in `tronDiscoverSchemas` for deterministic output across MSVC and GCC.
+- **Boundary-check refactor:** Extracted `checkStringLen`, `checkArraySize`, `checkObjectSize`, `checkNestingDepth` helpers to eliminate 32 duplicated limit checks.
+
+### 1.3.0 (2026-07-16)
+
+- **New format  -  GOON:** Greatly Optimized Object Notation  -  indentation-based nesting, tabular arrays, single-char literals (`T`/`F`/`_`/`~`), dictionary references, RLE (`*N`) for tabular rows, column reference (`^`) support.
+- **New format  -  TRON:** Token-Reduced Object Notation  -  class definitions for repeated structures, class instantiation, inheritance, named arguments, full round-trip.
+- **New format  -  TOON:** Token-Oriented Object Notation with inline and tabular array formats, full round-trip.
+- **NaN/Infinity support:** `allowNaNInfinity` flag enables parsing and serialization of non-standard JSON values.
+- **MSVC fixes:** Resolved multiple-definition linker errors (`inline` on out-of-line methods), signedness mismatch, removed non-const `getRootArray()`.
+
+### 1.0.0  -  1.2.0
+
+Initial releases with JSON, BSON, MessagePack, XML, YAML, CSV, JSON Pointer, JSON Patch, JSON Merge Patch support.
+
 ### Important Lifetime Notes
 
 - `std::string_view` returned by `getStringView()` or `getObjectIdView()` points to internal buffers. It becomes invalid after the next call to `parse()` or after the `asvJSON` object is destroyed. **Do not store these views long-term.**
