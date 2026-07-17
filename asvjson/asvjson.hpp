@@ -43,3 +43,7 @@
 #ifndef ASVJSON_DISABLE_CSV
 #include "formats/csv.hpp"
 #endif
+
+#ifndef ASVJSON_DISABLE_PROTOBUF
+#include "formats/protobuf.hpp"
+#endif

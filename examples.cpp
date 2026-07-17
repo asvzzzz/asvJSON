@@ -868,6 +868,24 @@ void example_to_yaml_multiline() {
 	std::cout << json.toYAML() << std::endl;
 }
 
+void example_from_yaml() {
+	std::cout << "=== fromYAML Parsing ===" << std::endl;
+
+	asvJSON json;
+	if (json.fromYAML("---\nname: John\nage: 30\nactive: true\nitems:\n- 1\n- 2\n- 3\nmeta:\n  nested: true\n  pi: 3.14\n")) {
+		auto* meta = json.getRoot()->get("meta");
+		bool nested = meta && meta->get("nested") ? meta->get("nested")->getBool() : false;
+		std::cout << "  name=" << json.getString("name")
+		          << " age=" << json.getInt("age")
+		          << " active=" << (json.getBool("active") ? "true" : "false")
+		          << " item_count=" << json.getRoot()->get("items")->arr->size()
+		          << " nested=" << (nested ? "true" : "false")
+		          << std::endl;
+	} else {
+		std::cout << "  fromYAML failed" << std::endl;
+	}
+}
+
 void example_to_csv() {
 	std::cout << "=== toCSV Serialization ===" << std::endl;
 
@@ -969,6 +987,49 @@ void example_to_goon() {
 	std::cout << std::endl;
 }
 
+void example_protobuf() {
+	std::cout << "=== Protobuf Binary Format ===" << std::endl;
+
+	// Schema-driven encoding/decoding (recommended)
+	std::string schema = R"({
+		"name":{"id":1,"type":"string"},
+		"age":{"id":2,"type":"int32"},
+		"active":{"id":3,"type":"bool"}
+	})";
+
+	asvJSON json;
+	json.putString("name", "Alice");
+	json.putInt("age", 30);
+	json.putBool("active", true);
+
+	auto buf = json.toProtobuf(schema);
+	std::cout << "Binary protobuf size: " << buf.size() << " bytes" << std::endl;
+
+	asvJSON json2;
+	if (json2.fromProtobuf(buf.data(), buf.size(), schema)) {
+		std::cout << "Round-trip: name=" << json2.getString("name")
+		          << " age=" << json2.getInt("age")
+		          << " active=" << json2.getBool("active") << std::endl;
+	}
+
+	// Protobuf text format
+	std::string text = json.toProtobufText();
+	std::cout << "Text format:" << std::endl << text << std::endl;
+
+	asvJSON json3;
+	if (json3.fromProtobufText(text)) {
+		std::cout << "Text round-trip: name=" << json3.getString("name")
+		          << " age=" << json3.getInt("age") << std::endl;
+	}
+
+	// Static converter helpers
+	auto buf2 = asvJSON::protobufFromString(R"({"1":"hello","2":42})");
+	auto jsStr = asvJSON::stringFromProtobuf(buf2.data(), buf2.size());
+	std::cout << "Static helpers OK" << std::endl;
+
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1025,12 +1086,14 @@ int main() {
 	example_xml_escaped_keys();
 	example_to_yaml();
 	example_to_yaml_multiline();
+	example_from_yaml();
 	example_to_csv();
 	example_to_csv_array();
 	example_from_csv();
 	example_to_toon();
 	example_to_tron();
 	example_to_goon();
+	example_protobuf();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

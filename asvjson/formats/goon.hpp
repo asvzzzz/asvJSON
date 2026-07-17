@@ -50,7 +50,7 @@ static std::string goonFormatSpecial(const asvJSONValue* v) {
     }
     case asvJSONValue::REGEX: {
       std::string re; fmtRegexVal(v->str_data, re);
-      return '"' + re + '"';
+      return re;
     }
     case asvJSONValue::TIMESTAMP:
       return std::to_string(v->num);

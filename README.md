@@ -35,7 +35,7 @@ MIT license - see the `LICENSE` file for details.
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
-- YAML - `toYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
+- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
@@ -138,6 +138,7 @@ int main() {
 | `std::string serialize(bool pretty = false) const` | Serialize to JSON string. |
 | `std::string toXML() const` | Serialize to XML document. |
 | `std::string toYAML() const` | Serialize to YAML document. |
+| `bool fromYAML(std::string_view input)` | Parse YAML string (indentation-based, block scalars, tagged values). |
 | `std::string toCSV() const` | Serialize to CSV (flattened, two-pass for arrays of objects). |
 | `std::string toTOON() const` | Serialize to TOON (token-oriented object notation). |
 | `bool fromTOON(std::string_view input)` | Parse TOON string. |
@@ -392,12 +393,16 @@ Output:
 
 ### YAML
 
+`toYAML()` serializes to indentation-based YAML with block-style sequences, literal block scalars, and tagged values.
+
+`fromYAML()` parses YAML back into JSON, supporting the same features plus single/double-quoted strings, comments, and document markers.
+
 Input:
 ```json
 {"name":"John","items":[1,2,3],"meta":{"nested":true}}
 ```
 
-Output:
+Output (`toYAML`):
 ```yaml
 ---
 name: John
@@ -407,6 +412,13 @@ items:
   - 3
 meta:
   nested: true
+```
+
+Round-trip (`fromYAML`):
+```cpp
+asvJSON json;
+json.fromYAML("name: John\nitems:\n  - 1\n  - 2\n  - 3");
+std::string name = json.getString("name"); // "John"
 ```
 
 ### CBOR (RFC 8949)

@@ -73,10 +73,10 @@ static std::vector<std::string> splitLines(std::string_view input) {
 	size_t start = 0;
 	for (size_t i = 0; i <= input.size(); i++) {
 		if (i == input.size() || input[i] == '\n') {
-			if (i > start) {
-				if (input[i - 1] == '\r') lines.push_back(std::string(input.substr(start, i - start - 1)));
-				else lines.push_back(std::string(input.substr(start, i - start)));
-			}
+			if (i > start && input[i - 1] == '\r')
+				lines.push_back(std::string(input.substr(start, i - start - 1)));
+			else
+				lines.push_back(std::string(input.substr(start, i - start)));
 			start = i + 1;
 		}
 	}

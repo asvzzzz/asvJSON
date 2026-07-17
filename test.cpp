@@ -2182,6 +2182,194 @@ TEST(testToYAML) {
 	}
 }
 
+TEST(testFromYAML) {
+	// Empty object
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("---\n{}"));
+		ASSERT(json.getRoot()->type == asvJSONValue::OBJECT);
+	}
+	// Basic key-value pairs
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\nb: true\nc: null\nd: hello"));
+		ASSERT_EQ(json.getInt("a"), 1);
+		ASSERT_EQ(json.getBool("b"), true);
+		ASSERT(json.isNull("c"));
+		ASSERT_EQ(std::string(json.getString("d")), "hello");
+	}
+	// Nested objects
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a:\n  b:\n    c: 42"));
+		auto* b = json.getRoot()->get("a");
+		ASSERT(b != nullptr);
+		auto* bc = b->get("b");
+		ASSERT(bc != nullptr);
+		ASSERT_EQ(bc->get("c")->getInt(), 42);
+	}
+	// Array at root
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- 10\n- 20\n- 30"));
+		auto* arr = json.getRoot();
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(3));
+		ASSERT_EQ(arr->arr->at(0)->getInt(), 10);
+	}
+	// Array as object value (same indent as key)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("vals:\n- 1\n- 2\n- 3"));
+		auto* v = json.getRoot()->get("vals");
+		ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(v->arr->size(), size_t(3));
+		ASSERT_EQ(v->arr->at(0)->getInt(), 1);
+	}
+	// Inline value after colon
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("name: Alice\nage: 30"));
+		ASSERT_EQ(std::string(json.getString("name")), "Alice");
+		ASSERT_EQ(json.getInt("age"), 30);
+	}
+	// Multiline string (block scalar |)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld");
+	}
+	// Quoted keys
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("'quoted key': value"));
+		ASSERT_EQ(std::string(json.getString("quoted key")), "value");
+	}
+	// Quoted values (double)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"hello\\nworld\""));
+		ASSERT_EQ(std::string(json.getString("s")), "hello\nworld");
+	}
+	// Quoted values (single)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: 'single quoted'"));
+		ASSERT_EQ(std::string(json.getString("s")), "single quoted");
+	}
+	// Empty containers
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: {}\nb: []"));
+		ASSERT(json.getRoot()->get("a")->type == asvJSONValue::OBJECT);
+		ASSERT(json.getRoot()->get("b")->type == asvJSONValue::ARRAY);
+	}
+	// Comments
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("name: Alice # this is a comment\nage: 30"));
+		ASSERT_EQ(std::string(json.getString("name")), "Alice");
+		ASSERT_EQ(json.getInt("age"), 30);
+	}
+	// Document marker
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("---\nname: test"));
+		ASSERT_EQ(std::string(json.getString("name")), "test");
+	}
+	// Round-trip: generated YAML -> parse
+	{
+		asvJSON json;
+		json.putNull("n");
+		json.putBool("b", true);
+		json.putInt("i", -42);
+		json.putDouble("d", 3.14);
+		json.putString("s", "plain");
+		json.putString("qq", "it's \"fine\"");
+		json.putString("ml", "line1\nline2");
+		asvJSON json2;
+		ASSERT(json2.fromYAML(json.toYAML()));
+		ASSERT(json2.isNull("n"));
+		ASSERT_EQ(json2.getBool("b"), true);
+		ASSERT_EQ(json2.getInt("i"), -42);
+		double dv = json2.getDouble("d");
+		ASSERT(dv > 3.13 && dv < 3.15);
+		ASSERT_EQ(std::string(json2.getString("s")), "plain");
+	}
+	// Object with array at deeper nesting
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("outer:\n  inner:\n    - x\n    - y"));
+		auto* outer = json.getRoot()->get("outer");
+		ASSERT(outer != nullptr);
+		auto* inner = outer->get("inner");
+		ASSERT(inner != nullptr && inner->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(inner->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(inner->arr->at(0)->getString()), "x");
+	}
+	// Round-trip special types (OBJECTID, REGEX, BINARY, EXTENSION)
+	{
+		asvJSON json;
+		json.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+		json.putRegex("rx", "^test$", "gi");
+		uint8_t bin[] = {0xde, 0xad};
+		json.putBinary("bin", bin, 2);
+		uint8_t ext[] = {0x01, 0x02};
+		json.putExtension("ext", 42, ext, 2);
+		json.putDateTime("dt", 1705314645);
+		std::string yml = json.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(std::string_view(yml)));
+		auto* oid = j2.getRoot()->get("oid");
+		ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+		ASSERT_EQ(std::string_view(oid->str_data), std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+		auto* rx = j2.getRoot()->get("rx");
+		ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
+		ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+		auto* bin2 = j2.getRoot()->get("bin");
+		ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+		ASSERT_EQ(bin2->bin_data.size(), size_t(2));
+		ASSERT_EQ(bin2->bin_data[0], 0xde);
+		auto* ext2 = j2.getRoot()->get("ext");
+		ASSERT(ext2 != nullptr && ext2->type == asvJSONValue::EXTENSION);
+		ASSERT_EQ(ext2->ext_type, 42);
+		ASSERT_EQ(ext2->bin_data.size(), size_t(2));
+		auto* dt2 = j2.getRoot()->get("dt");
+		ASSERT(dt2 != nullptr && dt2->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(dt2->timestamp, 1705314645);
+	}
+	// Folded block scalar >
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello world");
+	}
+	// Folded block scalar with empty line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >\n  para1\n\n  para2"));
+		ASSERT_EQ(std::string(json.getString("text")), "para1\npara2");
+	}
+	// Double-quoted YAML string with \n escape
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"hello\\nworld\""));
+		ASSERT_EQ(std::string(json.getString("s")), "hello\nworld");
+	}
+	// Double-quoted YAML string with \x escape
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\x48\\x65\\x6c\\x6c\\x6f\""));
+		ASSERT_EQ(std::string(json.getString("s")), "Hello");
+	}
+	// Double-quoted YAML string with \u escape
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\u0048\\u0065\\u006c\\u006c\\u006f\""));
+		ASSERT_EQ(std::string(json.getString("s")), "Hello");
+	}
+}
+
 TEST(testToTOON) {
 	// Basic object round-trip
 	{
@@ -2836,6 +3024,231 @@ TEST(testToGOON) {
 	}
 }
 
+TEST(testProtobufBasic) {
+	// Schema-less: keys must be numeric field numbers
+	asvJSON json;
+	json.parse(std::string(R"({"1":"test","2":42,"3":true,"5":3.14})"));
+
+	auto buf = json.toProtobuf();
+	ASSERT(buf.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobuf(buf.data(), buf.size()));
+	// In schema-less mode, field names stay as numeric strings
+	ASSERT(json2.getRoot()->hasKey("1"));
+	ASSERT(json2.getRoot()->hasKey("2"));
+	ASSERT(json2.getRoot()->hasKey("3"));
+}
+
+TEST(testProtobufArrays) {
+	// Schema-driven array round-trip
+	std::string schemaJson = R"({
+		"msg":{"id":1,"type":"string"},
+		"num":{"id":2,"type":"int32"}
+	})";
+	asvJSON json;
+	json.putString("msg", "hello");
+	json.putInt("num", 7);
+
+	auto buf = json.toProtobuf(schemaJson);
+	ASSERT(buf.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+	ASSERT_EQ(std::string(json2.getString("msg")), "hello");
+	ASSERT_EQ(json2.getInt("num"), 7);
+}
+
+TEST(testProtobufNested) {
+	// Schema-driven nested object
+	std::string schemaJson = R"({
+		"outer":{"id":1,"type":"message","fields":{
+			"inner":{"id":1,"type":"message","fields":{
+				"val":{"id":1,"type":"int32"}
+			}}
+		}}
+	})";
+	asvJSON json;
+	json.parse(std::string(R"({"outer":{"inner":{"val":42}}})"));
+
+	auto buf = json.toProtobuf(schemaJson);
+	ASSERT(buf.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+	ASSERT_EQ(json2.getInt("outer.inner.val"), 42);
+}
+
+TEST(testProtobufSchema) {
+	// Schema-driven round-trip
+	std::string schemaJson = R"({
+		"name":{"id":1,"type":"string"},
+		"age":{"id":2,"type":"int32"},
+		"active":{"id":3,"type":"bool"}
+	})";
+
+	asvJSON json;
+	json.putString("name", "Alice");
+	json.putInt("age", 30);
+	json.putBool("active", true);
+
+	auto buf = json.toProtobuf(schemaJson);
+	ASSERT(buf.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+	ASSERT_EQ(std::string(json2.getString("name")), "Alice");
+	ASSERT_EQ(json2.getInt("age"), 30);
+	ASSERT_EQ(json2.getBool("active"), true);
+}
+
+TEST(testProtobufTextFormat) {
+	// Text format round-trip (null values are skipped in serialization)
+	asvJSON json;
+	json.putString("name", "test");
+	json.putInt("count", 42);
+	json.putBool("flag", true);
+
+	std::string text = json.toProtobufText();
+	ASSERT(!text.empty());
+	ASSERT(text.find("name") != std::string::npos);
+	ASSERT(text.find("42") != std::string::npos);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobufText(text));
+	ASSERT_EQ(std::string(json2.getString("name")), "test");
+	ASSERT_EQ(json2.getInt("count"), 42);
+	ASSERT_EQ(json2.getBool("flag"), true);
+}
+
+TEST(testProtobufStaticConverters) {
+	// Static helper: protobufFromString / stringFromProtobuf (numeric keys = field numbers)
+	std::string jsonStr = R"({"1":1,"2":"hello"})";
+	auto buf = asvJSON::protobufFromString(jsonStr);
+	ASSERT(buf.size() > 0);
+
+	auto result = asvJSON::stringFromProtobuf(buf.data(), buf.size());
+	ASSERT(!result.empty());
+}
+
+TEST(testProtobufStringOverload) {
+	// fromProtobuf(string) overload with schema
+	std::string schemaJson = R"({
+		"msg":{"id":1,"type":"string"}
+	})";
+	asvJSON json;
+	json.putString("msg", "hello");
+	auto buf = json.toProtobuf(schemaJson);
+	ASSERT(buf.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromProtobuf(std::string(reinterpret_cast<const char*>(buf.data()), buf.size()), schemaJson));
+	ASSERT_EQ(std::string(json2.getString("msg")), "hello");
+}
+
+TEST(testProtobufPackedFixed) {
+	// Simple packed int32 first (known working path)
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"int32","repeated":true,"packed":true}
+		})";
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeInt(10));
+		arr->arr->push_back(asvJSONValue::makeInt(20));
+		json.setValue("vals", std::move(arr));
+		auto buf = json.toProtobuf(schemaJson);
+		ASSERT(buf.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+		ASSERT(json2.getRoot()->hasKey("vals"));
+		auto* vArr = json2.getRoot()->get("vals");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT_EQ(vArr->arr->at(0)->getInt(), 10);
+	}
+	// Packed float
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"float","repeated":true,"packed":true}
+		})";
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeDouble(1.5));
+		arr->arr->push_back(asvJSONValue::makeDouble(2.5));
+		json.setValue("vals", std::move(arr));
+		auto buf = json.toProtobuf(schemaJson);
+		ASSERT(buf.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+		ASSERT(json2.getRoot()->hasKey("vals"));
+		auto* vArr = json2.getRoot()->get("vals");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT(vArr->arr->at(0)->getDouble() > 1.4 && vArr->arr->at(0)->getDouble() < 1.6);
+	}
+	// Packed double
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"double","repeated":true,"packed":true}
+		})";
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeDouble(3.141592653589793));
+		arr->arr->push_back(asvJSONValue::makeDouble(2.718281828459045));
+		json.setValue("vals", std::move(arr));
+		auto buf = json.toProtobuf(schemaJson);
+		ASSERT(buf.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+		ASSERT(json2.getRoot()->hasKey("vals"));
+		auto* vArr = json2.getRoot()->get("vals");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT(vArr->arr->at(0)->getDouble() > 3.14 && vArr->arr->at(0)->getDouble() < 3.15);
+	}
+	// Packed fixed32
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"fixed32","repeated":true,"packed":true}
+		})";
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeInt(100));
+		arr->arr->push_back(asvJSONValue::makeInt(200));
+		json.setValue("vals", std::move(arr));
+		auto buf = json.toProtobuf(schemaJson);
+		ASSERT(buf.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+		ASSERT(json2.getRoot()->hasKey("vals"));
+		auto* vArr = json2.getRoot()->get("vals");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT_EQ(vArr->arr->at(0)->getInt(), 100);
+	}
+	// Packed fixed64
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"fixed64","repeated":true,"packed":true}
+		})";
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeInt(10000000000LL));
+		arr->arr->push_back(asvJSONValue::makeInt(20000000000LL));
+		json.setValue("vals", std::move(arr));
+		auto buf = json.toProtobuf(schemaJson);
+		ASSERT(buf.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromProtobuf(buf.data(), buf.size(), schemaJson));
+		ASSERT(json2.getRoot()->hasKey("vals"));
+		auto* vArr = json2.getRoot()->get("vals");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT_EQ(vArr->arr->at(0)->getInt(), 10000000000LL);
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -3265,11 +3678,22 @@ int main() {
 	RUN(testCBORIndefiniteMap);
 	RUN(testCBORFloat16);
 
+	std::cout << "\n--- Protobuf Tests ---\n";
+	RUN(testProtobufBasic);
+	RUN(testProtobufArrays);
+	RUN(testProtobufNested);
+	RUN(testProtobufSchema);
+	RUN(testProtobufTextFormat);
+	RUN(testProtobufStaticConverters);
+	RUN(testProtobufStringOverload);
+	RUN(testProtobufPackedFixed);
+
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
+	RUN(testFromYAML);
 	
 	std::cout << "\n--- CSV Serialization Tests ---\n";
 	RUN(testToCSV);

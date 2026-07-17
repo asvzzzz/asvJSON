@@ -674,8 +674,8 @@ private:
 			auto v = asvJSONValue::makeBinary(data.data(), data.size());
 			return v;
 		}
-		if (raw.size() > 6 && raw.compare(0, 6, "__EXT__") == 0) {
-			auto rest = raw.substr(6);
+		if (raw.size() > 7 && raw.compare(0, 7, "__EXT__") == 0) {
+			auto rest = raw.substr(7);
 			size_t sep = rest.find("__");
 			if (sep != std::string_view::npos) {
 				int extType = 0;
@@ -685,6 +685,33 @@ private:
 					return asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
 				}
 			}
+		}
+		if (raw.size() > 7 && raw.compare(0, 7, "__OID__") == 0) {
+			auto hex = raw.substr(7);
+			if (hex.size() == 24) {
+				auto hexVal = [](char c) -> uint8_t {
+					if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+					if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+					if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+					return 0;
+				};
+				uint8_t bytes[12];
+				for (int i = 0; i < 12; i++)
+					bytes[i] = static_cast<uint8_t>((hexVal(hex[i * 2]) << 4) | hexVal(hex[i * 2 + 1]));
+				return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
+			}
+		}
+		if (raw.size() > 9 && raw.compare(0, 9, "__REGEX__") == 0) {
+			auto rest = raw.substr(9);
+			size_t sep = rest.find('|');
+			std::string pattern, opts;
+			if (sep != std::string_view::npos) {
+				pattern = std::string(rest.substr(0, sep));
+				opts = std::string(rest.substr(sep + 1));
+			} else {
+				pattern = std::string(rest);
+			}
+			return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
 		}
 		if (raw.size() >= 20 && raw[4] == '-' && raw[7] == '-' && raw[10] == 'T') {
 			time_t ts;
@@ -1494,8 +1521,13 @@ public:
 	bool fromCBOR(const void* data, size_t size);
 	std::string toBSON() const;
 	bool fromBSON(const void* data, size_t size);
+	std::vector<uint8_t> toProtobuf(const std::string& schemaJson = "") const;
+	bool fromProtobuf(const void* data, size_t size, const std::string& schemaJson = "");
+	std::string toProtobufText() const;
+	bool fromProtobufText(const std::string& text);
 	std::string toXML() const;
 	std::string toYAML() const;
+	bool fromYAML(std::string_view input);
 	std::string toCSV() const;
 	bool fromCSV(std::string_view input);
 
@@ -1524,9 +1556,12 @@ public:
 	static std::string stringFromMessagePack(const uint8_t* data, size_t size);
 	static std::vector<uint8_t> bsonFromString(const std::string& jsonStr);
 	static std::vector<uint8_t> cborFromString(const std::string& jsonStr);
+	static std::vector<uint8_t> protobufFromString(const std::string& jsonStr);
+	static std::string stringFromProtobuf(const uint8_t* data, size_t size);
 	bool fromMessagePack(const std::string& data);
 	bool fromBSON(const std::string& data);
 	bool fromCBOR(const std::string& data);
+	bool fromProtobuf(const std::string& data, const std::string& schemaJson = "");
 };
 
 // ======================= Type Formatting Helpers =======================
@@ -1578,11 +1613,11 @@ static void fmtRegexVal(std::string_view s, std::string& out) {
 	size_t sep = s.find('|');
 	out.push_back('"');
 	appendJsonEscaped(out, (sep != std::string_view::npos) ? s.substr(0, sep) : s);
-	out += "\"/";
 	if (sep != std::string_view::npos && sep + 1 < s.size()) {
-		std::string_view opts(s.data() + sep + 1, s.size() - sep - 1);
-		for (auto c : opts) out += c;
+		out += '|';
+		appendJsonEscaped(out, std::string_view(s.data() + sep + 1, s.size() - sep - 1));
 	}
+	out += '"';
 }
 
 static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
