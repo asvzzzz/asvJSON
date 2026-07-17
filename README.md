@@ -34,7 +34,7 @@ MIT license - see the `LICENSE` file for details.
 - JSON (compact and pretty print)
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
-- XML - `toXML()` with element name sanitization, proper escaping, standard `&#x;` references for control chars
+- CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
 - YAML - `toYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
@@ -291,11 +291,15 @@ Convenience methods combining dot-path lookup with type extraction.
 | `std::vector<uint8_t> toMessagePack() const` | Serialise to MessagePack. |
 | `bool fromMessagePack(const uint8_t* data, size_t size)` | Parse MessagePack from raw bytes. |
 | `bool fromMessagePack(const std::string& data)` | Parse MessagePack from `std::string`. |
+| `std::vector<uint8_t> toCBOR() const` | Serialise to CBOR (RFC 8949). |
+| `bool fromCBOR(const uint8_t* data, size_t size)` | Parse CBOR from raw bytes. |
+| `bool fromCBOR(const std::string& data)` | Parse CBOR from `std::string`. |
 | `std::vector<uint8_t> toBSON() const` | Serialise to BSON. |
 | `bool fromBSON(const uint8_t* data, size_t size)` | Parse BSON from raw bytes. |
 | `bool fromBSON(const std::string& data)` | Parse BSON from `std::string`. |
 | `static std::vector<uint8_t> messagePackFromString(const std::string& json)` | JSON string -> MessagePack. |
 | `static std::string stringFromMessagePack(const uint8_t* data, size_t len)` | MessagePack -> JSON string. |
+| `static std::vector<uint8_t> cborFromString(const std::string& json)` | JSON string -> CBOR. |
 
 ### asvJSONValue Class
 
@@ -404,6 +408,27 @@ items:
 meta:
   nested: true
 ```
+
+### CBOR (RFC 8949)
+
+CBOR (Concise Binary Object Representation) is a binary JSON superset standardized as RFC 8949, designed for small code size and compact messages.
+
+```cpp
+asvJSON json;
+json.parse("{\"name\":\"Test\",\"count\":42,\"active\":true}");
+auto cbor = json.toCBOR();
+// cbor.size() < json.serialize().size() — compact binary format
+
+asvJSON json2;
+json2.fromCBOR(cbor.data(), cbor.size());
+```
+
+CBOR support includes:
+- **All major types**: unsigned/negative integers, byte strings, text strings, arrays, maps, simple values
+- **Indefinite-length** arrays, maps, and strings
+- **Floats**: half-precision (16-bit), single-precision (32-bit), double-precision (64-bit)
+- **Tags**: datetime (tag 1), regular expression (tag 35), extension types (tag 257)
+- **Static helper**: `asvJSON::cborFromString()` — JSON string → CBOR bytes
 
 ### CSV
 
@@ -517,6 +542,7 @@ GOON features:
 
 ### 1.5.0 (2026-07-17)
 
+- **New format — CBOR:** Added `toCBOR()` / `fromCBOR()` — RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags. Static helper `cborFromString()`.
 - **Modular structure:** Refactored monolithic header into `asvjson/` module directory  -  `core.hpp`, `detail/*.hpp`, `formats/*.hpp`. The top-level `asvJSON++.hpp` remains as a backward-compat wrapper.
 - **Bugfix  -  Base64 custom charset:** `decodeBase64Fast` now uses `getDecodeTable()`, fixing round-trip when a custom charset is set via `setBase64Chars()`.
 - **Bugfix  -  Namespace pollution:** Global symbols (`FormatFrame`, `splitLines`, `countIndent`, `stripIndent`, `closeFrames`, `addComma`) moved into `asvJSONInternal` namespace.

@@ -1,7 +1,7 @@
 #pragma once
-// asvJSON++ v1.5.0 - Main entry point
+// asvJSON++ v1.6.0 - Main entry point
 // Includes core + all formats by default.
-// Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_BSON,
+// Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
 // ASVJSON_DISABLE_XML, ASVJSON_DISABLE_YAML, ASVJSON_DISABLE_CSV
 // before including this header to exclude specific formats.
@@ -10,6 +10,10 @@
 
 #ifndef ASVJSON_DISABLE_MSG_PACK
 #include "formats/msgpack.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_CBOR
+#include "formats/cbor.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_BSON

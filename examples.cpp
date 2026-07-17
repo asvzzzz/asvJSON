@@ -360,6 +360,24 @@ void example_bson() {
 	std::cout << "Roundtrip - name: " << json2.getString("name") << ", count: " << json2.getInt("count") << std::endl << std::endl;
 }
 
+void example_cbor() {
+	std::cout << "=== CBOR (RFC 8949) ===" << std::endl;
+	
+	asvJSON json;
+	std::string input = R"({"name": "Test", "count": 42, "active": true, "data": [1, 2.5, null]})";
+	json.parse(input);
+	
+	auto cbor = json.toCBOR();
+	std::cout << "JSON size: " << json.serialize().size() << " bytes" << std::endl;
+	std::cout << "CBOR size: " << cbor.size() << " bytes" << std::endl;
+	
+	asvJSON json2;
+	json2.fromCBOR(cbor.data(), cbor.size());
+	std::cout << "Roundtrip - name: " << json2.getString("name")
+	          << ", count: " << json2.getInt("count")
+	          << ", active: " << (json2.getBool("active") ? "true" : "false") << std::endl << std::endl;
+}
+
 void example_json_pointer() {
 	std::cout << "=== JSON Pointer ===" << std::endl;
 	
@@ -977,6 +995,7 @@ int main() {
 	example_regex();
 	example_messagepack();
 	example_bson();
+	example_cbor();
 	example_json_pointer();
 	example_json_patch();
 	example_clone();

@@ -1709,6 +1709,286 @@ TEST(testMessagePackObjectIdRegexTimestamp) {
 	ASSERT_EQ(tsV->num, 1234567890);
 }
 
+TEST(testCBOR) {
+	asvJSON json;
+	json.putString("str", "hello");
+	json.putInt("num", 123);
+	json.putBool("flag", true);
+	json.putNull("nill");
+	json.putDouble("dbl", 1.5);
+
+	auto cbor = json.toCBOR();
+	ASSERT(cbor.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	ASSERT_EQ(json2.getString("str"), "hello");
+	ASSERT_EQ(json2.getInt("num"), 123);
+	ASSERT_EQ(json2.getBool("flag"), true);
+	ASSERT(json2.isNull("nill"));
+	ASSERT_EQ(json2.getDouble("dbl"), 1.5);
+}
+
+TEST(testCBORArray) {
+	asvJSON json;
+	json.parse(std::string("[1, \"two\", 3.0, true, null]"));
+	auto cbor = json.toCBOR();
+	ASSERT(cbor.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* arr = json2.getRoot();
+	ASSERT(arr != nullptr);
+	ASSERT_EQ(arr->type, asvJSONValue::ARRAY);
+	ASSERT_EQ(arr->size(), static_cast<size_t>(5));
+
+	auto* v = arr->get(0);
+	ASSERT(v != nullptr && v->type == asvJSONValue::INT && v->num == 1);
+	v = arr->get(1);
+	ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->str_data == "two");
+	v = arr->get(2);
+	ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE && v->dbl == 3.0);
+	v = arr->get(3);
+	ASSERT(v != nullptr && v->type == asvJSONValue::BOOL_VAL && v->flag == true);
+	v = arr->get(4);
+	ASSERT(v != nullptr && v->type == asvJSONValue::NULL_VAL);
+}
+
+TEST(testCBORIntegers) {
+	asvJSON json;
+	json.putInt("zero", 0);
+	json.putInt("pos_small", 42);
+	json.putInt("pos_byte", 200);
+	json.putInt("pos_word", 70000);
+	json.putInt("neg_small", -5);
+	json.putInt("neg_byte", -200);
+	json.putInt("neg_word", -70000);
+	json.putInt("max64", 9223372036854775807LL);
+	json.putInt("min64", -9223372036854775807LL - 1);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	ASSERT_EQ(json2.getInt("zero"), 0);
+	ASSERT_EQ(json2.getInt("pos_small"), 42);
+	ASSERT_EQ(json2.getInt("pos_byte"), 200);
+	ASSERT_EQ(json2.getInt("pos_word"), 70000);
+	ASSERT_EQ(json2.getInt("neg_small"), -5);
+	ASSERT_EQ(json2.getInt("neg_byte"), -200);
+	ASSERT_EQ(json2.getInt("neg_word"), -70000);
+	ASSERT_EQ(json2.getInt("max64"), 9223372036854775807LL);
+	ASSERT_EQ(json2.getInt("min64"), -9223372036854775807LL - 1);
+}
+
+TEST(testCBORDouble) {
+	asvJSON json;
+	json.putDouble("pi", 3.141592653589793);
+	json.putFloat32("f32", 1.5f);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	ASSERT_EQ(json2.getDouble("pi"), 3.141592653589793);
+	ASSERT_EQ(json2.getDouble("f32"), 1.5f);
+}
+
+TEST(testCBORBinary) {
+	asvJSON json;
+	uint8_t bin[] = {0x00, 0x01, 0x02, 0xFF, 0xFE};
+	json.putBinary("bin", bin, 5);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto v = json2.getBinary("bin");
+	ASSERT_EQ(v.size(), static_cast<size_t>(5));
+	ASSERT_EQ(v[0], 0x00);
+	ASSERT_EQ(v[4], 0xFE);
+}
+
+TEST(testCBORDateTime) {
+	{
+		asvJSON json;
+		json.putDateTime("dt", 1705314645, 123);
+
+		auto cbor = json.toCBOR();
+		asvJSON json2;
+		ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+		ASSERT_EQ(json2.getDateTime("dt"), 1705314645);
+		ASSERT_EQ(json2.getDateTimeMs("dt"), 123);
+	}
+	{
+		asvJSON json;
+		json.parse(std::string("{\"ts\":\"2024-01-15T10:30:45.123Z\"}"));
+		auto cbor = json.toCBOR();
+		asvJSON json2;
+		ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+		ASSERT_EQ(json2.getDateTime("ts"), 1705314645);
+		ASSERT_EQ(json2.getDateTimeMs("ts"), 123);
+	}
+}
+
+TEST(testCBORRegex) {
+	asvJSON json;
+	json.putRegex("re", "pattern", "ims");
+
+	auto cbor = json.toCBOR();
+	ASSERT(cbor.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* v = json2.getRoot()->get("re");
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::REGEX);
+}
+
+TEST(testCBORExtension) {
+	uint8_t extData[] = {0xDE, 0xAD, 0xBE, 0xEF};
+	asvJSON json;
+	json.putExtension("ext", 7, extData, 4);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	ASSERT(json2.isExtension("ext"));
+	auto ext = json2.getExtension("ext");
+	ASSERT_EQ(ext.first, 7);
+	ASSERT_EQ(ext.second.size(), static_cast<size_t>(4));
+	ASSERT_EQ(ext.second[0], 0xDE);
+}
+
+TEST(testCBORObjectIdTimestamp) {
+	asvJSON json;
+	json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+	json.putTimestamp("ts", 1234567890);
+
+	auto cbor = json.toCBOR();
+	ASSERT(cbor.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	// ObjectId round-trips as BINARY (no standard CBOR tag for ObjectId)
+	auto* oidV = json2.getRoot()->get("oid");
+	ASSERT(oidV != nullptr);
+	ASSERT_EQ(oidV->type, asvJSONValue::BINARY);
+	ASSERT_EQ(oidV->bin_data.size(), static_cast<size_t>(12));
+
+	// Timestamp round-trips as DATETIME (tag 1)
+	auto* tsV = json2.getRoot()->get("ts");
+	ASSERT(tsV != nullptr);
+	ASSERT_EQ(tsV->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(tsV->timestamp, 1234567890);
+}
+
+TEST(testCBORNestedObject) {
+	asvJSON json;
+	json.parse(std::string("{\"a\":{\"b\":{\"c\":[1,2,3]}}}"));
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	// Verify the root is an object
+	auto* root = json2.getRoot();
+	ASSERT(root != nullptr);
+	ASSERT_EQ(root->type, asvJSONValue::OBJECT);
+
+	// Navigate manually
+	auto* a = root->get("a");
+	ASSERT(a != nullptr);
+	ASSERT_EQ(a->type, asvJSONValue::OBJECT);
+
+	auto* b = a->get("b");
+	ASSERT(b != nullptr);
+	ASSERT_EQ(b->type, asvJSONValue::OBJECT);
+
+	auto* c = b->get("c");
+	ASSERT(c != nullptr);
+	ASSERT_EQ(c->type, asvJSONValue::ARRAY);
+	ASSERT_EQ(c->size(), static_cast<size_t>(3));
+	ASSERT_EQ(c->get(0)->num, 1);
+	ASSERT_EQ(c->get(1)->num, 2);
+	ASSERT_EQ(c->get(2)->num, 3);
+}
+
+TEST(testCBORCorrupted) {
+	asvJSON json;
+	uint8_t bad[] = {0xFF};
+	ASSERT(!json.fromCBOR(bad, 1));
+}
+
+TEST(testCBOREmpty) {
+	asvJSON json;
+	ASSERT(!json.fromCBOR(nullptr, 0));
+}
+
+TEST(testCBORFromString) {
+	auto cbor = asvJSON::cborFromString(std::string("{\"x\":1}"));
+	ASSERT(cbor.size() > 0);
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(cbor.data(), cbor.size()));
+	ASSERT_EQ(json.getInt("x"), 1);
+}
+
+TEST(testCBORIndefiniteArray) {
+	// Build CBOR with indefinite-length array (0x9F ... 0xFF)
+	std::vector<uint8_t> data;
+	data.push_back(0x9F); // array with indefinite length
+	data.push_back(0x01); // 1 (unsigned)
+	data.push_back(0x02); // 2
+	data.push_back(0x03); // 3
+	data.push_back(0xFF); // break
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(data.data(), data.size()));
+	auto* arr = json.getRoot();
+	ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+	ASSERT_EQ(arr->size(), static_cast<size_t>(3));
+	ASSERT_EQ(arr->get(0)->num, 1);
+	ASSERT_EQ(arr->get(1)->num, 2);
+	ASSERT_EQ(arr->get(2)->num, 3);
+}
+
+TEST(testCBORIndefiniteMap) {
+	// Build CBOR with indefinite-length map (0xBF ... 0xFF)
+	std::vector<uint8_t> data;
+	data.push_back(0xBF); // map with indefinite length
+	data.push_back(0x61); data.push_back('a'); // text(1) "a"
+	data.push_back(0x01); // 1
+	data.push_back(0x61); data.push_back('b'); // text(1) "b"
+	data.push_back(0x02); // 2
+	data.push_back(0xFF); // break
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(data.data(), data.size()));
+	ASSERT_EQ(json.getInt("a"), 1);
+	ASSERT_EQ(json.getInt("b"), 2);
+}
+
+TEST(testCBORFloat16) {
+	// Build CBOR with half-precision float: 0xF9 0x3C 0x00 = 1.0
+	std::vector<uint8_t> data;
+	data.push_back(0xF9);
+	data.push_back(0x3C);
+	data.push_back(0x00);
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(data.data(), data.size()));
+	auto* v = json.getRoot();
+	ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+	ASSERT_EQ(v->dbl, 1.0);
+}
+
 TEST(testObjectKeyEscapes) {
 	// Object keys with escape sequences must be decoded per RFC 7159
 	{
@@ -2967,6 +3247,24 @@ int main() {
 	std::cout << "\n--- Object Key Escape Tests ---\n";
 	RUN(testObjectKeyEscapes);
 	
+	std::cout << "\n--- CBOR Serialization Tests ---\n";
+	RUN(testCBOR);
+	RUN(testCBORArray);
+	RUN(testCBORIntegers);
+	RUN(testCBORDouble);
+	RUN(testCBORBinary);
+	RUN(testCBORDateTime);
+	RUN(testCBORRegex);
+	RUN(testCBORExtension);
+	RUN(testCBORObjectIdTimestamp);
+	RUN(testCBORNestedObject);
+	RUN(testCBORCorrupted);
+	RUN(testCBOREmpty);
+	RUN(testCBORFromString);
+	RUN(testCBORIndefiniteArray);
+	RUN(testCBORIndefiniteMap);
+	RUN(testCBORFloat16);
+
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);
 	

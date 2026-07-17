@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.5.0 - C++17 JSON library - Core Module
+// asvJSON++ v1.6.0 - C++17 JSON library - Core Module
 // 
 // Configuration:
 //   - Define ASVJSON_USE_ORDERED_MAP before including header for:
@@ -395,6 +395,7 @@ struct asvJSONValue {
 	void serialize(std::string& out, bool allowNaNInfinity = false) const;
 	void serializePretty(std::string& out, int indent = 0, bool allowNaNInfinity = false) const;
 	void toMessagePack(std::vector<uint8_t>& out) const;
+	void toCBOR(std::vector<uint8_t>& out) const;
 	void toBSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
 	void toXML(std::string& out, const std::string& name, int indent) const;
@@ -1485,6 +1486,8 @@ public:
 	// Format methods
 	std::vector<uint8_t> toMessagePack() const;
 	bool fromMessagePack(const void* data, size_t size);
+	std::vector<uint8_t> toCBOR() const;
+	bool fromCBOR(const void* data, size_t size);
 	std::string toBSON() const;
 	bool fromBSON(const void* data, size_t size);
 	std::string toXML() const;
@@ -1516,8 +1519,10 @@ public:
 	static std::vector<uint8_t> messagePackFromString(const std::string& jsonStr);
 	static std::string stringFromMessagePack(const uint8_t* data, size_t size);
 	static std::vector<uint8_t> bsonFromString(const std::string& jsonStr);
+	static std::vector<uint8_t> cborFromString(const std::string& jsonStr);
 	bool fromMessagePack(const std::string& data);
 	bool fromBSON(const std::string& data);
+	bool fromCBOR(const std::string& data);
 };
 
 // ======================= Type Formatting Helpers =======================
@@ -2025,8 +2030,15 @@ inline std::vector<uint8_t> asvJSON::toMessagePack() const {
 	return out;
 }
 
+inline std::vector<uint8_t> asvJSON::toCBOR() const {
+	std::vector<uint8_t> out;
+	if (root) root->toCBOR(out);
+	return out;
+}
+
 namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
+inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
 } // namespace asvJSONInternal
 using namespace asvJSONInternal;
 
@@ -2037,6 +2049,18 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	try {
 		size_t pos = 0;
 		root = parseMessagePack(u, pos, size, 0);
+		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
+		return true;
+	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+}
+
+inline bool asvJSON::fromCBOR(const void* data, size_t size) {
+	root = nullptr;
+	if (!data || size < 1) return false;
+	const uint8_t* u = static_cast<const uint8_t*>(data);
+	try {
+		size_t pos = 0;
+		root = parseCBOR(u, pos, size, 0);
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
@@ -2152,12 +2176,22 @@ inline std::vector<uint8_t> asvJSON::bsonFromString(const std::string& jsonStr) 
 	return std::vector<uint8_t>(s.begin(), s.end());
 }
 
+inline std::vector<uint8_t> asvJSON::cborFromString(const std::string& jsonStr) {
+	asvJSON j;
+	if (!j.parse(jsonStr)) return {};
+	return j.toCBOR();
+}
+
 inline bool asvJSON::fromMessagePack(const std::string& data) {
 	return fromMessagePack(static_cast<const void*>(data.data()), data.size());
 }
 
 inline bool asvJSON::fromBSON(const std::string& data) {
 	return fromBSON(static_cast<const void*>(data.data()), data.size());
+}
+
+inline bool asvJSON::fromCBOR(const std::string& data) {
+	return fromCBOR(static_cast<const void*>(data.data()), data.size());
 }
 
 #endif // ASVJSON_CORE_H
