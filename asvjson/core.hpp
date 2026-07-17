@@ -1267,6 +1267,10 @@ public:
 		return root ? root->getConst(key) : nullptr;
 	}
 
+	[[nodiscard]] const asvJSONValue* getConst(size_t idx) const noexcept {
+		return root ? root->getConst(idx) : nullptr;
+	}
+
 	[[nodiscard]] const asvJSONValue* getArray(std::string_view key) const {
 		auto* v = get(key);
 		return v && v->type == asvJSONValue::ARRAY ? v : nullptr;
