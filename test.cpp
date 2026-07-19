@@ -2382,6 +2382,22 @@ TEST(testFromXML) {
 		ASSERT(json.fromXML("<root xsi:nil=\"true\"/>"));
 		ASSERT(json.isNull("root"));
 	}
+	// xsi:nil="true" - whitespace before closing >
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><age xsi:nil=\"true\"></age ></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->get("age")->type == asvJSONValue::NULL_VAL);
+	}
+	// xsi:nil="true" - newline + spaces before closing >
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><x xsi:nil=\"true\">\n</x  ></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->get("x")->type == asvJSONValue::NULL_VAL);
+	}
 	// DOCTYPE skipped before root
 	{
 		asvJSON json;

@@ -281,10 +281,16 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (pos < s.size() && s[pos] == '/') { pos++; if (pos < s.size() && s[pos] == '>') pos++; }
 			else if (pos < s.size() && s[pos] == '>') {
 				pos++;
-				// Skip to matching closing tag (nil elements are leaf-level)
-				std::string endTag = "</" + elemName + ">";
-				size_t end = s.find(endTag, pos);
-				if (end != std::string_view::npos) pos = end + endTag.size();
+				// Skip to matching closing tag, tolerant of whitespace before >
+				std::string closeTag = "</" + elemName;
+				size_t closePos = s.find(closeTag, pos);
+				if (closePos != std::string_view::npos) {
+					size_t afterName = closePos + closeTag.size();
+					while (afterName < s.size() && (s[afterName] == ' ' || s[afterName] == '\t' || s[afterName] == '\n' || s[afterName] == '\r'))
+						afterName++;
+					if (afterName < s.size() && s[afterName] == '>')
+						pos = afterName + 1;
+				}
 			}
 			return asvJSONValue::makeNull();
 		}
