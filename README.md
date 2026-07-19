@@ -438,7 +438,7 @@ CBOR (Concise Binary Object Representation) is a binary JSON superset standardiz
 asvJSON json;
 json.parse("{\"name\":\"Test\",\"count\":42,\"active\":true}");
 auto cbor = json.toCBOR();
-// cbor.size() < json.serialize().size() — compact binary format
+// cbor.size() < json.serialize().size() - compact binary format
 
 asvJSON json2;
 json2.fromCBOR(cbor.data(), cbor.size());
@@ -449,7 +449,7 @@ CBOR support includes:
 - **Indefinite-length** arrays, maps, and strings
 - **Floats**: half-precision (16-bit), single-precision (32-bit), double-precision (64-bit)
 - **Tags**: datetime (tag 1), regular expression (tag 35), extension types (tag 257)
-- **Static helper**: `asvJSON::cborFromString()` — JSON string → CBOR bytes
+- **Static helper**: `asvJSON::cborFromString()` - JSON string -> CBOR bytes
 
 ### CSV
 
@@ -577,7 +577,7 @@ std::string schema = R"({
 })";
 
 auto buf = json.toProtobuf(schema);
-// buf.size() < json.serialize().size() — compact binary format
+// buf.size() < json.serialize().size() - compact binary format
 
 asvJSON json2;
 json2.fromProtobuf(buf.data(), buf.size(), schema);
@@ -596,15 +596,15 @@ Protobuf features:
 - **Schema-driven**: field numbers and types defined in a JSON schema object
 - **Varint encoding**: compact integer representation
 - **Packed fixed-size arrays**: `fixed32`, `fixed64`, `float`, `double` packed as contiguous blocks
-- **Static helpers**: `protobufFromString()` / `stringFromProtobuf()` for JSON string ↔ binary conversion
+- **Static helpers**: `protobufFromString()` / `stringFromProtobuf()` for JSON string <-> binary conversion
 - **Text format**: human-readable `key: value` representation with nested messages and arrays
 
 ## Changelog
 
 ### 1.7.0 (2026-07-19)
 
-- **New format — Protobuf:** Added `toProtobuf()` / `fromProtobuf()` — Protocol Buffers binary wire format with schema-driven field mapping, varint encoding, packed fixed-size arrays. Text format via `toProtobufText()` / `fromProtobufText()`. Static helpers `protobufFromString()` / `stringFromProtobuf()`.
-- **New — XML decoder:** Added `fromXML()` — full XML parser supporting elements, attributes (`@`-prefix), text content (`#text`), CDATA, comments, processing instructions, type detection (`type="datetime|binary|objectid|regex|timestamp|extension"` attributes), child grouping into arrays for repeated names, self-closing tags.
+- **New format - Protobuf:** Added `toProtobuf()` / `fromProtobuf()` - Protocol Buffers binary wire format with schema-driven field mapping, varint encoding, packed fixed-size arrays. Text format via `toProtobufText()` / `fromProtobufText()`. Static helpers `protobufFromString()` / `stringFromProtobuf()`.
+- **New - XML decoder:** Added `fromXML()` - full XML parser supporting elements, attributes (`@`-prefix), text content (`#text`), CDATA, comments, processing instructions, type detection (`type="datetime|binary|objectid|regex|timestamp|extension"` attributes), child grouping into arrays for repeated names, self-closing tags.
 - **YAML decoder rewritten:** Major improvements:
   - Tag support: `!!int` (hex/octal/binary), `!!float` (`.nan`/`.inf`), `!!bool`/`!!null`/`!!str`/`!!timestamp`, `!!set` (flow), `!!omap`, `!!pairs`
   - Flow anchors & aliases (`&anchor`/`*alias` inside `{}`/`[]`)
@@ -612,11 +612,11 @@ Protobuf features:
   - Line-number-anchored error diagnostics for parse errors
   - NaN/Infinity encoding fix: `.nan`, `.inf`, `-.inf` (was emitting `~`)
 - **New tests:** 655+ lines covering Protobuf, XML, YAML (tags, anchors/aliases, multi-doc, directives, edge cases).
-- **Version bump:** 1.6.0 → 1.7.0
+- **Version bump:** 1.6.0 -> 1.7.0
 
 ### 1.6.0 (2026-07-18)
 
-- **New format — CBOR:** Added `toCBOR()` / `fromCBOR()` — RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags. Static helper `cborFromString()`.
+- **New format - CBOR:** Added `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags. Static helper `cborFromString()`.
 - **Modular structure:** Refactored monolithic header into `asvjson/` module directory  -  `core.hpp`, `detail/*.hpp`, `formats/*.hpp`. The top-level `asvJSON++.hpp` remains as a backward-compat wrapper.
 - **Bugfix  -  Base64 custom charset:** `decodeBase64Fast` now uses `getDecodeTable()`, fixing round-trip when a custom charset is set via `setBase64Chars()`.
 - **Bugfix  -  Namespace pollution:** Global symbols (`FormatFrame`, `splitLines`, `countIndent`, `stripIndent`, `closeFrames`, `addComma`) moved into `asvJSONInternal` namespace.

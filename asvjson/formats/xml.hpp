@@ -1,5 +1,9 @@
 #pragma once
 // XML serialization/parsing for asvJSON++
+// Namespace prefixes (e.g. xml:lang, xsi:nil) are preserved as part of key strings:
+//   - Attributes become "@prefix:name" keys (e.g. "@xml:lang")
+//   - Element names preserve the prefix (e.g. "ns:element")
+//   - xmlns declarations become "@xmlns" and "@xmlns:prefix" attributes
 
 #include "../core.hpp"
 
@@ -207,6 +211,19 @@ static void xmlParseChildren(std::string_view s, size_t& pos,
 					textContent += s.substr(pos + 9, end - pos - 9);
 					pos = end + 3; continue;
 				}
+				// Skip DOCTYPE declarations (with bracket-aware nesting)
+				if (pos + 9 < s.size() && s.substr(pos + 2, 7) == "DOCTYPE") {
+					size_t scan = pos + 9;
+					int bracketDepth = 0;
+					while (scan < s.size()) {
+						if (s[scan] == '[') bracketDepth++;
+						else if (s[scan] == ']') bracketDepth--;
+						else if (s[scan] == '>' && bracketDepth <= 0) break;
+						scan++;
+					}
+					if (scan >= s.size()) { pos = s.size(); break; }
+					pos = scan + 1; continue;
+				}
 				break;
 			}
 			if (pos + 1 < s.size() && s[pos + 1] == '?') {
@@ -254,6 +271,22 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (pos < s.size() && (s[pos] == '"' || s[pos] == '\'')) {
 				attrs[attrName] = xmlParseAttrValue(s, pos);
 			}
+		}
+	}
+
+	// xsi:nil="true" - treat element as JSON null
+	{
+		auto nilIt = attrs.find("xsi:nil");
+		if (nilIt != attrs.end() && (nilIt->second == "true" || nilIt->second == "1")) {
+			if (pos < s.size() && s[pos] == '/') { pos++; if (pos < s.size() && s[pos] == '>') pos++; }
+			else if (pos < s.size() && s[pos] == '>') {
+				pos++;
+				// Skip to matching closing tag (nil elements are leaf-level)
+				std::string endTag = "</" + elemName + ">";
+				size_t end = s.find(endTag, pos);
+				if (end != std::string_view::npos) pos = end + endTag.size();
+			}
+			return asvJSONValue::makeNull();
 		}
 	}
 
@@ -396,13 +429,26 @@ inline bool asvJSON::fromXML(std::string_view input) {
 			pos = end + 2;
 		}
 
-		// Skip comments and whitespace before root element
+		// Skip comments and DOCTYPE before root element
 		while (pos < input.size()) {
 			xmlSkipSpaces(input, pos);
 			if (pos + 4 < input.size() && input.substr(pos, 4) == "<!--") {
 				size_t end = input.find("-->", pos + 4);
 				if (end == std::string_view::npos) throw asvJSONError("unclosed comment");
 				pos = end + 3;
+				continue;
+			}
+			if (pos + 9 < input.size() && input.substr(pos, 9) == "<!DOCTYPE") {
+				size_t scan = pos + 9;
+				int bracketDepth = 0;
+				while (scan < input.size()) {
+					if (input[scan] == '[') bracketDepth++;
+					else if (input[scan] == ']') bracketDepth--;
+					else if (input[scan] == '>' && bracketDepth <= 0) break;
+					scan++;
+				}
+				if (scan >= input.size()) throw asvJSONError("unclosed DOCTYPE");
+				pos = scan + 1;
 				continue;
 			}
 			break;

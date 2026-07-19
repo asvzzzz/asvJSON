@@ -2328,7 +2328,7 @@ TEST(testFromXML) {
 		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 2);
 		ASSERT(arr->get(static_cast<size_t>(2))->getInt() == 3);
 	}
-	// Non-consecutive same-named children → single array
+	// Non-consecutive same-named children -> single array
 	{
 		asvJSON json;
 		ASSERT(json.fromXML("<root><item>1</item><other>2</other><item>3</item></root>"));
@@ -2357,6 +2357,42 @@ TEST(testFromXML) {
 		asvJSON json;
 		ASSERT(json.fromXML("<root>&#xD800;</root>"));
 		ASSERT(json.getString("root") == "");
+	}
+	// xsi:nil="true" - self-closing
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><age xsi:nil=\"true\"/></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->hasKey("age"));
+		ASSERT(inner->get("age")->type == asvJSONValue::NULL_VAL);
+	}
+	// xsi:nil="true" - with closing tag
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><name xsi:nil=\"true\">should be ignored</name></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->hasKey("name"));
+		ASSERT(inner->get("name")->type == asvJSONValue::NULL_VAL);
+	}
+	// xsi:nil="true" - standalone root
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root xsi:nil=\"true\"/>"));
+		ASSERT(json.isNull("root"));
+	}
+	// DOCTYPE skipped before root
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<!DOCTYPE root SYSTEM \"foo.dtd\"><root>data</root>"));
+		ASSERT(json.getString("root") == "data");
+	}
+	// XML declaration + DOCTYPE + comment
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<?xml version=\"1.0\"?>\n<!DOCTYPE root [<!ELEMENT root (#PCDATA)>]>\n<!-- comment -->\n<root>ok</root>"));
+		ASSERT(json.getString("root") == "ok");
 	}
 }
 
