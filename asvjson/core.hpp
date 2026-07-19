@@ -1536,6 +1536,9 @@ public:
 	bool fromTOML(std::string_view input);
 	std::string toJSONLines() const;
 	bool fromJSONLines(std::string_view input);
+	/// @brief Transfer ownership of the root value to the caller.
+	/// @return Unique pointer to the root value (may be null).
+	/// @note After calling, the document becomes empty; it can be reused via parse().
 	[[nodiscard]] std::unique_ptr<asvJSONValue> releaseRoot() noexcept { return std::move(root); }
 
 private:
