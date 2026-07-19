@@ -1806,7 +1806,7 @@ inline asvJSONValue* asvJSON::getByPointer(std::string_view ptr) {
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (!isArrayIndex(seg)) return nullptr;
 			size_t idx = 0;
-			auto [ptr, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
+			auto [p, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
 			if (ec != std::errc() || idx >= cur->arr->size()) return nullptr;
 			cur = (*cur->arr)[idx].get();
 		} else return nullptr;
@@ -1854,7 +1854,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 			}
 			if (!isArrayIndex(seg)) return false;
 			size_t idx = 0;
-			auto [ptr, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
+			auto [p, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
 			if (ec != std::errc()) return false;
 			if (isLast) {
 				if (idx >= cur->arr->size()) cur->arr->resize(idx + 1);
@@ -1898,7 +1898,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (!isArrayIndex(seg)) return false;
 			size_t idx = 0;
-			auto [ptr, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
+			auto [p, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
 			if (ec != std::errc() || idx >= cur->arr->size()) return false;
 			if (isLast) {
 				cur->arr->erase(cur->arr->begin() + static_cast<ptrdiff_t>(idx));
@@ -2019,7 +2019,7 @@ static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 			return true;
 		}
 		case asvJSONValue::OBJECT: {
-			if (!a->obj != !b->obj) return false;
+			if (static_cast<bool>(a->obj) != static_cast<bool>(b->obj)) return false;
 			if (a->obj && b->obj) {
 				if (a->obj->size() != b->obj->size()) return false;
 				for (const auto& [k, v] : *a->obj) {
