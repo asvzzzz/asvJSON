@@ -1231,7 +1231,7 @@ public:
 		return root ? root->get(key) : nullptr;
 	}
 
-	[[nodiscard]] asvJSONValue* getNested(std::string_view path) const {
+	[[nodiscard]] const asvJSONValue* getNested(std::string_view path) const {
 		if (!root || path.empty()) return root.get();
 		const asvJSONValue* cur = root.get();
 		size_t start = 0;
@@ -1256,7 +1256,11 @@ public:
 			}
 			if (start < path.size() && path[start] == '.') start++;
 		}
-		return const_cast<asvJSONValue*>(cur);
+		return cur;
+	}
+
+	[[nodiscard]] asvJSONValue* getNested(std::string_view path) {
+		return const_cast<asvJSONValue*>(static_cast<const asvJSON*>(this)->getNested(path));
 	}
 
 	[[nodiscard]] bool hasKey(std::string_view key) const {
@@ -2006,7 +2010,7 @@ static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 		case asvJSONValue::REGEX: return a->str_data == b->str_data;
 		case asvJSONValue::EXTENSION: return a->ext_type == b->ext_type && a->bin_data == b->bin_data;
 		case asvJSONValue::ARRAY: {
-			if (!a->arr != !b->arr) return false;
+			if (static_cast<bool>(a->arr) != static_cast<bool>(b->arr)) return false;
 			if (a->arr && b->arr) {
 				if (a->arr->size() != b->arr->size()) return false;
 				for (size_t i = 0; i < a->arr->size(); i++)
