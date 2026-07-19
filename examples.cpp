@@ -1112,6 +1112,47 @@ void example_json_lines() {
 	std::cout << std::endl;
 }
 
+void example_to_sexpr() {
+	std::cout << "=== S-Expression Output ===" << std::endl;
+	
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":10001}})"));
+	std::string sexpr = json.toSexpr();
+	std::cout << "S-Expression:" << std::endl << sexpr << std::endl << std::endl;
+	
+	// Round-trip
+	asvJSON j2;
+	if (j2.fromSexpr(std::string_view(sexpr))) {
+		std::cout << "Round-trip: name=" << j2.getString("name")
+		          << " age=" << j2.getInt("age")
+		          << " city=" << j2.getString("address.city")
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_from_sexpr() {
+	std::cout << "=== S-Expression Input ===" << std::endl;
+	
+	asvJSON json;
+	std::string_view input = "(items (\"apple\" \"banana\" \"cherry\") count 3)";
+	if (json.fromSexpr(input)) {
+		std::cout << "Parsed S-Expression:" << std::endl;
+		std::cout << "  items: ";
+		auto* arr = json.getRoot()->getConst("items");
+		if (arr) {
+			std::cout << "[";
+			for (size_t i = 0; i < arr->size(); i++) {
+				if (i > 0) std::cout << ", ";
+				std::cout << arr->get(static_cast<size_t>(i))->getString();
+			}
+			std::cout << "]" << std::endl;
+		}
+		std::cout << "  count: " << json.getInt("count") << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1179,6 +1220,8 @@ int main() {
 	example_protobuf();
 	example_to_toml();
 	example_json_lines();
+	example_to_sexpr();
+	example_from_sexpr();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

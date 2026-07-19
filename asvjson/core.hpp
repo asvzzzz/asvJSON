@@ -895,6 +895,8 @@ public:
 	bool fromTRON(std::string_view input);
 	std::string toGOON() const;
 	bool fromGOON(std::string_view input);
+	std::string toSexpr() const;
+	bool fromSexpr(std::string_view input);
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;

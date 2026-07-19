@@ -51,3 +51,7 @@
 #ifndef ASVJSON_DISABLE_TOML
 #include "formats/toml.hpp"
 #endif
+
+#ifndef ASVJSON_DISABLE_SEXPR
+#include "formats/sexpr.hpp"
+#endif

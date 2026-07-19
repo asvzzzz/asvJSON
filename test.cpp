@@ -4391,6 +4391,168 @@ TEST(testFromJSONLines) {
   }
 }
 
+TEST(testToSexpr) {
+  // Basic object round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"name":"John","age":30,"active":true})")));
+    std::string s = j.toSexpr();
+    ASSERT(!s.empty());
+    ASSERT_EQ(s.front(), '(');
+    ASSERT_EQ(s.back(), ')');
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("name")), "John");
+    ASSERT_EQ(j2.getInt("age"), int64_t(30));
+    ASSERT_EQ(j2.getBool("active"), true);
+  }
+  // Array round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[10,20,30]")));
+    std::string s = j.toSexpr();
+    ASSERT_EQ(s, "(10 20 30)");
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+    ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(10));
+  }
+  // Nested object round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"name\":\"John\",\"address\":{\"city\":\"NYC\"}}")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("name")), "John");
+    ASSERT_EQ(std::string(j2.getString("address.city")), "NYC");
+  }
+  // Null, bool, int, double
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"s":"hi","b":false,"n":null,"i":42,"d":3.14})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("s")), "hi");
+    ASSERT_EQ(j2.getBool("b"), false);
+    ASSERT(j2.isNull("n"));
+    ASSERT_EQ(j2.getInt("i"), int64_t(42));
+    ASSERT(j2.getDouble("d") > 3.13 && j2.getDouble("d") < 3.15);
+  }
+  // Empty object
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    std::string s = j.toSexpr();
+    ASSERT_EQ(s, "()");
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+  }
+  // Empty array
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    std::string s = j.toSexpr();
+    ASSERT_EQ(s, "()");
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+  }
+  // Nested arrays
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([[1,2],[3,4]])")));
+    std::string s = j.toSexpr();
+    ASSERT(j.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j.getRoot()->size(), size_t(2));
+  }
+  // Comments
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(name \"John\" ; this is a comment\n age 30)")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Symbol keys
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(first-name \"Alice\" last-name \"Bob\")")));
+    ASSERT_EQ(std::string(j.getString("first-name")), "Alice");
+    ASSERT_EQ(std::string(j.getString("last-name")), "Bob");
+  }
+  // nil / #t / #f
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a nil b #t c #f)")));
+    ASSERT(j.isNull("a"));
+    ASSERT_EQ(j.getBool("b"), true);
+    ASSERT_EQ(j.getBool("c"), false);
+  }
+  // Numeric keys must be quoted in output
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"123":"value","-42":"neg","true":"bool"})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("123")), "value");
+    ASSERT_EQ(std::string(j2.getString("-42")), "neg");
+    ASSERT_EQ(std::string(j2.getString("true")), "bool");
+  }
+}
+
+TEST(testFromSexpr) {
+  // Simple object
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(name \"John\" age 30)")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Nested
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(person (name \"Alice\" age 25))")));
+    ASSERT_EQ(std::string(j.getString("person.name")), "Alice");
+    ASSERT_EQ(j.getInt("person.age"), int64_t(25));
+  }
+  // Pure array
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(1 2 3)")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+  }
+  // Mixed: object with array values
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(numbers (1 2 3) flags (#t #f))")));
+    ASSERT_EQ(j.getRoot()->getConst("numbers")->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->getConst("flags")->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->getConst("flags")->get(static_cast<size_t>(0))->getBool(), true);
+  }
+  // Empty
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("()")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(0));
+  }
+  // Numbers
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a 42 b -3 c 3.14)")));
+    ASSERT_EQ(j.getInt("a"), int64_t(42));
+    ASSERT_EQ(j.getInt("b"), int64_t(-3));
+  }
+  // Error on empty
+  {
+    asvJSON j;
+    ASSERT(!j.fromSexpr(std::string_view("")));
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -4668,6 +4830,10 @@ int main() {
 	std::cout << "\n--- JSON Lines Serialization Tests ---\n";
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
+
+	std::cout << "\n--- S-Expression Serialization Tests ---\n";
+	RUN(testToSexpr);
+	RUN(testFromSexpr);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
