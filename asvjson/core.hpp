@@ -1536,6 +1536,7 @@ public:
 	bool fromTOML(std::string_view input);
 	std::string toJSONLines() const;
 	bool fromJSONLines(std::string_view input);
+	[[nodiscard]] std::unique_ptr<asvJSONValue> releaseRoot() noexcept { return std::move(root); }
 
 private:
 	static bool isArrayIndex(std::string_view s) {
@@ -2219,8 +2220,8 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 			if (!line.empty()) {
 				asvJSON tmp;
 				if (!tmp.parse(line))
-					throw asvJSONError("JSON Lines: invalid JSON");
-				arr->arr->push_back(cloneValue(tmp.getRoot()));
+					throw asvJSONError("JSON Lines: invalid JSON at position " + std::to_string(pos));
+				arr->arr->push_back(tmp.releaseRoot());
 			}
 			pos = end + 1;
 		}
