@@ -690,6 +690,8 @@ private:
 		if (raw.size() > 7 && raw.compare(0, 7, "__OID__") == 0) {
 			auto hex = raw.substr(7);
 			if (hex.size() == 24) {
+				auto isHex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
+				for (auto c : hex) if (!isHex(c)) return nullptr;
 				auto hexVal = [](char c) -> uint8_t {
 					if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
 					if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
@@ -1251,9 +1253,6 @@ public:
 			auto it = mapFind(*cur->obj, seg);
 			if (it == cur->obj->end()) return nullptr;
 			cur = it->second.get();
-			if (cur->type == asvJSONValue::ARRAY && cur->arr && !cur->arr->empty()) {
-				cur = cur->arr->front().get();
-			}
 			if (start < path.size() && path[start] == '.') start++;
 		}
 		return cur;
@@ -1752,7 +1751,9 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 			auto o = asvJSONValue::makeObject();
 			if (!o) return nullptr;
 			if (v->obj) {
+#ifndef ASVJSON_USE_ORDERED_MAP
 				o->obj->reserve(v->obj->size());
+#endif
 				for (const auto& [k, val] : *v->obj) {
 					auto cloned = cloneValue(val.get());
 					if (cloned) o->obj->emplace(k, std::move(cloned));
@@ -1823,7 +1824,16 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 	if (ptr.empty() || ptr == "/") { root.reset(value); return true; }
 	if (ptr[0] != '/') return false;
 	std::unique_ptr<asvJSONValue> guard(value);
-	if (!root) root = asvJSONValue::makeObject();
+	if (!root) {
+		size_t nextSlash = ptr.find('/', 1);
+		std::string_view firstSeg = (nextSlash == std::string_view::npos) ? ptr.substr(1) : ptr.substr(1, nextSlash - 1);
+		if (isArrayIndex(firstSeg) || firstSeg == "-") {
+			root = asvJSONValue::makeArray();
+		} else {
+			root = asvJSONValue::makeObject();
+		}
+		if (!root) return false;
+	}
 	asvJSONValue* cur = root.get();
 	size_t start = 1;
 	while (start < ptr.size()) {
@@ -1840,11 +1850,23 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 			if (it != cur->obj->end()) {
 				cur = it->second.get();
 			} else {
-				auto next = asvJSONValue::makeObject();
-				if (!next) return false;
-				auto* ptr = next.get();
-				cur->obj->emplace(std::move(key), std::move(next));
-				cur = ptr;
+				size_t nextSlash = ptr.find('/', slash + 1);
+				std::string_view nextSeg = (nextSlash == std::string_view::npos)
+					? ptr.substr(slash + 1)
+					: ptr.substr(slash + 1, nextSlash - slash - 1);
+				if (isArrayIndex(nextSeg) || nextSeg == "-") {
+					auto nextArr = asvJSONValue::makeArray();
+					if (!nextArr) return false;
+					auto* nextPtr = nextArr.get();
+					cur->obj->emplace(std::move(key), std::move(nextArr));
+					cur = nextPtr;
+				} else {
+					auto nextObj = asvJSONValue::makeObject();
+					if (!nextObj) return false;
+					auto* nextPtr = nextObj.get();
+					cur->obj->emplace(std::move(key), std::move(nextObj));
+					cur = nextPtr;
+				}
 			}
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (seg == "-") {
@@ -2061,8 +2083,9 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			auto* fromVal = getByPointer(fromIt->second->str_data);
 			if (!fromVal) return false;
 			if (op == "move") {
-				if (!setByPointer(path, cloneValue(fromVal).release())) return false;
-				if (!removeByPointer(fromIt->second->str_data)) return false;
+				auto* fromClone = cloneValue(fromVal).release();
+				if (!removeByPointer(fromIt->second->str_data)) { delete fromClone; return false; }
+				if (!setByPointer(path, fromClone)) return false;
 			} else {
 				if (!setByPointer(path, cloneValue(fromVal).release())) return false;
 			}
