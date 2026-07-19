@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, TOML, and JSON Lines (NDJSON) serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, TOML, JSON Lines (NDJSON), and S-Expression serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -44,6 +44,7 @@ MIT license - see the `LICENSE` file for details.
 - Protobuf - `toProtobuf()` / `fromProtobuf()` - Protocol Buffers binary wire format with schema-driven field mapping, packed fixed-size arrays; plus `toProtobufText()` / `fromProtobufText()` for human-readable text format
 - TOML - `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings, hex/octal/binary integers, dotted keys, comments
 - JSON Lines (NDJSON) - `toJSONLines()` / `fromJSONLines()` - one JSON value per line, ideal for streaming/ logs/bulk data
+- S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -110,6 +111,7 @@ int main() {
     std::string yaml = json.toYAML();
     std::string csv = json.toCSV();
     std::string tron = json.toTRON();
+    std::string sexpr = json.toSexpr();
 
     return 0;
 }
@@ -159,6 +161,8 @@ int main() {
 | `bool fromTOML(std::string_view input)` | Parse TOML string (tables, arrays, inline tables, multi-line strings). |
 | `std::string toJSONLines() const` | Serialize to JSON Lines (one JSON value per line). |
 | `bool fromJSONLines(std::string_view input)` | Parse JSON Lines text into an array of values. |
+| `std::string toSexpr() const` | Serialize to S-Expression (Lisp-style nested lists). |
+| `bool fromSexpr(std::string_view input)` | Parse S-Expression string (heuristic object/array detection, `;` comments). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -672,7 +676,42 @@ Features:
 - **Round-trip**: `toJSONLines()` then `fromJSONLines()` returns the original array
 - **Error handling**: invalid JSON on any line rejects the entire input
 
+### S-Expression
+
+S-Expression (S-expression) is a Lisp-style nested list format: `(key "value" (nested 1 2 3))`. It is useful for metaprogramming, AST representation, and configuration.
+
+```cpp
+asvJSON json;
+json.parse(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC"}})");
+
+// Encode to S-Expression
+std::string sexpr = json.toSexpr();
+// sexpr: (name "John" age 30 active #t address (city "NYC"))
+
+// Decode from S-Expression
+asvJSON j2;
+j2.fromSexpr(sexpr);
+// j2.getString("name") == "John"
+// j2.getInt("age") == 30
+```
+
+S-Expression features:
+- **Objects**: alternating key-value pairs in a list, e.g., `(name "John" age 30)`
+- **Arrays**: plain list of values, e.g., `(1 2 3)`
+- **Heuristic detection**: even-length list with string/symbol keys → object; otherwise → array
+- **Nested structures**: `(person (name "Alice" age 25))`
+- **Booleans**: `#t` (true), `#f` (false)
+- **Null**: `nil`
+- **Strings**: `"quoted"` with C-style escapes (`\n`, `\t`, `\"`, `\\`)
+- **Comments**: `;` to end of line
+- **Full round-trip**: `toSexpr()` then `fromSexpr()` returns the original data
+
 ## Changelog
+
+### 1.10.0 (2026-07-20)
+
+- **New format - S-Expression:** Added `toSexpr()` / `fromSexpr()` - Lisp-style nested list format with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals, C-style escape sequences, and full round-trip support.
+- **Version bump:** 1.9.0 -> 1.10.0
 
 ### 1.9.0 (2026-07-19)
 
