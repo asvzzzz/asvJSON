@@ -353,7 +353,7 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 					}
 				}
 				if (t == "regex") {
-					size_t sep = textContent.find('|');
+					size_t sep = textContent.rfind('|');
 					if (sep != std::string::npos) {
 						std::string pat = textContent.substr(0, sep);
 						std::string opt = textContent.substr(sep + 1);

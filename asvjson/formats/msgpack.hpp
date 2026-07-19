@@ -244,7 +244,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				if (len > 0) {
 					std::string s(reinterpret_cast<const char*>(data + pos), len);
 					pos += len;
-					size_t sep = s.find('|');
+					size_t sep = s.rfind('|');
 					const char* optPtr = nullptr;
 					if (sep != std::string::npos && sep + 1 < s.length()) optPtr = s.c_str() + sep + 1;
 					return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
@@ -279,7 +279,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				if (len > 0) {
 					std::string s(reinterpret_cast<const char*>(data + pos), len);
 					pos += len;
-					size_t sep = s.find('|');
+					size_t sep = s.rfind('|');
 					const char* optPtr = nullptr;
 					if (sep != std::string::npos && sep + 1 < s.length()) optPtr = s.c_str() + sep + 1;
 					return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
@@ -314,7 +314,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				if (len > 0) {
 					std::string s(reinterpret_cast<const char*>(data + pos), len);
 					pos += len;
-					size_t sep = s.find('|');
+					size_t sep = s.rfind('|');
 					const char* optPtr = nullptr;
 					if (sep != std::string::npos && sep + 1 < s.length()) optPtr = s.c_str() + sep + 1;
 					return asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);

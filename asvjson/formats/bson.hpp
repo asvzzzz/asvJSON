@@ -110,7 +110,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 		case T::NULL_VAL: out.push_back(0x0A); break;
 		case T::REGEX: {
 			out.push_back(0x0B);
-			size_t sep = str_data.find('|');
+			size_t sep = str_data.rfind('|');
 			std::string_view pattern = (sep != std::string_view::npos) ? std::string_view(str_data.data(), sep) : str_data;
 			std::string_view opts = (sep != std::string_view::npos) ? std::string_view(str_data.data() + sep + 1, str_data.size() - sep - 1) : std::string_view();
 			out.insert(out.end(), pattern.begin(), pattern.end());

@@ -323,7 +323,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         // Regular expression
         if (val->type == asvJSONValue::STRING) {
           const std::string& s = val->str_data;
-          size_t sep = s.find('|');
+          size_t sep = s.rfind('|');
           const char* optPtr = nullptr;
           if (sep != std::string::npos && sep + 1 < s.length()) optPtr = s.c_str() + sep + 1;
           auto re = asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);

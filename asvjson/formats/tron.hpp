@@ -79,7 +79,7 @@ static void tronSerializeVal(const asvJSONValue* v,
       case asvJSONValue::REGEX:
         out += '"';
         {
-          size_t sep = v->str_data.find('|');
+          size_t sep = v->str_data.rfind('|');
           if (sep != std::string_view::npos) {
             appendJsonEscaped(out, v->str_data.substr(0, sep));
             out += '|';

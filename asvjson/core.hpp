@@ -1145,7 +1145,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.find('|');
+		size_t sep = v->str_data.rfind('|');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
 	}
 
@@ -1153,7 +1153,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.find('|');
+		size_t sep = v->str_data.rfind('|');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1) : std::string_view();
 	}
 
@@ -1161,7 +1161,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.find('|');
+		size_t sep = v->str_data.rfind('|');
 		if (sep == std::string_view::npos) return {std::string_view(v->str_data), std::string_view()};
 		return {std::string_view(v->str_data.data(), sep), std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)};
 	}
@@ -1170,7 +1170,7 @@ public:
 		if (!root) return false;
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return false;
-		size_t sep = v->str_data.find('|');
+		size_t sep = v->str_data.rfind('|');
 		if (sep == std::string_view::npos) { pattern = v->str_data; options.clear(); }
 		else { pattern = v->str_data.substr(0, sep); options = v->str_data.substr(sep + 1); }
 		return true;
@@ -1214,7 +1214,7 @@ public:
 		if (!root) return {};
 		auto* v = getNested(path);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.find('|');
+		size_t sep = v->str_data.rfind('|');
 		if (sep == std::string_view::npos) return {std::string_view(v->str_data), std::string_view()};
 		return {std::string_view(v->str_data.data(), sep), std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)};
 	}
@@ -1624,7 +1624,7 @@ static void fmtObjectIdHexVal(std::string_view s, std::string& out) {
 }
 
 static void fmtRegexVal(std::string_view s, std::string& out) {
-	size_t sep = s.find('|');
+	size_t sep = s.rfind('|');
 	out.push_back('"');
 	appendJsonEscaped(out, (sep != std::string_view::npos) ? s.substr(0, sep) : s);
 	if (sep != std::string_view::npos && sep + 1 < s.size()) {
@@ -1729,7 +1729,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 		case asvJSONValue::BINARY: return asvJSONValue::makeBinary(v->bin_data.data(), v->bin_data.size());
 		case asvJSONValue::OBJECTID: return asvJSONValue::makeObjectId(v->str_data);
 		case asvJSONValue::REGEX: {
-			size_t sep = v->str_data.find('|');
+			size_t sep = v->str_data.rfind('|');
 			if (sep != std::string_view::npos) {
 				auto pattern = v->str_data.substr(0, sep);
 				auto opts = v->str_data.substr(sep + 1);
