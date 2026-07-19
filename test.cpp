@@ -1,4 +1,5 @@
 #include "asvJSON++.hpp"
+using namespace asvJSONInternal;
 #include <iostream>
 #include <cassert>
 #include <cstring>

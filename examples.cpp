@@ -3,6 +3,7 @@
 #include <ctime>
 #include <limits>
 #include "asvJSON++.hpp"
+using namespace asvJSONInternal;
 
 void example_basic() {
 	std::cout << "=== Basic Usage ===" << std::endl;

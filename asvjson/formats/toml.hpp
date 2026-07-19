@@ -606,9 +606,6 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
   return numStr;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 // --- Encoder ---
 static void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool needHeader, std::string& out) {
   using T = asvJSONValue::Type;
@@ -864,3 +861,5 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     return false;
   }
 }
+
+} // namespace asvJSONInternal

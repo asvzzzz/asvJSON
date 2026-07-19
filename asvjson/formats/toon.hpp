@@ -330,9 +330,6 @@ static std::string toonToJson(std::string_view input) {
   return out;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 inline std::string asvJSON::toTOON() const {
   if (!root) return "null\n";
   std::string out;
@@ -344,3 +341,5 @@ inline bool asvJSON::fromTOON(std::string_view input) {
   std::string json = toonToJson(input);
   return parse(std::string_view(json));
 }
+
+} // namespace asvJSONInternal

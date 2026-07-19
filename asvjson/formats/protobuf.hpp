@@ -780,10 +780,6 @@ static void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
 
 // ======================= asvJSON wrapper implementations =======================
 
-} // namespace asvJSONInternal
-
-using namespace asvJSONInternal;
-
 inline std::vector<uint8_t> asvJSON::toProtobuf(const std::string& schemaJson) const {
   if (!root) return {};
   std::shared_ptr<ProtoSchema> schema;
@@ -849,3 +845,5 @@ inline std::string asvJSON::stringFromProtobuf(const uint8_t* data, size_t size)
 inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& schemaJson) {
   return fromProtobuf(static_cast<const void*>(data.data()), data.size(), schemaJson);
 }
+
+} // namespace asvJSONInternal

@@ -863,9 +863,6 @@ static std::string goonToJson(std::string_view input) {
   return out;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 inline std::string asvJSON::toGOON() const {
   if (!root) return "_\n";
   auto dict = goonBuildDict(root.get());
@@ -884,3 +881,5 @@ inline bool asvJSON::fromGOON(std::string_view input) {
     return false;
   }
 }
+
+} // namespace asvJSONInternal

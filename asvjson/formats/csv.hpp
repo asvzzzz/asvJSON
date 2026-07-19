@@ -18,8 +18,7 @@ inline std::string csvEscape(std::string_view s) {
 	return out;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
+
 
 /**
  * @brief Split CSV line into fields respecting RFC 4180 quotes and escapes
@@ -261,3 +260,5 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			break;
 	}
 }
+
+} // namespace asvJSONInternal

@@ -157,9 +157,6 @@ static void tronSerializeVal(const asvJSONValue* v,
   }
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 inline std::string asvJSON::toTRON() const {
   if (!root) return "null";
   std::unordered_map<std::string, std::vector<std::string>> firstKeys;
@@ -219,8 +216,6 @@ struct TronTok {
   TronTokType type;
   std::string text;
 };
-
-namespace asvJSONInternal {
 
 static std::string tronUnescape(const std::string& s) {
   return unescapeJsonString(s, false);
@@ -510,9 +505,6 @@ asvJSONValue* TronParseState::parseValue() {
   }
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 inline bool asvJSON::fromTRON(std::string_view input) {
   try {
     auto toks = tronTokenize(input, allowNaNInfinity);
@@ -581,3 +573,5 @@ inline bool asvJSON::fromTRON(std::string_view input) {
     return false;
   }
 }
+
+} // namespace asvJSONInternal

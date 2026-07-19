@@ -3,7 +3,7 @@
 
 #include "../core.hpp"
 
-// ==================== YAML Encoder ====================
+namespace asvJSONInternal {
 
 inline void asvJSONValue::toYAML(std::string& out) const {
 	out += "---\n";
@@ -106,7 +106,6 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 
 // ==================== YAML Decoder (YAML -> JSON -> parse) ====================
 
-namespace asvJSONInternal {
 
 // Unescape YAML double-quoted string (\n, \t, \\, \", \xNN, \uNNNN)
 static std::string yamlUnescapeDouble(std::string_view s) {
@@ -896,9 +895,6 @@ static std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 	return yamlParseInlineValue(sv);
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
-
 static std::string yamlToJson(std::string_view input);
 static std::string yamlParseDoc(std::string_view input);
 
@@ -1494,3 +1490,5 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 		return false;
 	}
 }
+
+} // namespace asvJSONInternal

@@ -27,8 +27,6 @@ static void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
   }
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
   using T = asvJSONValue::Type;
@@ -159,7 +157,6 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
 }
 
 // CBOR Parser
-namespace asvJSONInternal {
 
 inline uint64_t cborReadArg(const uint8_t* data, size_t& pos, size_t dataLen, uint8_t info) {
   if (info <= 23) return info;
@@ -407,4 +404,3 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
 }
 
 } // namespace asvJSONInternal
-using namespace asvJSONInternal;

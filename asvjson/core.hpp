@@ -83,7 +83,7 @@ inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_ca
 #include "detail/escape.hpp"
 #include "detail/base64.hpp"
 #include "detail/datetime.hpp"
-using namespace asvJSONInternal;
+namespace asvJSONInternal {
 
 // Object map type - default uses unordered_map for O(1) lookups
 // Define ASVJSON_USE_ORDERED_MAP before including header for std::map (deterministic output)
@@ -406,7 +406,6 @@ struct asvJSONValue {
 };
 
 // JSON formatting helpers
-namespace asvJSONInternal {
 
 inline int hexDigitValue(char c) {
 	if (c >= '0' && c <= '9') return c - '0';
@@ -440,8 +439,6 @@ inline void appendJsonEscaped(std::string& out, std::string_view s) {
 
 void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity);
 void parseMsgPackToken(const asvJSONValue* v, std::string& out, bool allowNaNInfinity);
-
-} // namespace asvJSONInternal
 
 inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) const {
 	switch (type) {
@@ -543,10 +540,8 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 	}
 }
 
-namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v);
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
+
 
 class asvJSON {
 public:
@@ -1578,7 +1573,6 @@ public:
 };
 
 // ======================= Type Formatting Helpers =======================
-namespace asvJSONInternal {
 
 static void fmtDoubleVal(double d, std::string& out) {
 	if (d == 0.0) { out += '0'; return; }
@@ -1709,12 +1703,8 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 	}
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 // ======================= Core inline definitions =======================
-
-namespace asvJSONInternal {
 
 inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 	if (!v) return nullptr;
@@ -1765,11 +1755,8 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 	return asvJSONValue::makeNull();
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 // JSON Pointer, Merge, Patch
-namespace asvJSONInternal {
 
 static std::string decodeJSONPointerKey(std::string_view seg) {
 	std::string out;
@@ -1786,8 +1773,6 @@ static std::string decodeJSONPointerKey(std::string_view seg) {
 	return out;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline asvJSONValue* asvJSON::getByPointer(std::string_view ptr) {
 	if (!root) return nullptr;
@@ -1934,7 +1919,6 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 }
 
 // Merge & Patch
-namespace asvJSONInternal {
 
 static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch) {
 	if (!target || !patch) return;
@@ -1958,8 +1942,6 @@ static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch)
 	}
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
@@ -2013,8 +1995,6 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
 	return result;
 }
 
-namespace asvJSONInternal {
-
 static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 	if (!a && !b) return true;
 	if (!a || !b) return false;
@@ -2056,8 +2036,6 @@ static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 	return false;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline bool asvJSON::applyPatch(const asvJSON& patch) {
 	if (!patch.root) return false;
@@ -2112,11 +2090,9 @@ inline std::vector<uint8_t> asvJSON::toCBOR() const {
 	return out;
 }
 
-namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
 inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
+
 
 inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	root = nullptr;
@@ -2264,10 +2240,8 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 	}
 }
 
-namespace asvJSONInternal {
 inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
+
 
 inline bool asvJSON::fromBSON(const void* data, size_t size) {
 	root = nullptr;
@@ -2317,5 +2291,11 @@ inline bool asvJSON::fromBSON(const std::string& data) {
 inline bool asvJSON::fromCBOR(const std::string& data) {
 	return fromCBOR(static_cast<const void*>(data.data()), data.size());
 }
+
+} // namespace asvJSONInternal
+
+using asvJSONInternal::asvJSONValue;
+using asvJSONInternal::asvJSON;
+using asvJSONInternal::asvJSONError;
 
 #endif // ASVJSON_CORE_H

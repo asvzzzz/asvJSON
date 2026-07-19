@@ -16,8 +16,6 @@ inline void writeLE64(std::vector<uint8_t>& out, uint64_t v) {
 	for (int i = 0; i < 8; i++) { out.push_back(static_cast<uint8_t>(v >> (i * 8))); }
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 	using T = asvJSONValue::Type;
@@ -153,7 +151,6 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 }
 
 // BSON Parser
-namespace asvJSONInternal {
 
 inline void readLE32(const uint8_t* data, size_t& pos, uint32_t& v) {
 	v = static_cast<uint32_t>(data[pos]) | (static_cast<uint32_t>(data[pos + 1]) << 8) | (static_cast<uint32_t>(data[pos + 2]) << 16) | (static_cast<uint32_t>(data[pos + 3]) << 24);
@@ -329,4 +326,3 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 }
 
 } // namespace asvJSONInternal
-using namespace asvJSONInternal;

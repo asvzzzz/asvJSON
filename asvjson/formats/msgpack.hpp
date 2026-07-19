@@ -18,8 +18,6 @@ static void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uin
 	out.insert(out.end(), data, data + len);
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 	using T = asvJSONValue::Type;
@@ -166,7 +164,6 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 }
 
 // MessagePack Parser
-namespace asvJSONInternal {
 
 inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
 	if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
@@ -472,4 +469,3 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 }
 
 } // namespace asvJSONInternal
-using namespace asvJSONInternal;

@@ -54,8 +54,6 @@ static std::string xmlDecodeEntities(std::string_view s) {
 	return out;
 }
 
-} // namespace asvJSONInternal
-using namespace asvJSONInternal;
 
 inline void asvJSONValue::toXML(std::string& out) const {
 	toXML(out, "root", 0);
@@ -137,8 +135,6 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 }
 
 // ---------- XML Parser ----------
-
-namespace asvJSONInternal {
 
 static void xmlSkipSpaces(std::string_view s, size_t& pos) {
 	while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r'))
@@ -419,8 +415,6 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	return obj;
 }
 
-} // namespace asvJSONInternal
-
 inline bool asvJSON::fromXML(std::string_view input) {
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
@@ -476,3 +470,5 @@ inline bool asvJSON::fromXML(std::string_view input) {
 		return false;
 	}
 }
+
+} // namespace asvJSONInternal
