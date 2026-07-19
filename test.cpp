@@ -2092,6 +2092,274 @@ TEST(testToXML) {
 	}
 }
 
+TEST(testFromXML) {
+	// Empty object (self-closing root)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root/>"));
+		ASSERT(json.isNull("root"));
+	}
+	// Simple string value
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>hello</root>"));
+		ASSERT(json.getString("root") == "hello");
+	}
+	// Integer detection
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>42</root>"));
+		ASSERT(json.getInt("root") == 42);
+	}
+	// Double detection
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>3.14</root>"));
+		ASSERT(json.getDouble("root") > 3.13 && json.getDouble("root") < 3.15);
+	}
+	// Bool detection
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>true</root>"));
+		ASSERT(json.getBool("root") == true);
+	}
+	// Null detection
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>null</root>"));
+		ASSERT(json.isNull("root"));
+	}
+	// Nested object
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><a>1</a><b>2</b></root>"));
+		ASSERT(json.getInt("root.a") == 1);
+		ASSERT(json.getInt("root.b") == 2);
+	}
+	// Array detection (consecutive same-named siblings)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><item>1</item><item>2</item><item>3</item></root>"));
+		auto* root = json.getRoot();
+		auto* inner = root->get("root");
+		ASSERT(inner != nullptr);
+		auto* arr = inner->get("item");
+		ASSERT(arr != nullptr);
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT(arr->arr->size() == 3);
+		ASSERT(arr->get(static_cast<size_t>(0))->getInt() == 1);
+		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 2);
+		ASSERT(arr->get(static_cast<size_t>(2))->getInt() == 3);
+	}
+	// Attributes as @attr
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root id=\"123\" name=\"test\"><child>val</child></root>"));
+		ASSERT(json.getString("root.@id") == "123");
+		ASSERT(json.getString("root.@name") == "test");
+		ASSERT(json.getString("root.child") == "val");
+	}
+	// Self-closing with attribute
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root enabled=\"true\"/>"));
+		ASSERT(json.getString("root.@enabled") == "true");
+	}
+	// XML declaration skipped
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<?xml version=\"1.0\"?><root>data</root>"));
+		ASSERT(json.getString("root") == "data");
+	}
+	// Comment skipped
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><!-- comment -->data</root>"));
+		ASSERT(json.getString("root") == "data");
+	}
+	// Entity decoding
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>a &amp; b &lt; c</root>"));
+		ASSERT(json.getString("root") == "a & b < c");
+	}
+	// Deeply nested
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><a><b><c>42</c></b></a></root>"));
+		ASSERT(json.getInt("root.a.b.c") == 42);
+	}
+	// Mixed children and text (text becomes #text)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>hello<child>world</child></root>"));
+		ASSERT(json.getString("root.#text") == "hello");
+		ASSERT(json.getString("root.child") == "world");
+	}
+	// Special type: datetime
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root type=\"datetime\">2024-01-15T10:30:45Z</root>"));
+		auto* dt = json.getRoot()->get("root");
+		ASSERT(dt != nullptr);
+		ASSERT(dt->type == asvJSONValue::DATETIME);
+	}
+	// Special type: binary
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root type=\"binary\">3q0=</root>"));
+		auto* bin = json.getRoot()->get("root");
+		ASSERT(bin != nullptr);
+		ASSERT(bin->type == asvJSONValue::BINARY);
+	}
+	// Special type: objectid
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root type=\"objectid\">ABCDEF1234567890abcdef12</root>"));
+		auto* oid = json.getRoot()->get("root");
+		ASSERT(oid != nullptr);
+		ASSERT(oid->type == asvJSONValue::OBJECTID);
+	}
+	// Special type: regex
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root type=\"regex\">^test$|gi</root>"));
+		auto* rx = json.getRoot()->get("root");
+		ASSERT(rx != nullptr);
+		ASSERT(rx->type == asvJSONValue::REGEX);
+	}
+	// Special type: timestamp
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root type=\"timestamp\">98765</root>"));
+		auto* ts = json.getRoot()->get("root");
+		ASSERT(ts != nullptr);
+		ASSERT(ts->type == asvJSONValue::TIMESTAMP);
+	}
+	// Error: empty input
+	{
+		asvJSON json;
+		ASSERT(!json.fromXML(""));
+	}
+	// Error: no XML
+	{
+		asvJSON json;
+		ASSERT(!json.fromXML("not xml"));
+	}
+	// Nesting depth limit
+	{
+		asvJSON json;
+		std::string deep;
+		for (int i = 0; i < 60; i++) deep += "<a>";
+		deep += "x";
+		for (int i = 0; i < 60; i++) deep += "</a>";
+		ASSERT(!json.fromXML("<root>" + deep + "</root>"));
+	}
+	// Extension ext_type round-trip
+	{
+		asvJSON json;
+		uint8_t extData[] = {0x01, 0x02};
+		json.putExtension("ext", 42, extData, 2);
+		std::string xml = json.toXML();
+		ASSERT(xml.find("exttype=\"42\"") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* inner = json2.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		auto* ext = inner->get("ext");
+		ASSERT(ext != nullptr);
+		ASSERT(ext->type == asvJSONValue::EXTENSION);
+		ASSERT(ext->ext_type == 42);
+	}
+	// Round-trip: toXML then fromXML
+	{
+		asvJSON json;
+		json.putNull("n");
+		json.putBool("b", true);
+		json.putInt("i", -42);
+		json.putDouble("d", 3.14);
+		json.putString("s", "hello");
+		json.putDateTime("dt", 1705314645);
+		uint8_t binData[] = {0xDE, 0xAD};
+		json.putBinary("bin", binData, 2);
+		json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+		json.putTimestamp("ts", 98765);
+		json.putRegex("rx", "^test$", "gi");
+		uint8_t extData[] = {0x01, 0x02};
+		json.putExtension("ext", 42, extData, 2);
+
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* inner = json2.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->type == asvJSONValue::OBJECT);
+		ASSERT(inner->hasKey("n"));
+		ASSERT(inner->hasKey("b"));
+		ASSERT(inner->hasKey("i"));
+		ASSERT(inner->hasKey("d"));
+		ASSERT(inner->hasKey("s"));
+		ASSERT(inner->hasKey("dt"));
+		ASSERT(inner->hasKey("bin"));
+		ASSERT(inner->hasKey("oid"));
+		ASSERT(inner->hasKey("ts"));
+		ASSERT(inner->hasKey("rx"));
+		ASSERT(inner->hasKey("ext"));
+		ASSERT(inner->get("n")->type == asvJSONValue::NULL_VAL);
+		ASSERT(inner->get("b")->getBool() == true);
+		ASSERT(inner->get("i")->getInt() == -42);
+		ASSERT(inner->get("d")->getDouble() > 3.13 && inner->get("d")->getDouble() < 3.15);
+		ASSERT(std::string(inner->get("s")->getString()) == "hello");
+	}
+	// Round-trip: array
+	{
+		asvJSON json;
+		json.parse(std::string("[1, 2, 3]"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* inner = json2.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		auto* arr = inner->get("item");
+		ASSERT(arr != nullptr);
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT(arr->arr->size() == 3);
+		ASSERT(arr->get(static_cast<size_t>(0))->getInt() == 1);
+		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 2);
+		ASSERT(arr->get(static_cast<size_t>(2))->getInt() == 3);
+	}
+	// Non-consecutive same-named children → single array
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><item>1</item><other>2</other><item>3</item></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		auto* arr = inner->get("item");
+		ASSERT(arr != nullptr);
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT(arr->arr->size() == 2);
+		ASSERT(arr->get(static_cast<size_t>(0))->getInt() == 1);
+		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 3);
+		ASSERT(inner->get("other")->getInt() == 2);
+	}
+	// Self-closing with type + other attributes preserves all
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root custom=\"val\" type=\"datetime\"/>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->hasKey("@type"));
+		ASSERT(inner->hasKey("@custom"));
+		ASSERT(inner->get("@custom")->getStringView() == "val");
+	}
+	// Surrogate code point rejected in entity
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>&#xD800;</root>"));
+		ASSERT(json.getString("root") == "");
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -2367,6 +2635,385 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(json.fromYAML("s: \"\\u0048\\u0065\\u006c\\u006c\\u006f\""));
 		ASSERT_EQ(std::string(json.getString("s")), "Hello");
+	}
+	// Explicit tag !!str -- forces number to string
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: !!str 123"));
+		ASSERT_EQ(std::string(json.getString("s")), "123");
+	}
+	// Explicit tag !!str -- plain text
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: !!str hello"));
+		ASSERT_EQ(std::string(json.getString("s")), "hello");
+	}
+	// Explicit tag !!str -- no value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: !!str"));
+		ASSERT_EQ(std::string(json.getString("s")), "");
+	}
+	// Explicit tag !!int -- quoted string forced to int
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!int \"42\""));
+		ASSERT_EQ(json.getInt("n"), 42);
+	}
+	// Explicit tag !!int -- plain number
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!int 42"));
+		ASSERT_EQ(json.getInt("n"), 42);
+	}
+	// Explicit tag !!float -- integer forced to float
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!float 3"));
+		ASSERT_EQ(json.getDouble("n"), 3.0);
+	}
+	// Explicit tag !!float -- float value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!float 3.14"));
+		double v = json.getDouble("n");
+		ASSERT(v > 3.13 && v < 3.15);
+	}
+	// Explicit tag !!bool -- yes/true/on -> true
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: !!bool yes\nb: !!bool true\nc: !!bool on"));
+		ASSERT_EQ(json.getBool("a"), true);
+		ASSERT_EQ(json.getBool("b"), true);
+		ASSERT_EQ(json.getBool("c"), true);
+	}
+	// Explicit tag !!bool -- no/false/off -> false
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: !!bool no\nb: !!bool false\nc: !!bool off"));
+		ASSERT_EQ(json.getBool("a"), false);
+		ASSERT_EQ(json.getBool("b"), false);
+		ASSERT_EQ(json.getBool("c"), false);
+	}
+	// Explicit tag !!null
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!null"));
+		ASSERT(json.isNull("n"));
+	}
+	// Explicit tag !!null with value (ignored)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!null \"ignored\""));
+		ASSERT(json.isNull("n"));
+	}
+	// Explicit tag !!timestamp -- value passed as string
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("dt: !!timestamp 2024-01-15T10:30:00Z"));
+		ASSERT_EQ(std::string(json.getString("dt")), "2024-01-15T10:30:00Z");
+	}
+	// Explicit tag !!int with invalid quoted value -> parse fails
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("n: !!int \"not-a-number\""));
+	}
+	// Explicit tag !!float with invalid quoted value -> parse fails
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("n: !!float \"not-a-number\""));
+	}
+	// Three-! tag (!!!int) treated as unknown -> value parsed normally
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("n: !!!int 42"));
+		ASSERT_EQ(json.getInt("n"), 42);
+	}
+	// Explicit tags in array items
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!str 42\n- !!int \"99\"\n- !!bool yes"));
+		auto* arr = json.getRoot();
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(3));
+		ASSERT_EQ(std::string(arr->arr->at(0)->getString()), "42");
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 99);
+		ASSERT_EQ(arr->arr->at(2)->getBool(), true);
+	}
+	// %YAML directive -- silently skipped
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("%YAML 1.2\nkey: val"));
+		ASSERT_EQ(std::string(json.getString("key")), "val");
+	}
+	// %TAG !handle! prefix -- custom tag resolves via handle
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("%TAG !x! tag:example.com,2000:app/\nx: !x!foo hello"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello");
+	}
+	// %TAG with !! override -- still parses value normally (unknown resolved tag)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("%TAG !! tag:example.com,2000:app/\nx: !!str 42"));
+		ASSERT_EQ(std::string(json.getString("x")), "42"); // !!str still works
+	}
+	// Directives before ---
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("%TAG !x! tag:example.com,2000:app/\n---\nx: !x!foo hello"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello");
+	}
+	// Directives after ---
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("---\n%TAG !x! tag:example.com,2000:app/\nx: !x!foo hello"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello");
+	}
+	// Multiple directives
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("%YAML 1.2\n%TAG !x! tag:example.com,2000:app/\nkey: !x!test val"));
+		ASSERT_EQ(std::string(json.getString("key")), "val");
+	}
+	// Inline flow mapping
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("obj: {a: 1, b: 2}"));
+		auto* o = json.getRoot()->get("obj");
+		ASSERT(o != nullptr && o->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(o->get("a")->getInt(), 1);
+		ASSERT_EQ(o->get("b")->getInt(), 2);
+	}
+	// Inline flow array
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("arr: [1, 2, 3]"));
+		auto* a = json.getRoot()->get("arr");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->arr->size(), size_t(3));
+		ASSERT_EQ(a->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(a->arr->at(2)->getInt(), 3);
+	}
+	// Empty flow collections
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: {}\nb: []"));
+		ASSERT(json.getRoot()->get("a")->type == asvJSONValue::OBJECT);
+		ASSERT(json.getRoot()->get("b")->type == asvJSONValue::ARRAY);
+	}
+	// Nested flow collections
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("obj: {a: {b: 3}}"));
+		auto* a = json.getRoot()->get("obj")->get("a");
+		ASSERT(a != nullptr && a->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(a->get("b")->getInt(), 3);
+	}
+	// Multi-line flow mapping
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("obj:\n  {a: 1,\n   b: 2}"));
+		auto* o = json.getRoot()->get("obj");
+		ASSERT(o != nullptr && o->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(o->get("a")->getInt(), 1);
+		ASSERT_EQ(o->get("b")->getInt(), 2);
+	}
+	// Flow array of objects
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("items: [{x: 1}, {x: 2}]"));
+		auto* arr = json.getRoot()->get("items");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT_EQ(arr->arr->at(0)->get("x")->getInt(), 1);
+	}
+	// Flow with comments
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("obj: {a: 1 #comment\n, b: 2}"));
+		auto* o = json.getRoot()->get("obj");
+		ASSERT(o != nullptr && o->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(o->get("a")->getInt(), 1);
+		ASSERT_EQ(o->get("b")->getInt(), 2);
+	}
+	// Flow with quoted keys and strings
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("obj: {\"a\": \"hello\", 'b': world}"));
+		auto* o = json.getRoot()->get("obj");
+		ASSERT(o != nullptr && o->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(o->get("a")->getString()), "hello");
+		ASSERT_EQ(std::string(o->get("b")->getString()), "world");
+	}
+	// Flow with tags
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("items: [!!str 42, !!int \"99\"]"));
+		auto* arr = json.getRoot()->get("items");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(arr->arr->at(0)->getString()), "42");
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 99);
+	}
+	// Anchor/alias inside flow sequence: inline values
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("default: &ref 42\nitems: [1, *ref, 3]"));
+		auto* arr = json.getRoot()->get("items");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(3));
+		ASSERT_EQ(arr->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 42);
+		ASSERT_EQ(arr->arr->at(2)->getInt(), 3);
+	}
+	// Anchor/alias inside flow map value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: &val hello\ny: {a: 1, b: *val}"));
+		auto* inner = json.getRoot()->get("y");
+		ASSERT(inner != nullptr && inner->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(inner->get("a")->getInt(), 1);
+		ASSERT_EQ(std::string(inner->get("b")->getString()), "hello");
+	}
+	// Simple inline anchor inside flow (block-level anchor, flow alias)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: &ref 42\ny: [1, *ref, 3]"));
+		auto* arr = json.getRoot()->get("y");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(3));
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 42);
+	}
+	// Define anchor inside flow, reference in another flow
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("data: {first: &anchor 99, second: *anchor}"));
+		auto* obj = json.getRoot()->get("data");
+		ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(obj->get("first")->getInt(), 99);
+		ASSERT_EQ(obj->get("second")->getInt(), 99);
+	}
+	// Define anchor inside flow sequence, reference after
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("items: [&a 10, 20, *a]\nother: *a"));
+		auto* arr = json.getRoot()->get("items");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(3));
+		ASSERT_EQ(arr->arr->at(0)->getInt(), 10);
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 20);
+		ASSERT_EQ(arr->arr->at(2)->getInt(), 10);
+		ASSERT_EQ(json.getInt("other"), 10);
+	}
+	// Core Schema: !!set with flow [a,b,c]
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set [a, b, c]"));
+		auto* obj = json.getRoot()->get("val");
+		ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+		ASSERT(obj->hasKey("a"));
+		ASSERT(obj->hasKey("b"));
+		ASSERT(obj->hasKey("c"));
+		ASSERT(obj->get("a")->type == asvJSONValue::NULL_VAL);
+		ASSERT(obj->get("b")->type == asvJSONValue::NULL_VAL);
+		ASSERT(obj->get("c")->type == asvJSONValue::NULL_VAL);
+	}
+	// Core Schema: !!set with flow {a,b,c}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set {a, b, c}"));
+		auto* obj = json.getRoot()->get("val");
+		ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+		ASSERT(obj->hasKey("a"));
+		ASSERT(obj->hasKey("b"));
+		ASSERT(obj->hasKey("c"));
+		ASSERT(obj->get("a")->type == asvJSONValue::NULL_VAL);
+	}
+	// Core Schema: !!omap [{a:1},{b:2}]
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!omap [{a: 1}, {b: 2}]"));
+		auto* arr = json.getRoot()->get("val");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT_EQ(arr->arr->at(0)->get("a")->getInt(), 1);
+		ASSERT_EQ(arr->arr->at(1)->get("b")->getInt(), 2);
+	}
+	// Core Schema: !!pairs [[a,1],[b,2]]
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!pairs [[a, 1], [b, 2]]"));
+		auto* arr = json.getRoot()->get("val");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT_EQ(arr->arr->at(0)->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(arr->arr->at(0)->arr->at(0)->getString()), "a");
+		ASSERT_EQ(arr->arr->at(0)->arr->at(1)->getInt(), 1);
+	}
+	// Core Schema: !!int with 0x hex
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!int 0x1A"));
+		ASSERT_EQ(json.getInt("x"), 26);
+	}
+	// Core Schema: !!int with 0o octal
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!int 0o755"));
+		ASSERT_EQ(json.getInt("x"), 493);
+	}
+	// Core Schema: !!int with 0b binary
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!int 0b1101"));
+		ASSERT_EQ(json.getInt("x"), 13);
+	}
+	// Core Schema: !!float .inf
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!float .inf"));
+		double dv = json.getRoot()->get("x")->getDouble();
+		ASSERT(std::isinf(dv) && dv > 0);
+	}
+	// Core Schema: !!float -.inf
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!float -.inf"));
+		double dv = json.getRoot()->get("x")->getDouble();
+		ASSERT(std::isinf(dv) && dv < 0);
+	}
+	// Core Schema: !!float .nan
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!float .nan"));
+		double dv = json.getRoot()->get("x")->getDouble();
+		ASSERT(std::isnan(dv));
+	}
+	// Core Schema: !!bool yes/on recognized as true
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: !!bool yes\nb: !!bool on"));
+		ASSERT(json.getBool("a"));
+		ASSERT(json.getBool("b"));
+	}
+	// Core Schema: !!null with ~
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!null ~"));
+		ASSERT(json.isNull("x"));
+	}
+	// Tag validation: invalid !!int should fail and report line number
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("bad: !!int not-a-number"));
+		ASSERT(std::string(json.lastError).find("line") != std::string::npos);
+	}
+	// Tag validation: invalid !!float should fail and report line number
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("bad: !!float not-a-number"));
+		ASSERT(std::string(json.lastError).find("line") != std::string::npos);
 	}
 }
 
@@ -2716,7 +3363,7 @@ TEST(testToTRONAdvanced) {
 }
 
 TEST(testToTRONComprehensive) {
-	// 1. Round-trip: toTRON() + fromTRON() → original JSON values
+	// 1. Round-trip: toTRON() + fromTRON() -> original JSON values
 	{
 		asvJSON j;
 		ASSERT(j.parse(std::string_view(R"({"name":"Alice","age":30,"scores":[90,85,95],"meta":{"active":true,"tag":"v1"}})")));
@@ -2808,7 +3455,7 @@ TEST(testToTRONComprehensive) {
 		ASSERT(std::isinf(j2.getDouble("neg_inf")));
 		ASSERT(j2.getDouble("neg_inf") < 0);
 	}
-	// NaN/Infinity without allowNaNInfinity → serialized as null, parse as null
+	// NaN/Infinity without allowNaNInfinity -> serialized as null, parse as null
 	{
 		asvJSON j;
 		j.putDouble("nan", std::numeric_limits<double>::quiet_NaN());
@@ -3011,7 +3658,7 @@ TEST(testToGOON) {
 		ASSERT(j2.getDouble("pi") > 3.13 && j2.getDouble("pi") < 3.15);
 		ASSERT(j2.getDouble("neg") > -2.51 && j2.getDouble("neg") < -2.49);
 	}
-	// Round-trip: array of objects with same schema → tabular
+	// Round-trip: array of objects with same schema -> tabular
 	{
 		asvJSON j;
 		ASSERT(j.parse(std::string_view(R"({"items":[{"id":1,"val":"a"},{"id":2,"val":"b"}]})")));
@@ -3375,7 +4022,7 @@ TEST(testFromCSV) {
     ASSERT(r->get("d")->type == asvJSONValue::NULL_VAL);
     ASSERT_EQ(std::string(r->get("e")->getString()), "hello");
   }
-  // Empty cell → null
+  // Empty cell -> null
   {
     asvJSON json;
     ASSERT(json.fromCSV(std::string_view("x,y\n1,\n,2")));
@@ -3396,7 +4043,7 @@ TEST(testFromCSV) {
     ASSERT(json.fromCSV(std::string_view("a,b\r\n1,2\r\n3,4\r\n")));
     ASSERT_EQ(json.getRoot()->arr->size(), 2U);
   }
-  // Missing fields → null
+  // Missing fields -> null
   {
     asvJSON json;
     ASSERT(json.fromCSV(std::string_view("a,b,c\n1,2")));
@@ -3404,7 +4051,7 @@ TEST(testFromCSV) {
     ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("b")->getInt(), 2);
     ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("c")->type == asvJSONValue::NULL_VAL);
   }
-  // Single column named "value" → handles array-of-scalars pattern
+  // Single column named "value" -> handles array-of-scalars pattern
   {
     asvJSON json;
     ASSERT(json.fromCSV(std::string_view("value\n1\nhello\n\n")));
@@ -3435,7 +4082,7 @@ TEST(testFromCSV) {
     ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("a")->getInt(), 2);
     ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(1))->get("b")->getInt(), 3);
   }
-  // Unclosed quote → error
+  // Unclosed quote -> error
   {
     asvJSON json;
     ASSERT(!json.fromCSV(std::string_view("a\n\"unclosed")));
@@ -3690,6 +4337,7 @@ int main() {
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);
+	RUN(testFromXML);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);

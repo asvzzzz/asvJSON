@@ -1526,6 +1526,7 @@ public:
 	std::string toProtobufText() const;
 	bool fromProtobufText(const std::string& text);
 	std::string toXML() const;
+	bool fromXML(std::string_view input);
 	std::string toYAML() const;
 	bool fromYAML(std::string_view input);
 	std::string toCSV() const;

@@ -3,7 +3,7 @@
 
 #include "../core.hpp"
 
-// ── TRON Encoder ──
+// -- TRON Encoder --
 
 namespace asvJSONInternal {
 
@@ -207,7 +207,7 @@ inline std::string asvJSON::toTRON() const {
   return out;
 }
 
-// ── TRON Decoder ──
+// -- TRON Decoder --
 
 enum class TronTokType {
   CLASS, IDENT, STRING, NUMBER, TRUE, FALSE, NUL, NAN_VAL, INF_VAL,
