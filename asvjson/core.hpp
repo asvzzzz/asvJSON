@@ -704,7 +704,7 @@ private:
 		}
 		if (raw.size() > 9 && raw.compare(0, 9, "__REGEX__") == 0) {
 			auto rest = raw.substr(9);
-			size_t sep = rest.find('|');
+			size_t sep = rest.rfind('|');
 			std::string pattern, opts;
 			if (sep != std::string_view::npos) {
 				pattern = std::string(rest.substr(0, sep));
