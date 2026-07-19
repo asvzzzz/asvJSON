@@ -1064,6 +1064,34 @@ void example_protobuf() {
 	std::cout << std::endl;
 }
 
+void example_to_toml() {
+	std::cout << "=== TOML Serialization ===" << std::endl;
+
+	// Basic round-trip
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}})"));
+		std::string toml = json.toTOML();
+		std::cout << "TOML output:" << std::endl << toml << std::endl;
+
+		asvJSON j2;
+		if (j2.fromTOML(std::string_view(toml))) {
+			std::cout << "Round-trip: name=" << j2.getString("name")
+			          << " age=" << j2.getInt("age")
+			          << " active=" << j2.getBool("active")
+			          << " city=" << j2.getString("address.city") << std::endl;
+		}
+	}
+	// Inline table with dotted keys
+	{
+		asvJSON j;
+		j.fromTOML(std::string_view(R"(point = {x.y = 1, x.z = 2})"));
+		std::cout << "Inline table dotted keys: x.y=" << j.getInt("point.x.y")
+		          << " x.z=" << j.getInt("point.x.z") << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1129,6 +1157,7 @@ int main() {
 	example_to_tron();
 	example_to_goon();
 	example_protobuf();
+	example_to_toml();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

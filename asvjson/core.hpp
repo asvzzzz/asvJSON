@@ -20,7 +20,7 @@
 //   - unique_ptr for internal containers (obj/arr) and factory methods
 //   - Factory methods return std::unique_ptr - automatic lifetime management
 //
-// Include individual format headers for MessagePack, BSON, TOON, TRON, GOON, XML, YAML, CSV.
+// Include individual format headers for MessagePack, BSON, TOON, TRON, GOON, XML, YAML, CSV, TOML.
 //
 // Important: string_view lifetime
 //   - getStringView() returns string_view valid only until next parse() or destruction
@@ -402,6 +402,7 @@ struct asvJSONValue {
 	void toYAML(std::string& out) const;
 	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const;
 	void toCSV(std::string& out) const;
+	void toTOML(std::string& out) const;
 };
 
 // JSON formatting helpers
@@ -1531,6 +1532,8 @@ public:
 	bool fromYAML(std::string_view input);
 	std::string toCSV() const;
 	bool fromCSV(std::string_view input);
+	std::string toTOML() const;
+	bool fromTOML(std::string_view input);
 
 private:
 	static bool isArrayIndex(std::string_view s) {
@@ -2177,6 +2180,12 @@ inline std::string asvJSON::toYAML() const {
 inline std::string asvJSON::toCSV() const {
 	std::string out;
 	if (root) root->toCSV(out);
+	return out;
+}
+
+inline std::string asvJSON::toTOML() const {
+	std::string out;
+	if (root) root->toTOML(out);
 	return out;
 }
 

@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, and Protobuf serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, and TOML serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -42,6 +42,7 @@ MIT license - see the `LICENSE` file for details.
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
 - GOON - `toGOON()` / `fromGOON()` - greatly optimized object notation with YAML-like indentation, tabular arrays, inline/inference-based lists, single-char literals (T/F/_/~), dictionary references, round-trip support
 - Protobuf - `toProtobuf()` / `fromProtobuf()` - Protocol Buffers binary wire format with schema-driven field mapping, packed fixed-size arrays; plus `toProtobufText()` / `fromProtobufText()` for human-readable text format
+- TOML - `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings, hex/octal/binary integers, dotted keys, comments
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -153,6 +154,8 @@ int main() {
 | `bool fromProtobuf(const uint8_t* data, size_t size, const std::string&amp; schema)` | Parse Protocol Buffers binary wire format. |
 | `std::string toProtobufText() const` | Serialize to Protobuf text format (human-readable). |
 | `bool fromProtobufText(const std::string&amp; text)` | Parse Protobuf text format. |
+| `std::string toTOML() const` | Serialize to TOML (Tom's Obvious Minimal Language). |
+| `bool fromTOML(std::string_view input)` | Parse TOML string (tables, arrays, inline tables, multi-line strings). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -599,7 +602,57 @@ Protobuf features:
 - **Static helpers**: `protobufFromString()` / `stringFromProtobuf()` for JSON string <-> binary conversion
 - **Text format**: human-readable `key: value` representation with nested messages and arrays
 
+### TOML
+
+TOML (Tom's Obvious Minimal Language) is a configuration file format designed for readability. The library supports full round-trip serialization and parsing.
+
+```cpp
+asvJSON json;
+json.parse(R"({"name":"John","age":30,"active":true,"items":[10,20,30],"address":{"city":"NYC"}})");
+
+// Encode to TOML
+std::string toml = json.toTOML();
+// toml:
+// name = "John"
+// age = 30
+// items = [10, 20, 30]
+// active = true
+// [address]
+// city = "NYC"
+
+// Decode from TOML
+asvJSON j2;
+j2.fromTOML(toml);
+// j2.getString("name") == "John"
+// j2.getInt("age") == 30
+```
+
+TOML features:
+- **Tables and nested tables**: `[table]` / `[table.subtable]` headers
+- **Arrays of tables**: `[[array]]` headers for array-of-object structures
+- **Inline tables**: `{key = value, ...}` compact syntax with dotted keys (`{x.y = 1, x.z = 2}`)
+- **Inline arrays**: `[1, 2, 3]` with typed values
+- **Multi-line strings**: `"""..."""` basic and `'''...'''` literal (leading newline trimmed per spec)
+- **Numeric types**: integers (decimal, hex `0x`, octal `0o`, binary `0b`), floats, booleans
+- **Dotted keys**: `a.b.c = 42` creates nested structure
+- **Quoted keys**: `"key with spaces"` via JSON-style basic strings
+- **Literal strings**: `'C:\Windows'` for raw unescaped strings
+- **Comments**: `#` to end of line, both full-line and inline
+- **Null handling**: TOML has no null type; null values are skipped during encoding
+- **Full round-trip**: `toTOML()` then `fromTOML()` returns the original data
+
 ## Changelog
+
+### 1.8.1 (2026-07-19)
+
+- **Bugfix - TOML inline table dotted keys:** Fixed loss of data when inline table keys share a dotted prefix (e.g., `{x.y = 1, x.z = 2}` now produces `{"x":{"y":1,"z":2}}` instead of duplicate-key JSON).
+- **Bugfix - TOML inline table type conflict:** Added error on scalar-to-table redefinition (e.g., `{a = 1, a.b = 2}` now throws instead of segfaulting).
+- **Bugfix - TOML depth guard:** Fixed variable shadowing that disabled the `MAX_TOML_DEPTH` recursion guard in inline table and inline array parsers.
+
+### 1.8.0 (2026-07-19)
+
+- **New format - TOML:** Added `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings (basic and literal), hex/octal/binary integers, dotted keys, quoted keys, literal strings, comments. Direct tree-building decoder for robustness.
+- **Version bump:** 1.7.0 -> 1.8.0
 
 ### 1.7.0 (2026-07-19)
 

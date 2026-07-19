@@ -4141,6 +4141,201 @@ TEST(testFromCSV) {
   }
 }
 
+TEST(testToTOML) {
+  // Round-trip: simple object
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"name":"John","age":30})")));
+    std::string toml = j.toTOML();
+    ASSERT(!toml.empty());
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(std::string(j2.getString("name")), "John");
+    ASSERT_EQ(j2.getInt("age"), int64_t(30));
+  }
+  // Round-trip: nested object
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"owner":{"name":"Tom","age":30}})")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(std::string(j2.getString("owner.name")), "Tom");
+    ASSERT_EQ(j2.getInt("owner.age"), int64_t(30));
+  }
+  // Round-trip: array of objects (wrapped in [[item]] for root array)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([{"x":1,"y":2},{"x":3,"y":4}])")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT(j2.hasKey("item"));
+    ASSERT_EQ(j2.getRoot()->get("item")->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get("item")->get(static_cast<size_t>(0))->get("x")->getInt(), int64_t(1));
+  }
+  // Round-trip: boolean, null, float
+  // Note: TOML has no null type, so null values are skipped
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"active":true,"empty":null,"pi":3.14})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("empty") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT(j2.getBool("active"));
+    ASSERT(!j2.hasKey("empty"));
+    ASSERT(j2.getDouble("pi") > 3.13 && j2.getDouble("pi") < 3.15);
+  }
+  // Empty object
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.empty());
+  }
+  // Root level array of primitives (wrapped as "items" key)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([1,2,3])")));
+    std::string toml = j.toTOML();
+    ASSERT(!toml.empty());
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT(j2.hasKey("items"));
+    ASSERT_EQ(j2.getRoot()->get("items")->size(), size_t(3));
+  }
+}
+
+TEST(testFromTOML) {
+  // Direct parsing: simple key=value
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(name = "Alice"
+age = 30)")));
+    ASSERT_EQ(std::string(j.getString("name")), "Alice");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Direct parsing: table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"([owner]
+name = "Bob"
+age = 25)")));
+    ASSERT_EQ(std::string(j.getString("owner.name")), "Bob");
+    ASSERT_EQ(j.getInt("owner.age"), int64_t(25));
+  }
+  // Direct parsing: inline table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(point = {x = 1, y = 2})")));
+    ASSERT_EQ(j.getInt("point.x"), int64_t(1));
+    ASSERT_EQ(j.getInt("point.y"), int64_t(2));
+  }
+  // Direct parsing: boolean
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(flag = true)")));
+    ASSERT(j.getBool("flag"));
+  }
+  // Direct parsing: array of tables
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"([[products]]
+name = "Hammer"
+price = 10
+[[products]]
+name = "Nail"
+price = 2)")));
+    ASSERT_EQ(j.getRoot()->hasKey("products"), true);
+    ASSERT_EQ(j.getRoot()->getConst("products")->size(), size_t(2));
+    ASSERT_EQ(std::string(j.getRoot()->getConst("products")->get(static_cast<size_t>(0))->getConst("name")->getString()), "Hammer");
+    ASSERT_EQ(j.getRoot()->getConst("products")->get(static_cast<size_t>(1))->getConst("price")->getInt(), int64_t(2));
+  }
+  // Empty input
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("")));
+  }
+  // Numbers: integer
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = 42")));
+    ASSERT_EQ(j.getInt("n"), int64_t(42));
+  }
+  // Numbers: float
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = 3.14")));
+    ASSERT(j.getDouble("n") > 3.13 && j.getDouble("n") < 3.15);
+  }
+  // Quoted key
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"("key with spaces" = "value")")));
+    ASSERT_EQ(std::string(j.getString("key with spaces")), "value");
+  }
+  // Dotted key
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(a.b.c = 42)")));
+    ASSERT_EQ(j.getInt("a.b.c"), int64_t(42));
+  }
+  // Literal string
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(path = 'C:\Windows\System32')")));
+    ASSERT_EQ(std::string(j.getString("path")), "C:\\Windows\\System32");
+  }
+  // Multi-line basic string
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """
+line1
+line2""")")));
+    ASSERT_EQ(std::string(j.getString("str")), "line1\nline2");
+  }
+  // Hex number
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = 0xFF")));
+    ASSERT_EQ(j.getInt("n"), int64_t(255));
+  }
+  // Octal number
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = 0o77")));
+    ASSERT_EQ(j.getInt("n"), int64_t(63));
+  }
+  // Binary number
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = 0b1010")));
+    ASSERT_EQ(j.getInt("n"), int64_t(10));
+  }
+  // Inline array
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("arr = [1, 2, 3]")));
+    ASSERT_EQ(j.getRoot()->getConst("arr")->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->getConst("arr")->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+  }
+  // Comment
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(# this is a comment
+key = "value" # inline comment)")));
+    ASSERT_EQ(std::string(j.getString("key")), "value");
+  }
+  // Inline table with dotted keys (merged into correct nested structure)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(point = {x.y = 1, x.z = 2})")));
+    ASSERT_EQ(j.getInt("point.x.y"), int64_t(1));
+    ASSERT_EQ(j.getInt("point.x.z"), int64_t(2));
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -4411,6 +4606,10 @@ int main() {
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);
 	
+	std::cout << "\n--- TOML Serialization Tests ---\n";
+	RUN(testToTOML);
+	RUN(testFromTOML);
+
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
 	std::cout << "========================================" << std::endl;
