@@ -829,6 +829,40 @@ void example_to_xml() {
 	std::cout << json.toXML() << std::endl;
 }
 
+void example_from_xml() {
+	std::cout << "=== fromXML Parsing ===" << std::endl;
+
+	std::string xml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<root>
+  <name>John &amp; Jane</name>
+  <age>30</age>
+  <active>true</active>
+  <items>
+    <item>1</item>
+    <item>2</item>
+    <item>3</item>
+  </items>
+  <meta>
+    <nested>true</nested>
+  </meta>
+</root>)";
+
+	asvJSON json;
+	if (json.fromXML(std::string_view(xml))) {
+		auto* root = json.getRoot();
+		if (root) root = root->get("root");
+		if (root) {
+			std::cout << "  name=" << (root->get("name") ? root->get("name")->getString() : "?")
+			          << " age=" << (root->get("age") ? root->get("age")->getInt() : 0)
+			          << " active=" << (root->get("active") && root->get("active")->getBool() ? "true" : "false")
+			          << " nested=" << (root->get("meta") && root->get("meta")->get("nested") && root->get("meta")->get("nested")->getBool() ? "true" : "false")
+			          << std::endl;
+		}
+	} else {
+		std::cout << "  fromXML failed: " << json.getLastError() << std::endl;
+	}
+}
+
 void example_xml_escaped_keys() {
 	std::cout << "=== toXML with Escaped Keys ===" << std::endl;
 
@@ -1083,6 +1117,7 @@ int main() {
 	example_remove_by_pointer();
 	example_opt_datetime_tm_default();
 	example_to_xml();
+	example_from_xml();
 	example_xml_escaped_keys();
 	example_to_yaml();
 	example_to_yaml_multiline();

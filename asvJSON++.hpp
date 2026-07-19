@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.6.0 - Backward-compat wrapper. Includes the modular asvjson/ library.
+// asvJSON++ v1.7.0 - Backward-compat wrapper. Includes the modular asvjson/ library.
 // The library has been decomposed into asvjson/*.hpp for better organization.
 // This file is kept for backward compatibility.
 

@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON and GOON serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, and Protobuf serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -35,11 +35,13 @@ MIT license - see the `LICENSE` file for details.
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
-- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars
+- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
+- XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension)
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
 - GOON - `toGOON()` / `fromGOON()` - greatly optimized object notation with YAML-like indentation, tabular arrays, inline/inference-based lists, single-char literals (T/F/_/~), dictionary references, round-trip support
+- Protobuf - `toProtobuf()` / `fromProtobuf()` - Protocol Buffers binary wire format with schema-driven field mapping, packed fixed-size arrays; plus `toProtobufText()` / `fromProtobufText()` for human-readable text format
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -137,8 +139,9 @@ int main() {
 |--------|-------------|
 | `std::string serialize(bool pretty = false) const` | Serialize to JSON string. |
 | `std::string toXML() const` | Serialize to XML document. |
+| `bool fromXML(std::string_view input)` | Parse XML string (elements, attributes, type detection, CDATA). |
 | `std::string toYAML() const` | Serialize to YAML document. |
-| `bool fromYAML(std::string_view input)` | Parse YAML string (indentation-based, block scalars, tagged values). |
+| `bool fromYAML(std::string_view input)` | Parse YAML string (tags, anchors/aliases, multi-doc, directives). |
 | `std::string toCSV() const` | Serialize to CSV (flattened, two-pass for arrays of objects). |
 | `std::string toTOON() const` | Serialize to TOON (token-oriented object notation). |
 | `bool fromTOON(std::string_view input)` | Parse TOON string. |
@@ -146,6 +149,10 @@ int main() {
 | `bool fromTRON(std::string_view input)` | Parse TRON string (class definitions, inheritance, named args). |
 | `std::string toGOON() const` | Serialize to GOON (greatly optimized object notation). |
 | `bool fromGOON(std::string_view input)` | Parse GOON string (indentation-based, tabular arrays, dictionary refs). |
+| `std::vector&lt;uint8_t&gt; toProtobuf(const std::string&amp; schema) const` | Serialize to Protocol Buffers binary wire format (schema-driven). |
+| `bool fromProtobuf(const uint8_t* data, size_t size, const std::string&amp; schema)` | Parse Protocol Buffers binary wire format. |
+| `std::string toProtobufText() const` | Serialize to Protobuf text format (human-readable). |
+| `bool fromProtobufText(const std::string&amp; text)` | Parse Protobuf text format. |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -301,6 +308,8 @@ Convenience methods combining dot-path lookup with type extraction.
 | `static std::vector<uint8_t> messagePackFromString(const std::string& json)` | JSON string -> MessagePack. |
 | `static std::string stringFromMessagePack(const uint8_t* data, size_t len)` | MessagePack -> JSON string. |
 | `static std::vector<uint8_t> cborFromString(const std::string& json)` | JSON string -> CBOR. |
+| `static std::vector<uint8_t> protobufFromString(const std::string& json)` | JSON string -> Protobuf binary (using numeric field names as IDs). |
+| `static std::string stringFromProtobuf(const uint8_t* data, size_t len)` | Protobuf binary -> JSON string. |
 
 ### asvJSONValue Class
 
@@ -550,9 +559,62 @@ GOON features:
 - `#` prefix forces quoting to avoid comment ambiguity
 - Full round-trip: `toGOON()` then `fromGOON()` returns the original data
 
+### Protobuf
+
+Protobuf (Protocol Buffers) is a binary serialization format developed by Google. The library supports both the binary wire format and a human-readable text format.
+
+```cpp
+asvJSON json;
+json.putString("name", "Alice");
+json.putInt("age", 30);
+json.putBool("active", true);
+
+// Schema-driven binary encoding
+std::string schema = R"({
+  "name":{"id":1,"type":"string"},
+  "age":{"id":2,"type":"int32"},
+  "active":{"id":3,"type":"bool"}
+})";
+
+auto buf = json.toProtobuf(schema);
+// buf.size() < json.serialize().size() — compact binary format
+
+asvJSON json2;
+json2.fromProtobuf(buf.data(), buf.size(), schema);
+
+// Human-readable text format
+std::string text = json.toProtobufText();
+// name: "Alice"
+// age: 30
+// active: true
+
+asvJSON json3;
+json3.fromProtobufText(text);
+```
+
+Protobuf features:
+- **Schema-driven**: field numbers and types defined in a JSON schema object
+- **Varint encoding**: compact integer representation
+- **Packed fixed-size arrays**: `fixed32`, `fixed64`, `float`, `double` packed as contiguous blocks
+- **Static helpers**: `protobufFromString()` / `stringFromProtobuf()` for JSON string ↔ binary conversion
+- **Text format**: human-readable `key: value` representation with nested messages and arrays
+
 ## Changelog
 
-### 1.5.0 (2026-07-17)
+### 1.7.0 (2026-07-19)
+
+- **New format — Protobuf:** Added `toProtobuf()` / `fromProtobuf()` — Protocol Buffers binary wire format with schema-driven field mapping, varint encoding, packed fixed-size arrays. Text format via `toProtobufText()` / `fromProtobufText()`. Static helpers `protobufFromString()` / `stringFromProtobuf()`.
+- **New — XML decoder:** Added `fromXML()` — full XML parser supporting elements, attributes (`@`-prefix), text content (`#text`), CDATA, comments, processing instructions, type detection (`type="datetime|binary|objectid|regex|timestamp|extension"` attributes), child grouping into arrays for repeated names, self-closing tags.
+- **YAML decoder rewritten:** Major improvements:
+  - Tag support: `!!int` (hex/octal/binary), `!!float` (`.nan`/`.inf`), `!!bool`/`!!null`/`!!str`/`!!timestamp`, `!!set` (flow), `!!omap`, `!!pairs`
+  - Flow anchors & aliases (`&anchor`/`*alias` inside `{}`/`[]`)
+  - `%TAG` / `%YAML` directive parsing with tag handle resolution
+  - Line-number-anchored error diagnostics for parse errors
+  - NaN/Infinity encoding fix: `.nan`, `.inf`, `-.inf` (was emitting `~`)
+- **New tests:** 655+ lines covering Protobuf, XML, YAML (tags, anchors/aliases, multi-doc, directives, edge cases).
+- **Version bump:** 1.6.0 → 1.7.0
+
+### 1.6.0 (2026-07-18)
 
 - **New format — CBOR:** Added `toCBOR()` / `fromCBOR()` — RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags. Static helper `cborFromString()`.
 - **Modular structure:** Refactored monolithic header into `asvjson/` module directory  -  `core.hpp`, `detail/*.hpp`, `formats/*.hpp`. The top-level `asvJSON++.hpp` remains as a backward-compat wrapper.
