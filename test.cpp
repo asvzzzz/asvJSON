@@ -4336,6 +4336,60 @@ key = "value" # inline comment)")));
   }
 }
 
+TEST(testToJSONLines) {
+  // Array of objects -> one JSON line per element
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([{"a":1,"b":2},{"a":3,"b":4}])")));
+    std::string jl = j.toJSONLines();
+    ASSERT(!jl.empty());
+    asvJSON j2;
+    ASSERT(j2.fromJSONLines(std::string_view(jl)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(1))->get("b")->getInt(), int64_t(4));
+  }
+  // Single object -> one line
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"x":42})")));
+    std::string jl = j.toJSONLines();
+    std::string expected = R"({"x":42})" "\n";
+    ASSERT_EQ(jl, expected);
+  }
+}
+
+TEST(testFromJSONLines) {
+  // Multiple JSON lines
+  {
+    asvJSON j;
+    ASSERT(j.fromJSONLines(std::string_view(R"({"a":1}
+{"a":2}
+{"a":3}
+)")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(2))->get("a")->getInt(), int64_t(3));
+  }
+  // Windows line endings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSONLines(std::string_view("{\"b\":1}\r\n{\"b\":2}\r\n")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(2));
+  }
+  // Empty lines should be skipped
+  {
+    asvJSON j;
+    ASSERT(j.fromJSONLines(std::string_view("{\"c\":1}\n\n{\"c\":3}\n")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(2));
+  }
+  // Error on invalid JSON
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines(std::string_view("not valid json")));
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -4609,6 +4663,10 @@ int main() {
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);
 	RUN(testFromTOML);
+
+	std::cout << "\n--- JSON Lines Serialization Tests ---\n";
+	RUN(testToJSONLines);
+	RUN(testFromJSONLines);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

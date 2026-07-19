@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, and TOML serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, TOML, and JSON Lines (NDJSON) serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -43,6 +43,7 @@ MIT license - see the `LICENSE` file for details.
 - GOON - `toGOON()` / `fromGOON()` - greatly optimized object notation with YAML-like indentation, tabular arrays, inline/inference-based lists, single-char literals (T/F/_/~), dictionary references, round-trip support
 - Protobuf - `toProtobuf()` / `fromProtobuf()` - Protocol Buffers binary wire format with schema-driven field mapping, packed fixed-size arrays; plus `toProtobufText()` / `fromProtobufText()` for human-readable text format
 - TOML - `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings, hex/octal/binary integers, dotted keys, comments
+- JSON Lines (NDJSON) - `toJSONLines()` / `fromJSONLines()` - one JSON value per line, ideal for streaming/ logs/bulk data
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -156,6 +157,8 @@ int main() {
 | `bool fromProtobufText(const std::string&amp; text)` | Parse Protobuf text format. |
 | `std::string toTOML() const` | Serialize to TOML (Tom's Obvious Minimal Language). |
 | `bool fromTOML(std::string_view input)` | Parse TOML string (tables, arrays, inline tables, multi-line strings). |
+| `std::string toJSONLines() const` | Serialize to JSON Lines (one JSON value per line). |
+| `bool fromJSONLines(std::string_view input)` | Parse JSON Lines text into an array of values. |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -641,7 +644,40 @@ TOML features:
 - **Null handling**: TOML has no null type; null values are skipped during encoding
 - **Full round-trip**: `toTOML()` then `fromTOML()` returns the original data
 
+### JSON Lines (NDJSON)
+
+JSON Lines (also called NDJSON) is a text format where each line is a valid JSON value. It is well-suited for streaming data, log files, and bulk database operations.
+
+```cpp
+asvJSON json;
+json.parse(R"([{"name":"Alice","age":30},{"name":"Bob","age":25}])");
+
+// Encode to JSON Lines
+std::string jl = json.toJSONLines();
+// jl:
+// {"name":"Alice","age":30}
+// {"name":"Bob","age":25}
+
+// Decode from JSON Lines
+asvJSON j2;
+j2.fromJSONLines(jl);
+// j2.getRoot()->get(0)->get("name") == "Alice"
+```
+
+Features:
+- **Array root**: each element becomes one line
+- **Non-array root**: serialized as a single line
+- **Empty lines**: silently skipped during parsing
+- **Windows line endings**: `\r\n` handled transparently
+- **Round-trip**: `toJSONLines()` then `fromJSONLines()` returns the original array
+- **Error handling**: invalid JSON on any line rejects the entire input
+
 ## Changelog
+
+### 1.9.0 (2026-07-19)
+
+- **New format - JSON Lines (NDJSON):** Added `toJSONLines()` / `fromJSONLines()` - one JSON value per line, for streaming/logs/bulk data.
+- **Version bump:** 1.8.1 -> 1.9.0
 
 ### 1.8.1 (2026-07-19)
 

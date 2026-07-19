@@ -1092,6 +1092,25 @@ void example_to_toml() {
 	std::cout << std::endl;
 }
 
+void example_json_lines() {
+	std::cout << "=== JSON Lines (NDJSON) ===" << std::endl;
+
+	// Encode array of objects to JSON Lines
+	asvJSON json;
+	json.parse(std::string(R"([{"name":"Alice","age":30},{"name":"Bob","age":25},{"name":"Charlie","age":35}])"));
+	std::string jl = json.toJSONLines();
+	std::cout << "JSON Lines output:" << std::endl << jl;
+
+	// Decode back
+	asvJSON j2;
+	if (j2.fromJSONLines(std::string_view(jl))) {
+		std::cout << "Round-trip: count=" << j2.getRoot()->size()
+		          << " first=" << j2.getRoot()->get(static_cast<size_t>(0))->get("name")->getString()
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1158,6 +1177,7 @@ int main() {
 	example_to_goon();
 	example_protobuf();
 	example_to_toml();
+	example_json_lines();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

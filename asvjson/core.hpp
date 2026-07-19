@@ -1534,6 +1534,8 @@ public:
 	bool fromCSV(std::string_view input);
 	std::string toTOML() const;
 	bool fromTOML(std::string_view input);
+	std::string toJSONLines() const;
+	bool fromJSONLines(std::string_view input);
 
 private:
 	static bool isArrayIndex(std::string_view s) {
@@ -2187,6 +2189,48 @@ inline std::string asvJSON::toTOML() const {
 	std::string out;
 	if (root) root->toTOML(out);
 	return out;
+}
+
+inline std::string asvJSON::toJSONLines() const {
+	std::string out;
+	if (!root) return out;
+	if (root->type == asvJSONValue::ARRAY && root->arr) {
+		for (const auto& elem : *root->arr) {
+			elem->serialize(out, false);
+			out += '\n';
+		}
+	} else {
+		root->serialize(out, false);
+		out += '\n';
+	}
+	return out;
+}
+
+inline bool asvJSON::fromJSONLines(std::string_view input) {
+	try {
+		auto arr = asvJSONValue::makeArray();
+		size_t pos = 0;
+		while (pos < input.size()) {
+			size_t end = input.find('\n', pos);
+			if (end == std::string_view::npos) end = input.size();
+			std::string_view line = input.substr(pos, end - pos);
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+				line.remove_suffix(1);
+			if (!line.empty()) {
+				asvJSON tmp;
+				if (!tmp.parse(line))
+					throw asvJSONError("JSON Lines: invalid JSON");
+				arr->arr->push_back(cloneValue(tmp.getRoot()));
+			}
+			pos = end + 1;
+		}
+		root = std::move(arr);
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
+		root = nullptr;
+		return false;
+	}
 }
 
 namespace asvJSONInternal {
