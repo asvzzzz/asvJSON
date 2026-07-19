@@ -2220,7 +2220,7 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 			if (!line.empty()) {
 				asvJSON tmp;
 				if (!tmp.parse(line))
-					throw asvJSONError("JSON Lines: invalid JSON at position " + std::to_string(pos));
+					throw asvJSONError("JSON Lines: invalid JSON near: " + std::string(line.substr(0, 30)));
 				arr->arr->push_back(tmp.releaseRoot());
 			}
 			pos = end + 1;
