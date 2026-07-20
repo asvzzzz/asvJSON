@@ -59,3 +59,7 @@
 #ifndef ASVJSON_DISABLE_JSON5
 #include "formats/json5.hpp"
 #endif
+
+#ifndef ASVJSON_DISABLE_INI
+#include "formats/ini.hpp"
+#endif

@@ -46,6 +46,7 @@ MIT license - see the `LICENSE` file for details.
 - JSON Lines (NDJSON) - `toJSONLines()` / `fromJSONLines()` - one JSON value per line, ideal for streaming/ logs/bulk data
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
+- INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -728,7 +729,36 @@ S-Expression features:
 | EXTENSION | `{"$binary":{"base64":"3q0=","subType":"2a"}}` |
 | DATETIME | `"2026-07-20T00:21:57Z"` (ISO 8601) |
 
+### INI — Classic initialization file format
+
+`toINI()` / `fromINI()` — the classic initialization file format with dot-notation section nesting for hierarchical data.
+
+```
+; Sample configuration
+name = John
+age = 30
+
+[address]
+city = NYC
+zip = 10001
+
+[network.server]
+ip = 10.0.0.1
+
+[network.client]
+retries = 3
+```
+
+**Features:** sections `[name]` with dot-notation nesting (`[parent.child]`), `;`/`#` comments, quoted `"values"` with escape sequences (`\n`, `\t`, `\\`, `\;`, `\#`, `\=`), line continuation (`\` at end of line), global keys (before any section), `=`/`:`/space delimiters, duplicate key override, array of objects support.
+
+On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
+
 ## Changelog
+
+### 1.12.0 (2026-07-20)
+
+- **New format - INI:** Added `toINI()` / `fromINI()` — classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting for hierarchical data (e.g. `[network.server]` → nested JSON `{"network":{"server":{...}}}`).
+- **Version bump:** 1.11.1 -> 1.12.0
 
 ### 1.11.1 (2026-07-20)
 

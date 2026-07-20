@@ -1214,6 +1214,30 @@ void example_from_json5() {
 	std::cout << std::endl;
 }
 
+void example_to_ini() {
+	std::cout << "=== INI Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":"10001"},"network":{"server":{"ip":"10.0.0.1"},"client":{"retries":"3"}}})"));
+	std::cout << json.toINI() << std::endl;
+}
+
+void example_from_ini() {
+	std::cout << "=== INI Input ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input = "; Sample config\nname = John\nage = 30\n\n[address]\ncity = NYC\nzip = 10001\n\n[network.server]\nip = 10.0.0.1\n\n[network.client]\nretries = 3\n";
+	if (json.fromINI(input)) {
+		std::cout << "  name=" << json.getString("name")
+		          << " age=" << json.getString("age")
+		          << " city=" << json.getString("address.city")
+		          << " ip=" << json.getString("network.server.ip")
+		          << " retries=" << json.getString("network.client.retries")
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1285,6 +1309,8 @@ int main() {
 	example_from_sexpr();
 	example_to_json5();
 	example_from_json5();
+	example_to_ini();
+	example_from_ini();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

@@ -403,6 +403,7 @@ struct asvJSONValue {
 	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const;
 	void toCSV(std::string& out) const;
 	void toTOML(std::string& out) const;
+	void toINI(std::string& out) const;
 };
 
 // JSON formatting helpers
@@ -1550,6 +1551,8 @@ public:
 	bool fromTOML(std::string_view input);
 	std::string toJSONLines() const;
 	bool fromJSONLines(std::string_view input);
+	std::string toINI() const;
+	bool fromINI(std::string_view input);
 	/// @brief Transfer ownership of the root value to the caller.
 	/// @return Unique pointer to the root value (may be null).
 	/// @note After calling, the document becomes empty; it can be reused via parse().
@@ -2226,6 +2229,12 @@ inline std::string asvJSON::toCSV() const {
 inline std::string asvJSON::toTOML() const {
 	std::string out;
 	if (root) root->toTOML(out);
+	return out;
+}
+
+inline std::string asvJSON::toINI() const {
+	std::string out;
+	if (root) root->toINI(out);
 	return out;
 }
 

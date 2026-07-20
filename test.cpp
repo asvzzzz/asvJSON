@@ -5076,6 +5076,138 @@ TEST(testFromJSON5) {
   }
 }
 
+TEST(testToINI) {
+  // Simple object
+  {
+    asvJSON j;
+    j.parse(std::string("{\"key\":\"val\",\"num\":42,\"flag\":true,\"nullval\":null}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("key = val") != std::string::npos);
+    ASSERT(ini.find("num = 42") != std::string::npos);
+    ASSERT(ini.find("flag = true") != std::string::npos);
+  }
+  // Nested sections via dot notation
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"db":{"host":"localhost","port":"5432"},"log":{"level":"debug"}})"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("[db]") != std::string::npos);
+    ASSERT(ini.find("host = localhost") != std::string::npos);
+    ASSERT(ini.find("port = 5432") != std::string::npos);
+    ASSERT(ini.find("[log]") != std::string::npos);
+    ASSERT(ini.find("level = debug") != std::string::npos);
+  }
+  // Deep nesting
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"network":{"server":{"ip":"10.0.0.1"},"client":{"retries":"3"}}})"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("[network.server]") != std::string::npos);
+    ASSERT(ini.find("ip = 10.0.0.1") != std::string::npos);
+    ASSERT(ini.find("[network.client]") != std::string::npos);
+    ASSERT(ini.find("retries = 3") != std::string::npos);
+  }
+  // Quoted value (string with spaces)
+  {
+    asvJSON j;
+    j.putString("title", "Hello World");
+    std::string ini = j.toINI();
+    ASSERT(ini.find(R"(title = "Hello World")") != std::string::npos);
+  }
+  // Array of objects
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"items":[{"x":"1"},{"x":"2"}]})"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("[items]") != std::string::npos);
+  }
+  // Empty root
+  {
+    asvJSON j;
+    j.parse(std::string("{}"));
+    ASSERT_EQ(j.toINI(), std::string(""));
+  }
+}
+
+TEST(testFromINI) {
+  // Simple key-value
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("key = val\nnum = 42\nflag = true\nempty =\n")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+    ASSERT_EQ(std::string(j.getString("num")), "42");
+    ASSERT_EQ(std::string(j.getString("flag")), "true");
+    ASSERT_EQ(std::string(j.getString("empty")), "");
+  }
+  // Sections
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[db]\nhost = localhost\nport = 5432\n")));
+    ASSERT(j.getNested("db") != nullptr);
+    ASSERT_EQ(std::string(j.getString("db.host")), "localhost");
+    ASSERT_EQ(std::string(j.getString("db.port")), "5432");
+  }
+  // Nested sections (dot notation)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[network.server]\nip = 10.0.0.1\n[network.client]\nretries = 3\n")));
+    ASSERT_EQ(std::string(j.getString("network.server.ip")), "10.0.0.1");
+    ASSERT_EQ(std::string(j.getString("network.client.retries")), "3");
+  }
+  // Quoted values
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("title = \"Hello World\"\npath = \"C:\\\\Program Files\"\n")));
+    ASSERT_EQ(std::string(j.getString("title")), "Hello World");
+    ASSERT_EQ(std::string(j.getString("path")), "C:\\Program Files");
+  }
+  // Comments (; and #)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("; comment\nkey = val\n# another comment\nfoo = bar\n")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+    ASSERT_EQ(std::string(j.getString("foo")), "bar");
+    ASSERT(j.get("baz") == nullptr);
+  }
+  // Escape sequences
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("msg = hello\\nworld\ntab = a\\tb\n")));
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\nworld");
+    ASSERT_EQ(std::string(j.getString("tab")), "a\tb");
+  }
+  // Global keys + sections
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("global = val\n[sec]\nk = v\n")));
+    ASSERT_EQ(std::string(j.getString("global")), "val");
+    ASSERT_EQ(std::string(j.getString("sec.k")), "v");
+  }
+  // Empty input
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("")));
+  }
+  // Colon as delimiter
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("key: val\n")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+  }
+  // Space delimiter
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("key val\n")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+  }
+  // Line continuation
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("msg = hello\\\nworld\n")));
+    ASSERT_EQ(std::string(j.getString("msg")), "helloworld");
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -5361,6 +5493,10 @@ int main() {
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
 	RUN(testFromJSON5);
+
+	std::cout << "\n--- INI Serialization Tests ---\n";
+	RUN(testToINI);
+	RUN(testFromINI);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
