@@ -665,52 +665,6 @@ private:
 
 	std::unique_ptr<asvJSONValue> parseStringOrSpecial() {
 		std::string_view raw = parseStringRaw();
-		if (raw.size() > 10 && raw.compare(0, 10, "__BASE64__") == 0) {
-			auto data = decodeBase64Fast(raw.data() + 10, raw.size() - 10);
-			auto v = asvJSONValue::makeBinary(data.data(), data.size());
-			return v;
-		}
-		if (raw.size() > 7 && raw.compare(0, 7, "__EXT__") == 0) {
-			auto rest = raw.substr(7);
-			size_t sep = rest.find("__");
-			if (sep != std::string_view::npos) {
-				int extType = 0;
-				auto [ptr, ec] = std::from_chars(rest.data(), rest.data() + sep, extType);
-				if (ec == std::errc()) {
-					auto data = decodeBase64Fast(rest.data() + sep + 2, rest.size() - sep - 2);
-					return asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
-				}
-			}
-		}
-		if (raw.size() > 7 && raw.compare(0, 7, "__OID__") == 0) {
-			auto hex = raw.substr(7);
-			if (hex.size() == 24) {
-				auto isHex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
-				for (auto c : hex) if (!isHex(c)) return nullptr;
-				auto hexVal = [](char c) -> uint8_t {
-					if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
-					if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
-					if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
-					return 0;
-				};
-				uint8_t bytes[12];
-				for (int i = 0; i < 12; i++)
-					bytes[i] = static_cast<uint8_t>((hexVal(hex[i * 2]) << 4) | hexVal(hex[i * 2 + 1]));
-				return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
-			}
-		}
-		if (raw.size() > 9 && raw.compare(0, 9, "__REGEX__") == 0) {
-			auto rest = raw.substr(9);
-			size_t sep = rest.rfind('|');
-			std::string pattern, opts;
-			if (sep != std::string_view::npos) {
-				pattern = std::string(rest.substr(0, sep));
-				opts = std::string(rest.substr(sep + 1));
-			} else {
-				pattern = std::string(rest);
-			}
-			return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-		}
 		if (raw.size() >= 20 && raw[4] == '-' && raw[7] == '-' && raw[10] == 'T') {
 			time_t ts;
 			int ms = 0;
@@ -751,6 +705,62 @@ private:
 			}
 		} catch (...) { --parseDepth; throw; }
 		--parseDepth;
+		// Special object detection (MongoDB Extended JSON)
+		if (obj->obj->size() >= 1) {
+			{
+				auto oidIt = obj->obj->find("$oid");
+				if (oidIt != obj->obj->end() && oidIt->second->type == asvJSONValue::STRING && oidIt->second->str_data.size() == 24 && obj->obj->size() == 1) {
+					uint8_t bytes[12];
+					for (int i = 0; i < 12; i++) {
+						char buf[3] = {oidIt->second->str_data[i*2], oidIt->second->str_data[i*2+1], 0};
+						bytes[i] = static_cast<uint8_t>(std::strtol(buf, nullptr, 16));
+					}
+					return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
+				}
+			}
+			{
+				auto tsIt = obj->obj->find("$timestamp");
+				if (tsIt != obj->obj->end() && tsIt->second->type == asvJSONValue::OBJECT && tsIt->second->obj && obj->obj->size() == 1) {
+					auto tIt = tsIt->second->obj->find("t");
+					if (tIt != tsIt->second->obj->end() && tIt->second->type == asvJSONValue::INT) {
+						return asvJSONValue::makeTimestamp(tIt->second->num);
+					}
+				}
+			}
+			{
+				auto binIt = obj->obj->find("$binary");
+				if (binIt != obj->obj->end() && binIt->second->type == asvJSONValue::OBJECT && binIt->second->obj && obj->obj->size() == 1) {
+					auto base64It = binIt->second->obj->find("base64");
+					auto subIt = binIt->second->obj->find("subType");
+					if (base64It != binIt->second->obj->end() && base64It->second->type == asvJSONValue::STRING) {
+						auto data = decodeBase64Fast(base64It->second->str_data.data(), base64It->second->str_data.size());
+						if (!data.empty()) {
+							int subType = 0;
+							if (subIt != binIt->second->obj->end() && subIt->second->type == asvJSONValue::STRING) {
+								subType = static_cast<int>(std::strtol(subIt->second->str_data.c_str(), nullptr, 16));
+							}
+							if (subType == 0) {
+								return asvJSONValue::makeBinary(data.data(), data.size());
+							} else {
+								return asvJSONValue::makeExtension(static_cast<int8_t>(subType), data.data(), data.size());
+							}
+						}
+					}
+				}
+			}
+			{
+				auto regexIt = obj->obj->find("$regex");
+				if (regexIt != obj->obj->end() && regexIt->second->type == asvJSONValue::STRING) {
+					std::string pattern = regexIt->second->str_data;
+					std::string opts;
+					auto optsIt = obj->obj->find("$options");
+					if (optsIt != obj->obj->end() && optsIt->second->type == asvJSONValue::STRING) {
+						opts = optsIt->second->str_data;
+					}
+					return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
+				}
+			}
+		}
 		return obj;
 	}
 
@@ -897,6 +907,8 @@ public:
 	bool fromGOON(std::string_view input);
 	std::string toSexpr() const;
 	bool fromSexpr(std::string_view input);
+	std::string toJSON5() const;
+	bool fromJSON5(std::string_view input);
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;
@@ -1670,9 +1682,9 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::BINARY: {
-			out += "\"__BASE64__";
+			out += "{\"$binary\":{\"base64\":\"";
 			out += encodeBase64(v->bin_data.data(), v->bin_data.size());
-			out += '"';
+			out += "\",\"subType\":\"00\"}}";
 			break;
 		}
 		case asvJSONValue::OBJECTID: {
@@ -1682,9 +1694,20 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::REGEX: {
-			out += "{\"$regex\":";
-			fmtRegexVal(v->str_data, out);
-			out += "}";
+			{
+				size_t sep = v->str_data.rfind('|');
+				std::string_view pattern = (sep != std::string_view::npos) ? v->str_data.substr(0, sep) : v->str_data;
+				std::string_view opts = (sep != std::string_view::npos) ? v->str_data.substr(sep + 1) : "";
+				out += "{\"$regex\":\"";
+				appendJsonEscaped(out, pattern);
+				out += "\"";
+				if (!opts.empty()) {
+					out += ",\"$options\":\"";
+					appendJsonEscaped(out, opts);
+					out += "\"";
+				}
+				out += "}";
+			}
 			break;
 		}
 		case asvJSONValue::TIMESTAMP: {
@@ -1696,9 +1719,13 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::EXTENSION: {
-			out += '"';
-			fmtExtVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), out);
-			out += '"';
+			out += "{\"$binary\":{\"base64\":\"";
+			out += encodeBase64(v->bin_data.data(), v->bin_data.size());
+			char hex[3];
+			snprintf(hex, sizeof(hex), "%02x", static_cast<uint8_t>(v->ext_type));
+			out += "\",\"subType\":\"";
+			out += hex;
+			out += "\"}}";
 			break;
 		}
 		default: out += "null"; break;

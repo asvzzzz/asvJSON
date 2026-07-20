@@ -45,6 +45,7 @@ MIT license - see the `LICENSE` file for details.
 - TOML - `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings, hex/octal/binary integers, dotted keys, comments
 - JSON Lines (NDJSON) - `toJSONLines()` / `fromJSONLines()` - one JSON value per line, ideal for streaming/ logs/bulk data
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
+- JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, and MongoDB Extended JSON for special types
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -706,7 +707,36 @@ S-Expression features:
 - **Comments**: `;` to end of line
 - **Full round-trip**: `toSexpr()` then `fromSexpr()` returns the original data
 
+### JSON5 — Extended JSON superset
+
+`toJSON5()` / `fromJSON5()` — JSON5 with MongoDB Extended JSON for special types.
+
+**JSON5 features:** unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal (`.5`), plus sign (`+42`), `//`/`/* */`/`#` comments.
+
+```
+{name:"John",age:30,active:true,address:{city:"NYC",zip:10001}}
+```
+
+**Extended JSON** (MongoDB Canonical format) for special data types:
+
+| Type | Serialized form |
+|---|---|
+| OBJECTID | `{"$oid":"507f1f77bcf86cd799439011"}` |
+| REGEX | `{"$regex":"^test$","$options":"gi"}` |
+| TIMESTAMP | `{"$timestamp":{"t":1712345678}}` |
+| BINARY | `{"$binary":{"base64":"3q0=","subType":"00"}}` |
+| EXTENSION | `{"$binary":{"base64":"3q0=","subType":"2a"}}` |
+| DATETIME | `"2026-07-20T00:21:57Z"` (ISO 8601) |
+
 ## Changelog
+
+### 1.11.0 (2026-07-20)
+
+- **New format - JSON5:** Added `toJSON5()` / `fromJSON5()` — JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, plus sign, leading decimal, comments. Uses MongoDB Extended JSON (`$oid`, `$regex`+`$options`, `$timestamp`, `$binary` with subType) for special data types (OBJECTID, REGEX, TIMESTAMP, BINARY, EXTENSION), replacing legacy `__OID__`/`__REGEX__`/`__BASE64__`/`__EXT__` prefix convention.
+- **Extended JSON parser:** JSON parser now detects `$oid`, `$regex`+`$options`, `$timestamp`, `$binary` objects and converts them to native special types. Legacy custom prefix strings (`__BASE64__`, `__OID__`, `__REGEX__`, `__EXT__`) are no longer recognized.
+- **YAML decoder updated:** YAML `!objectid`/`!regex`/`!!binary`/`!ext` tags now emit Extended JSON format instead of legacy prefixes, ensuring full round-trip fidelity.
+- **NaN/Infinity in JSON5:** `NaN`, `Infinity`, `-Infinity` literals supported (enabled automatically in `fromJSON5`).
+- **Version bump:** 1.10.0 -> 1.11.0
 
 ### 1.10.0 (2026-07-20)
 

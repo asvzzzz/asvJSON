@@ -4553,6 +4553,212 @@ TEST(testFromSexpr) {
   }
 }
 
+TEST(testToJSON5) {
+  // Basic object round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"name":"John","age":30,"active":true})")));
+    std::string s = j.toJSON5();
+    ASSERT(!s.empty());
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("name")), "John");
+    ASSERT_EQ(j2.getInt("age"), int64_t(30));
+    ASSERT_EQ(j2.getBool("active"), true);
+  }
+  // Array round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[10,20,30]")));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+    ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(10));
+  }
+  // Nested object
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":{\"b\":{\"c\":42}}}")));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getInt("a.b.c"), int64_t(42));
+  }
+  // Special types serialize as null (not lost)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"s":"hi","b":false,"n":null,"i":42})")));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("s")), "hi");
+    ASSERT_EQ(j2.getBool("b"), false);
+    ASSERT(j2.isNull("n"));
+    ASSERT_EQ(j2.getInt("i"), int64_t(42));
+  }
+  // Output uses unquoted keys for simple identifiers
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"simpleKey":1,"_ok":2,"$valid":3})")));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("\"simpleKey\"") == std::string::npos);
+    ASSERT(s.find("simpleKey") != std::string::npos);
+  }
+  // Special types round-trip (Extended JSON)
+  {
+    asvJSON j;
+    j.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+    j.putRegex("rx", "^test$", "gi");
+    uint8_t bin[] = {0xde, 0xad};
+    j.putBinary("bin", bin, 2);
+    j.putExtension("ext", 42, bin, 2);
+    j.putDateTime("dt", 1705314645);
+    j.putInt("ts", 1712345678);
+    std::string s = j.toJSON5();
+    ASSERT(!s.empty());
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* oid = j2.getRoot()->get("oid");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+    auto* rx = j2.getRoot()->get("rx");
+    ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
+    ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+    auto* bin2 = j2.getRoot()->get("bin");
+    ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin2->bin_data.size(), size_t(2));
+    ASSERT_EQ(bin2->bin_data[0], 0xde);
+    ASSERT_EQ(bin2->bin_data[1], 0xad);
+    auto* ext2 = j2.getRoot()->get("ext");
+    ASSERT(ext2 != nullptr && ext2->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext2->ext_type, 42);
+    ASSERT_EQ(ext2->bin_data.size(), size_t(2));
+    auto* dt2 = j2.getRoot()->get("dt");
+    ASSERT(dt2 != nullptr && dt2->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt2->timestamp, 1705314645);
+  }
+}
+
+TEST(testFromJSON5) {
+  // Single-quoted strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'name':'John','age':30}")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Unquoted keys
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{name:\"John\",age:30}")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Trailing commas
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'a':1,'b':2,}")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[1,2,3,]")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(3));
+  }
+  // Hex numbers
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'val':0xFF}")));
+    ASSERT_EQ(j.getInt("val"), int64_t(255));
+  }
+  // Octal numbers
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'val':0o77}")));
+    ASSERT_EQ(j.getInt("val"), int64_t(63));
+  }
+  // Binary numbers
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'val':0b1010}")));
+    ASSERT_EQ(j.getInt("val"), int64_t(10));
+  }
+  // Leading decimal
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'val':.5}")));
+    ASSERT(j.getDouble("val") > 0.49 && j.getDouble("val") < 0.51);
+  }
+  // Plus sign
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'val':+42}")));
+    ASSERT_EQ(j.getInt("val"), int64_t(42));
+  }
+  // Mixed JSON5 features
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{unquoted:'single',\"double\":0xFF,trailing:0o10,}")));
+    ASSERT_EQ(std::string(j.getString("unquoted")), "single");
+    ASSERT_EQ(j.getInt("double"), int64_t(255));
+    ASSERT_EQ(j.getInt("trailing"), int64_t(8));
+  }
+  // Comments (already handled by JSON parser)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{'a':1 // inline\n,'b':2}")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // Error on empty
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("")));
+  }
+  // Parse Extended JSON (MongoDB format)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"json5({"$oid":"0102030405060708090a0b0c"})json5")));
+    auto* oid = j.getRoot();
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"json5({"$regex":"^test$","$options":"gi"})json5")));
+    auto* rx = j.getRoot();
+    ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
+    ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"json5({"$timestamp":{"t":1712345678}})json5")));
+    auto* ts = j.getRoot();
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(1712345678));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"json5({"$binary":{"base64":"3q0=","subType":"00"}})json5")));
+    auto* bin = j.getRoot();
+    ASSERT(bin != nullptr && bin->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin->bin_data.size(), size_t(2));
+    ASSERT_EQ(bin->bin_data[0], 0xde);
+    ASSERT_EQ(bin->bin_data[1], 0xad);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"json5({"$binary":{"base64":"3q0=","subType":"2a"}})json5")));
+    auto* ext = j.getRoot();
+    ASSERT(ext != nullptr && ext->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext->ext_type, 42);
+    ASSERT_EQ(ext->bin_data.size(), size_t(2));
+    ASSERT_EQ(ext->bin_data[0], 0xde);
+    ASSERT_EQ(ext->bin_data[1], 0xad);
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -4834,6 +5040,10 @@ int main() {
 	std::cout << "\n--- S-Expression Serialization Tests ---\n";
 	RUN(testToSexpr);
 	RUN(testFromSexpr);
+
+	std::cout << "\n--- JSON5 Serialization Tests ---\n";
+	RUN(testToJSON5);
+	RUN(testFromJSON5);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

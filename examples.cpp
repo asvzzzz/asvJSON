@@ -1153,6 +1153,67 @@ void example_from_sexpr() {
 	std::cout << std::endl;
 }
 
+void example_to_json5() {
+	std::cout << "=== JSON5 Output ===" << std::endl;
+	
+	// Basic types - unquoted keys
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":10001}})"));
+	std::string j5 = json.toJSON5();
+	std::cout << "JSON5 (unquoted keys):" << std::endl << j5 << std::endl << std::endl;
+	
+	// Round-trip
+	asvJSON j2;
+	if (j2.fromJSON5(std::string_view(j5))) {
+		std::cout << "Round-trip: name=" << j2.getString("name")
+		          << " age=" << j2.getInt("age")
+		          << " city=" << j2.getString("address.city")
+		          << std::endl;
+	}
+	
+	// Special types - Extended JSON format
+	asvJSON j3;
+	uint8_t bin[] = {0xde, 0xad, 0xbe, 0xef};
+	j3.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+	j3.putRegex("rx", "^test$", "gi");
+	j3.putBinary("bin", bin, 4);
+	j3.putExtension("ext", 42, bin, 4);
+	j3.putDateTime("dt", 1705314645);
+	j3.putInt("ts", 1712345678);
+	std::string j5special = j3.toJSON5();
+	std::cout << "JSON5 with special types (Extended JSON):" << std::endl << j5special << std::endl << std::endl;
+	
+	// Round-trip special types
+	asvJSON j4;
+	if (j4.fromJSON5(std::string_view(j5special))) {
+		std::cout << "Special types round-trip OK:";
+		if (j4.getRoot()->get("oid") && j4.getRoot()->get("oid")->type == asvJSONValue::OBJECTID) std::cout << " oid";
+		if (j4.getRoot()->get("rx") && j4.getRoot()->get("rx")->type == asvJSONValue::REGEX) std::cout << " rx";
+		if (j4.getRoot()->get("bin") && j4.getRoot()->get("bin")->type == asvJSONValue::BINARY) std::cout << " bin";
+		if (j4.getRoot()->get("ext") && j4.getRoot()->get("ext")->type == asvJSONValue::EXTENSION) std::cout << " ext";
+		if (j4.getRoot()->get("dt") && j4.getRoot()->get("dt")->type == asvJSONValue::DATETIME) std::cout << " dt";
+		std::cout << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_from_json5() {
+	std::cout << "=== JSON5 Input ===" << std::endl;
+	
+	// JSON5 with single quotes, unquoted keys, hex, trailing comma
+	asvJSON json;
+	std::string_view input = "{name:'Alice',age:0x1E,active:true,items:[1,2,3,],}";
+	if (json.fromJSON5(input)) {
+		std::cout << "Parsed JSON5:" << std::endl;
+		std::cout << "  name=" << json.getString("name")
+		          << " age=" << json.getInt("age")
+		          << " active=" << json.getBool("active")
+		          << " items[0]=" << json.getRoot()->getConst("items")->get(static_cast<size_t>(0))->getInt()
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1222,6 +1283,8 @@ int main() {
 	example_json_lines();
 	example_to_sexpr();
 	example_from_sexpr();
+	example_to_json5();
+	example_from_json5();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

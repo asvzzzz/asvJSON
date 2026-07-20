@@ -504,9 +504,13 @@ static std::string yamlParseTaggedValue(std::string_view s) {
 		return "\"\"";
 	}
 
-	// Special type tags
-	if (tag == "!!binary") return "\"__BASE64__" + std::string(val) + "\"";
-	if (tag == "!objectid") return "\"__OID__" + std::string(val) + "\"";
+	// Special type tags (Extended JSON)
+	if (tag == "!!binary") {
+		return "{\"$binary\":{\"base64\":\"" + std::string(val) + "\",\"subType\":\"00\"}}";
+	}
+	if (tag == "!objectid") {
+		return "{\"$oid\":\"" + std::string(val) + "\"}";
+	}
 	if (tag == "!regex") {
 		std::string resolved = yamlParseInlineValue(val);
 		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
@@ -514,11 +518,22 @@ static std::string yamlParseTaggedValue(std::string_view s) {
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
 		std::string internal = yamlRegexToInternal(raw);
-		std::string out = "\"__REGEX__";
-		for (auto c : internal) {
+		size_t sep = internal.rfind('|');
+		std::string pattern = (sep != std::string::npos) ? internal.substr(0, sep) : internal;
+		std::string opts = (sep != std::string::npos) ? internal.substr(sep + 1) : "";
+		std::string out = "{\"$regex\":\"";
+		for (auto c : pattern) {
 			if (c == '"') out += "\\\""; else if (c == '\\') out += "\\\\"; else out += c;
 		}
 		out += "\"";
+		if (!opts.empty()) {
+			out += ",\"$options\":\"";
+			for (auto c : opts) {
+				if (c == '"') out += "\\\""; else if (c == '\\') out += "\\\\"; else out += c;
+			}
+			out += "\"";
+		}
+		out += "}";
 		return out;
 	}
 	if (tag == "!ext") {
@@ -532,7 +547,9 @@ static std::string yamlParseTaggedValue(std::string_view s) {
 			resolved = resolved.substr(1, resolved.size() - 2);
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
-		return "\"__EXT__" + std::to_string(extType) + "__" + raw + "\"";
+		char hex[3];
+		snprintf(hex, sizeof(hex), "%02x", static_cast<uint8_t>(extType));
+		return "{\"$binary\":{\"base64\":\"" + raw + "\",\"subType\":\"" + hex + "\"}}";
 	}
 
 	// !!set -- convert to object-with-null-values for flow notation: [a,b,c] -> {"a":null,"b":null}
