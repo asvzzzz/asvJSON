@@ -5130,13 +5130,15 @@ TEST(testToINI) {
 }
 
 TEST(testFromINI) {
-  // Simple key-value
+  // Simple key-value with type inference
   {
     asvJSON j;
     ASSERT(j.fromINI(std::string("key = val\nnum = 42\nflag = true\nempty =\n")));
     ASSERT_EQ(std::string(j.getString("key")), "val");
-    ASSERT_EQ(std::string(j.getString("num")), "42");
-    ASSERT_EQ(std::string(j.getString("flag")), "true");
+    ASSERT(j.get("num") != nullptr && j.get("num")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("num"), int64_t(42));
+    ASSERT(j.get("flag") != nullptr && j.get("flag")->type == asvJSONValue::BOOL_VAL);
+    ASSERT_EQ(j.getBool("flag"), true);
     ASSERT_EQ(std::string(j.getString("empty")), "");
   }
   // Sections
@@ -5145,29 +5147,32 @@ TEST(testFromINI) {
     ASSERT(j.fromINI(std::string("[db]\nhost = localhost\nport = 5432\n")));
     ASSERT(j.getNested("db") != nullptr);
     ASSERT_EQ(std::string(j.getString("db.host")), "localhost");
-    ASSERT_EQ(std::string(j.getString("db.port")), "5432");
+    ASSERT_EQ(j.getInt("db.port"), int64_t(5432));
   }
   // Nested sections (dot notation)
   {
     asvJSON j;
     ASSERT(j.fromINI(std::string("[network.server]\nip = 10.0.0.1\n[network.client]\nretries = 3\n")));
     ASSERT_EQ(std::string(j.getString("network.server.ip")), "10.0.0.1");
-    ASSERT_EQ(std::string(j.getString("network.client.retries")), "3");
+    ASSERT_EQ(j.getInt("network.client.retries"), int64_t(3));
   }
-  // Quoted values
+  // Quoted values (always strings, even for true/42)
   {
     asvJSON j;
-    ASSERT(j.fromINI(std::string("title = \"Hello World\"\npath = \"C:\\\\Program Files\"\n")));
+    ASSERT(j.fromINI(std::string("title = \"Hello World\"\npath = \"C:\\\\Program Files\"\nstr42 = \"42\"\n")));
     ASSERT_EQ(std::string(j.getString("title")), "Hello World");
     ASSERT_EQ(std::string(j.getString("path")), "C:\\Program Files");
+    ASSERT(j.get("str42") != nullptr && j.get("str42")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("str42")), "42");
   }
-  // Comments (; and #)
+  // Line comments (; and #, including inline for bare values)
   {
     asvJSON j;
-    ASSERT(j.fromINI(std::string("; comment\nkey = val\n# another comment\nfoo = bar\n")));
+    ASSERT(j.fromINI(std::string("; line comment\nkey = val\n# another line comment\nfoo = bar\nbare = hello ; inline\nnum = 42 # inline\n")));
     ASSERT_EQ(std::string(j.getString("key")), "val");
     ASSERT_EQ(std::string(j.getString("foo")), "bar");
-    ASSERT(j.get("baz") == nullptr);
+    ASSERT_EQ(std::string(j.getString("bare")), "hello");
+    ASSERT_EQ(j.getInt("num"), int64_t(42));
   }
   // Escape sequences
   {
@@ -5205,6 +5210,34 @@ TEST(testFromINI) {
     asvJSON j;
     ASSERT(j.fromINI(std::string("msg = hello\\\nworld\n")));
     ASSERT_EQ(std::string(j.getString("msg")), "helloworld");
+  }
+  // [[section]] for arrays of objects
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[[items]]\nx = 1\n[[items]]\nx = 2\n")));
+    auto* items = j.get("items");
+    ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(items->arr->size(), size_t(2));
+    auto* first = items->get(size_t(0));
+    ASSERT(first != nullptr && first->type == asvJSONValue::OBJECT);
+    auto* x1 = first->get("x");
+    ASSERT(x1 != nullptr && x1->type == asvJSONValue::INT);
+    ASSERT_EQ(x1->getInt(), int64_t(1));
+    auto* second = items->get(size_t(1));
+    ASSERT(second != nullptr && second->type == asvJSONValue::OBJECT);
+    auto* x2 = second->get("x");
+    ASSERT(x2 != nullptr && x2->type == asvJSONValue::INT);
+    ASSERT_EQ(x2->getInt(), int64_t(2));
+  }
+  // Duplicate keys → arrays
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("tag = cpp\ntag = json\n")));
+    auto* tags = j.get("tag");
+    ASSERT(tags != nullptr && tags->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(tags->arr->size(), size_t(2));
+    ASSERT_EQ(std::string(tags->arr->at(0)->getString()), "cpp");
+    ASSERT_EQ(std::string(tags->arr->at(1)->getString()), "json");
   }
 }
 
