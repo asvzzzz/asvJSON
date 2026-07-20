@@ -23,27 +23,130 @@ static std::string json5ToJson(std::string_view input) {
   enum StrState { NONE, SINGLE, DOUBLE };
   StrState str = NONE;
 
+  auto isIdStart = [](char ch) noexcept { auto u = static_cast<unsigned char>(ch); return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || ch == '_' || ch == '$' || u >= 0xC0; };
+  auto isIdCont = [](char ch) noexcept { auto u = static_cast<unsigned char>(ch); return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || ch == '_' || ch == '$' || u >= 0x80; };
+
+  // Hex digit value (0-15) or -1 for invalid
+  auto hexVal = [](char c) -> int { auto u = static_cast<unsigned char>(c); if (u >= '0' && u <= '9') return u - '0'; if (u >= 'a' && u <= 'f') return u - 'a' + 10; if (u >= 'A' && u <= 'F') return u - 'A' + 10; return -1; };
+
+  // Escape control characters (< 0x20) for strict JSON
+  auto escapeControl = [&out](char c) {
+    if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else if (c == '\b') out += "\\b";
+    else if (c == '\f') out += "\\f";
+    else { char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c)); out += buf; }
+  };
+
   for (size_t i = 0; i < input.size(); i++) {
     char c = input[i];
 
     if (str == DOUBLE) {
-      out += c;
-      if (c == '\\' && i + 1 < input.size()) { out += input[++i]; }
-      else if (c == '"') { str = NONE; }
+      if (c == '\\' && i + 1 < input.size()) {
+        char n = input[i + 1];
+        if (n == '\n') { i++; }
+        else if (n == '\r') { i++; if (i + 1 < input.size() && input[i + 1] == '\n') i++; }
+        else if (n == 'v') { out += "\\u000B"; i++; }
+        else if (n == '0') {
+          if (i + 2 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 2])))
+            throw asvJSONError("octal escape not allowed in JSON5");
+          out += "\\u0000"; i++;
+        }
+        else if (n == 'x') {
+          if (i + 3 >= input.size() || !std::isxdigit(static_cast<unsigned char>(input[i + 2])) || !std::isxdigit(static_cast<unsigned char>(input[i + 3])))
+            throw asvJSONError("invalid \\x escape in JSON5");
+          out += "\\u00"; out += input[i + 2]; out += input[i + 3]; i += 3;
+        }
+        else if (n == 'u') {
+          if (i + 2 < input.size() && input[i + 2] == '{') {
+            size_t hexStart = i + 3;
+            size_t hexEnd = hexStart;
+            while (hexEnd < input.size() && std::isxdigit(static_cast<unsigned char>(input[hexEnd]))) hexEnd++;
+            if (hexEnd == hexStart || hexEnd >= input.size() || input[hexEnd] != '}')
+              throw asvJSONError("invalid \\u{...} escape in JSON5");
+            unsigned long long cp = 0;
+            for (size_t k = hexStart; k < hexEnd; k++) cp = (cp << 4) | static_cast<unsigned>(hexVal(input[k]));
+            if (cp > 0x10FFFF) throw asvJSONError("codepoint too large in \\u{...} escape");
+            if (cp < 0x10000) {
+              char b[8]; snprintf(b, sizeof(b), "\\u%04X", static_cast<unsigned>(cp)); out += b;
+            } else {
+              unsigned hi = 0xD800 + ((static_cast<unsigned>(cp) - 0x10000) >> 10);
+              unsigned lo = 0xDC00 + ((static_cast<unsigned>(cp) - 0x10000) & 0x3FF);
+              char b[14]; snprintf(b, sizeof(b), "\\u%04X\\u%04X", hi, lo); out += b;
+            }
+            i = hexEnd;
+          } else {
+            if (i + 5 >= input.size() || !std::isxdigit(static_cast<unsigned char>(input[i + 2])) || !std::isxdigit(static_cast<unsigned char>(input[i + 3])) || !std::isxdigit(static_cast<unsigned char>(input[i + 4])) || !std::isxdigit(static_cast<unsigned char>(input[i + 5])))
+              throw asvJSONError("invalid \\u escape in JSON5");
+            out += "\\u"; out += input[i + 2]; out += input[i + 3]; out += input[i + 4]; out += input[i + 5];
+            i += 5;
+          }
+        }
+        else if (n == '\'') { out += '\''; i++; }
+        else { out += '\\'; out += n; i++; }
+      } else {
+        if (static_cast<unsigned char>(c) < 0x20) escapeControl(c);
+        else out += c;
+        if (c == '"') str = NONE;
+      }
       continue;
     }
 
     if (str == SINGLE) {
       if (c == '\\' && i + 1 < input.size()) {
         char n = input[++i];
-        if (n == '\'') out += '\'';
+        if (n == '\n') { /* line continuation: skip */ }
+        else if (n == '\r') { if (i + 1 < input.size() && input[i + 1] == '\n') i++; }
+        else if (n == 'v') { out += "\\u000B"; }
+        else if (n == '0') {
+          if (i + 1 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 1])))
+            throw asvJSONError("octal escape not allowed in JSON5");
+          out += "\\u0000";
+        }
+        else if (n == 'x') {
+          if (i + 2 >= input.size() || !std::isxdigit(static_cast<unsigned char>(input[i + 1])) || !std::isxdigit(static_cast<unsigned char>(input[i + 2])))
+            throw asvJSONError("invalid \\x escape in JSON5");
+          out += "\\u00"; out += input[i + 1]; out += input[i + 2]; i += 2;
+        }
+        else if (n == 'u') {
+          if (i + 1 < input.size() && input[i + 1] == '{') {
+            size_t hexStart = i + 2;
+            size_t hexEnd = hexStart;
+            while (hexEnd < input.size() && std::isxdigit(static_cast<unsigned char>(input[hexEnd]))) hexEnd++;
+            if (hexEnd == hexStart || hexEnd >= input.size() || input[hexEnd] != '}')
+              throw asvJSONError("invalid \\u{...} escape in JSON5");
+            unsigned long long cp = 0;
+            for (size_t k = hexStart; k < hexEnd; k++) cp = (cp << 4) | static_cast<unsigned>(hexVal(input[k]));
+            if (cp > 0x10FFFF) throw asvJSONError("codepoint too large in \\u{...} escape");
+            if (cp < 0x10000) {
+              char b[8]; snprintf(b, sizeof(b), "\\u%04X", static_cast<unsigned>(cp)); out += b;
+            } else {
+              unsigned hi = 0xD800 + ((static_cast<unsigned>(cp) - 0x10000) >> 10);
+              unsigned lo = 0xDC00 + ((static_cast<unsigned>(cp) - 0x10000) & 0x3FF);
+              char b[14]; snprintf(b, sizeof(b), "\\u%04X\\u%04X", hi, lo); out += b;
+            }
+            i = hexEnd;
+          } else {
+            if (i + 4 >= input.size() || !std::isxdigit(static_cast<unsigned char>(input[i + 1])) || !std::isxdigit(static_cast<unsigned char>(input[i + 2])) || !std::isxdigit(static_cast<unsigned char>(input[i + 3])) || !std::isxdigit(static_cast<unsigned char>(input[i + 4])))
+              throw asvJSONError("invalid \\u escape in JSON5");
+            out += "\\u";
+            out += input[i + 1]; out += input[i + 2]; out += input[i + 3]; out += input[i + 4];
+            i += 4;
+          }
+        }
+        else if (n == '\'') { out += '\''; }
+        else if (n == '"') { out += "\\\""; }
         else { out += '\\'; out += n; }
       } else if (c == '\'') {
         out += '"';
         str = NONE;
       } else {
-        if (c == '"') out += "\\\"";
-        else out += c;
+        if (static_cast<unsigned char>(c) < 0x20) escapeControl(c);
+        else {
+          if (c == '"') out += "\\\"";
+          else out += c;
+        }
       }
       continue;
     }
@@ -51,13 +154,43 @@ static std::string json5ToJson(std::string_view input) {
     if (c == '"') { out += c; str = DOUBLE; continue; }
     if (c == '\'') { out += '"'; str = SINGLE; continue; }
 
+    // Control character check (outside strings)
+    if (static_cast<unsigned char>(c) < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\v' && c != '\f')
+      throw asvJSONError("control character not allowed in JSON5");
+
+    // Extended whitespace (JSON5 Sec 8)
+    if (c == '\v' || c == '\f') continue;
+    if (static_cast<unsigned char>(c) == 0xC2 && i + 1 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xA0) { i++; continue; }
+    if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) { i += 2; continue; }
+    if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        static_cast<unsigned char>(input[i + 2]) >= 0x80 && static_cast<unsigned char>(input[i + 2]) <= 0x8A) { i += 2; continue; }
+    if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x81 &&
+        static_cast<unsigned char>(input[i + 2]) == 0x9F) { i += 2; continue; }
+    if (static_cast<unsigned char>(c) == 0xE3 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        static_cast<unsigned char>(input[i + 2]) == 0x80) { i += 2; continue; }
+    if (static_cast<unsigned char>(c) == 0xEF && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
+        static_cast<unsigned char>(input[i + 2]) == 0xBF) { i += 2; continue; }
+
     // Trailing comma (skips comments between comma and bracket)
     if (c == ',') {
       size_t j = i + 1;
       bool isTrailing = false;
       while (j < input.size()) {
         char nc = input[j];
-        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r') { j++; continue; }
+        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' || nc == '\v' || nc == '\f') { j++; continue; }
+        auto unc = static_cast<unsigned char>(nc);
+        if (unc == 0xC2 && j + 1 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xA0) { j += 2; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            (static_cast<unsigned char>(input[j + 2]) == 0xA8 || static_cast<unsigned char>(input[j + 2]) == 0xA9)) { j += 3; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) >= 0x80 && static_cast<unsigned char>(input[j + 2]) <= 0x8A) { j += 3; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x81 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x9F) { j += 3; continue; }
+        if (unc == 0xE3 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; }
+        if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
+            static_cast<unsigned char>(input[j + 2]) == 0xBF) { j += 3; continue; }
         if (nc == '/' && j + 1 < input.size()) {
           if (input[j + 1] == '/') { while (j < input.size() && input[j] != '\n') j++; continue; }
           if (input[j + 1] == '*') { j += 2; while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++; if (j < input.size()) j += 2; continue; }
@@ -71,16 +204,34 @@ static std::string json5ToJson(std::string_view input) {
       continue;
     }
 
-    // Unquoted key
-    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '$') {
+    // Unquoted key (supports Unicode identifiers)
+    if (isIdStart(c)) {
       size_t start = i;
-      while (i < input.size() && (std::isalnum(static_cast<unsigned char>(input[i])) || input[i] == '_' || input[i] == '$')) i++;
+      while (i < input.size() && isIdCont(input[i])) i++;
       std::string_view ident(input.data() + start, i - start);
+      // Validate identifier characters
+      for (size_t k = 0; k < ident.size(); k++) {
+        auto uc = static_cast<unsigned char>(ident[k]);
+        if (uc <= 0x20 || uc == 0x7F || uc == ':' || uc == '{' || uc == '}' || uc == '[' || uc == ']' || uc == ',' || uc == '"' || uc == '\'' || uc == '\\' || uc == '/' || uc == '#')
+          throw asvJSONError("invalid character in JSON5 identifier");
+      }
       i--;
       bool isKey = false;
       for (size_t j = i + 1; j < input.size(); j++) {
         char nc = input[j];
-        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r') continue;
+        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' || nc == '\v' || nc == '\f') continue;
+        auto unc = static_cast<unsigned char>(nc);
+        if (unc == 0xC2 && j + 1 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xA0) { j++; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            (static_cast<unsigned char>(input[j + 2]) == 0xA8 || static_cast<unsigned char>(input[j + 2]) == 0xA9)) { j += 2; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) >= 0x80 && static_cast<unsigned char>(input[j + 2]) <= 0x8A) { j += 2; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x81 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x9F) { j += 2; continue; }
+        if (unc == 0xE3 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 2; continue; }
+        if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
+            static_cast<unsigned char>(input[j + 2]) == 0xBF) { j += 2; continue; }
         if (nc == '/') {
           if (j + 1 < input.size() && input[j + 1] == '/') { while (j < input.size() && input[j] != '\n') j++; continue; }
           if (j + 1 < input.size() && input[j + 1] == '*') { j += 2; while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++; if (j < input.size()) j += 2; continue; }
@@ -139,8 +290,42 @@ static std::string json5ToJson(std::string_view input) {
       continue;
     }
 
-    // Plus sign on numbers
-    if (c == '+' && i + 1 < input.size() && (std::isdigit(static_cast<unsigned char>(input[i + 1])) || input[i + 1] == '.')) {
+    // Signs (+/-) with whitespace-tolerant lookahead (JSON5: - Infinity, + 5)
+    if (c == '+' || c == '-') {
+      size_t j = i + 1;
+      while (j < input.size()) {
+        char nc = input[j];
+        if (nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' || nc == '\v' || nc == '\f') { j++; continue; }
+        auto unc = static_cast<unsigned char>(nc);
+        if (unc == 0xC2 && j + 1 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xA0) { j += 2; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            (static_cast<unsigned char>(input[j + 2]) == 0xA8 || static_cast<unsigned char>(input[j + 2]) == 0xA9)) { j += 3; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) >= 0x80 && static_cast<unsigned char>(input[j + 2]) <= 0x8A) { j += 3; continue; }
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x81 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x9F) { j += 3; continue; }
+        if (unc == 0xE3 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; }
+        if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
+            static_cast<unsigned char>(input[j + 2]) == 0xBF) { j += 3; continue; }
+        break;
+      }
+      bool isNaN_ = (j + 3 <= input.size() && input.compare(j, 3, "NaN") == 0);
+      bool isInf = (j + 8 <= input.size() && input.compare(j, 8, "Infinity") == 0);
+      bool isNum = (j < input.size() && (std::isdigit(static_cast<unsigned char>(input[j])) || input[j] == '.'));
+      if (isNaN_) { if (c == '-') out += '-'; out += "NaN"; i = j + 2; continue; }
+      if (isInf) {
+        if (c == '-') out += '-';
+        out += "Infinity"; i = j + 7; continue;
+      }
+      if (c == '+') continue;
+      if (isNum && j > i + 1) { out += '-'; i = j - 1; continue; }
+    }
+
+    // Trailing decimal: 5. -> 5.0, 5.e10 -> 5.0e10
+    if (c == '.' && i > 0 && std::isdigit(static_cast<unsigned char>(input[i - 1])) &&
+        (i + 1 >= input.size() || !std::isdigit(static_cast<unsigned char>(input[i + 1])))) {
+      out += ".0";
       continue;
     }
 

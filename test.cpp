@@ -4757,6 +4757,323 @@ TEST(testFromJSON5) {
     ASSERT_EQ(ext->bin_data[0], 0xde);
     ASSERT_EQ(ext->bin_data[1], 0xad);
   }
+  // Trailing decimal point: 5. -> 5.0
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[5.]")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(1));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::DOUBLE ||
+          j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::INT);
+  }
+  // Trailing decimal with exponent: 5.e10 -> 5.0e10
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[5.e10]")));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::DOUBLE);
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->getDouble() > 4.99e10);
+  }
+  // Line continuation in double-quoted strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"hello\\\nworld\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "helloworld");
+  }
+  // Line continuation in single-quoted strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("['hello\\\nworld']")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "helloworld");
+  }
+  // Line continuation with CRLF
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"hello\\\r\nworld\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "helloworld");
+  }
+  // +Infinity literal
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[+Infinity]")));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isinf(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+  }
+  // +NaN literal
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[+NaN]")));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isnan(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+  }
+  // -NaN literal
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[-NaN]")));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isnan(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+  }
+  // Extended whitespace: VT, FF between tokens
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{\x0b\x0c}")));
+  }
+  // Extended whitespace: NBSP between tokens
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\xC2\xA0 1]")));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+  }
+  // Unicode identifier key (Japanese: 日本語)
+  {
+    asvJSON j;
+    const char json5src[] = "{'hello':{" "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e" ":'val'}}";
+    ASSERT(j.fromJSON5(std::string_view(json5src, sizeof(json5src) - 1)));
+    auto* h = j.get("hello");
+    ASSERT(h != nullptr && h->type == asvJSONValue::OBJECT);
+    std::string key = "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e";
+    ASSERT_EQ(std::string(j.getString(std::string_view("hello." + key))), "val");
+  }
+  // \\v escape -> vertical tab
+  {
+    asvJSON j;
+    const char inp[] = { '[', '"', 'a', '\\', 'v', 'b', '"', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 8)));
+    auto* v = j.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(v != nullptr);
+    ASSERT_EQ(v->type, asvJSONValue::STRING);
+    std::string_view sv = v->str_data;
+    ASSERT_EQ(sv.size(), size_t(3));
+    ASSERT_EQ(sv[0], 'a');
+    ASSERT_EQ(static_cast<unsigned char>(sv[1]), '\v');
+    ASSERT_EQ(sv[2], 'b');
+  }
+  // \\v in single-quoted strings
+  {
+    asvJSON j;
+    const char inp[] = { '[', '\'', 'a', '\\', 'v', 'b', '\'', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 8)));
+    auto* v = j.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(v != nullptr);
+    ASSERT_EQ(v->type, asvJSONValue::STRING);
+    std::string_view sv = v->str_data;
+    ASSERT_EQ(sv.size(), size_t(3));
+    ASSERT_EQ(sv[0], 'a');
+    ASSERT_EQ(sv[1], '\v');
+    ASSERT_EQ(sv[2], 'b');
+  }
+  // \\0 escape -> null character
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"a\\0b\"]")));
+    auto* v = j.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(v != nullptr);
+    ASSERT_EQ(v->type, asvJSONValue::STRING);
+    std::string_view sv = v->str_data;
+    ASSERT_EQ(sv.size(), size_t(3));
+    ASSERT_EQ(sv[0], 'a');
+    ASSERT_EQ(sv[1], '\0');
+    ASSERT_EQ(sv[2], 'b');
+  }
+  // \\x41 escape -> 'A'
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"\\x41\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "A");
+  }
+  // \\x escape in single-quoted strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("['\\x41']")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "A");
+  }
+  // Raw control character in string (tab)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"a\tb\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "a\tb");
+  }
+  // Raw control character in single-quoted string (newline)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("['a\nb']")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "a\nb");
+  }
+  // Sign + whitespace: - Infinity
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[- Infinity]")));
+    ASSERT(std::isinf(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->getDouble() < 0);
+  }
+  // Sign + whitespace: + Infinity
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[+ Infinity]")));
+    ASSERT(std::isinf(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->getDouble() > 0);
+  }
+  // Sign + whitespace: + NaN
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[+ NaN]")));
+    ASSERT(std::isnan(j.getRoot()->get(static_cast<size_t>(0))->getDouble()));
+  }
+  // Sign + whitespace: + 5
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[+ 5]")));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(5));
+  }
+  // Sign + whitespace: - 5
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[- 5]")));
+    ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(-5));
+  }
+  // Sign + whitespace: - .5
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[- .5]")));
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->getDouble() > -0.51);
+    ASSERT(j.getRoot()->get(static_cast<size_t>(0))->getDouble() < -0.49);
+  }
+  // \\u standard escape (\\u0041 -> 'A')
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"\\u0041\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "A");
+  }
+  // \\u{...} BMP codepoint (\\u{41} -> 'A')
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"\\u{41}\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "A");
+  }
+  // \\u{...} supplementary plane (\\u{1F600} -> U+1F600)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"\\u{1F600}\"]")));
+    std::string s = j.getRoot()->get(static_cast<size_t>(0))->getString();
+    ASSERT_EQ(s.size(), size_t(4));
+    // U+1F600 (GRINNING FACE) in UTF-8: F0 9F 98 80
+    ASSERT_EQ(static_cast<unsigned char>(s[0]), 0xF0);
+    ASSERT_EQ(static_cast<unsigned char>(s[1]), 0x9F);
+    ASSERT_EQ(static_cast<unsigned char>(s[2]), 0x98);
+    ASSERT_EQ(static_cast<unsigned char>(s[3]), 0x80);
+  }
+  // \\u{...} in single-quoted strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("['\\u{1F600}']")));
+    std::string s = j.getRoot()->get(static_cast<size_t>(0))->getString();
+    ASSERT_EQ(s.size(), size_t(4));
+    ASSERT_EQ(static_cast<unsigned char>(s[0]), 0xF0);
+    ASSERT_EQ(static_cast<unsigned char>(s[1]), 0x9F);
+    ASSERT_EQ(static_cast<unsigned char>(s[2]), 0x98);
+    ASSERT_EQ(static_cast<unsigned char>(s[3]), 0x80);
+  }
+  // \\u{...} zero codepoint
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"a\\u{0}b\"]")));
+    auto* v = j.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(v != nullptr);
+    ASSERT_EQ(v->str_data.size(), size_t(3));
+    ASSERT_EQ(v->str_data[0], 'a');
+    ASSERT_EQ(v->str_data[1], '\0');
+    ASSERT_EQ(v->str_data[2], 'b');
+  }
+  // \\0 followed by digit should fail (no octal)
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"a\\01b\"]")));
+  }
+  // \\x without 2 hex digits should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\xZZ\"]")));
+  }
+  // \\x with single hex digit should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\x4\"]")));
+  }
+  // \\u without 4 hex digits should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u12\"]")));
+  }
+  // \\u with invalid hex digits should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u00ZZ\"]")));
+  }
+  // \\u{...} with no hex digits should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u{}\"]")));
+  }
+  // \\u{...} without closing brace should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u{41\"]")));
+  }
+  // \\u{...} with invalid hex should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u{XYZ1}\"]")));
+  }
+  // \\u{...} with codepoint > 0x10FFFF should fail
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"\\u{110000}\"]")));
+  }
+  // Control character (U+0001) outside string should fail
+  {
+    asvJSON j;
+    const char inp[] = { '[', 0x01, ']', 0 };
+    ASSERT(!j.fromJSON5(std::string_view(inp, 3)));
+  }
+  // Control character (U+0008 = \\b) outside string should fail
+  {
+    asvJSON j;
+    const char inp[] = { '[', 0x08, ']', 0 };
+    ASSERT(!j.fromJSON5(std::string_view(inp, 3)));
+  }
+  // Allowed whitespace control chars outside string: tab, newline, vt, ff
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"a\",\t\"b\"]")));
+  }
+  {
+    asvJSON j;
+    const char inp[] = { '[', '\"', 'a', '\"', ',', '\v', '\"', 'b', '\"', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 10)));
+  }
+  // Zs space: U+2003 (EM SPACE) between tokens
+  {
+    asvJSON j;
+    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE2, 0x80, 0x83, '\"', 'b', '\"', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 12)));
+  }
+  // Zs space: U+3000 (IDEOGRAPHIC SPACE) between tokens
+  {
+    asvJSON j;
+    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE3, 0x80, 0x80, '\"', 'b', '\"', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 12)));
+  }
+  // Zs space: U+205F (MEDIUM MATHEMATICAL SPACE) between tokens
+  {
+    asvJSON j;
+    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE2, 0x81, 0x9F, '\"', 'b', '\"', ']', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 12)));
+  }
+  // Multiple Zs spaces before unquoted key
+  {
+    asvJSON j;
+    const char inp[] = { '{', 0xE2, 0x80, 0x83, 0xC2, 0xA0, 'k', 'e', 'y', ':', '1', '}', 0 };
+    ASSERT(j.fromJSON5(std::string_view(inp, 12)));
+    ASSERT_EQ(j.getRoot()->getConst("key")->getInt(), int64_t(1));
+  }
 }
 
 int main() {

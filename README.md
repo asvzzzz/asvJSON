@@ -45,7 +45,7 @@ MIT license - see the `LICENSE` file for details.
 - TOML - `toTOML()` / `fromTOML()` - Tom's Obvious Minimal Language with tables, arrays of tables, inline tables/arrays, multi-line strings, hex/octal/binary integers, dotted keys, comments
 - JSON Lines (NDJSON) - `toJSONLines()` / `fromJSONLines()` - one JSON value per line, ideal for streaming/ logs/bulk data
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
-- JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, and MongoDB Extended JSON for special types
+- JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -711,7 +711,7 @@ S-Expression features:
 
 `toJSON5()` / `fromJSON5()` — JSON5 with MongoDB Extended JSON for special types.
 
-**JSON5 features:** unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal (`.5`), plus sign (`+42`), `//`/`/* */`/`#` comments.
+**JSON5 features:** unquoted keys (Unicode identifiers), single-quoted strings, trailing commas, hex (`0x`), octal (`0o`), binary (`0b`) numbers, leading decimal (`.5`), plus sign (`+42`), `//`/`/* */`/`#` comments, `NaN`/`Infinity`/`-Infinity`/`-NaN` literals, `\u{...}` code point escapes (surrogate pairs for supplementary), ES5 escape sequences (`\v`, `\0`, `\xHH`), extended whitespace (Zs Unicode spaces, BOM), control character validation outside strings, locale-independent identifier parsing.
 
 ```
 {name:"John",age:30,active:true,address:{city:"NYC",zip:10001}}
@@ -729,6 +729,11 @@ S-Expression features:
 | DATETIME | `"2026-07-20T00:21:57Z"` (ISO 8601) |
 
 ## Changelog
+
+### 1.11.1 (2026-07-20)
+
+- **JSON5 spec conformance:** Full compliance with JSON5 specification (https://spec.json5.org/). Added `\u{...}` code point escapes (BMP → `\uHHHH`, supplementary → surrogate pairs), ES5 escape sequences (`\v` → `\u000B`, `\0` → `\u0000`, `\xHH` → `\u00HH`), invalid escape validation (octal, malformed `\x`/`\u`). Control characters outside strings now correctly rejected; raw control chars in strings escaped. Extended whitespace (U+2000–U+200A, U+205F, U+3000 Zs spaces; U+FEFF BOM) in all whitespace-skip positions. Unicode identifier keys with locale-independent `isIdStart`/`isIdCont`. `-NaN` literal preserved as `-NaN`. `\'` in double-quoted strings and `\"` in single-quoted strings handled correctly.
+- **Version bump:** 1.11.0 -> 1.11.1
 
 ### 1.11.0 (2026-07-20)
 

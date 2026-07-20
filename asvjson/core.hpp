@@ -658,6 +658,8 @@ private:
 			if (json.compare(pos, 8, "Infinity") == 0) { pos += 8; if (pos < json.size() && isIdentChar()) throw asvJSONError("Invalid Infinity literal"); return asvJSONValue::makeDouble(INFINITY); }
 		} else if (allowNaNInfinity && c == '-' && pos + 1 < json.size() && json[pos + 1] == 'I') {
 			if (json.compare(pos, 9, "-Infinity") == 0) { pos += 9; if (pos < json.size() && isIdentChar()) throw asvJSONError("Invalid -Infinity literal"); return asvJSONValue::makeDouble(-INFINITY); }
+		} else if (allowNaNInfinity && c == '-' && pos + 1 < json.size() && json[pos + 1] == 'N') {
+			if (json.compare(pos, 4, "-NaN") == 0) { pos += 4; if (pos < json.size() && isIdentChar()) throw asvJSONError("Invalid -NaN literal"); return asvJSONValue::makeDouble(-NAN); }
 		}
 		if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
 		throw asvJSONError(std::string("Unexpected: ") + c);
