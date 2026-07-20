@@ -106,7 +106,7 @@ static std::string json5ToJson(std::string_view input) {
         while (i < input.size() && std::isxdigit(static_cast<unsigned char>(input[i]))) { digits += input[i++]; }
         i--;
         char* end = nullptr;
-        long long val = strtoll(digits.c_str(), &end, 16);
+        unsigned long long val = strtoull(digits.c_str(), &end, 16);
         out += std::to_string(val);
         continue;
       }
@@ -116,7 +116,7 @@ static std::string json5ToJson(std::string_view input) {
         while (i < input.size() && input[i] >= '0' && input[i] <= '7') { digits += input[i++]; }
         i--;
         char* end = nullptr;
-        long long val = strtoll(digits.c_str(), &end, 8);
+        unsigned long long val = strtoull(digits.c_str(), &end, 8);
         out += std::to_string(val);
         continue;
       }
@@ -126,7 +126,7 @@ static std::string json5ToJson(std::string_view input) {
         while (i < input.size() && (input[i] == '0' || input[i] == '1')) { digits += input[i++]; }
         i--;
         char* end = nullptr;
-        long long val = strtoll(digits.c_str(), &end, 2);
+        unsigned long long val = strtoull(digits.c_str(), &end, 2);
         out += std::to_string(val);
         continue;
       }
@@ -147,6 +147,7 @@ static std::string json5ToJson(std::string_view input) {
     out += c;
   }
 
+  if (str != NONE) throw asvJSONError("unclosed string in JSON5");
   return out;
 }
 
