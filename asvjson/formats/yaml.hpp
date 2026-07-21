@@ -6,7 +6,6 @@
 namespace asvJSONInternal {
 
 inline void asvJSONValue::toYAML(std::string& out) const {
-	out += "---\n";
 	toYAML(out, 0, "", false);
 }
 
@@ -83,8 +82,12 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 			break;
 		case T::OBJECT: {
 			if (!obj || obj->empty()) { out += prefix() + "{}\n"; break; }
-			out += prefix() + "\n";
-			for (const auto& [k, v] : *obj) v->toYAML(out, indent + 1, k, false);
+			if (key.empty() && !isArrayItem) {
+				for (const auto& [k, v] : *obj) v->toYAML(out, indent, k, false);
+			} else {
+				out += prefix() + "\n";
+				for (const auto& [k, v] : *obj) v->toYAML(out, indent + 1, k, false);
+			}
 			break;
 		}
 		case T::ARRAY: {

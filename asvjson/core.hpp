@@ -910,7 +910,7 @@ public:
 	bool fromGOON(std::string_view input);
 	std::string toSexpr() const;
 	bool fromSexpr(std::string_view input);
-	std::string toJSON5() const;
+	std::string toJSON5(bool pretty = false) const;
 	bool fromJSON5(std::string_view input);
 
 	std::string serialize(bool pretty = false) const {
@@ -2209,13 +2209,10 @@ inline std::string asvJSON::toXML() const {
 inline std::string asvJSON::toYAML() const {
 	std::string out;
 	if (root) {
-		if (root->type == asvJSONValue::ARRAY) {
+		if (root->type != asvJSONValue::ARRAY) {
 			out += "---\n";
-			root->toYAML(out);
-		} else {
-			out += "---\n";
-			root->toYAML(out);
 		}
+		root->toYAML(out);
 	}
 	return out;
 }

@@ -15,6 +15,20 @@ target_include_directories(examples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(test test.cpp)
 target_include_directories(test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(debug_toml debug_toml.cpp)
-target_include_directories(debug_toml PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# --- CLI converter ---
+add_executable(convert web/convert.cpp)
+target_include_directories(convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# --- HTTP server (frontend in web/public/) ---
+add_executable(asvjserver web/server.cpp)
+target_include_directories(asvjserver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+  target_link_libraries(asvjserver PRIVATE ws2_32)
+endif()
+
+if(MSVC)
+  foreach(tgt examples test convert asvjserver)
+    target_compile_options(${tgt} PRIVATE /MT$<$<CONFIG:Debug>:d>)
+  endforeach()
+endif()
 

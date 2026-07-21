@@ -867,6 +867,7 @@ inline std::string asvJSON::toGOON() const {
   if (!root) return "_\n";
   auto dict = goonBuildDict(root.get());
   std::string out;
+  goonWriteDictHeader(dict, out);
   goonSerializeVal(root.get(), out, 0, "", 0, &dict);
   return out;
 }

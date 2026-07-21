@@ -114,7 +114,22 @@ static std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaV
 // Helper: set a field on a JSON value object by key
 static void protoSetField(asvJSONValue* obj, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
-  (*obj->obj)[key] = std::move(val);
+  auto it = obj->obj->find(key);
+  if (it != obj->obj->end()) {
+    // Repeated field — convert to array if not already
+    if (it->second->type == asvJSONValue::ARRAY && it->second->arr) {
+      it->second->arr->push_back(std::move(val));
+    } else {
+      auto arr = asvJSONValue::makeArray();
+      if (arr && arr->arr) {
+        arr->arr->push_back(std::move(it->second));
+        arr->arr->push_back(std::move(val));
+        it->second = std::move(arr);
+      }
+    }
+  } else {
+    (*obj->obj)[key] = std::move(val);
+  }
 }
 
 // ======================= Wire format encoder =======================
@@ -740,7 +755,7 @@ static void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
     case asvJSONValue::DOUBLE: {
       if (std::isnan(val->dbl)) { out += "nan"; break; }
       if (std::isinf(val->dbl)) { out += (val->dbl > 0) ? "inf" : "-inf"; break; }
-      char buf[64]; snprintf(buf, sizeof(buf), "%.17g", val->dbl); out += buf; break;
+      char buf[64]; snprintf(buf, sizeof(buf), "%.16g", val->dbl); out += buf; break;
     }
     case asvJSONValue::STRING: protoTextQuote(val->str_data, out); break;
     case asvJSONValue::BINARY:
@@ -823,8 +838,21 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       protoTextParseBody(text, pos, obj.get(), 1);
       if (obj->obj && !obj->obj->empty()) root = std::move(obj);
     } else {
-      auto val = protoTextParseScalar(text, pos);
-      if (val) root = std::move(val);
+      // Auto-detect implicit object: identifier followed by ':'
+      size_t save = pos;
+      std::string maybeIdent = protoTextParseIdent(text, pos);
+      protoTextSkipWS(text, pos);
+      bool isObject = !maybeIdent.empty() && pos < text.size() && text[pos] == ':';
+      pos = save;
+      if (isObject) {
+        auto obj = asvJSONValue::makeObject();
+        if (!obj) return false;
+        protoTextParseBody(text, pos, obj.get(), 1);
+        if (obj->obj && !obj->obj->empty()) root = std::move(obj);
+      } else {
+        auto val = protoTextParseScalar(text, pos);
+        if (val) root = std::move(val);
+      }
     }
     return root != nullptr;
   } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }

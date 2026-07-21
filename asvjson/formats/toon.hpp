@@ -15,7 +15,18 @@ static std::string toonJsonEscape(const std::string& s) {
 static bool toonIsJsonValue(std::string_view s) {
   if (s.empty()) return false;
   if (s.front() == '"' || s.front() == '{' || s.front() == '[') return true;
-  if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) return true;
+  if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) {
+    // Validate full number — reject e.g. "1.12.0" (two dots)
+    bool hasDot = false, hasExp = false;
+    for (size_t i = (s.front() == '-' || s.front() == '+') ? 1 : 0; i < s.size(); i++) {
+      if (s[i] >= '0' && s[i] <= '9') continue;
+      if (s[i] == '.') { if (hasDot || hasExp) return false; hasDot = true; continue; }
+      if (s[i] == 'e' || s[i] == 'E') { if (hasExp) return false; hasExp = true; continue; }
+      if ((s[i] == '+' || s[i] == '-') && hasExp && i + 1 < s.size() && s[i-1] != '.' && (i == 0 || (s[i-1] != '+' && s[i-1] != '-'))) continue;
+      return false;
+    }
+    return true;
+  }
   if (s == "true" || s == "false" || s == "null") return true;
   return false;
 }

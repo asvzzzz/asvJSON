@@ -336,9 +336,11 @@ static std::string json5ToJson(std::string_view input) {
   return out;
 }
 
-static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0) {
+static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false) {
   if (!v) { out += "null"; return; }
   if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
+  std::string pad;
+  if (pretty) pad = std::string(static_cast<size_t>(depth) * 2, ' ');
   switch (v->type) {
     case asvJSONValue::NULL_VAL: out += "null"; break;
     case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
@@ -358,25 +360,32 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::OBJECT: {
       out += '{';
+      if (pretty && v->obj && !v->obj->empty()) out += '\n';
       bool first = true;
       for (const auto& [k, child] : *(v->obj)) {
-        if (!first) out += ',';
+        if (!first) out += pretty ? ",\n" : ",";
         first = false;
+        if (pretty) { out += std::string(static_cast<size_t>(depth + 1) * 2, ' '); }
         bool needsQuote = k.empty() || k.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$0123456789") != std::string::npos || (k[0] >= '0' && k[0] <= '9');
         if (needsQuote) { out += '"'; appendJsonEscaped(out, k); out += '"'; }
         else out += k;
         out += ':';
-        json5SerializeVal(child.get(), out, depth + 1);
+        if (pretty) out += ' ';
+        json5SerializeVal(child.get(), out, depth + 1, pretty);
       }
+      if (pretty && v->obj && !v->obj->empty()) { out += '\n'; out += pad; }
       out += '}';
       break;
     }
     case asvJSONValue::ARRAY: {
       out += '[';
+      if (pretty && v->arr && !v->arr->empty()) out += '\n';
       for (size_t i = 0; i < v->size(); i++) {
-        if (i > 0) out += ',';
-        json5SerializeVal(v->get(i), out, depth + 1);
+        if (i > 0) out += pretty ? ",\n" : ",";
+        if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+        json5SerializeVal(v->get(i), out, depth + 1, pretty);
       }
+      if (pretty && v->arr && !v->arr->empty()) { out += '\n'; out += pad; }
       out += ']';
       break;
     }
@@ -387,15 +396,25 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       break;
     }
     case asvJSONValue::BINARY: {
-      out += "{\"$binary\":{\"base64\":\"";
+      out += '{';
+      if (pretty) out += '\n';
+      if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+      out += "\"$binary\":{\"base64\":\"";
       out += encodeBase64(v->bin_data.data(), v->bin_data.size());
-      out += "\",\"subType\":\"00\"}}";
+      out += "\",\"subType\":\"00\"}";
+      if (pretty) { out += '\n'; out += pad; }
+      out += '}';
       break;
     }
     case asvJSONValue::OBJECTID: {
-      out += "{\"$oid\":\"";
+      out += '{';
+      if (pretty) out += '\n';
+      if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+      out += "\"$oid\":\"";
       fmtObjectIdHexVal(v->str_data, out);
-      out += "\"}";
+      out += "\"";
+      if (pretty) { out += '\n'; out += pad; }
+      out += '}';
       break;
     }
     case asvJSONValue::REGEX: {
@@ -403,15 +422,21 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
         size_t sep = v->str_data.rfind('|');
         std::string_view pattern = (sep != std::string_view::npos) ? v->str_data.substr(0, sep) : v->str_data;
         std::string_view opts = (sep != std::string_view::npos) ? v->str_data.substr(sep + 1) : "";
-        out += "{\"$regex\":\"";
+        out += '{';
+        if (pretty) out += '\n';
+        if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+        out += "\"$regex\":\"";
         appendJsonEscaped(out, pattern);
         out += "\"";
         if (!opts.empty()) {
-          out += ",\"$options\":\"";
+          if (pretty) { out += ",\n"; out += std::string(static_cast<size_t>(depth + 1) * 2, ' '); }
+          else out += ",";
+          out += "\"$options\":\"";
           appendJsonEscaped(out, opts);
           out += "\"";
         }
-        out += "}";
+        if (pretty) { out += '\n'; out += pad; }
+        out += '}';
       }
       break;
     }
@@ -439,10 +464,10 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
   }
 }
 
-inline std::string asvJSON::toJSON5() const {
+inline std::string asvJSON::toJSON5(bool pretty) const {
   if (!root) return "null";
   std::string out;
-  json5SerializeVal(root.get(), out);
+  json5SerializeVal(root.get(), out, 0, pretty);
   return out;
 }
 

@@ -2483,7 +2483,6 @@ TEST(testToYAML) {
 		std::string out;
 		v->toYAML(out);
 		ASSERT(!out.empty());
-		ASSERT(out.find("---") != std::string::npos);
 		ASSERT(out.find("test") != std::string::npos);
 	}
 	// Quoting
