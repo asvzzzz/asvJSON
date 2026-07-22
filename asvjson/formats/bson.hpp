@@ -185,7 +185,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		if (pos > docEnd) throw asvJSONError("BSON element past end");
 		if (key.size() > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("BSON key too long");
 		switch (elemType) {
-			case 0x01: { double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
+			case 0x01: { if (pos + 8 > dataLen) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
 			case 0x02: {
 				if (pos + 4 > dataLen) throw asvJSONError("BSON string");
 				uint32_t slen; readLE32(data, pos, slen);
@@ -313,7 +313,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x13: {
-				if (pos + 8 > dataLen) throw asvJSONError("BSON decimal128");
+				if (pos + 16 > dataLen) throw asvJSONError("BSON decimal128: unexpected end");
 				pos += 16;
 				obj->obj->emplace(key, asvJSONValue::makeNull());
 				break;

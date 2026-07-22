@@ -160,21 +160,21 @@ inline std::string unescapeJsonString(std::string_view raw, bool allowNull) {
 					if (c >= 'A' && c <= 'F') return c - 'A' + 10;
 					return -1;
 				};
-				int hi = hex(1);
-				if (hi < 0) break;
-				unsigned int cp = static_cast<unsigned int>(hi) << 12;
-				cp |= static_cast<unsigned int>(hex(2) & 0xF) << 8;
-				cp |= static_cast<unsigned int>(hex(3) & 0xF) << 4;
-				cp |= static_cast<unsigned int>(hex(4) & 0xF);
+				int h1 = hex(1), h2 = hex(2), h3 = hex(3), h4 = hex(4);
+				if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) throw std::runtime_error("Invalid unicode escape in string");
+				unsigned int cp = (static_cast<unsigned int>(h1) << 12) | (static_cast<unsigned int>(h2) << 8) | (static_cast<unsigned int>(h3) << 4) | static_cast<unsigned int>(h4);
 				i += 4;
 
 				// Handle surrogate pairs
 				if (cp >= 0xD800 && cp <= 0xDBFF) {
 					if (i + 6 < raw.size() && raw[i + 1] == '\\' && raw[i + 2] == 'u') {
-						int lo = (hex(3) << 12) | ((hex(4) & 0xF) << 8) | ((hex(5) & 0xF) << 4) | (hex(6) & 0xF);
-						if (lo >= 0xDC00 && lo <= 0xDFFF) {
-							cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-							i += 6;
+						int h5 = hex(3), h6 = hex(4), h7 = hex(5), h8 = hex(6);
+						if (h5 >= 0 && h6 >= 0 && h7 >= 0 && h8 >= 0) {
+							int lo = (h5 << 12) | (h6 << 8) | (h7 << 4) | h8;
+							if (lo >= 0xDC00 && lo <= 0xDFFF) {
+								cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+								i += 6;
+							}
 						}
 					}
 				}

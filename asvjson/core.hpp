@@ -127,8 +127,9 @@ struct asvJSONValue {
 	double dbl = 0;
 	int64_t timestamp = 0;
 	int datetime_ms = 0;
+	bool raw_number = false;  // true when value is a string holding an exact numeric literal
 
-	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0) {}
+	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), raw_number(false) {}
 	~asvJSONValue() { destroy(); }
 
 	asvJSONValue(const asvJSONValue&) = delete;
@@ -147,10 +148,12 @@ struct asvJSONValue {
 		datetime_ms = other.datetime_ms;
 		is_float32 = other.is_float32;
 		ext_type = other.ext_type;
+		raw_number = other.raw_number;
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
 		other.is_float32 = false;
 		other.ext_type = 0;
+		other.raw_number = false;
 	}
 
 	asvJSONValue& operator=(asvJSONValue&& other) noexcept {
@@ -168,10 +171,12 @@ struct asvJSONValue {
 			datetime_ms = other.datetime_ms;
 			is_float32 = other.is_float32;
 			ext_type = other.ext_type;
+			raw_number = other.raw_number;
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
 			other.is_float32 = false;
 			other.ext_type = 0;
+			other.raw_number = false;
 		}
 		return *this;
 	}
@@ -807,7 +812,23 @@ private:
 			double d;
 		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
-			if (ec != std::errc() || ptr != buf + numLen) throw asvJSONError("Invalid number");
+			if (ec == std::errc() && ptr == buf + numLen) {
+				// Check if precision is lost: count significant digits in the integer+fractional parts
+				size_t sigDigits = 0;
+				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
+					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
+				}
+				// Also check if exponent shifts digits beyond double precision
+				if (sigDigits > 15) {
+					// Precision would be lost - store as raw number string
+					auto v = asvJSONValue::makeString(buf, numLen);
+					v->raw_number = true;
+					return v;
+				}
+				if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) throw asvJSONError("Invalid number: NaN or Infinity not allowed");
+				return asvJSONValue::makeDouble(d);
+			}
+			if (ec == std::errc() && ptr != buf + numLen) throw asvJSONError("Invalid number");
 		#else
 			std::string numStr(buf, numLen);
 			char* endptr;
@@ -815,13 +836,29 @@ private:
 			d = std::strtod(numStr.c_str(), &endptr);
 			if (errno == ERANGE) throw asvJSONError("Invalid number: out of range");
 			if (endptr != numStr.c_str() + numLen) throw asvJSONError("Invalid number");
+			{
+				size_t sigDigits = 0;
+				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
+					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
+				}
+				if (sigDigits > 15) {
+					auto v = asvJSONValue::makeString(buf, numLen);
+					v->raw_number = true;
+					return v;
+				}
+			}
 		#endif
 			if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) throw asvJSONError("Invalid number: NaN or Infinity not allowed");
 			return asvJSONValue::makeDouble(d);
 		} else {
 			long long l;
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, l);
-			if (ec != std::errc() || ptr != buf + numLen) throw asvJSONError("Invalid number");
+			if (ec != std::errc() || ptr != buf + numLen) {
+				// Integer too large for int64 - store as raw number string
+				auto v = asvJSONValue::makeString(buf, numLen);
+				v->raw_number = true;
+				return v;
+			}
 			return asvJSONValue::makeInt(l);
 		}
 	}
@@ -1675,6 +1712,7 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::STRING: {
+			if (v->raw_number) { out.append(v->str_data); break; }
 			out.push_back('"');
 			appendJsonEscaped(out, v->str_data);
 			out.push_back('"');
@@ -1747,7 +1785,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 		case asvJSONValue::BOOL_VAL: return asvJSONValue::makeBool(v->flag);
 		case asvJSONValue::INT: return asvJSONValue::makeInt(v->num);
 		case asvJSONValue::DOUBLE: { auto c = asvJSONValue::makeDouble(v->dbl); if (c) c->is_float32 = v->is_float32; return c; }
-		case asvJSONValue::STRING: return asvJSONValue::makeString(v->str_data.data(), v->str_data.size());
+		case asvJSONValue::STRING: { auto c = asvJSONValue::makeString(v->str_data.data(), v->str_data.size()); if (c) c->raw_number = v->raw_number; return c; }
 		case asvJSONValue::DATETIME: return asvJSONValue::makeDateTime(v->timestamp, v->datetime_ms);
 		case asvJSONValue::BINARY: return asvJSONValue::makeBinary(v->bin_data.data(), v->bin_data.size());
 		case asvJSONValue::OBJECTID: return asvJSONValue::makeObjectId(v->str_data);
@@ -2202,7 +2240,14 @@ inline std::string asvJSON::toBSON() const {
 inline std::string asvJSON::toXML() const {
 	std::string out;
 	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-	if (root) { root->toXML(out); }
+	if (root) {
+		if (root->type == asvJSONValue::OBJECT && root->obj) {
+			for (const auto& [k, v] : *(root->obj))
+				v->toXML(out, k, 0);
+		} else {
+			root->toXML(out);
+		}
+	}
 	return out;
 }
 

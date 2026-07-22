@@ -101,7 +101,41 @@ async function loadSample(target) {
 // Auto-reload sample on format change
 inputFormat.addEventListener('change', () => {
   if (_inputIsSample) loadSample('input');
+  updateFormatInfo();
 });
+outputFormat.addEventListener('change', updateFormatInfo);
+
+const FORMAT_INFO = {
+  JSON: 'JavaScript Object Notation - universal data interchange format',
+  JSON5: 'JSON with comments, trailing commas, unquoted keys',
+  XML: 'Extensible Markup Language - mixed content, attributes, namespaces',
+  YAML: 'Human-readable with anchors, block scalars, multiple documents',
+  CSV: 'Comma-Separated Values - tabular data (flat structure)',
+  TOML: "Tom's Obvious Minimal Language - config file format",
+  INI: 'Initialization file - sections with key=value pairs',
+  JSONLines: 'One JSON value per line - streaming-friendly',
+  Sexpr: 'S-expressions - Lisp-style parenthesized notation',
+  TOON: 'Terse Object-Oriented Notation - compact, readable',
+  TRON: 'Class-based format with inheritance support',
+  GOON: 'Greatly Optimized Object Notation - JSON superset with tabular arrays',
+  ProtobufText: 'Human-readable Protocol Buffers',
+  MessagePack: 'Binary - compact serialization, like JSON but smaller',
+  BSON: 'Binary JSON - used by MongoDB, supports Date/ObjectId',
+  CBOR: 'IETF binary format (RFC 7049) - IoT and COSE',
+  Protobuf: 'Google binary format - sequential field numbering',
+};
+
+function updateFormatInfo() {
+  const infoEl = document.getElementById('formatInfo');
+  if (!infoEl) return;
+  const inFmt = parseFmt(inputFormat.value).name;
+  const outFmt = parseFmt(outputFormat.value).name;
+  const parts = [];
+  if (FORMAT_INFO[inFmt]) parts.push('In: ' + FORMAT_INFO[inFmt]);
+  if (FORMAT_INFO[outFmt]) parts.push('Out: ' + FORMAT_INFO[outFmt]);
+  infoEl.textContent = parts.join('  ·  ');
+}
+updateFormatInfo();
 
 function clearInput() { inputArea.value = ''; inputStatus.textContent = 'Cleared'; }
 function clearOutput() { outputArea.value = ''; outputStatus.textContent = 'Cleared'; }
@@ -117,6 +151,12 @@ function swapFormats() {
   outputArea.value = tc;
   inputStatus.textContent = 'Formats swapped';
   outputStatus.textContent = 'Formats swapped';
+  // Wrap output with binary preamble if output format is binary and no preamble yet
+  const outFmt = parseFmt(outputFormat.value).name;
+  const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'];
+  if (binaryFmts.includes(outFmt) && outputArea.value.length > 0 && !outputArea.value.startsWith(_BIN_PREFIX)) {
+    outputArea.value = _BIN_PREFIX + outputArea.value;
+  }
 }
 
 // --- File upload ---
@@ -146,6 +186,7 @@ function copyOutput() {
 
 // --- Download output ---
 let _lastBinary = false;
+const _BIN_PREFIX = '[Binary data \u2014 base64 encoded]\n\n';
 
 function downloadOutput() {
   if (!outputArea.value) return;
@@ -159,11 +200,10 @@ function downloadOutput() {
   const isBinaryOutput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'].includes(fmtOpt.name);
 
   let blob;
-  if (isBinaryOutput && _lastBinary) {
+  if (isBinaryOutput && (_lastBinary || outputArea.value.startsWith(_BIN_PREFIX))) {
     // Decode base64 to binary
-    const prefix = '[Binary data \u2014 base64 encoded]\n\n';
     const val = outputArea.value;
-    const b64 = val.startsWith(prefix) ? val.slice(prefix.length) : val;
+    const b64 = val.startsWith(_BIN_PREFIX) ? val.slice(_BIN_PREFIX.length) : val;
     const bin = Uint8Array.from(atob(b64.trim()), c => c.charCodeAt(0));
     const mimeMap = { messagepack: 'application/msgpack', bson: 'application/bson', cbor: 'application/cbor', protobuf: 'application/x-protobuf' };
     blob = new Blob([bin], { type: mimeMap[fmt] || 'application/octet-stream' });
@@ -195,8 +235,15 @@ async function convert() {
 
   const isBinaryInput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'].includes(fromOpt.name);
 
+  // Strip binary preamble if present (e.g., "[Binary data — base64 encoded]\n\n...")
+  let data = text;
+  if (isBinaryInput && text.startsWith('[Binary data')) {
+    const idx = text.indexOf('\n\n');
+    if (idx >= 0) data = text.slice(idx + 2).trim();
+  }
+
   try {
-    const payload = JSON.stringify({ from: fromOpt.name, to: toOpt.name, data: text, binary: isBinaryInput, pretty: toOpt.pretty });
+    const payload = JSON.stringify({ from: fromOpt.name, to: toOpt.name, data: data, binary: isBinaryInput, pretty: toOpt.pretty });
     const resp = await fetch('/api/convert', { method: 'POST', body: payload });
     const result = await resp.json();
 
@@ -204,7 +251,7 @@ async function convert() {
       _lastBinary = !!result.binary;
       if (result.binary) {
         const b64 = result.data;
-        outputArea.value = `[Binary data — base64 encoded]\n\n${b64}`;
+        outputArea.value = _BIN_PREFIX + b64;
         outputStatus.textContent = 'Binary output (base64)';
       } else {
         outputArea.value = result.data;

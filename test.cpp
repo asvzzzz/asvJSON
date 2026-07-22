@@ -640,6 +640,47 @@ TEST(testInvalidNumber) {
 	if (!json.parse(std::string("1e10"))) throw std::runtime_error("1e10 should be valid");
 }
 
+TEST(testBigNumberRoundTrip) {
+	// Big decimal: too many significant digits for double precision
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"val\": 12345678901987262932881764329723182403218436.19232714293743612984612}")));
+		auto* v = json.getRoot()->get("val");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		// Round-trip: serialize and re-parse
+		std::string out = json.serialize();
+		ASSERT(out.find("12345678901987262932881764329723182403218436.19232714293743612984612") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.parse(out));
+		auto* v2 = json2.getRoot()->get("val");
+		ASSERT(v2 != nullptr);
+		ASSERT(v2->type == asvJSONValue::STRING);
+		ASSERT(v2->raw_number);
+		ASSERT(std::string(v2->getString()) == "12345678901987262932881764329723182403218436.19232714293743612984612");
+	}
+	// Big integer: too large for int64
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"val\": 999999999999999999999999999999}")));
+		auto* v = json.getRoot()->get("val");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		std::string out = json.serialize();
+		ASSERT(out.find("999999999999999999999999999999") != std::string::npos);
+	}
+	// Normal numbers still work as int/double
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"a\": 42, \"b\": 3.14, \"c\": 15}")));
+		ASSERT(json.getRoot()->get("a")->type == asvJSONValue::INT);
+		ASSERT(json.getRoot()->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(json.getRoot()->get("c")->type == asvJSONValue::INT);
+	}
+}
+
 TEST(testGetObjectIdView) {
 	asvJSON json;
 	const char oid[12] = {'5','0','7','f','1','f','7','7','b','c','f','8'};
@@ -915,8 +956,61 @@ TEST(testBSONCorruptedData) {
 
 TEST(testMessagePackCorruptedData) {
 	asvJSON json;
+	// null/empty data
 	bool ok = json.fromMessagePack(nullptr, 0);
 	if (ok) throw std::runtime_error("null data should fail");
+
+	// Truncated array header
+	{
+		uint8_t data[] = {0x93}; // array of 3, but no elements
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("truncated array should fail");
+		ASSERT(!json2.getLastError().empty());
+	}
+
+	// Truncated map header
+	{
+		uint8_t data[] = {0x81}; // map of 1, but no key/value
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("truncated map should fail");
+		ASSERT(!json2.getLastError().empty());
+	}
+
+	// Truncated string
+	{
+		uint8_t data[] = {0xa5, 'h', 'e', 'l'}; // str5 but only 3 bytes
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("truncated string should fail");
+		ASSERT(!json2.getLastError().empty());
+	}
+
+	// Truncated fixext4 (0xD6 needs 5 bytes: 1 type + 4 data)
+	{
+		uint8_t data[] = {0xD6, 0x01, 0x02}; // fixext4 but only 2 data bytes instead of 4
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("truncated fixext4 should fail");
+		ASSERT(!json2.getLastError().empty());
+	}
+
+	// Trailing bytes after valid value
+	{
+		uint8_t data[] = {0x01, 0x02}; // valid int 1, trailing byte 2
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("trailing bytes should fail");
+	}
+
+	// Truncated bin8
+	{
+		uint8_t data[] = {0xc4, 0x05, 0x01, 0x02}; // bin8 len=5, only 2 bytes
+		asvJSON json2;
+		ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("truncated bin8 should fail");
+	}
 }
 
 TEST(testDuplicateKeyNoLeak) {
@@ -2062,7 +2156,7 @@ TEST(testToXML) {
 		json.putExtension("ext", 42, extData, 2);
 
 		std::string xml = json.toXML();
-		ASSERT(xml.find("<null_val/>") != std::string::npos || xml.find("<n/>") != std::string::npos);
+		ASSERT(xml.find("xsi:nil=\"true\"") != std::string::npos);
 		ASSERT(xml.find("true") != std::string::npos);
 		ASSERT(xml.find("-42") != std::string::npos);
 		ASSERT(xml.find("a &amp; b &lt; c") != std::string::npos);
@@ -2094,11 +2188,11 @@ TEST(testToXML) {
 }
 
 TEST(testFromXML) {
-	// Empty object (self-closing root)
+	// Empty self-closing root
 	{
 		asvJSON json;
 		ASSERT(json.fromXML("<root/>"));
-		ASSERT(json.isNull("root"));
+		ASSERT(json.getString("root") == "");
 	}
 	// Simple string value
 	{
@@ -2144,13 +2238,11 @@ TEST(testFromXML) {
 		auto* root = json.getRoot();
 		auto* inner = root->get("root");
 		ASSERT(inner != nullptr);
-		auto* arr = inner->get("item");
-		ASSERT(arr != nullptr);
-		ASSERT(arr->type == asvJSONValue::ARRAY);
-		ASSERT(arr->arr->size() == 3);
-		ASSERT(arr->get(static_cast<size_t>(0))->getInt() == 1);
-		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 2);
-		ASSERT(arr->get(static_cast<size_t>(2))->getInt() == 3);
+		ASSERT(inner->type == asvJSONValue::ARRAY);
+		ASSERT(inner->arr->size() == 3);
+		ASSERT(inner->get(static_cast<size_t>(0))->getInt() == 1);
+		ASSERT(inner->get(static_cast<size_t>(1))->getInt() == 2);
+		ASSERT(inner->get(static_cast<size_t>(2))->getInt() == 3);
 	}
 	// Attributes as @attr
 	{
@@ -2265,9 +2357,7 @@ TEST(testFromXML) {
 		ASSERT(xml.find("exttype=\"42\"") != std::string::npos);
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
-		auto* inner = json2.getRoot()->get("root");
-		ASSERT(inner != nullptr);
-		auto* ext = inner->get("ext");
+		auto* ext = json2.getRoot()->get("ext");
 		ASSERT(ext != nullptr);
 		ASSERT(ext->type == asvJSONValue::EXTENSION);
 		ASSERT(ext->ext_type == 42);
@@ -2292,7 +2382,7 @@ TEST(testFromXML) {
 		std::string xml = json.toXML();
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
-		auto* inner = json2.getRoot()->get("root");
+		auto* inner = json2.getRoot();
 		ASSERT(inner != nullptr);
 		ASSERT(inner->type == asvJSONValue::OBJECT);
 		ASSERT(inner->hasKey("n"));
@@ -2321,13 +2411,11 @@ TEST(testFromXML) {
 		ASSERT(json2.fromXML(xml));
 		auto* inner = json2.getRoot()->get("root");
 		ASSERT(inner != nullptr);
-		auto* arr = inner->get("item");
-		ASSERT(arr != nullptr);
-		ASSERT(arr->type == asvJSONValue::ARRAY);
-		ASSERT(arr->arr->size() == 3);
-		ASSERT(arr->get(static_cast<size_t>(0))->getInt() == 1);
-		ASSERT(arr->get(static_cast<size_t>(1))->getInt() == 2);
-		ASSERT(arr->get(static_cast<size_t>(2))->getInt() == 3);
+		ASSERT(inner->type == asvJSONValue::ARRAY);
+		ASSERT(inner->arr->size() == 3);
+		ASSERT(inner->get(static_cast<size_t>(0))->getInt() == 1);
+		ASSERT(inner->get(static_cast<size_t>(1))->getInt() == 2);
+		ASSERT(inner->get(static_cast<size_t>(2))->getInt() == 3);
 	}
 	// Non-consecutive same-named children -> single array
 	{
@@ -2410,6 +2498,74 @@ TEST(testFromXML) {
 		asvJSON json;
 		ASSERT(json.fromXML("<?xml version=\"1.0\"?>\n<!DOCTYPE root [<!ELEMENT root (#PCDATA)>]>\n<!-- comment -->\n<root>ok</root>"));
 		ASSERT(json.getString("root") == "ok");
+	}
+	// Mixed content: text-element-text produces #content array
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>hello<child>world</child>trailer</root>"));
+		auto* root = json.getRoot()->get("root");
+		ASSERT(root != nullptr);
+		ASSERT(root->hasKey("#content"));
+		auto* content = root->get("#content");
+		ASSERT(content != nullptr);
+		ASSERT(content->type == asvJSONValue::ARRAY);
+		ASSERT(content->arr->size() == 3);
+		ASSERT((*content->arr)[0]->type == asvJSONValue::STRING);
+		ASSERT(std::string((*content->arr)[0]->getString()) == "hello");
+		ASSERT((*content->arr)[1]->type == asvJSONValue::OBJECT);
+		ASSERT((*content->arr)[1]->hasKey("child"));
+		ASSERT(std::string((*content->arr)[1]->get("child")->getString()) == "world");
+		ASSERT((*content->arr)[2]->type == asvJSONValue::STRING);
+		ASSERT(std::string((*content->arr)[2]->getString()) == "trailer");
+	}
+	// Mixed content round-trip: text + element + text + self-closing
+	{
+		std::string input = "<root>text1<child>inner</child>text2<br/>text3</root>";
+		asvJSON json;
+		ASSERT(json.fromXML(input));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("text1") != std::string::npos);
+		ASSERT(xml.find("<child>") != std::string::npos);
+		ASSERT(xml.find("inner") != std::string::npos);
+		ASSERT(xml.find("text2") != std::string::npos);
+		ASSERT(xml.find("<br") != std::string::npos);
+		ASSERT(xml.find("text3") != std::string::npos);
+		// Round-trip: re-parse the output
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* root2 = json2.getRoot()->get("root");
+		ASSERT(root2 != nullptr);
+		ASSERT(root2->hasKey("#content"));
+	}
+	// Mixed content with attributes on parent
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root lang=\"en\">text<b>bold</b>more</root>"));
+		auto* root = json.getRoot()->get("root");
+		ASSERT(root != nullptr);
+		ASSERT(root->hasKey("@lang"));
+		ASSERT(root->get("@lang")->getStringView() == "en");
+		ASSERT(root->hasKey("#content"));
+	}
+	// Pure text -> #text key (no interleaving)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>hello</root>"));
+		ASSERT(json.getString("root") == "hello");
+	}
+	// Pure elements -> named keys (no interleaving)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><a>1</a><b>2</b></root>"));
+		ASSERT(json.getInt("root.a") == 1);
+		ASSERT(json.getInt("root.b") == 2);
+	}
+	// Element-then-text (no interleaving) -> #text + named keys
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>hello<child>world</child></root>"));
+		ASSERT(json.getString("root.#text") == "hello");
+		ASSERT(json.getString("root.child") == "world");
 	}
 }
 
@@ -5337,6 +5493,7 @@ int main() {
 	RUN(testGetDateTimeMethod);
 	RUN(testGetObjectIdView);
 	RUN(testInvalidNumber);
+	RUN(testBigNumberRoundTrip);
 	RUN(testRemoveByPointer);
 	
 	std::cout << "\n--- Merge Tests ---\n";

@@ -111,6 +111,9 @@ static std::vector<SexprToken> sexprTokenize(std::string_view input) {
   return tokens;
 }
 
+// S-Expression internal marker byte for quoted object keys (stripped before JSON escaping)
+static const char SEXPR_KEY_MARK = '\x01';
+
 static std::string sexprTokenToJson(const SexprToken& token) {
   switch (token.type) {
     case SEXPR_STRING: {
@@ -137,6 +140,20 @@ static std::string sexprTokenToJson(const SexprToken& token) {
   }
 }
 
+static bool sexprTypeIsKey(int t) {
+  return t == SEXPR_SYMBOL || t == SEXPR_NUMBER ||
+         t == SEXPR_TRUE || t == SEXPR_FALSE || t == SEXPR_NIL;
+}
+
+static std::string sexprKeyJson(const std::string& item, int type) {
+  if (type == SEXPR_NUMBER || type == SEXPR_TRUE ||
+      type == SEXPR_FALSE || type == SEXPR_NIL) {
+    // Bare JSON value — wrap in quotes for JSON object key
+    return '"' + item + '"';
+  }
+  return item;
+}
+
 static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size_t& pos, int depth = 0) {
   if (depth > 256) throw asvJSONError("S-Expression nesting too deep");
 
@@ -150,11 +167,22 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
 
   pos++; // skip '('
   std::vector<std::string> items;
+  std::vector<int> itemTypes;
   while (pos < tokens.size() && tokens[pos].type != SEXPR_RPAREN) {
     if (tokens[pos].type == SEXPR_LPAREN) {
-      items.push_back(sexprTokensToJson(tokens, pos, depth + 1));
+      std::string sub = sexprTokensToJson(tokens, pos, depth + 1);
+      itemTypes.push_back(sub.empty() ? SEXPR_NIL : (sub[0] == '{' ? -2 : -1));
+      items.push_back(std::move(sub));
+    } else if (tokens[pos].type == SEXPR_STRING && !tokens[pos].value.empty() && tokens[pos].value[0] == SEXPR_KEY_MARK) {
+      // Marked string key from encoder — strip marker and treat as symbol
+      SexprToken stripped = tokens[pos];
+      stripped.value = stripped.value.substr(1);
+      items.push_back(sexprTokenToJson(stripped));
+      itemTypes.push_back(SEXPR_SYMBOL);
+      pos++;
     } else {
       items.push_back(sexprTokenToJson(tokens[pos]));
+      itemTypes.push_back(tokens[pos].type);
       pos++;
     }
   }
@@ -163,10 +191,30 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
 
   bool isObj = false;
   if (items.size() >= 2 && items.size() % 2 == 0) {
-    isObj = true;
-    for (size_t j = 0; j < items.size(); j += 2) {
-      if (items[j].size() < 2 || items[j][0] != '"') { isObj = false; break; }
+    // For 2-item lists, only treat as object if first item is a symbol
+    if (items.size() == 2) {
+      isObj = (itemTypes[0] == SEXPR_SYMBOL);
+    } else {
+      isObj = true;
+      for (size_t j = 0; j < items.size(); j += 2) {
+        if (!sexprTypeIsKey(itemTypes[j])) { isObj = false; break; }
+      }
     }
+  }
+
+  // Fallback: if first item is a symbol-key, emit {key: values}
+  if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
+    std::string key = items[0];
+    if (items.size() == 2) {
+      return '{' + key + ':' + items[1] + '}';
+    }
+    std::string r = '{' + key + ":[";
+    for (size_t j = 1; j < items.size(); j++) {
+      if (j > 1) r += ',';
+      r += items[j];
+    }
+    r += "]}";
+    return r;
   }
 
   std::string out;
@@ -174,7 +222,7 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
     out = '{';
     for (size_t j = 0; j < items.size(); j += 2) {
       if (j > 0) out += ',';
-      out += items[j] + ':' + items[j + 1];
+      out += sexprKeyJson(items[j], itemTypes[j]) + ':' + items[j + 1];
     }
     out += '}';
   } else {
@@ -232,7 +280,7 @@ static void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
             }
           }
         }
-        if (needsQuote) { out += '"'; appendJsonEscaped(out, k); out += '"'; }
+        if (needsQuote) { out += '"'; out += SEXPR_KEY_MARK; appendJsonEscaped(out, k); out += '"'; }
         else out += k;
         out += ' ';
         sexprSerializeVal(child.get(), out, depth + 1);

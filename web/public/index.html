@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asvJSON++ Converter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">asvJSON++ Converter</div>
+  <div class="header-sub">17 formats · C++17 · header-only</div>
+</div>
+
+<div class="container">
+  <div class="panel panel-left">
+    <div class="panel-bar">
+      <select id="inputFormat">
+        <optgroup label="Text Formats">
+          <option value="JSON~pretty" title="JavaScript Object Notation - universal data interchange">JSON (pretty)</option>
+          <option value="JSON~minify" title="JavaScript Object Notation - compact form">JSON (minify)</option>
+          <option value="JSON5~pretty" title="JSON with comments, trailing commas, unquoted keys">JSON5 (pretty)</option>
+          <option value="JSON5~minify" title="JSON5 compact form">JSON5 (minify)</option>
+          <option value="XML" title="Extensible Markup Language - mixed content, attributes, namespaces">XML</option>
+          <option value="YAML" title="YAML Ain't Markup Language - human-readable with anchors, tags, block scalars">YAML</option>
+          <option value="CSV" title="Comma-Separated Values - tabular data format">CSV</option>
+          <option value="TOML" title="Tom's Obvious Minimal Language - configuration file format">TOML</option>
+          <option value="INI" title="Initialization file format with sections and key=value pairs">INI</option>
+          <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
+          <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
+          <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>
+          <option value="TRON" title="TRON - class-based format with inheritance support">TRON</option>
+          <option value="GOON" title="Greatly Optimized Object Notation - JSON superset with tabular arrays">GOON</option>
+          <option value="ProtobufText" title="Human-readable form of Protocol Buffers">Protobuf Text</option>
+        </optgroup>
+        <optgroup label="Binary Formats">
+          <option value="MessagePack" title="Compact binary serialization, like JSON but smaller and faster">MessagePack</option>
+          <option value="BSON" title="Binary JSON used by MongoDB, supports Date and ObjectId types">BSON</option>
+          <option value="CBOR" title="IETF standard binary format (RFC 7049), used in IoT and COSE">CBOR</option>
+          <option value="Protobuf" title="Google's compact binary format with sequential field numbering">Protobuf</option>
+        </optgroup>
+      </select>
+      <button class="btn btn-sm" onclick="loadSample('input')">Sample</button>
+      <button class="btn btn-sm" onclick="clearInput()">Clear</button>
+      <span class="file-label">or <label class="file-link" for="fileInput">Upload file</label></span>
+      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.jsonl,.sexpr,.toon,.tron,.goon,.msgpack,.bson,.cbor,.bin" onchange="loadFile(event)">
+    </div>
+    <textarea id="inputArea" placeholder="Paste your data here..."></textarea>
+    <div class="panel-status" id="inputStatus">Ready</div>
+  </div>
+
+  <div class="center-col">
+    <button class="btn btn-convert" onclick="convert()" id="convertBtn">Convert →</button>
+    <button class="btn btn-sm" onclick="swapFormats()" title="Swap input/output formats">⇄</button>
+  </div>
+
+  <div class="panel panel-right">
+    <div class="panel-bar">
+      <select id="outputFormat">
+        <optgroup label="Text Formats">
+          <option value="JSON~pretty" selected title="JavaScript Object Notation - universal data interchange">JSON (pretty)</option>
+          <option value="JSON~minify" title="JavaScript Object Notation - compact form">JSON (minify)</option>
+          <option value="JSON5~pretty" title="JSON with comments, trailing commas, unquoted keys">JSON5 (pretty)</option>
+          <option value="JSON5~minify" title="JSON5 compact form">JSON5 (minify)</option>
+          <option value="XML" title="Extensible Markup Language - mixed content, attributes, namespaces">XML</option>
+          <option value="YAML" title="YAML Ain't Markup Language - human-readable with anchors, tags, block scalars">YAML</option>
+          <option value="CSV" title="Comma-Separated Values - tabular data format">CSV</option>
+          <option value="TOML" title="Tom's Obvious Minimal Language - configuration file format">TOML</option>
+          <option value="INI" title="Initialization file format with sections and key=value pairs">INI</option>
+          <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
+          <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
+          <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>
+          <option value="TRON" title="TRON - class-based format with inheritance support">TRON</option>
+          <option value="GOON" title="Greatly Optimized Object Notation - JSON superset with tabular arrays">GOON</option>
+          <option value="ProtobufText" title="Human-readable form of Protocol Buffers">Protobuf Text</option>
+        </optgroup>
+        <optgroup label="Binary Formats">
+          <option value="MessagePack" title="Compact binary serialization, like JSON but smaller and faster">MessagePack</option>
+          <option value="BSON" title="Binary JSON used by MongoDB, supports Date and ObjectId types">BSON</option>
+          <option value="CBOR" title="IETF standard binary format (RFC 7049), used in IoT and COSE">CBOR</option>
+          <option value="Protobuf" title="Google's compact binary format with sequential field numbering">Protobuf</option>
+        </optgroup>
+      </select>
+      <button class="btn btn-sm" onclick="copyOutput()">Copy</button>
+      <button class="btn btn-sm" onclick="downloadOutput()">Download</button>
+      <button class="btn btn-sm" onclick="clearOutput()">Clear</button>
+    </div>
+    <textarea id="outputArea" placeholder="Converted output will appear here..." readonly></textarea>
+    <div class="panel-status" id="outputStatus">Ready</div>
+  </div>
+</div>
+
+<div class="footer">
+  <span id="statusMsg">Enter data and click Convert</span>
+  <span id="formatInfo" class="format-info"></span>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

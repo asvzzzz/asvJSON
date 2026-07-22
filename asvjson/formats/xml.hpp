@@ -65,7 +65,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 
 	switch (type) {
 		case T::NULL_VAL:
-			out += pad + "<" + xmlSanitizeElementName(name) + "/>\n";
+			out += pad + "<" + xmlSanitizeElementName(name) + " xsi:nil=\"true\"/>\n";
 			break;
 		case T::BOOL_VAL:
 			out += pad + "<" + xmlSanitizeElementName(name) + ">" + (flag ? "true" : "false") + "</" + xmlSanitizeElementName(name) + ">\n";
@@ -116,6 +116,42 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 		}
 		case T::OBJECT: {
 			if (!obj) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
+			// Check for #content array (mixed content from fromXML)
+			auto contentIt = obj->find("#content");
+			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
+				out += pad + "<" + xmlSanitizeElementName(name);
+				// Emit attributes (keys starting with @, excluding #content)
+				for (const auto& [k, v] : *obj) {
+					if (k == "#content") continue;
+					if (!k.empty() && k[0] == '@') out += " " + k.substr(1) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
+				}
+				out += ">";
+				for (const auto& item : *(contentIt->second->arr)) {
+					if (item->type == asvJSONValue::STRING) {
+						out += xmlEscapeContent(item->str_data);
+					} else if (item->type == asvJSONValue::OBJECT && item->obj && item->obj->size() == 1) {
+						// Single-key wrapper object = element
+						const auto& [childName, childVal] = *item->obj->begin();
+						childVal->toXML(out, childName, 0);
+					} else if (item->type == asvJSONValue::OBJECT) {
+						item->toXML(out, "item", 0);
+					} else if (item->type == asvJSONValue::ARRAY) {
+						item->toXML(out, "item", 0);
+					} else if (item->type == asvJSONValue::INT) {
+						char buf[32];
+						auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num);
+						if (ec == std::errc()) out += std::string(buf, ptr);
+					} else if (item->type == asvJSONValue::DOUBLE) {
+						std::string val; fmtDoubleVal(item->dbl, val); out += val;
+					} else if (item->type == asvJSONValue::BOOL_VAL) {
+						out += item->flag ? "true" : "false";
+					} else if (item->type == asvJSONValue::NULL_VAL) {
+						// null in mixed content -> skip
+					}
+				}
+				out += "</" + xmlSanitizeElementName(name) + ">\n";
+				break;
+			}
 			out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
 			for (const auto& [k, v] : *obj) v->toXML(out, k, indent + 1);
 			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
@@ -185,10 +221,17 @@ static std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 // Forward declaration
 static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth);
 
-// Parse a single element's children into (name, value) pairs, plus text content
-static void xmlParseChildren(std::string_view s, size_t& pos,
-	std::vector<std::pair<std::string, std::unique_ptr<asvJSONValue>>>& children,
-	std::string& textContent, int depth)
+// Segment for interleaved mixed content tracking
+struct XmlSegment {
+	bool isElement;
+	std::string text;      // for text segments
+	std::string childName; // for element segments
+	std::unique_ptr<asvJSONValue> childVal;
+};
+
+// Parse a single element's children into segments (preserving interleaved order)
+static void xmlParseChildrenSegments(std::string_view s, size_t& pos,
+	std::vector<XmlSegment>& segments, int depth)
 {
 	while (pos < s.size()) {
 		xmlSkipSpaces(s, pos);
@@ -204,10 +247,12 @@ static void xmlParseChildren(std::string_view s, size_t& pos,
 				if (pos + 8 < s.size() && s.substr(pos + 2, 7) == "[CDATA[") {
 					size_t end = s.find("]]>", pos + 9);
 					if (end == std::string_view::npos) { pos = s.size(); break; }
-					textContent += s.substr(pos + 9, end - pos - 9);
+					std::string cdata = std::string(s.substr(pos + 9, end - pos - 9));
+					if (!cdata.empty()) {
+						segments.push_back({false, std::move(cdata), "", nullptr});
+					}
 					pos = end + 3; continue;
 				}
-				// Skip DOCTYPE declarations (with bracket-aware nesting)
 				if (pos + 9 < s.size() && s.substr(pos + 2, 7) == "DOCTYPE") {
 					size_t scan = pos + 9;
 					int bracketDepth = 0;
@@ -229,7 +274,7 @@ static void xmlParseChildren(std::string_view s, size_t& pos,
 			}
 			std::string childName;
 			auto childVal = xmlParseElement(s, pos, childName, depth + 1);
-			if (childVal) children.emplace_back(std::move(childName), std::move(childVal));
+			if (childVal) segments.push_back({true, "", std::move(childName), std::move(childVal)});
 		} else {
 			size_t start = pos;
 			while (pos < s.size() && s[pos] != '<') pos++;
@@ -238,7 +283,7 @@ static void xmlParseChildren(std::string_view s, size_t& pos,
 			for (auto c : text) {
 				if (c != ' ' && c != '\t' && c != '\n' && c != '\r') { onlySpace = false; break; }
 			}
-			if (!onlySpace) textContent += text;
+			if (!onlySpace) segments.push_back({false, std::move(text), "", nullptr});
 		}
 	}
 }
@@ -296,7 +341,7 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	if (pos < s.size() && s[pos] == '/') {
 		pos++;
 		if (pos < s.size() && s[pos] == '>') { pos++; }
-		if (attrs.empty()) return asvJSONValue::makeNull();
+		if (attrs.empty()) return asvJSONValue::makeString("", 0);
 		auto obj = asvJSONValue::makeObject();
 		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
 		return obj;
@@ -307,9 +352,8 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	else throw asvJSONError("expected '>'");
 
 	// Parse children and text content
-	std::vector<std::pair<std::string, std::unique_ptr<asvJSONValue>>> children;
-	std::string textContent;
-	xmlParseChildren(s, pos, children, textContent, depth + 1);
+	std::vector<XmlSegment> segments;
+	xmlParseChildrenSegments(s, pos, segments, depth + 1);
 
 	// Closing tag
 	xmlSkipSpaces(s, pos);
@@ -321,94 +365,164 @@ static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		if (pos < s.size() && s[pos] == '>') pos++;
 	}
 
+	// Analyze segments: count text vs element segments
+	size_t textCount = 0, elemCount = 0;
+	std::string combinedText;
+	bool hasInterleaving = false;
+	for (size_t i = 0; i < segments.size(); i++) {
+		if (segments[i].isElement) {
+			elemCount++;
+		} else {
+			textCount++;
+			combinedText += segments[i].text;
+			// Check if elements appear both before and after this text
+		}
+	}
+	// Interleaving = text appears both before and after child elements
+	// Simple case: text-before-elements then elements is NOT interleaved
+	bool seenElem = false, textAfterElem = false;
+	for (size_t i = 0; i < segments.size(); i++) {
+		if (segments[i].isElement) {
+			seenElem = true;
+		} else if (seenElem) {
+			textAfterElem = true;
+			break;
+		}
+	}
+	hasInterleaving = textAfterElem;
+
 	// Build result
-	if (children.empty()) {
-		// No child elements - just text content
-		if (attrs.empty()) return xmlDetectValue(textContent);
+	if (segments.empty()) {
+		// No content - just attributes or plain
+		if (attrs.empty()) return xmlDetectValue(combinedText);
+		auto obj = asvJSONValue::makeObject();
+		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
+		return obj;
+	}
+
+	// No elements, only text - simple case
+	if (elemCount == 0) {
+		if (attrs.empty()) return xmlDetectValue(combinedText);
 		// Check for special type attribute (from toXML)
-		if (!textContent.empty()) {
-			auto tit = attrs.find("type");
-			if (tit != attrs.end()) {
-				const std::string& t = tit->second;
-				if (t == "datetime") {
-					time_t ts = 0; int ms = 0;
-					if (tryParseDateTime(textContent, ts, &ms)) return asvJSONValue::makeDateTime(ts, ms);
-				}
-				if (t == "binary") {
-					auto decoded = decodeBase64Fast(textContent.data(), textContent.size());
-					if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
-				}
-				if (t == "objectid") {
-					if (textContent.size() == 24) {
-						std::string oid; oid.reserve(12);
-						for (size_t i = 0; i + 1 < textContent.size(); i += 2) {
-							char buf[3] = {textContent[i], textContent[i+1], 0};
-							oid.push_back(static_cast<char>(std::strtol(buf, nullptr, 16)));
-						}
-						if (oid.size() == 12) return asvJSONValue::makeObjectId(std::string_view(oid.data(), 12));
+		auto tit = attrs.find("type");
+		if (tit != attrs.end() && !combinedText.empty()) {
+			const std::string& t = tit->second;
+			if (t == "datetime") {
+				time_t ts = 0; int ms = 0;
+				if (tryParseDateTime(combinedText, ts, &ms)) return asvJSONValue::makeDateTime(ts, ms);
+			}
+			if (t == "binary") {
+				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
+				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
+			}
+			if (t == "objectid") {
+				if (combinedText.size() == 24) {
+					std::string oid; oid.reserve(12);
+					for (size_t i = 0; i + 1 < combinedText.size(); i += 2) {
+						char buf[3] = {combinedText[i], combinedText[i+1], 0};
+						oid.push_back(static_cast<char>(std::strtol(buf, nullptr, 16)));
 					}
+					if (oid.size() == 12) return asvJSONValue::makeObjectId(std::string_view(oid.data(), 12));
 				}
-				if (t == "regex") {
-					size_t sep = textContent.rfind('|');
-					if (sep != std::string::npos) {
-						std::string pat = textContent.substr(0, sep);
-						std::string opt = textContent.substr(sep + 1);
-						return asvJSONValue::makeRegex(pat.c_str(), opt.c_str());
+			}
+			if (t == "regex") {
+				size_t sep = combinedText.rfind('|');
+				if (sep != std::string::npos) {
+					std::string pat = combinedText.substr(0, sep);
+					std::string opt = combinedText.substr(sep + 1);
+					return asvJSONValue::makeRegex(pat.c_str(), opt.c_str());
+				}
+				return asvJSONValue::makeRegex(combinedText.c_str(), "");
+			}
+			if (t == "timestamp") {
+				long long v;
+				auto [ptr, ec] = std::from_chars(combinedText.data(), combinedText.data() + combinedText.size(), v);
+				if (ec == std::errc()) return asvJSONValue::makeTimestamp(v);
+			}
+			if (t == "extension") {
+				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
+				if (!decoded.empty()) {
+					auto eit = attrs.find("exttype");
+					int8_t et = 0;
+					if (eit != attrs.end()) {
+						long ev = std::strtol(eit->second.c_str(), nullptr, 10);
+						if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
 					}
-					return asvJSONValue::makeRegex(textContent.c_str(), "");
-				}
-				if (t == "timestamp") {
-					long long v;
-					auto [ptr, ec] = std::from_chars(textContent.data(), textContent.data() + textContent.size(), v);
-					if (ec == std::errc()) return asvJSONValue::makeTimestamp(v);
-				}
-				if (t == "extension") {
-					auto decoded = decodeBase64Fast(textContent.data(), textContent.size());
-					if (!decoded.empty()) {
-						auto eit = attrs.find("exttype");
-						int8_t et = 0;
-						if (eit != attrs.end()) {
-							long ev = std::strtol(eit->second.c_str(), nullptr, 10);
-							if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
-						}
-						return asvJSONValue::makeExtension(et, decoded.data(), decoded.size());
-					}
+					return asvJSONValue::makeExtension(et, decoded.data(), decoded.size());
 				}
 			}
 		}
 		// Has attributes - object with #text + @attr
 		auto obj = asvJSONValue::makeObject();
 		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
-		if (!textContent.empty()) obj->obj->emplace("#text", xmlDetectValue(textContent));
-		if (obj->obj->empty()) return asvJSONValue::makeNull();
+		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
+		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
 		return obj;
 	}
 
-	// Has child elements - build object
+	// Has child elements (possibly interleaved with text)
 	auto obj = asvJSONValue::makeObject();
 
 	// Add attributes
 	for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
 
-	// Add text content as #text
-	if (!textContent.empty()) obj->obj->emplace("#text", xmlDetectValue(textContent));
-
-	// Count occurrences of each child name (global, not just consecutive)
-	std::unordered_map<std::string, size_t> nameCounts;
-	for (const auto& child : children) nameCounts[child.first]++;
-
-	// Add children, grouping into arrays for names with count > 1
-	for (auto& child : children) {
-		if (nameCounts[child.first] > 1) {
-			auto it = obj->obj->find(child.first);
-			if (it == obj->obj->end()) {
-				auto arr = asvJSONValue::makeArray();
-				obj->obj->emplace(child.first, std::move(arr));
-				it = obj->obj->find(child.first);
+	if (hasInterleaving) {
+		// Mixed content: preserve interleaved order as #content array
+		auto arr = asvJSONValue::makeArray();
+		for (auto& seg : segments) {
+			if (seg.isElement) {
+				auto wrapper = asvJSONValue::makeObject();
+				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
+				arr->arr->push_back(std::move(wrapper));
+			} else {
+				arr->arr->push_back(xmlDetectValue(seg.text));
 			}
-			it->second->arr->push_back(std::move(child.second));
-		} else {
-			obj->obj->emplace(child.first, std::move(child.second));
+		}
+		obj->obj->emplace("#content", std::move(arr));
+	} else {
+		// Non-interleaved: all text first (if any), then all elements
+		// Add text content as #text
+		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
+
+		// Count occurrences of each child name (global, not just consecutive)
+		std::unordered_map<std::string, size_t> nameCounts;
+		for (auto& seg : segments) {
+			if (seg.isElement) nameCounts[seg.childName]++;
+		}
+
+		// Add children, grouping into arrays for names with count > 1
+		for (auto& seg : segments) {
+			if (!seg.isElement) continue;
+			if (nameCounts[seg.childName] > 1) {
+				auto it = obj->obj->find(seg.childName);
+				if (it == obj->obj->end()) {
+					auto arr = asvJSONValue::makeArray();
+					obj->obj->emplace(seg.childName, std::move(arr));
+					it = obj->obj->find(seg.childName);
+				}
+				it->second->arr->push_back(std::move(seg.childVal));
+			} else {
+				obj->obj->emplace(seg.childName, std::move(seg.childVal));
+			}
+		}
+	}
+
+	// Collapse: if element has only children (no attrs, no text, no #content),
+	// and all children are same-named, return the array directly.
+	if (attrs.empty() && combinedText.empty() && !hasInterleaving) {
+		std::unordered_map<std::string, size_t> nameCounts2;
+		for (auto& seg : segments) {
+			if (seg.isElement) nameCounts2[seg.childName]++;
+		}
+		for (const auto& [k, v] : nameCounts2) {
+			if (v > 1 && nameCounts2.size() == 1) {
+				auto it = obj->obj->find(k);
+				if (it != obj->obj->end() && it->second->type == asvJSONValue::ARRAY) {
+					auto arr = std::move(it->second);
+					return arr;
+				}
+			}
 		}
 	}
 
@@ -430,38 +544,48 @@ inline bool asvJSON::fromXML(std::string_view input) {
 		}
 
 		// Skip comments and DOCTYPE before root element
-		while (pos < input.size()) {
-			xmlSkipSpaces(input, pos);
-			if (pos + 4 < input.size() && input.substr(pos, 4) == "<!--") {
-				size_t end = input.find("-->", pos + 4);
-				if (end == std::string_view::npos) throw asvJSONError("unclosed comment");
-				pos = end + 3;
-				continue;
-			}
-			if (pos + 9 < input.size() && input.substr(pos, 9) == "<!DOCTYPE") {
-				size_t scan = pos + 9;
-				int bracketDepth = 0;
-				while (scan < input.size()) {
-					if (input[scan] == '[') bracketDepth++;
-					else if (input[scan] == ']') bracketDepth--;
-					else if (input[scan] == '>' && bracketDepth <= 0) break;
-					scan++;
+		auto skipProlog = [&]() -> bool {
+			while (pos < input.size()) {
+				xmlSkipSpaces(input, pos);
+				if (pos + 4 < input.size() && input.substr(pos, 4) == "<!--") {
+					size_t end = input.find("-->", pos + 4);
+					if (end == std::string_view::npos) throw asvJSONError("unclosed comment");
+					pos = end + 3;
+					continue;
 				}
-				if (scan >= input.size()) throw asvJSONError("unclosed DOCTYPE");
-				pos = scan + 1;
-				continue;
+				if (pos + 9 < input.size() && input.substr(pos, 9) == "<!DOCTYPE") {
+					size_t scan = pos + 9;
+					int bracketDepth = 0;
+					while (scan < input.size()) {
+						if (input[scan] == '[') bracketDepth++;
+						else if (input[scan] == ']') bracketDepth--;
+						else if (input[scan] == '>' && bracketDepth <= 0) break;
+						scan++;
+					}
+					if (scan >= input.size()) throw asvJSONError("unclosed DOCTYPE");
+					pos = scan + 1;
+					continue;
+				}
+				break;
 			}
-			break;
-		}
+			return pos < input.size() && input[pos] == '<';
+		};
 
-		if (pos >= input.size() || input[pos] != '<') throw asvJSONError("expected '<'");
+		if (!skipProlog()) throw asvJSONError("expected '<'");
 
-		std::string rootName;
-		auto val = xmlParseElement(input, pos, rootName, 0);
-		if (!val) throw asvJSONError("failed to parse root element");
-
+		// Parse all top-level elements, combining into one object
 		auto obj = asvJSONValue::makeObject();
-		obj->obj->emplace(std::move(rootName), std::move(val));
+		int count = 0;
+		while (pos < input.size()) {
+			if (!skipProlog()) break;
+			std::string name;
+			auto val = xmlParseElement(input, pos, name, 0);
+			if (!val) break;
+			obj->obj->emplace(std::move(name), std::move(val));
+			count++;
+		}
+		if (count == 0) throw asvJSONError("failed to parse root element");
+
 		root = std::move(obj);
 		return true;
 	} catch (const asvJSONError& e) {
