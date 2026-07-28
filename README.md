@@ -4,6 +4,10 @@ A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
+## Online Converter
+
+Try it online: **https://jx8.ru/** — browser-based converter supporting all 17 formats with file upload/download.
+
 ## License
 
 MIT license - see the `LICENSE` file for details.
