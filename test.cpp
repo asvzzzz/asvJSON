@@ -4701,6 +4701,17 @@ TEST(testFromSexpr) {
     ASSERT_EQ(j.getInt("a"), int64_t(42));
     ASSERT_EQ(j.getInt("b"), int64_t(-3));
   }
+  // Standard Lisp form: nested objects with mixed types
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(root (name \"asvJSON++\") (version \"1.12.0\") (active true) (tags \"json\" \"c++\"))")));
+    ASSERT_EQ(std::string(j.getString("root.name")), "asvJSON++");
+    ASSERT_EQ(std::string(j.getString("root.version")), "1.12.0");
+    ASSERT(j.getConst("root")->getConst("active")->getBool());
+    ASSERT_EQ(j.getRoot()->getConst("root")->getConst("tags")->size(), size_t(2));
+    ASSERT_EQ(std::string(j.getRoot()->getConst("root")->getConst("tags")->get(static_cast<size_t>(0))->getString()), "json");
+    ASSERT_EQ(std::string(j.getRoot()->getConst("root")->getConst("tags")->get(static_cast<size_t>(1))->getString()), "c++");
+  }
   // Error on empty
   {
     asvJSON j;
@@ -5690,6 +5701,6 @@ int main() {
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
 	std::cout << "========================================" << std::endl;
-	
+
 	return failed > 0 ? 1 : 0;
 }

@@ -120,7 +120,6 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
 				out += pad + "<" + xmlSanitizeElementName(name);
-				// Emit attributes (keys starting with @, excluding #content)
 				for (const auto& [k, v] : *obj) {
 					if (k == "#content") continue;
 					if (!k.empty() && k[0] == '@') out += " " + k.substr(1) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
@@ -130,13 +129,36 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 					if (item->type == asvJSONValue::STRING) {
 						out += xmlEscapeContent(item->str_data);
 					} else if (item->type == asvJSONValue::OBJECT && item->obj && item->obj->size() == 1) {
-						// Single-key wrapper object = element
 						const auto& [childName, childVal] = *item->obj->begin();
-						childVal->toXML(out, childName, 0);
+						std::string safeChildName = xmlSanitizeElementName(childName);
+						if (!childVal || childVal->type == asvJSONValue::NULL_VAL) {
+							out += "<" + safeChildName + "/>";
+						} else if (childVal->type == asvJSONValue::STRING && childVal->str_data.empty()) {
+							out += "<" + safeChildName + "/>";
+						} else if (childVal->type == asvJSONValue::STRING) {
+							out += "<" + safeChildName + ">" + xmlEscapeContent(childVal->str_data) + "</" + safeChildName + ">";
+						} else if (childVal->type == asvJSONValue::INT) {
+							char buf[32];
+							auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), childVal->num);
+							if (ec == std::errc()) out += "<" + safeChildName + ">" + std::string(buf, ptr) + "</" + safeChildName + ">";
+						} else if (childVal->type == asvJSONValue::DOUBLE) {
+							std::string val; fmtDoubleVal(childVal->dbl, val);
+							out += "<" + safeChildName + ">" + xmlEscapeContent(val) + "</" + safeChildName + ">";
+						} else if (childVal->type == asvJSONValue::BOOL_VAL) {
+							out += "<" + safeChildName + ">" + (childVal->flag ? "true" : "false") + "</" + safeChildName + ">";
+						} else {
+							size_t before = out.size();
+							childVal->toXML(out, childName, 0);
+							if (!out.empty() && out.back() == '\n') out.pop_back();
+						}
 					} else if (item->type == asvJSONValue::OBJECT) {
+						size_t before = out.size();
 						item->toXML(out, "item", 0);
+						if (!out.empty() && out.back() == '\n') out.pop_back();
 					} else if (item->type == asvJSONValue::ARRAY) {
+						size_t before = out.size();
 						item->toXML(out, "item", 0);
+						if (!out.empty() && out.back() == '\n') out.pop_back();
 					} else if (item->type == asvJSONValue::INT) {
 						char buf[32];
 						auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num);
@@ -152,16 +174,46 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				out += "</" + xmlSanitizeElementName(name) + ">\n";
 				break;
 			}
-			out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
-			for (const auto& [k, v] : *obj) v->toXML(out, k, indent + 1);
+			out += pad + "<" + xmlSanitizeElementName(name);
+			for (const auto& [k, v] : *obj) {
+				if (!k.empty() && k[0] == '@') out += " " + k.substr(1) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
+			}
+			out += ">\n";
+			for (const auto& [k, v] : *obj) {
+				if (!k.empty() && k[0] == '@') continue;
+				v->toXML(out, k, indent + 1);
+			}
 			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		}
 		case T::ARRAY: {
 			if (!arr) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
-			out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
-			for (const auto& item : *arr) item->toXML(out, "item", indent + 1);
-			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
+			if (arr->empty()) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
+			bool allObjects = true;
+			for (const auto& item : *arr) {
+				if (item->type != asvJSONValue::OBJECT) { allObjects = false; break; }
+			}
+			if (allObjects) {
+				for (const auto& item : *arr) {
+					item->toXML(out, name, indent);
+				}
+			} else {
+				out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
+				for (const auto& item : *arr) {
+					out += pad + "  <item";
+					if (item->type == asvJSONValue::NULL_VAL) {
+						out += "/>\n";
+					} else {
+						out += ">";
+						if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
+						else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
+						else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
+						else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
+						out += "</item>\n";
+					}
+				}
+				out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
+			}
 			break;
 		}
 		default:

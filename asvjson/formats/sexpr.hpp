@@ -208,6 +208,26 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
     if (items.size() == 2) {
       return '{' + key + ':' + items[1] + '}';
     }
+    // Check if all remaining items are objects — merge into single object
+    bool allObj = true;
+    for (size_t j = 1; j < items.size(); j++) {
+      if (itemTypes[j] != -2) { allObj = false; break; }
+    }
+    if (allObj) {
+      std::string r = '{' + key + ":{";
+      for (size_t j = 1; j < items.size(); j++) {
+        if (j > 1) r += ',';
+        // Each item is {"k":"v"} — strip outer braces to merge key-value pairs
+        const auto& s = items[j];
+        if (s.size() >= 2 && s.front() == '{' && s.back() == '}') {
+          r += s.substr(1, s.size() - 2);
+        } else {
+          r += s;
+        }
+      }
+      r += "}}";
+      return r;
+    }
     std::string r = '{' + key + ":[";
     for (size_t j = 1; j < items.size(); j++) {
       if (j > 1) r += ',';
