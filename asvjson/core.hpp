@@ -67,13 +67,13 @@
 #include "detail/common.hpp"
 #ifdef _WIN32
 namespace asvJSONInternal {
-inline void gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_s(tm, &tt); }
+inline bool gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); return gmtime_s(tm, &tt) == 0; }
 inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_s(tm, &tt); }
 } // namespace asvJSONInternal
 #define asvjson_timegm _mkgmtime
 #else
 namespace asvJSONInternal {
-inline void gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); gmtime_r(&tt, tm); }
+inline bool gmtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); return gmtime_r(&tt, tm) != nullptr; }
 inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_cast<time_t>(*t); localtime_r(&tt, tm); }
 } // namespace asvJSONInternal
 #define asvjson_timegm timegm
@@ -1653,8 +1653,8 @@ static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 
 static void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
 	char buf[32];
-	std::tm tm;
-	gmtimeSafe(&tm, &ts);
+	std::tm tm{};
+	if (!gmtimeSafe(&tm, &ts)) { out += "null"; return; }
 	if (ms > 0) {
 		std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
 		out += buf;
@@ -2193,7 +2193,6 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 inline std::string asvJSON::toBSON() const {
 	std::vector<uint8_t> out;
 	if (!root) return {};
-	// BSON root document - no type byte, just docSize + elements + \0
 	auto writeLE32 = [](std::vector<uint8_t>& buf, uint32_t v) {
 		buf.push_back(static_cast<uint8_t>(v));
 		buf.push_back(static_cast<uint8_t>(v >> 8));
@@ -2228,6 +2227,7 @@ inline std::string asvJSON::toBSON() const {
 		root->toBSON(sub);
 	}
 	sub.push_back(0);
+	if (sub.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) return {};
 	uint32_t totalSize = static_cast<uint32_t>(sub.size());
 	sub[subSizePos] = static_cast<uint8_t>(totalSize);
 	sub[subSizePos + 1] = static_cast<uint8_t>(totalSize >> 8);
