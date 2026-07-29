@@ -1613,7 +1613,7 @@ public:
 	// Merge & Patch
 	void merge(const asvJSON& other);
 	bool applyPatch(const asvJSON& patch);
-	asvJSON applyMergePatch(const asvJSON& patch) const;
+	asvJSON applyMergePatch(const asvJSON& patch, int depth = 0) const;
 
 	// Static conversion helpers
 	static std::vector<uint8_t> messagePackFromString(const std::string& jsonStr);
@@ -1992,8 +1992,9 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 
 // Merge & Patch
 
-static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch) {
+static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch, int depth) {
 	if (!target || !patch) return;
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
 	if (patch->type != asvJSONValue::OBJECT || !patch->obj) {
 		return;
 	}
@@ -2007,7 +2008,7 @@ static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch)
 		}
 		auto it = mapFind(*target->obj, k);
 		if (it != target->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-			mergePatchRecursive(it->second.get(), v.get());
+			mergePatchRecursive(it->second.get(), v.get(), depth + 1);
 		} else {
 			target->obj->insert_or_assign(k, cloneValue(v.get()));
 		}
@@ -2029,16 +2030,17 @@ inline void asvJSON::merge(const asvJSON& other) {
 	for (const auto& [k, v] : *patch->obj) {
 		auto it = mapFind(*root->obj, k);
 		if (it != root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-			mergePatchRecursive(it->second.get(), v.get());
+			mergePatchRecursive(it->second.get(), v.get(), 0);
 		} else {
 			root->obj->insert_or_assign(k, cloneValue(v.get()));
 		}
 	}
 }
 
-inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
+inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 	asvJSON result = *this;
 	if (!patch.root) return result;
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return result;
 	const asvJSONValue* p = patch.root.get();
 	if (p->type != asvJSONValue::OBJECT || !p->obj) {
 		result.root = cloneValue(p);
@@ -2057,7 +2059,7 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch) const {
 				subDoc.root = cloneValue(it->second.get());
 				asvJSON patchDoc;
 				patchDoc.root = cloneValue(v.get());
-				asvJSON subResult = subDoc.applyMergePatch(patchDoc);
+				asvJSON subResult = subDoc.applyMergePatch(patchDoc, depth + 1);
 				it->second = std::move(subResult.root);
 			} else {
 				result.root->obj->insert_or_assign(k, cloneValue(v.get()));
