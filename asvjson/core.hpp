@@ -199,16 +199,6 @@ struct asvJSONValue {
 		return v;
 	}
 
-	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeStringOwned(char* s, size_t len) {
-		if (!s || !asvJSONValue::checkStringLen(len)) { delete[] s; return nullptr; }
-		std::unique_ptr<char[]> guard(s);
-		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
-		if (!v) return nullptr;
-		v->type = STRING;
-		try { v->str_data.assign(guard.get(), len); } catch (...) { return nullptr; }
-		return v;
-	}
-
 	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeStringView(std::string_view sv) {
 		return makeString(sv.data(), sv.size());
 	}
@@ -1288,20 +1278,32 @@ public:
 		size_t start = 0;
 		while (start < path.size()) {
 			if (!cur || cur->type != asvJSONValue::OBJECT) return nullptr;
-			std::string seg;
-			while (start < path.size() && path[start] != '.') {
-				if (path[start] == '\\' && start + 1 < path.size()) {
-					start++;
-					seg += path[start];
-				} else {
-					seg += path[start];
+			size_t end = start;
+			bool hasEscape = false;
+			while (end < path.size() && path[end] != '.') {
+				if (path[end] == '\\' && end + 1 < path.size()) {
+					hasEscape = true;
+					end++;
 				}
-				start++;
+				end++;
 			}
-			if (seg.empty()) return nullptr;
+			if (start == end) return nullptr;
+			std::string_view seg;
+			std::string segBuf;
+			if (hasEscape) {
+				segBuf.reserve(end - start);
+				for (size_t i = start; i < end; i++) {
+					if (path[i] == '\\' && i + 1 < path.size()) i++;
+					segBuf += path[i];
+				}
+				seg = segBuf;
+			} else {
+				seg = path.substr(start, end - start);
+			}
 			auto it = mapFind(*cur->obj, seg);
 			if (it == cur->obj->end()) return nullptr;
 			cur = it->second.get();
+			start = end;
 			if (start < path.size() && path[start] == '.') start++;
 		}
 		return cur;
