@@ -389,7 +389,7 @@ void example_json_pointer() {
 	auto* v = json.getByPointer("/user/name");
 	if (v) std::cout << "getByPointer /user/name: " << (v->type == asvJSONValue::STRING ? std::string(v->str_data.data(), v->str_data.size()) : "") << std::endl;
 	
-	json.setByPointer("/user/age", asvJSONValue::makeInt(30).release());
+	json.setByPointer("/user/age", asvJSONValue::makeInt(30));
 	std::cout << "After setByPointer /user/age: " << json.serialize() << std::endl;
 	
 	json.removeByPointer("/user/address");
@@ -397,8 +397,8 @@ void example_json_pointer() {
 	
 	asvJSON json2;
 	json2.parse(std::string("[1, 2, 3]"));
-	json2.setByPointer("/-", asvJSONValue::makeInt(4).release());
-	json2.setByPointer("/-", asvJSONValue::makeInt(5).release());
+	json2.setByPointer("/-", asvJSONValue::makeInt(4));
+	json2.setByPointer("/-", asvJSONValue::makeInt(5));
 	std::cout << "After array append: " << json2.serialize() << std::endl << std::endl;
 }
 

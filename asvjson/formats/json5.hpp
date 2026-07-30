@@ -419,7 +419,7 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::REGEX: {
       {
-        size_t sep = v->str_data.rfind('|');
+        size_t sep = v->str_data.rfind('\0');
         std::string_view pattern = (sep != std::string_view::npos) ? v->str_data.substr(0, sep) : v->str_data;
         std::string_view opts = (sep != std::string_view::npos) ? v->str_data.substr(sep + 1) : "";
         out += '{';

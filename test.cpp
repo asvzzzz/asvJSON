@@ -594,7 +594,7 @@ TEST(testSetByPointer) {
 	asvJSON json;
 	json.parse(std::string("{\"name\": \"Test\"}"));
 	
-	json.setByPointer("/name", asvJSONValue::makeString("Updated", 7).release());
+	json.setByPointer("/name", asvJSONValue::makeString("Updated", 7));
 	
 	ASSERT_EQ(json.getString("name"), "Updated");
 }
@@ -603,7 +603,7 @@ TEST(testSetByPointerArrayExpand) {
 	asvJSON json;
 	json.parse(std::string("{\"arr\": [1]}"));
 	
-	json.setByPointer("/arr/5", asvJSONValue::makeInt(2).release());
+	json.setByPointer("/arr/5", asvJSONValue::makeInt(2));
 	
 	auto* arr = json.getArray("arr");
 	if (!arr) throw std::runtime_error("array not found");
@@ -614,8 +614,8 @@ TEST(testSetByPointerArrayAppend) {
 	asvJSON json;
 	json.parse(std::string("[1, 2, 3]"));
 	
-	json.setByPointer("/-", asvJSONValue::makeInt(4).release());
-	
+	json.setByPointer("/-", asvJSONValue::makeInt(4));
+
 	auto* root = json.getRoot();
 	if (!root || root->type != asvJSONValue::ARRAY) throw std::runtime_error("root not array");
 	if (root->size() != 4) throw std::runtime_error("array size should be 4");
@@ -884,13 +884,13 @@ TEST(testJSONPointerEscape) {
 TEST(testJSONPointerArrayAppend) {
 	asvJSON json;
 	json.parse(std::string("{\"arr\": [1, 2, 3]}"));
-	bool ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(4).release());
+	bool ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(4));
 	ASSERT(ok);
 	auto* arr = json.getArray("arr");
 	ASSERT(arr != nullptr);
 	ASSERT_EQ(arr->size(), 4);
 	ASSERT_EQ(arr->get(3)->getInt(), 4);
-	ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(5).release());
+	ok = json.setByPointer("/arr/-", asvJSONValue::makeInt(5));
 	ASSERT(ok);
 	arr = json.getArray("arr");
 	ASSERT_EQ(arr->size(), 5);
@@ -1686,9 +1686,9 @@ TEST(testAPICoverage) {
 	{
 		asvJSON json2;
 		const unsigned char oidBytes[12] = {0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0x00, 0x00};
-		json2.setByPointer("/sub/oid", asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(oidBytes), 12)).release());
-		json2.setByPointer("/sub/ts", asvJSONValue::makeTimestamp(1000).release());
-		json2.setByPointer("/sub/rx", asvJSONValue::makeRegex("^test$", "gi").release());
+		json2.setByPointer("/sub/oid", asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(oidBytes), 12)));
+		json2.setByPointer("/sub/ts", asvJSONValue::makeTimestamp(1000));
+		json2.setByPointer("/sub/rx", asvJSONValue::makeRegex("^test$", "gi"));
 		ASSERT_EQ(json2.getNestedObjectId("sub.oid"), std::string(reinterpret_cast<const char*>(oidBytes), 12));
 		ASSERT_EQ(json2.getNestedTimestamp("sub.ts"), 1000);
 		auto nrx = json2.getNestedRegex("sub.rx");
@@ -2799,9 +2799,8 @@ TEST(testFromYAML) {
 		auto* oid = j2.getRoot()->get("oid");
 		ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
 		ASSERT_EQ(std::string_view(oid->str_data), std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
-		auto* rx = j2.getRoot()->get("rx");
-		ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
-		ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+		ASSERT_EQ(j2.getRegexPattern("rx"), "^test$");
+		ASSERT_EQ(j2.getRegexOptions("rx"), "gi");
 		auto* bin2 = j2.getRoot()->get("bin");
 		ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
 		ASSERT_EQ(bin2->bin_data.size(), size_t(2));
@@ -4788,9 +4787,8 @@ TEST(testToJSON5) {
     auto* oid = j2.getRoot()->get("oid");
     ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
     ASSERT_EQ(std::string_view(oid->str_data), std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
-    auto* rx = j2.getRoot()->get("rx");
-    ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
-    ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+    ASSERT_EQ(j2.getRegexPattern("rx"), "^test$");
+    ASSERT_EQ(j2.getRegexOptions("rx"), "gi");
     auto* bin2 = j2.getRoot()->get("bin");
     ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
     ASSERT_EQ(bin2->bin_data.size(), size_t(2));
@@ -4893,9 +4891,9 @@ TEST(testFromJSON5) {
   {
     asvJSON j;
     ASSERT(j.fromJSON5(std::string_view(R"json5({"$regex":"^test$","$options":"gi"})json5")));
-    auto* rx = j.getRoot();
-    ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
-    ASSERT_EQ(std::string_view(rx->str_data), "^test$|gi");
+    auto [pat, opt] = j.getNestedRegex("");
+    ASSERT_EQ(pat, "^test$");
+    ASSERT_EQ(opt, "gi");
   }
   {
     asvJSON j;

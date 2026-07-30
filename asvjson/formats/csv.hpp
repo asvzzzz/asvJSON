@@ -153,7 +153,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				std::string s; fmtObjectIdHexVal(v->str_data, s); return s;
 			}
 			case T::REGEX: {
-				size_t sep = v->str_data.rfind('|');
+				size_t sep = v->str_data.rfind('\0');
 				return (sep != std::string_view::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
 			}
 			case T::TIMESTAMP: return std::to_string(v->num);

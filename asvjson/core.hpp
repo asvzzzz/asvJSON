@@ -313,7 +313,7 @@ struct asvJSONValue {
 		try {
 			v->str_data.reserve(patLen + optLen + 1);
 			v->str_data.append(pattern, patLen);
-			v->str_data.push_back('|');
+			v->str_data.push_back('\0');
 			if (optLen > 0) v->str_data.append(options, optLen);
 		} catch (...) { return nullptr; }
 		return v;
@@ -809,7 +809,7 @@ private:
 					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
 				}
 				// Also check if exponent shifts digits beyond double precision
-				if (sigDigits > 15) {
+				if (sigDigits > 17) {
 					// Precision would be lost - store as raw number string
 					auto v = asvJSONValue::makeString(buf, numLen);
 					v->raw_number = true;
@@ -831,7 +831,7 @@ private:
 				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
 					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
 				}
-				if (sigDigits > 15) {
+				if (sigDigits > 17) {
 					auto v = asvJSONValue::makeString(buf, numLen);
 					v->raw_number = true;
 					return v;
@@ -1186,7 +1186,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.rfind('|');
+		size_t sep = v->str_data.rfind('\0');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
 	}
 
@@ -1194,7 +1194,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.rfind('|');
+		size_t sep = v->str_data.rfind('\0');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1) : std::string_view();
 	}
 
@@ -1202,7 +1202,7 @@ public:
 		if (!root) return {};
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.rfind('|');
+		size_t sep = v->str_data.rfind('\0');
 		if (sep == std::string_view::npos) return {std::string_view(v->str_data), std::string_view()};
 		return {std::string_view(v->str_data.data(), sep), std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)};
 	}
@@ -1211,7 +1211,7 @@ public:
 		if (!root) return false;
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::REGEX) return false;
-		size_t sep = v->str_data.rfind('|');
+		size_t sep = v->str_data.rfind('\0');
 		if (sep == std::string_view::npos) { pattern = v->str_data; options.clear(); }
 		else { pattern = v->str_data.substr(0, sep); options = v->str_data.substr(sep + 1); }
 		return true;
@@ -1255,7 +1255,7 @@ public:
 		if (!root) return {};
 		auto* v = getNested(path);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
-		size_t sep = v->str_data.rfind('|');
+		size_t sep = v->str_data.rfind('\0');
 		if (sep == std::string_view::npos) return {std::string_view(v->str_data), std::string_view()};
 		return {std::string_view(v->str_data.data(), sep), std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)};
 	}
@@ -1281,7 +1281,7 @@ public:
 			size_t end = start;
 			bool hasEscape = false;
 			while (end < path.size() && path[end] != '.') {
-				if (path[end] == '\\' && end + 1 < path.size()) {
+				if (path[end] == '\\' && end + 1 < path.size() && (path[end + 1] == '.' || path[end + 1] == '\\')) {
 					hasEscape = true;
 					end++;
 				}
@@ -1416,9 +1416,13 @@ public:
 	[[nodiscard]] bool isDouble(std::string_view key) const {
 		if (!root) return false;
 		auto* v = root->get(key);
-		if (v && v->type == asvJSONValue::DOUBLE) return true;
-		if (v && v->type == asvJSONValue::INT) return true;
-		return false;
+		return v && v->type == asvJSONValue::DOUBLE;
+	}
+
+	[[nodiscard]] bool isNumeric(std::string_view key) const {
+		if (!root) return false;
+		auto* v = root->get(key);
+		return v && (v->type == asvJSONValue::DOUBLE || v->type == asvJSONValue::INT);
 	}
 
 	[[nodiscard]] bool isBool(std::string_view key) const {
@@ -1609,7 +1613,7 @@ public:
 	// JSON Pointer
 	asvJSONValue* getByPointer(std::string_view ptr);
 	const asvJSONValue* getByPointer(std::string_view ptr) const;
-	bool setByPointer(std::string_view ptr, asvJSONValue* value);
+	bool setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value);
 	bool removeByPointer(std::string_view ptr);
 
 	// Merge & Patch
@@ -1675,7 +1679,7 @@ static void fmtObjectIdHexVal(std::string_view s, std::string& out) {
 }
 
 static void fmtRegexVal(std::string_view s, std::string& out) {
-	size_t sep = s.rfind('|');
+	size_t sep = 	s.rfind('\0');
 	out.push_back('"');
 	appendJsonEscaped(out, (sep != std::string_view::npos) ? s.substr(0, sep) : s);
 	if (sep != std::string_view::npos && sep + 1 < s.size()) {
@@ -1740,7 +1744,7 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 		}
 		case asvJSONValue::REGEX: {
 			{
-				size_t sep = v->str_data.rfind('|');
+				size_t sep = v->str_data.rfind('\0');
 				std::string_view pattern = (sep != std::string_view::npos) ? v->str_data.substr(0, sep) : v->str_data;
 				std::string_view opts = (sep != std::string_view::npos) ? v->str_data.substr(sep + 1) : "";
 				out += "{\"$regex\":\"";
@@ -1792,7 +1796,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 		case asvJSONValue::BINARY: return asvJSONValue::makeBinary(v->bin_data.data(), v->bin_data.size());
 		case asvJSONValue::OBJECTID: return asvJSONValue::makeObjectId(v->str_data);
 		case asvJSONValue::REGEX: {
-			size_t sep = v->str_data.rfind('|');
+			size_t sep = v->str_data.rfind('\0');
 			if (sep != std::string_view::npos) {
 				auto pattern = v->str_data.substr(0, sep);
 				auto opts = v->str_data.substr(sep + 1);
@@ -1879,10 +1883,9 @@ inline const asvJSONValue* asvJSON::getByPointer(std::string_view ptr) const {
 	return const_cast<asvJSON*>(this)->getByPointer(ptr);
 }
 
-inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
-	if (ptr.empty() || ptr == "/") { root.reset(value); return true; }
+inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value) {
+	if (ptr.empty() || ptr == "/") { root = std::move(value); return true; }
 	if (ptr[0] != '/') return false;
-	std::unique_ptr<asvJSONValue> guard(value);
 	if (!root) {
 		size_t nextSlash = ptr.find('/', 1);
 		std::string_view firstSeg = (nextSlash == std::string_view::npos) ? ptr.substr(1) : ptr.substr(1, nextSlash - 1);
@@ -1902,7 +1905,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 		if (cur->type == asvJSONValue::OBJECT && cur->obj) {
 			std::string key = decodeJSONPointerKey(seg);
 			if (isLast) {
-				cur->obj->insert_or_assign(std::move(key), std::move(guard));
+				cur->obj->insert_or_assign(std::move(key), std::move(value));
 				return true;
 			}
 			auto it = mapFind(*cur->obj, key);
@@ -1930,7 +1933,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (seg == "-") {
 				if (!isLast) return false;
-				cur->arr->push_back(std::move(guard));
+				cur->arr->push_back(std::move(value));
 				return true;
 			}
 			if (!isArrayIndex(seg)) return false;
@@ -1939,7 +1942,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, asvJSONValue* value) {
 			if (ec != std::errc()) return false;
 			if (isLast) {
 				if (idx >= cur->arr->size()) cur->arr->resize(idx + 1);
-				(*cur->arr)[idx] = std::move(guard);
+				(*cur->arr)[idx] = std::move(value);
 				return true;
 			}
 			if (idx >= cur->arr->size()) return false;
@@ -2057,12 +2060,7 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 		} else {
 			auto it = result.root->obj ? mapFind(*result.root->obj, k) : result.root->obj->end();
 			if (it != result.root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-				asvJSON subDoc;
-				subDoc.root = cloneValue(it->second.get());
-				asvJSON patchDoc;
-				patchDoc.root = cloneValue(v.get());
-				asvJSON subResult = subDoc.applyMergePatch(patchDoc, depth + 1);
-				it->second = std::move(subResult.root);
+				mergePatchRecursive(it->second.get(), v.get(), depth + 1);
 			} else {
 				result.root->obj->insert_or_assign(k, cloneValue(v.get()));
 			}
@@ -2128,7 +2126,7 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 		if (op == "add" || op == "replace") {
 			auto valIt = mapFind(*elem->obj, std::string_view("value"));
 			if (valIt == elem->obj->end()) return false;
-			if (!setByPointer(path, cloneValue(valIt->second.get()).release())) return false;
+			if (!setByPointer(path, cloneValue(valIt->second.get()))) return false;
 		} else if (op == "remove") {
 			if (!removeByPointer(path)) return false;
 		} else if (op == "move" || op == "copy") {
@@ -2137,11 +2135,11 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			auto* fromVal = getByPointer(fromIt->second->str_data);
 			if (!fromVal) return false;
 			if (op == "move") {
-				auto* fromClone = cloneValue(fromVal).release();
-				if (!removeByPointer(fromIt->second->str_data)) { delete fromClone; return false; }
-				if (!setByPointer(path, fromClone)) return false;
+				auto fromClone = cloneValue(fromVal);
+				if (!removeByPointer(fromIt->second->str_data)) return false;
+				if (!setByPointer(path, std::move(fromClone))) return false;
 			} else {
-				if (!setByPointer(path, cloneValue(fromVal).release())) return false;
+				if (!setByPointer(path, cloneValue(fromVal))) return false;
 			}
 		} else if (op == "test") {
 			auto valIt = mapFind(*elem->obj, std::string_view("value"));
@@ -2209,22 +2207,28 @@ inline std::string asvJSON::toBSON() const {
 	writeLE32(sub, 0);
 	if (root->type == asvJSONValue::OBJECT && root->obj) {
 		for (const auto& [k, v] : *root->obj) {
-			size_t startSize = sub.size();
-			v->toBSON(sub);
-			if (sub.size() > startSize) {
-				sub.insert(sub.begin() + startSize + 1, k.begin(), k.end());
-				sub.insert(sub.begin() + startSize + 1 + k.size(), 0);
+			std::vector<uint8_t> elem;
+			elem.reserve(64 + k.size());
+			size_t elemStart = elem.size();
+			v->toBSON(elem);
+			if (elem.size() > elemStart) {
+				elem.insert(elem.begin() + elemStart + 1, k.begin(), k.end());
+				elem.insert(elem.begin() + elemStart + 1 + k.size(), 0);
+				sub.insert(sub.end(), elem.begin() + elemStart, elem.end());
 			}
 		}
 	} else if (root->type == asvJSONValue::ARRAY && root->arr) {
 		for (size_t i = 0; i < root->arr->size(); i++) {
-			size_t startSize = sub.size();
-			(*root->arr)[i]->toBSON(sub);
-			if (sub.size() > startSize) {
+			std::vector<uint8_t> elem;
+			elem.reserve(64);
+			size_t elemStart = elem.size();
+			(*root->arr)[i]->toBSON(elem);
+			if (elem.size() > elemStart) {
 				char idx[16];
 				int n = snprintf(idx, sizeof(idx), "%zu", i);
-				sub.insert(sub.begin() + startSize + 1, idx, idx + n);
-				sub.insert(sub.begin() + startSize + 1 + n, 0);
+				elem.insert(elem.begin() + elemStart + 1, idx, idx + n);
+				elem.insert(elem.begin() + elemStart + 1 + n, 0);
+				sub.insert(sub.end(), elem.begin() + elemStart, elem.end());
 			}
 		}
 	} else {

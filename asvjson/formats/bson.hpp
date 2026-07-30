@@ -42,11 +42,14 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			writeLE32(sub, 0);
 			if (obj) {
 				for (const auto& [k, v] : *obj) {
-					size_t startSize = sub.size();
-					v->toBSON(sub);
-					if (sub.size() > startSize) {
-						sub.insert(sub.begin() + startSize + 1, k.begin(), k.end());
-						sub.insert(sub.begin() + startSize + 1 + k.size(), 0);
+					std::vector<uint8_t> elem;
+					elem.reserve(64 + k.size());
+					size_t elemStart = elem.size();
+					v->toBSON(elem);
+					if (elem.size() > elemStart) {
+						elem.insert(elem.begin() + elemStart + 1, k.begin(), k.end());
+						elem.insert(elem.begin() + elemStart + 1 + k.size(), 0);
+						sub.insert(sub.end(), elem.begin() + elemStart, elem.end());
 					}
 				}
 			}
@@ -67,13 +70,16 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			writeLE32(sub, 0);
 			if (arr) {
 				for (size_t i = 0; i < arr->size(); i++) {
-					size_t startSize = sub.size();
-					(*arr)[i]->toBSON(sub);
-					if (sub.size() > startSize) {
+					std::vector<uint8_t> elem;
+					elem.reserve(64);
+					size_t elemStart = elem.size();
+					(*arr)[i]->toBSON(elem);
+					if (elem.size() > elemStart) {
 						char idx[16];
 						int n = snprintf(idx, sizeof(idx), "%zu", i);
-						sub.insert(sub.begin() + startSize + 1, idx, idx + n);
-						sub.insert(sub.begin() + startSize + 1 + n, 0);
+						elem.insert(elem.begin() + elemStart + 1, idx, idx + n);
+						elem.insert(elem.begin() + elemStart + 1 + n, 0);
+						sub.insert(sub.end(), elem.begin() + elemStart, elem.end());
 					}
 				}
 			}
@@ -108,7 +114,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 		case T::NULL_VAL: out.push_back(0x0A); break;
 		case T::REGEX: {
 			out.push_back(0x0B);
-			size_t sep = str_data.rfind('|');
+			size_t sep = str_data.rfind('\0');
 			std::string_view pattern = (sep != std::string_view::npos) ? std::string_view(str_data.data(), sep) : str_data;
 			std::string_view opts = (sep != std::string_view::npos) ? std::string_view(str_data.data() + sep + 1, str_data.size() - sep - 1) : std::string_view();
 			out.insert(out.end(), pattern.begin(), pattern.end());
