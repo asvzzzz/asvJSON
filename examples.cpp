@@ -1238,6 +1238,29 @@ void example_from_ini() {
 	std::cout << std::endl;
 }
 
+void example_to_ude() {
+	std::cout << "=== UDE Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":"10001"},"tags":["admin","user"]})"));
+	std::cout << json.toUDE() << std::endl;
+}
+
+void example_from_ude() {
+	std::cout << "=== UDE Input ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input = "# UDE v1.0\nname: John\nage: 30\nactive: true\ntags: [admin, user]\n";
+	if (json.fromUDE(input)) {
+		std::cout << "  name=" << json.getString("name")
+		          << " age=" << json.getInt("age")
+		          << " active=" << json.getBool("active")
+		          << " tags[0]=" << json.getRoot()->getConst("tags")->get(static_cast<size_t>(0))->getString()
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1311,6 +1334,8 @@ int main() {
 	example_from_json5();
 	example_to_ini();
 	example_from_ini();
+	example_to_ude();
+	example_from_ude();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

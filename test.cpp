@@ -5405,6 +5405,507 @@ TEST(testFromINI) {
   }
 }
 
+TEST(testToUDE) {
+  // Simple object: scalar types serialize bare
+  {
+    asvJSON j;
+    j.parse(std::string("{\"key\":\"val\",\"num\":42,\"flag\":true,\"nullval\":null}"));
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("key: val") != std::string::npos);
+    ASSERT(ude.find("num: 42") != std::string::npos);
+    ASSERT(ude.find("flag: true") != std::string::npos);
+    ASSERT(ude.find("nullval: null") != std::string::npos);
+  }
+  // Strings that would be misread as other types are quoted
+  {
+    asvJSON j;
+    j.putString("title", "Hello World");
+    j.putString("numstr", "5432");
+    j.putString("boolstr", "true");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find(R"(title: "Hello World")") != std::string::npos);
+    ASSERT(ude.find(R"(numstr: "5432")") != std::string::npos);
+    ASSERT(ude.find(R"(boolstr: "true")") != std::string::npos);
+  }
+  // Empty root object
+  {
+    asvJSON j;
+    j.parse(std::string("{}"));
+    ASSERT_EQ(j.toUDE(), std::string(""));
+  }
+  // Root array
+  {
+    asvJSON j;
+    j.parse(std::string("[1,2,3]"));
+    ASSERT_EQ(j.toUDE(), std::string("[1, 2, 3]\n"));
+  }
+  // Array of objects is serialized multiline
+  {
+    asvJSON j;
+    j.parse(std::string("{\"items\":[{\"x\":1},{\"x\":2}]}"));
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("items: [") != std::string::npos);
+    ASSERT(ude.find("x: 1") != std::string::npos);
+    ASSERT(ude.find("x: 2") != std::string::npos);
+  }
+  // Multiline string becomes a block scalar
+  {
+    asvJSON j;
+    j.putString("msg", "line1\nline2");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: |") != std::string::npos);
+    ASSERT(ude.find("  line1") != std::string::npos);
+    ASSERT(ude.find("  line2") != std::string::npos);
+  }
+  // Keys that are not identifier-like are quoted
+  {
+    asvJSON j;
+    j.putString("my key", "v");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find(R"("my key": v)") != std::string::npos);
+  }
+  // Binary becomes !base64
+  {
+    asvJSON j;
+    uint8_t data[] = {0x01, 0x02, 0x03};
+    j.putBinary("data", data, 3);
+    std::string ude = j.toUDE();
+    ASSERT(ude.find(R"(!base64 "AQID")") != std::string::npos);
+  }
+  // Regex becomes !regex
+  {
+    asvJSON j;
+    j.putRegex("re", "a+b", "i");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("!regex ") != std::string::npos);
+  }
+  // Datetime becomes !datetime
+  {
+    asvJSON j;
+    j.putDateTime("ts", time(nullptr));
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("!datetime \"") != std::string::npos);
+  }
+}
+
+TEST(testFromUDE) {
+  // Simple key-value with type inference
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: val\nnum: 42\nflag: true\nnil: null\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+    ASSERT(j.get("num") != nullptr && j.get("num")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("num"), int64_t(42));
+    ASSERT(j.get("flag") != nullptr && j.get("flag")->type == asvJSONValue::BOOL_VAL);
+    ASSERT_EQ(j.getBool("flag"), true);
+    ASSERT(j.get("nil") != nullptr && j.get("nil")->type == asvJSONValue::NULL_VAL);
+  }
+  // Quoted strings with escapes
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("path: \"C:\\\\Program Files\"\nmsg: \"hello\\nworld\"\n"));
+    ASSERT_EQ(std::string(j.getString("path")), "C:\\Program Files");
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\nworld");
+  }
+  // Dotted keys produce nested objects
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a.b.c: 1\n"));
+    ASSERT(j.getNested("a") != nullptr);
+    ASSERT_EQ(j.getInt("a.b.c"), int64_t(1));
+  }
+  // Inline array
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("list: [1, 2, 3]\n"));
+    auto* arr = j.get("list");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->arr->size(), size_t(3));
+    ASSERT_EQ(arr->arr->at(0)->getInt(), int64_t(1));
+  }
+  // Multiline array
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("list: [\n  1,\n  2,\n  3\n]\n"));
+    auto* arr = j.get("list");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->arr->size(), size_t(3));
+  }
+  // Inline object
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("db: {host: localhost, port: 5432}\n"));
+    ASSERT_EQ(std::string(j.getString("db.host")), "localhost");
+    ASSERT_EQ(j.getInt("db.port"), int64_t(5432));
+  }
+  // Block scalar '|'
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  line1\n  line2\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2");
+  }
+  // Folded scalar '>'
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: >\n  line1\n  line2\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "line1 line2");
+  }
+  // Number bases and doubles
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("h: 0xFF\no: 0o17\nb: 0b1010\nd: 1.5\n"));
+    ASSERT_EQ(j.getInt("h"), int64_t(255));
+    ASSERT_EQ(j.getInt("o"), int64_t(15));
+    ASSERT_EQ(j.getInt("b"), int64_t(10));
+    ASSERT(j.get("d") != nullptr && j.get("d")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j.getDouble("d"), 1.5);
+  }
+  // Anchors and aliases
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("name: &a hello\ncopy: *a\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "hello");
+    ASSERT_EQ(std::string(j.getString("copy")), "hello");
+  }
+  // Tags for special types
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("data: !base64 \"AQID\"\nts: !datetime \"2024-01-15T10:30:00Z\"\nraw: !bin 0x0102\nre: !regex \"a+b|i\"\next: !ext \"5:AQID\"\n"));
+    ASSERT(j.get("data") != nullptr && j.get("data")->type == asvJSONValue::BINARY);
+    ASSERT_EQ(j.getBinary("data").size(), size_t(3));
+    ASSERT(j.get("ts") != nullptr && j.get("ts")->type == asvJSONValue::DATETIME);
+    ASSERT(j.get("raw") != nullptr && j.get("raw")->type == asvJSONValue::BINARY);
+    ASSERT(j.get("re") != nullptr && j.get("re")->type == asvJSONValue::REGEX);
+    ASSERT(j.get("ext") != nullptr && j.get("ext")->type == asvJSONValue::EXTENSION);
+    auto ext = j.getExtension("ext");
+    ASSERT_EQ(ext.first, int8_t(5));
+    ASSERT_EQ(ext.second.size(), size_t(3));
+  }
+  // Multiple documents -> array of documents
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1\n// --- End of Document ---\nb: 2\n"));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(root->arr->size(), size_t(2));
+    ASSERT_EQ(root->arr->at(0)->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(root->arr->at(1)->get("b")->getInt(), int64_t(2));
+  }
+  // Comments: #, // and /* ... */
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# line comment\na: 1\n// slash comment\nb: 2\n/* block\ncomment */ c: 3\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+    ASSERT_EQ(j.getInt("c"), int64_t(3));
+  }
+  // Header line is skipped as a comment
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# UDE v1.0\nname: test\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // Plain text fallback for a single-line document
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("just some plain text"));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "just some plain text");
+  }
+  // Empty input -> empty object
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE(""));
+    ASSERT(j.getRoot() != nullptr && j.getRoot()->type == asvJSONValue::OBJECT);
+  }
+  // Duplicate keys: last wins by default, rejected in strict mode
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1\na: 2\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: 1\na: 2\n", true));
+  }
+}
+
+TEST(testUDERoundTrip) {
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"name":"hello","count":7,"ratio":1.5,"ok":true,"nested":{"a":"x","b":[1,2,3]},"words":"two words"})"));
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("name")), "hello");
+    ASSERT_EQ(j2.getInt("count"), int64_t(7));
+    ASSERT_EQ(j2.getDouble("ratio"), 1.5);
+    ASSERT_EQ(j2.getBool("ok"), true);
+    ASSERT_EQ(std::string(j2.getString("nested.a")), "x");
+    auto* arr = j2.getNested("nested.b");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->arr->size(), size_t(3));
+    ASSERT_EQ(std::string(j2.getString("words")), "two words");
+  }
+  // Binary round-trip
+  {
+    asvJSON j;
+    uint8_t data[] = {0x01, 0x02, 0x03, 0xFA};
+    j.putBinary("data", data, 4);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT(j2.get("data") != nullptr && j2.get("data")->type == asvJSONValue::BINARY);
+    auto bin = j2.getBinary("data");
+    ASSERT_EQ(bin.size(), size_t(4));
+    ASSERT_EQ(bin[3], uint8_t(0xFA));
+  }
+  // Multiline string round-trip via block scalar
+  {
+    asvJSON j;
+    j.putString("msg", "line1\nline2");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "line1\nline2");
+  }
+}
+
+TEST(testUDEBlockScalarChomp) {
+  // Default chomping (clip) keeps exactly one trailing newline
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  hello\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\n");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  hello\n\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\n");
+  }
+  // No trailing blank lines -> clip leaves the value unchanged
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  line1\n  line2\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2");
+  }
+  // '-' strips all trailing newlines
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |-\n  hello\n\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "hello");
+  }
+  // '+' keeps all trailing newlines
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |+\n  hello\n\n\n"));
+    // The first empty line terminates the scalar (Appendix A), so only a
+    // single trailing newline is captured even with keep chomping.
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\n");
+  }
+  // Empty first line does not break the block scalar (implicit indent)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n\n  hello\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "\nhello");
+  }
+  // Empty first line with explicit indent: the base indent is known from the
+  // indicator, so a blank first line terminates the scalar (Appendix A)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |2\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "");
+  }
+  // An empty line terminates the block when the base indent > 0 (Appendix A)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  a\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a\n");
+  }
+  // A block scalar terminated by an empty line can be followed by a new key
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  a\n\nother: 1\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a\n");
+    ASSERT_EQ(j.getInt("other"), int64_t(1));
+  }
+  // Folded scalars fold a single break into a space; an empty line terminates
+  // the scalar rather than forming a paragraph break
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: >\n  a\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a\n");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: >\n  a\n  b\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a b");
+  }
+  // Round-trip a string that ends with newlines via |+ serializer
+  {
+    asvJSON j;
+    j.putString("msg", "hello\n");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.getString("msg")), "hello\n");
+  }
+  {
+    asvJSON j;
+    j.putString("msg", "hello\n\n");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.getString("msg")), "hello\n\n");
+  }
+  // Leading newline round-trips as a block scalar (blank line before the
+  // base indent is known is preserved)
+  {
+    asvJSON j;
+    j.putString("msg", "\nhello");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: |") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "\nhello");
+  }
+  // A single trailing newline round-trips as a '|+' block scalar
+  {
+    asvJSON j;
+    j.putString("msg", "a\nb\n");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: |+") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "a\nb\n");
+  }
+  // Internal blank lines cannot round-trip as a block scalar (Appendix A), so
+  // the serializer falls back to a quoted string
+  {
+    asvJSON j;
+    j.putString("msg", "a\n\nb");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: \"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "a\n\nb");
+  }
+  // A first line with leading whitespace cannot round-trip as a block scalar
+  // (it would be absorbed into the base indent), so it is quoted instead
+  {
+    asvJSON j;
+    j.putString("msg", "  a\n  b");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: \"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "  a\n  b");
+  }
+}
+
+TEST(testUDESpecConformance) {
+  // Quoted dotted key is a literal key, unquoted dotted key nests
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"a.b.c\": 1\n"));
+    ASSERT(j.get("a") == nullptr);
+    auto it = j.getRoot()->obj->find("a.b.c");
+    ASSERT(it != j.getRoot()->obj->end());
+    ASSERT_EQ(it->second->getInt(), int64_t(1));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a.b.c: 1\n"));
+    ASSERT(j.getNested("a") != nullptr);
+    ASSERT_EQ(j.getInt("a.b.c"), int64_t(1));
+  }
+  // Literal dotted key round-trips through the serializer
+  {
+    asvJSON j;
+    j.putInt("a.b.c", 1);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(j2.get("a") == nullptr);
+    auto it = j2.getRoot()->obj->find("a.b.c");
+    ASSERT(it != j2.getRoot()->obj->end());
+    ASSERT_EQ(it->second->getInt(), int64_t(1));
+  }
+  // Document separator is exact: a comment merely containing the phrase
+  // "End of Document" must not split the stream
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1\n// we reached the End of Document phase\nb: 2\n"));
+    ASSERT(j.getRoot() != nullptr && j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // A leading '+' is not a valid UDE number sign (SIGNED_INT ::= '-'? INT)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("x: +42\n"));
+    ASSERT(j.get("x") != nullptr && j.get("x")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("x")), "+42");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("x: -42\n"));
+    ASSERT(j.get("x") != nullptr && j.get("x")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("x"), int64_t(-42));
+  }
+  // Unterminated block comment is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: 1\n/* dangling"));
+  }
+}
+
+TEST(testUDEStrict) {
+  // All keys must be quoted in strict mode
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: 1\n", true));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"a\": 1\n", true));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // Duplicate keys rejected in strict mode
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("\"a\": 1\n\"a\": 2\n", true));
+  }
+  // Strict serialization round-trips (keys re-quoted)
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"name":"x","nested":{"v":1}})"));
+    std::string ude = j.toUDE(true);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude, true));
+    ASSERT_EQ(std::string(j2.getString("name")), "x");
+    ASSERT_EQ(j2.getInt("nested.v"), int64_t(1));
+  }
+}
+
+TEST(testUDEAnchors) {
+  // Basic alias after the anchor definition
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("name: &a hello\ncopy: *a\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "hello");
+    ASSERT_EQ(std::string(j.getString("copy")), "hello");
+  }
+  // Anchor values survive later replacement of the key (no dangling pointer)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("x: &a hello\nx: replaced\ny: *a\n"));
+    ASSERT_EQ(std::string(j.getString("x")), "replaced");
+    ASSERT_EQ(std::string(j.getString("y")), "hello");
+  }
+  // Self-referential alias is rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: &x *x\n"));
+  }
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -5695,6 +6196,15 @@ int main() {
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);
 	RUN(testFromINI);
+
+	std::cout << "\n--- UDE Serialization Tests ---\n";
+	RUN(testToUDE);
+	RUN(testFromUDE);
+	RUN(testUDERoundTrip);
+	RUN(testUDEBlockScalarChomp);
+	RUN(testUDESpecConformance);
+	RUN(testUDEStrict);
+	RUN(testUDEAnchors);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

@@ -6,6 +6,7 @@ const SAMPLES = {
   CSV: 'name,version,active\nasvJSON++,1.12.0,true\n',
   TOML: 'name = "asvJSON++"\nversion = "1.12.0"\nactive = true\n\n[metadata]\nauthor = "asv"\nlicense = "MIT"\n',
   INI: '[general]\nname = asvJSON++\nversion = 1.12.0\nactive = true\n\n[metadata]\nauthor = asv\nlicense = MIT\n',
+  UDE: '# UDE v1.0\nname: "asvJSON++"\nversion: 1.12.0\nactive: true\nformats: 17\ntags: [json, c++, header-only]\n',
   JSONLines: '{"name": "asvJSON++", "version": "1.12.0"}\n{"name": "sample2", "version": "2.0.0"}\n',
   Sexpr: '(root\n  (name "asvJSON++")\n  (version "1.12.0")\n  (active true)\n  (tags "json" "c++"))\n',
   TOON: 'name: asvJSON++\nactive: true\nversion: 1.12\nformats: 17\ntags: []\n  - json\n  - c++\n  - header-only\n',
@@ -113,6 +114,7 @@ const FORMAT_INFO = {
   CSV: 'Comma-Separated Values - tabular data (flat structure)',
   TOML: "Tom's Obvious Minimal Language - config file format",
   INI: 'Initialization file - sections with key=value pairs',
+  UDE: 'Unified Data Exchange - header, multi-doc, anchors, tags',
   JSONLines: 'One JSON value per line - streaming-friendly',
   Sexpr: 'S-expressions - Lisp-style parenthesized notation',
   TOON: 'Terse Object-Oriented Notation - compact, readable',
@@ -193,7 +195,7 @@ function downloadOutput() {
   const fmtOpt = parseFmt(outputFormat.value);
   const fmt = fmtOpt.name.toLowerCase();
   const extMap = { json: 'json', json5: 'json5', xml: 'xml', yaml: 'yaml', csv: 'csv',
-    toml: 'toml', ini: 'ini', jsonlines: 'jsonl', sexpr: 'sexpr',
+    toml: 'toml', ini: 'ini', ude: 'ude', jsonlines: 'jsonl', sexpr: 'sexpr',
     toon: 'toon', tron: 'tron', goon: 'goon', protobuftext: 'txt',
     messagepack: 'msgpack', bson: 'bson', cbor: 'cbor', protobuf: 'bin' };
   const ext = extMap[fmt] || 'txt';

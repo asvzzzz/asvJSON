@@ -1,12 +1,12 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, Protobuf, TOML, JSON Lines (NDJSON), and S-Expression serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), and S-Expression serialization.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
 ## Online Converter
 
-Try it online: **https://jx8.ru/** — browser-based converter supporting all 17 formats with file upload/download.
+Try it online: **https://jx8.ru/** — browser-based converter supporting all 18 formats with file upload/download.
 
 ## License
 
@@ -51,6 +51,7 @@ MIT license - see the `LICENSE` file for details.
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
+- UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -159,6 +160,8 @@ int main() {
 | `bool fromTRON(std::string_view input)` | Parse TRON string (class definitions, inheritance, named args). |
 | `std::string toGOON() const` | Serialize to GOON (greatly optimized object notation). |
 | `bool fromGOON(std::string_view input)` | Parse GOON string (indentation-based, tabular arrays, dictionary refs). |
+| `std::string toUDE(bool strict = false) const` | Serialize to UDE (Unified Data Exchange). |
+| `bool fromUDE(std::string_view input, bool strict = false)` | Parse UDE string (header, multi-doc, anchors, tags, block scalars). |
 | `std::vector&lt;uint8_t&gt; toProtobuf(const std::string&amp; schema) const` | Serialize to Protocol Buffers binary wire format (schema-driven). |
 | `bool fromProtobuf(const uint8_t* data, size_t size, const std::string&amp; schema)` | Parse Protocol Buffers binary wire format. |
 | `std::string toProtobufText() const` | Serialize to Protobuf text format (human-readable). |
@@ -758,6 +761,12 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.13.0 (2026-08-04)
+
+- **New format - UDE:** Added `toUDE()` / `fromUDE()` — Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens.
+- **UDE spec conformance:** default chomping now clips (keeps one trailing newline) instead of stripping; block scalars handle a blank first line, and empty lines now terminate the scalar when the base indentation is greater than zero (Appendix A) with a single trailing line break captured; the serializer falls back to quoted strings whenever a value cannot round-trip as a block scalar; quoted dotted keys (`"a.b.c"`) are literal while unquoted ones nest; document separators match exactly (no accidental splits on comments); anchors store deep copies (no dangling pointers) with cycle detection; strict mode requires quoted keys; a leading `+` is no longer accepted as a numeric sign.
+- **Version bump:** 1.12.0 -> 1.13.0
 
 ### 1.12.0 (2026-07-20)
 

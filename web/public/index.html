@@ -10,7 +10,7 @@
 
 <div class="header">
   <div class="header-title">asvJSON++ Converter</div>
-  <div class="header-sub">17 formats · C++17 · header-only</div>
+  <div class="header-sub">18 formats · C++17 · header-only</div>
 </div>
 
 <div class="container">
@@ -27,6 +27,7 @@
           <option value="CSV" title="Comma-Separated Values - tabular data format">CSV</option>
           <option value="TOML" title="Tom's Obvious Minimal Language - configuration file format">TOML</option>
           <option value="INI" title="Initialization file format with sections and key=value pairs">INI</option>
+          <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
           <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>
@@ -44,7 +45,7 @@
       <button class="btn btn-sm" onclick="loadSample('input')">Sample</button>
       <button class="btn btn-sm" onclick="clearInput()">Clear</button>
       <span class="file-label">or <label class="file-link" for="fileInput">Upload file</label></span>
-      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.jsonl,.sexpr,.toon,.tron,.goon,.msgpack,.bson,.cbor,.bin" onchange="loadFile(event)">
+      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.ude,.jsonl,.sexpr,.toon,.tron,.goon,.msgpack,.bson,.cbor,.bin" onchange="loadFile(event)">
     </div>
     <textarea id="inputArea" placeholder="Paste your data here..."></textarea>
     <div class="panel-status" id="inputStatus">Ready</div>
@@ -68,6 +69,7 @@
           <option value="CSV" title="Comma-Separated Values - tabular data format">CSV</option>
           <option value="TOML" title="Tom's Obvious Minimal Language - configuration file format">TOML</option>
           <option value="INI" title="Initialization file format with sections and key=value pairs">INI</option>
+          <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
           <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>

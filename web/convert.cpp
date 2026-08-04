@@ -92,8 +92,8 @@ int main(int argc, char** argv) {
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
-           "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, JSONLines,\n"
-           "         Sexpr, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
+            "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, UDE, JSONLines,\n"
+            "         Sexpr, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
            "         (empty from=JSON, to=JSON)\n";
       return 0;
     }
@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
       else if (fromFmt == "CSV") ok = j.fromCSV(text);
       else if (fromFmt == "TOML") ok = j.fromTOML(text);
       else if (fromFmt == "INI") ok = j.fromINI(text);
+      else if (fromFmt == "UDE") ok = j.fromUDE(text);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(text);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(text);
       else if (fromFmt == "TOON") ok = j.fromTOON(text);
@@ -203,6 +204,7 @@ int main(int argc, char** argv) {
       else if (toFmt == "CSV") result = j.toCSV();
       else if (toFmt == "TOML") result = j.toTOML();
       else if (toFmt == "INI") result = j.toINI();
+      else if (toFmt == "UDE") result = j.toUDE();
       else if (toFmt == "JSONLines") result = j.toJSONLines();
       else if (toFmt == "Sexpr") result = j.toSexpr();
       else if (toFmt == "TOON") result = j.toTOON();

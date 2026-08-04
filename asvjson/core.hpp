@@ -939,6 +939,8 @@ public:
 	bool fromSexpr(std::string_view input);
 	std::string toJSON5(bool pretty = false) const;
 	bool fromJSON5(std::string_view input);
+	std::string toUDE(bool strict = false) const;
+	bool fromUDE(std::string_view input, bool strict = false);
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;

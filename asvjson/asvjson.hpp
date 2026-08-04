@@ -1,9 +1,11 @@
 #pragma once
-// asvJSON++ v1.7.0 - Main entry point
+// asvJSON++ v1.13.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
-// ASVJSON_DISABLE_XML, ASVJSON_DISABLE_YAML, ASVJSON_DISABLE_CSV, ASVJSON_DISABLE_TOML
+// ASVJSON_DISABLE_XML, ASVJSON_DISABLE_YAML, ASVJSON_DISABLE_CSV,
+// ASVJSON_DISABLE_PROTOBUF, ASVJSON_DISABLE_TOML, ASVJSON_DISABLE_SEXPR,
+// ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE
 // before including this header to exclude specific formats.
 
 #include "core.hpp"
@@ -62,4 +64,8 @@
 
 #ifndef ASVJSON_DISABLE_INI
 #include "formats/ini.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_UDE
+#include "formats/ude.hpp"
 #endif
