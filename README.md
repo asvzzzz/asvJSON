@@ -51,7 +51,7 @@ MIT license - see the `LICENSE` file for details.
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
-- UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens
+- UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 
 ### Standards
 - JSON Pointer (RFC 6901)
