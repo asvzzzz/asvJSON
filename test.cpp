@@ -5906,6 +5906,37 @@ TEST(testUDEAnchors) {
   }
 }
 
+TEST(testByteSizeNullRoot) {
+	asvJSON j;
+	ASSERT_EQ(j.byteSize(), 0);
+}
+
+TEST(testByteSizeEmptyObject) {
+	asvJSON j;
+	ASSERT(j.parse(std::string_view("{\"empty\":null}")));
+	ASSERT_EQ(j.byteSize(), j.serialize().size());
+	ASSERT_EQ(j.byteSize(), size_t(14));
+}
+
+TEST(testByteSizeSimpleString) {
+	asvJSON j;
+	ASSERT(j.parse(std::string_view("\"hello\"")));
+	ASSERT_EQ(j.byteSize(), j.serialize().size());
+	ASSERT_EQ(j.byteSize(), size_t(7));
+}
+
+TEST(testByteSizeNestedStructure) {
+	asvJSON j;
+	ASSERT(j.parse(std::string_view("{\"key1\":\"value1\",\"nested\":{\"nested_key\":42}}")));
+	ASSERT_EQ(j.byteSize(), j.serialize().size());
+}
+
+TEST(testByteSizeWithCountAndName) {
+	asvJSON j;
+	ASSERT(j.parse(std::string_view("{\"name\":\"test\",\"count\":5}")));
+	ASSERT_EQ(j.byteSize(), j.serialize().size());
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
@@ -6182,6 +6213,14 @@ int main() {
 	RUN(testFromTOML);
 
 	std::cout << "\n--- JSON Lines Serialization Tests ---\n";
+	// ByteSize Tests
+	std::cout << "\n--- ByteSize Serialization Tests ---\n";
+	RUN(testByteSizeNullRoot);
+	RUN(testByteSizeEmptyObject);
+	RUN(testByteSizeSimpleString);
+	RUN(testByteSizeNestedStructure);
+	RUN(testByteSizeWithCountAndName);
+
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
 

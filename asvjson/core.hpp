@@ -543,7 +543,10 @@ class asvJSON {
 public:
 	mutable std::string lastError;
 	bool allowNaNInfinity = false;
-
+public:
+	size_t asvJSON::size() const {
+		return root ? root->size() : 0;
+	}
 private:
 	std::unique_ptr<asvJSONValue> root;
 	std::string jsonBuf;
@@ -948,8 +951,16 @@ public:
 		if (root) {
 			if (pretty) root->serializePretty(out, 0, allowNaNInfinity);
 			else root->serialize(out, allowNaNInfinity);
-		} else out = "null";
+		} else out.clear();
 		return out;
+	}
+
+	size_t byteSize() const {
+		if (!root) return 0;
+		std::string out;
+		out.reserve(512);
+		root->serialize(out);
+		return out.size();
 	}
 
 	bool writeToFile(const std::string& filename, bool pretty = false) const {
@@ -1328,8 +1339,6 @@ public:
 
 	void clear() { root = nullptr; }
 
-	[[nodiscard]] size_t size() const { return root ? root->size() : 0; }
-
 	std::vector<std::string> getKeys() const {
 		std::vector<std::string> keys;
 		if (root && root->type == asvJSONValue::OBJECT && root->obj) {
@@ -1505,9 +1514,8 @@ public:
 			}
 		}
 		if (!asvJSONValue::checkArraySize(root->arr->size() + 1)) return nullptr;
-		auto* ptr = val.get();
 		root->arr->push_back(std::move(val));
-		return ptr;
+		return root->arr->back().get();
 	}
 
 	// These work on the root array (no key)
@@ -1532,24 +1540,28 @@ public:
 
 	// Key-based overloads: find/create array under key, then add
 	asvJSONValue* arrayAddValue(std::string_view key, std::unique_ptr<asvJSONValue> val) {
-		if (!root || root->type != asvJSONValue::OBJECT) root = asvJSONValue::makeObject();
-		if (!root || !root->obj) return nullptr;
+		if (!root || root->type != asvJSONValue::OBJECT)
+			root = asvJSONValue::makeObject();
+		if (!root || !root->obj)
+			return nullptr;
+
 		auto it = root->obj->find(std::string(key));
-		asvJSONValue* arr;
+		asvJSONValue* arrPtr;
 		if (it != root->obj->end() && it->second->type == asvJSONValue::ARRAY) {
-			arr = it->second.get();
+			arrPtr = it->second.get();
 		} else {
 			auto newArr = asvJSONValue::makeArray();
 			if (!newArr) return nullptr;
-			arr = newArr.get();
-			auto [ins, ok] = root->obj->insert_or_assign(std::string(key), std::move(newArr));
-			(void)ins;
+			arrPtr = newArr.get();
+			root->obj->insert_or_assign(std::string(key), std::move(newArr));
 		}
-		if (!asvJSONValue::checkArraySize(arr->arr->size() + 1)) return nullptr;
-		auto* ptr = val.get();
-		arr->arr->push_back(std::move(val));
-		return ptr;
+
+		if (!asvJSONValue::checkArraySize(arrPtr->arr->size() + 1)) return nullptr;
+
+		arrPtr->arr->push_back(std::move(val));
+		return arrPtr->arr->back().get();
 	}
+
 	asvJSONValue* arrayAddString(std::string_view key, const char* s) {
 		return arrayAddValue(key, asvJSONValue::makeString(s, strlen(s)));
 	}
