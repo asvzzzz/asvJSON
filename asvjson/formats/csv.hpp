@@ -23,7 +23,7 @@ inline std::string csvEscape(std::string_view s) {
 /**
  * @brief Split CSV line into fields respecting RFC 4180 quotes and escapes
  */
-static std::vector<std::string> csvSplitLine(std::string_view line) {
+inline std::vector<std::string> csvSplitLine(std::string_view line) {
 	std::vector<std::string> fields;
 	std::string cur;
 	bool inQuotes = false;
@@ -44,7 +44,7 @@ static std::vector<std::string> csvSplitLine(std::string_view line) {
 /**
  * @brief Detect JSON value type from CSV cell string
  */
-static std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
+inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
 	if (s == "false" || s == "FALSE" || s == "F") return asvJSONValue::makeBool(false);

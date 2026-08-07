@@ -54,6 +54,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 				}
 			}
 			sub.push_back(0);
+			if (sub.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON document too large");
 			uint32_t totalSize = static_cast<uint32_t>(sub.size());
 			sub[subSizePos] = static_cast<uint8_t>(totalSize);
 			sub[subSizePos + 1] = static_cast<uint8_t>(totalSize >> 8);
@@ -84,6 +85,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 				}
 			}
 			sub.push_back(0);
+			if (sub.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON document too large");
 			uint32_t totalSize = static_cast<uint32_t>(sub.size());
 			sub[subSizePos] = static_cast<uint8_t>(totalSize);
 			sub[subSizePos + 1] = static_cast<uint8_t>(totalSize >> 8);
@@ -198,6 +200,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				if (slen < 1 || pos + slen > dataLen) throw asvJSONError("BSON string invalid");
 				auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen - 1);
 				pos += slen;
+				if (!val) throw asvJSONError("BSON string too long");
 				obj->obj->emplace(key, std::move(val));
 				break;
 			}
@@ -217,6 +220,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 						if (subArr->obj->find(std::string(idxBuf, static_cast<size_t>(ptr - idxBuf))) == subArr->obj->end()) { sequential = false; break; }
 					}
 					if (sequential) {
+						if (subArr->obj->size() > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("BSON array too large");
 						subArr->type = asvJSONValue::ARRAY;
 						auto newArr = std::make_unique<std::vector<std::unique_ptr<asvJSONValue>>>();
 						newArr->resize(subArr->obj->size());
@@ -241,21 +245,27 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				if (subtype == 0x05 || subtype == 0) {
 					auto val = asvJSONValue::makeBinary(data + pos, blen);
 					pos += blen;
+					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->emplace(key, std::move(val));
 				} else if (subtype == 0x03) {
 					if (blen >= 4) {
-						uint32_t oldLen; readLE32(data, pos, blen);
-						auto val = asvJSONValue::makeBinary(data + pos, blen);
-						pos += blen;
+						if (pos + 4 > dataLen) throw asvJSONError("BSON binary subtype 0x03 truncated");
+						uint32_t oldLen; readLE32(data, pos, oldLen);
+						if (pos + oldLen > dataLen) throw asvJSONError("BSON binary subtype 0x03 overflow");
+						auto val = asvJSONValue::makeBinary(data + pos, oldLen);
+						pos += oldLen;
+						if (!val) throw asvJSONError("BSON binary too large");
 						obj->obj->emplace(key, std::move(val));
 					} else {
 						auto val = asvJSONValue::makeBinary(data + pos, blen);
 						pos += blen;
+						if (!val) throw asvJSONError("BSON binary too large");
 						obj->obj->emplace(key, std::move(val));
 					}
 				} else {
 					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + pos, blen);
 					pos += blen;
+					if (!val) throw asvJSONError("BSON extension too large");
 					obj->obj->emplace(key, std::move(val));
 				}
 				break;
@@ -293,7 +303,9 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				while (pos < docEnd && data[pos] != 0) pos++;
 				std::string options(reinterpret_cast<const char*>(data + optStart), pos - optStart);
 				pos++;
-				obj->obj->emplace(key, asvJSONValue::makeRegex(pattern.c_str(), options.c_str()));
+				auto val = asvJSONValue::makeRegex(pattern.c_str(), options.c_str());
+				if (!val) throw asvJSONError("BSON regex invalid or too large");
+				obj->obj->emplace(key, std::move(val));
 				break;
 			}
 			case 0x10: {

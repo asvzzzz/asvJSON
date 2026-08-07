@@ -22,7 +22,7 @@ struct SexprToken {
   std::string value;
 };
 
-static std::vector<SexprToken> sexprTokenize(std::string_view input) {
+inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
   std::vector<SexprToken> tokens;
   size_t i = 0;
   while (i < input.size()) {
@@ -114,7 +114,7 @@ static std::vector<SexprToken> sexprTokenize(std::string_view input) {
 // S-Expression internal marker byte for quoted object keys (stripped before JSON escaping)
 static const char SEXPR_KEY_MARK = '\x01';
 
-static std::string sexprTokenToJson(const SexprToken& token) {
+inline std::string sexprTokenToJson(const SexprToken& token) {
   switch (token.type) {
     case SEXPR_STRING: {
       std::string esc;
@@ -140,12 +140,12 @@ static std::string sexprTokenToJson(const SexprToken& token) {
   }
 }
 
-static bool sexprTypeIsKey(int t) {
+inline bool sexprTypeIsKey(int t) {
   return t == SEXPR_SYMBOL || t == SEXPR_NUMBER ||
          t == SEXPR_TRUE || t == SEXPR_FALSE || t == SEXPR_NIL;
 }
 
-static std::string sexprKeyJson(const std::string& item, int type) {
+inline std::string sexprKeyJson(const std::string& item, int type) {
   if (type == SEXPR_NUMBER || type == SEXPR_TRUE ||
       type == SEXPR_FALSE || type == SEXPR_NIL) {
     // Bare JSON value — wrap in quotes for JSON object key
@@ -154,7 +154,7 @@ static std::string sexprKeyJson(const std::string& item, int type) {
   return item;
 }
 
-static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size_t& pos, int depth = 0) {
+inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size_t& pos, int depth = 0) {
   if (depth > 256) throw asvJSONError("S-Expression nesting too deep");
 
   if (pos >= tokens.size()) throw asvJSONError("unexpected end of S-Expression");
@@ -189,6 +189,16 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   if (pos >= tokens.size()) throw asvJSONError("unclosed parenthesis in S-Expression");
   pos++; // skip ')'
 
+  // Object-vs-list heuristic for a parenthesized group:
+  // - Odd-length groups are always lists.
+  // - Even-length groups are objects only if all even-indexed items are
+  //   string/symbol keys. A 2-item group is treated as an object ONLY when
+  //   the first item is a symbol (this avoids misclassifying "("a" "b")" and
+  //   plain string pairs as objects).
+  // - When the group starts with a symbol key but the remaining items are not
+  //   objects, the values are emitted as an array: {key: [v1, v2, ...]}.
+  // This is intentionally heuristic — S-Expressions have no inherent
+  // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
   if (items.size() >= 2 && items.size() % 2 == 0) {
     // For 2-item lists, only treat as object if first item is a symbol
@@ -256,7 +266,7 @@ static std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   return out;
 }
 
-static void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth = 0) {
+inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth = 0) {
   if (!v) { out += "nil"; return; }
   if (!asvJSONValue::checkNestingDepth(depth)) { out += "nil"; return; }
   switch (v->type) {

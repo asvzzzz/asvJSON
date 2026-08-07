@@ -13,7 +13,12 @@ namespace asvJSONInternal {
 
 // ======================= Varint helpers =======================
 
-static void protoWriteVarint(std::vector<uint8_t>& out, uint64_t val) {
+// Field number used to embed the JSON name map in schema-less encoding.
+// Uses the protobuf-reserved range 19000-19999 to avoid colliding with
+// legitimate user field numbers (536870911 was previously used).
+inline constexpr int protoNameMapFieldNum = 19000;
+
+inline void protoWriteVarint(std::vector<uint8_t>& out, uint64_t val) {
   while (val >= 0x80) {
     out.push_back(static_cast<uint8_t>((val & 0x7F) | 0x80));
     val >>= 7;
@@ -21,7 +26,7 @@ static void protoWriteVarint(std::vector<uint8_t>& out, uint64_t val) {
   out.push_back(static_cast<uint8_t>(val));
 }
 
-static uint64_t protoReadVarint(const uint8_t* data, size_t size, size_t& pos) {
+inline uint64_t protoReadVarint(const uint8_t* data, size_t size, size_t& pos) {
   uint64_t val = 0;
   int shift = 0;
   while (pos < size) {
@@ -34,19 +39,19 @@ static uint64_t protoReadVarint(const uint8_t* data, size_t size, size_t& pos) {
   throw asvJSONError("malformed varint: unexpected end");
 }
 
-static int64_t protoZigZagDecode(uint64_t val) {
+inline int64_t protoZigZagDecode(uint64_t val) {
   return (val >> 1) ^ -(static_cast<int64_t>(val) & 1);
 }
 
-static uint64_t protoZigZagEncode(int64_t val) {
+inline uint64_t protoZigZagEncode(int64_t val) {
   return (static_cast<uint64_t>(val) << 1) ^ static_cast<uint64_t>(val >> 63);
 }
 
-static void protoWriteTag(std::vector<uint8_t>& out, int fieldNum, int wireType) {
+inline void protoWriteTag(std::vector<uint8_t>& out, int fieldNum, int wireType) {
   protoWriteVarint(out, (static_cast<uint64_t>(fieldNum) << 3) | static_cast<uint64_t>(wireType));
 }
 
-static int protoReadTag(const uint8_t* data, size_t size, size_t& pos, int& fieldNum) {
+inline int protoReadTag(const uint8_t* data, size_t size, size_t& pos, int& fieldNum) {
   if (pos >= size) return -1;
   uint64_t tag = protoReadVarint(data, size, pos);
   fieldNum = static_cast<int>(tag >> 3);
@@ -69,7 +74,7 @@ struct ProtoField {
   std::shared_ptr<ProtoSchema> schema;
 };
 
-static ProtoField protoParseOneField(const asvJSONValue* val) {
+inline ProtoField protoParseOneField(const asvJSONValue* val) {
   ProtoField f;
   if (!val || val->type != asvJSONValue::OBJECT) return f;
   auto* n = val->get("id");
@@ -86,6 +91,8 @@ static ProtoField protoParseOneField(const asvJSONValue* val) {
     auto* sub = val->get("fields");
     if (sub && sub->type == asvJSONValue::OBJECT) {
       f.schema = std::make_shared<ProtoSchema>();
+      f.schema->fields.reserve(sub->obj->size());
+      f.schema->numberToName.reserve(sub->obj->size());
       for (const auto& [k, v] : *sub->obj) {
         if (!v) continue;
         auto pf = protoParseOneField(v.get());
@@ -99,9 +106,11 @@ static ProtoField protoParseOneField(const asvJSONValue* val) {
   return f;
 }
 
-static std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaVal) {
+inline std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaVal) {
   auto s = std::make_shared<ProtoSchema>();
   if (!schemaVal || schemaVal->type != asvJSONValue::OBJECT || !schemaVal->obj) return s;
+  s->fields.reserve(schemaVal->obj->size());
+  s->numberToName.reserve(schemaVal->obj->size());
   for (const auto& [name, val] : *schemaVal->obj) {
     if (!val) continue;
     auto pf = protoParseOneField(val.get());
@@ -114,11 +123,11 @@ static std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaV
 }
 
 // Helper: set a field on a JSON value object by key
-static void protoSetField(asvJSONValue* obj, const std::string& key, std::unique_ptr<asvJSONValue> val) {
+inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
   auto it = obj->obj->find(key);
   if (it != obj->obj->end()) {
-    // Repeated field — convert to array if not already
+    // Repeated field вЂ” convert to array if not already
     if (it->second->type == asvJSONValue::ARRAY && it->second->arr) {
       it->second->arr->push_back(std::move(val));
     } else {
@@ -136,7 +145,7 @@ static void protoSetField(asvJSONValue* obj, const std::string& key, std::unique
 
 // ======================= Wire format encoder =======================
 
-static void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val, const std::string& type) {
+inline void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val, const std::string& type) {
   if (!val) return;
   if (type == "int32" || type == "int64") {
     int64_t n = (val->type == asvJSONValue::INT) ? val->num : static_cast<int64_t>(val->dbl);
@@ -171,9 +180,9 @@ static void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val
   }
 }
 
-static void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field);
+inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field);
 
-static void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoSchema* schema) {
+inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoSchema* schema) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) return;
   if (schema) {
     for (const auto& [key, fieldVal] : *val->obj) {
@@ -233,7 +242,7 @@ static void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
     for (const auto& [k, v] : *val->obj) {
       if (v) fields.push_back({k, v.get()});
     }
-    // Build JSON name map at field 536870911 (max 29-bit field number)
+    // Build JSON name map at the reserved field number (19000-19999)
     if (!fields.empty()) {
       std::string nm = "{";
       for (size_t i = 0; i < fields.size(); i++) {
@@ -251,7 +260,7 @@ static void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         nm += '"';
       }
       nm += '}';
-      protoWriteTag(out, 536870911, 2);
+      protoWriteTag(out, protoNameMapFieldNum, 2);
       protoWriteVarint(out, nm.size());
       out.insert(out.end(), nm.begin(), nm.end());
     }
@@ -330,7 +339,7 @@ static void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
   }
 }
 
-static void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field) {
+inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field) {
   if (!val) return;
   if (field.type == "string") {
     std::string s;
@@ -355,7 +364,7 @@ static void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue*
   }
 }
 
-static std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const ProtoSchema* schema) {
+inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const ProtoSchema* schema) {
   std::vector<uint8_t> out;
   if (!root) return out;
   if (root->type == asvJSONValue::OBJECT) {
@@ -370,15 +379,16 @@ static std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
 
 // ======================= Wire format decoder =======================
 
-static void protoApplyNameMap(asvJSONValue* obj) {
+inline void protoApplyNameMap(asvJSONValue* obj) {
   if (!obj || !obj->obj) return;
-  auto it = obj->obj->find("536870911");
+  const std::string nmKey = std::to_string(protoNameMapFieldNum);
+  auto it = obj->obj->find(nmKey);
   if (it == obj->obj->end() || it->second->type != asvJSONValue::STRING) return;
   asvJSON nm;
-  if (!nm.parse(it->second->str_data)) { obj->obj->erase("536870911"); return; }
+  if (!nm.parse(it->second->str_data)) { obj->obj->erase(nmKey); return; }
   auto* mapRoot = nm.getRoot();
   if (!mapRoot || mapRoot->type != asvJSONValue::OBJECT || !mapRoot->obj) {
-    obj->obj->erase("536870911"); return;
+    obj->obj->erase(nmKey); return;
   }
   std::vector<std::pair<std::string, std::string>> renames;
   for (const auto& [fnumStr, nameVal] : *mapRoot->obj) {
@@ -386,16 +396,17 @@ static void protoApplyNameMap(asvJSONValue* obj) {
   }
   for (const auto& [oldNum, newName] : renames) {
     auto eit = obj->obj->find(oldNum);
-    if (eit != obj->obj->end() && eit->first != "536870911") {
+    if (eit != obj->obj->end() && eit->first != nmKey) {
       auto node = obj->obj->extract(eit);
       node.key() = newName;
+      obj->obj->erase(newName);
       obj->obj->insert(std::move(node));
     }
   }
-  obj->obj->erase("536870911");
+  obj->obj->erase(nmKey);
 }
 
-static std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
+inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
                                                            int wireType, const std::string& type,
                                                            const ProtoSchema* schema, int depth = 0) {
   switch (wireType) {
@@ -422,33 +433,34 @@ static std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
     }
     case 2: {
       uint64_t len = protoReadVarint(data, size, pos);
-      if (static_cast<size_t>(len) > size - pos) { return nullptr; }
+      if (len > static_cast<uint64_t>(SIZE_MAX) || static_cast<size_t>(len) > size - pos) { return nullptr; }
       size_t end = pos + static_cast<size_t>(len);
 
       if (type == "message" || type.empty()) {
         if (depth > asvJSONValue::MAX_NESTING_DEPTH) { pos = end; return nullptr; }
         auto obj = asvJSONValue::makeObject();
         if (!obj) { pos = end; return nullptr; }
-        size_t savedPos = pos;
         while (pos < end) {
           int fnum = 0; int wt = protoReadTag(data, end, pos, fnum);
           if (wt < 0 || wt > 5 || fnum <= 0) { pos = end; break; }
           if (wt == 3 || wt == 4) break;
-          std::string fname = std::to_string(fnum);
-          std::string ftype;
-          bool repeated = false;
-          const ProtoSchema* subSchema = nullptr;
-          if (schema) {
-            auto it = schema->numberToName.find(fnum);
-            if (it != schema->numberToName.end()) {
-              fname = it->second;
-              auto fit = schema->fields.find(fname);
-              if (fit != schema->fields.end()) {
-                ftype = fit->second.type; repeated = fit->second.repeated;
-                if (fit->second.schema) subSchema = fit->second.schema.get();
-              }
-            }
-          }
+    std::string fname = std::to_string(fnum);
+    std::string ftype;
+    bool repeated = false;
+    const ProtoSchema* subSchema = nullptr;
+    if (schema) {
+      auto it = schema->numberToName.find(fnum);
+      if (it != schema->numberToName.end()) {
+        fname = it->second;
+        auto fit = schema->fields.find(fname);
+        if (fit != schema->fields.end()) {
+          ftype = fit->second.type; repeated = fit->second.repeated;
+          if (fit->second.schema) subSchema = fit->second.schema.get();
+        }
+      }
+    }
+    if (ftype.empty() && fnum == protoNameMapFieldNum) ftype = "string";
+          if (ftype.empty() && fnum == protoNameMapFieldNum) ftype = "string";
           size_t beforePos = pos;
           auto val = protoDecodeWireValue(data, end, pos, wt, ftype, subSchema, depth + 1);
           if (!val) { pos = end; break; }
@@ -475,33 +487,30 @@ static std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
         pos = end;
         // Apply embedded name map in schema-less mode
         if (type.empty()) protoApplyNameMap(obj.get());
-        // Schema-less wireType=2: if content is all printable ASCII, treat as string
+        // Schema-less wireType=2: return the parsed sub-message if it has fields;
+        // otherwise fall through to the BINARY branch (no printable-ASCII heuristic,
+        // so binary payloads that happen to be printable are not corrupted)
         if (type.empty()) {
-          bool allPrintable = (end - savedPos) >= 1;
-          for (size_t i = savedPos; allPrintable && i < end; i++) {
-            unsigned char c = data[i];
-            if (c < 32 && c != '\t' && c != '\n' && c != '\r') allPrintable = false;
-            if (c > 126) allPrintable = false;
-          }
-          if (allPrintable) {
-            pos = savedPos; // fall through to string
-          } else if (!obj->obj->empty()) {
-            return obj;
-          }
-          // empty sub-message: also fall through to string
+          if (!obj->obj->empty()) return obj;
         } else {
           return obj;
         }
       }
-      if (type == "string" || (wireType == 2 && type.empty())) {
-        auto s = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(len));
-        pos = end; return s;
-      } else if (type == "bytes" || type == "binary") {
+      if (type == "string") {
+        size_t start = end - static_cast<size_t>(len);
+        auto s = asvJSONValue::makeString(reinterpret_cast<const char*>(data + start), static_cast<size_t>(len));
+        pos = end; if (!s) throw asvJSONError("Protobuf string too long"); return s;
+      } else if (type == "bytes" || type == "binary" || type.empty()) {
+        if (static_cast<size_t>(len) > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("Protobuf binary field exceeds MAX_STRING_LEN");
+        size_t start = end - static_cast<size_t>(len);
         auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
-        if (v) { v->type = asvJSONValue::BINARY; v->bin_data.assign(data + pos, data + end); }
-        pos = end; return v;
+        pos = end;
+        if (!v) throw asvJSONError("Protobuf binary alloc failed");
+        v->type = asvJSONValue::BINARY; v->bin_data.assign(data + start, data + end);
+        return v;
       } else {
         // Packed repeated field -- decode according to element type
+        if (static_cast<size_t>(end - pos) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("Protobuf packed field too large");
         auto arr = asvJSONValue::makeArray();
         if (arr && arr->arr) {
           if (type == "float" || type == "fixed32" || type == "sfixed32") {
@@ -541,7 +550,7 @@ static std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
   return nullptr;
 }
 
-static std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t size, const ProtoSchema* schema, int depth = 0) {
+inline std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t size, const ProtoSchema* schema, int depth = 0) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
   size_t pos = 0;
   auto root = asvJSONValue::makeObject();
@@ -596,7 +605,7 @@ static std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t
 
 // ======================= Text format parser =======================
 
-static void protoTextSkipWS(const std::string& text, size_t& pos) {
+inline void protoTextSkipWS(const std::string& text, size_t& pos) {
   while (pos < text.size()) {
     char c = text[pos];
     if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { pos++; continue; }
@@ -608,7 +617,7 @@ static void protoTextSkipWS(const std::string& text, size_t& pos) {
   }
 }
 
-static std::string protoTextParseStringLit(const std::string& text, size_t& pos) {
+inline std::string protoTextParseStringLit(const std::string& text, size_t& pos) {
   if (pos >= text.size()) return {};
   char q = text[pos];
   if (q != '"' && q != '\'') return {};
@@ -669,7 +678,7 @@ static std::string protoTextParseStringLit(const std::string& text, size_t& pos)
   return r;
 }
 
-static std::string protoTextParseIdent(const std::string& text, size_t& pos) {
+inline std::string protoTextParseIdent(const std::string& text, size_t& pos) {
   std::string id;
   while (pos < text.size() && (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
     id += text[pos++];
@@ -677,7 +686,7 @@ static std::string protoTextParseIdent(const std::string& text, size_t& pos) {
   return id;
 }
 
-static std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& text, size_t& pos) {
+inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& text, size_t& pos) {
   protoTextSkipWS(text, pos);
   if (pos >= text.size()) return nullptr;
   char c = text[pos];
@@ -723,7 +732,7 @@ static std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
   return asvJSONValue::makeString(id.data(), id.size());
 }
 
-static void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth = 0) {
+inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth = 0) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) return;
   while (pos < text.size()) {
     protoTextSkipWS(text, pos);
@@ -798,7 +807,7 @@ static void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
 
 // ======================= Text format serializer =======================
 
-static void protoTextQuote(const std::string& s, std::string& out) {
+inline void protoTextQuote(const std::string& s, std::string& out) {
   out += '"';
   for (char c : s) {
     switch (c) {
@@ -815,9 +824,9 @@ static void protoTextQuote(const std::string& s, std::string& out) {
   out += '"';
 }
 
-static void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent);
+inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent);
 
-static void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent) {
+inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) { out += "{}"; return; }
   out += "{\n";
   for (const auto& [k, fv] : *val->obj) {
@@ -835,7 +844,7 @@ static void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
   out += '}';
 }
 
-static void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent) {
+inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent) {
   if (!val || val->type == asvJSONValue::NULL_VAL) return;
   switch (val->type) {
     case asvJSONValue::BOOL_VAL: out += val->flag ? "true" : "false"; break;
@@ -959,13 +968,14 @@ inline std::string asvJSON::stringFromProtobuf(const uint8_t* data, size_t size)
 }
 
 inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& schemaJson) {
-  // Auto-detect base64: if data is all printable ASCII and length is multiple of 4,
+  // Auto-detect base64: if data is all valid Base64 and length is multiple of 4,
   // try base64 decoding first (common usage: passing base64-encoded protobuf)
   if (data.size() >= 4 && (data.size() % 4) == 0) {
     bool looksLikeBase64 = true;
     for (size_t i = 0; i < data.size(); i++) {
       unsigned char c = static_cast<unsigned char>(data[i]);
-      if (c >= 32 && c <= 126) continue;
+      if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') continue;
       looksLikeBase64 = false;
       break;
     }
@@ -982,3 +992,4 @@ inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& sc
 }
 
 } // namespace asvJSONInternal
+

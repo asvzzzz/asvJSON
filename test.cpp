@@ -307,6 +307,86 @@ TEST(testParseEmptyArray) {
 	ASSERT_EQ(arr->size(), 0);
 }
 
+TEST(testParseUTF8BOM) {
+	// UTF-8 BOM (EF BB BF) must be stripped before parsing
+	const char withBom[] = { '\xEF', '\xBB', '\xBF', '{', '"', 'a', '"', ':', '1', '}', 0 };
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string_view(withBom, 10)));
+		ASSERT_EQ(json.getInt("a"), int64_t(1));
+	}
+	// Leading whitespace after BOM
+	const char bomWs[] = { '\xEF', '\xBB', '\xBF', ' ', '{', '"', 'a', '"', ':', '2', '}', 0 };
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string_view(bomWs, 11)));
+		ASSERT_EQ(json.getInt("a"), int64_t(2));
+	}
+	// BOM only at start; a BOM inside content is still rejected as invalid JSON
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string_view("[1]")));
+	}
+	// std::string input (implicitly converts to string_view) must also strip BOM
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(withBom, 10)));
+		ASSERT_EQ(json.getInt("a"), int64_t(1));
+	}
+	// readFromFile() uses the std::string parse path
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("\xEF\xBB\xBF" "{\"b\":3}")));
+		ASSERT_EQ(json.getInt("b"), int64_t(3));
+	}
+}
+
+TEST(testParseValidateUTF8) {
+	// Off by default: invalid bytes inside strings are accepted as-is
+	{
+		const char bad[] = { '{', '"', 'a', '"', ':', '"', (char)0xC3, '(', '"', '}', 0 };
+		asvJSON json;
+		ASSERT(json.parse(std::string_view(bad, 10)));
+	}
+	// When enabled, the same input is rejected with a clear error
+	{
+		const char bad[] = { '{', '"', 'a', '"', ':', '"', (char)0xC3, '(', '"', '}', 0 };
+		asvJSON json;
+		json.validateUTF8 = true;
+		ASSERT(!json.parse(std::string_view(bad, 10)));
+		ASSERT_EQ(json.getLastError(), std::string("Invalid UTF-8 in input"));
+	}
+	// Valid UTF-8 (incl. multibyte and escaped) passes when enabled
+	{
+		asvJSON json;
+		json.validateUTF8 = true;
+		ASSERT(json.parse(std::string("{\"k\":\"\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82\",\"u\":\"\\u00e9\"}")));
+		ASSERT_EQ(json.getInt("missing"), 0);
+	}
+	// BOM is stripped before validation
+	{
+		asvJSON json;
+		json.validateUTF8 = true;
+		ASSERT(json.parse(std::string("\xEF\xBB\xBF" "{\"b\":3}")));
+		ASSERT_EQ(json.getInt("b"), int64_t(3));
+	}
+}
+
+TEST(testNegativeDateTime) {
+	// Pre-1970 timestamps cannot be converted by gmtimeSafe; must not crash
+	asvJSON json;
+	json.putDateTime("dt", (time_t)-631152000); // 1950-01-01T00:00:00Z
+	// getDateTimeString returns "" instead of reading uninitialized tm
+	ASSERT_EQ(json.getDateTimeString("dt"), std::string(""));
+	// Serializer emits the literal string "null" for the same value
+	std::string s = json.serialize();
+	ASSERT_EQ(s, std::string("{\"dt\":\"null\"}"));
+	// And such a value round-trips through parse without crashing
+	asvJSON j2;
+	ASSERT(j2.parse(s));
+	ASSERT_EQ(j2.serialize(), s);
+}
+
 TEST(testPutString) {
 	asvJSON json;
 	json.putString("name", "John Doe");
@@ -1091,12 +1171,17 @@ TEST(testPutBinChunked) {
 	asvJSON json;
 	uint8_t data[200];
 	for (size_t i = 0; i < 200; i++) data[i] = static_cast<uint8_t>(i);
-	json.putBinChunked("large", data, 200, 76);
+	ASSERT(json.putBinChunked("large", data, 200, 76));
 	auto retrieved = json.getBinChunked("large");
 	ASSERT_EQ(retrieved.size(), 200U);
 	for (size_t i = 0; i < 200; i++) {
 		ASSERT_EQ(retrieved[i], static_cast<uint8_t>(i));
 	}
+	// Empty data
+	asvJSON json2;
+	ASSERT(json2.putBinChunked("empty", nullptr, 0, 76));
+	auto emptyRet = json2.getBinChunked("empty");
+	ASSERT_EQ(emptyRet.size(), 0U);
 }
 
 TEST(testGetKeys) {
@@ -5238,6 +5323,27 @@ TEST(testFromJSON5) {
     ASSERT(j.fromJSON5(std::string_view(inp, 12)));
     ASSERT_EQ(j.getRoot()->getConst("key")->getInt(), int64_t(1));
   }
+  // -NaN preserves the negative sign through serialization (round-trip)
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{\"x\":-NaN}")));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("-NaN") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* v = j2.getRoot()->getConst("x");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isnan(v->getDouble()));
+    ASSERT(std::signbit(v->getDouble()));
+  }
+  // +NaN serializes as plain NaN
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{\"x\":+NaN}")));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("NaN") != std::string::npos);
+    ASSERT(s.find("-NaN") == std::string::npos);
+  }
 }
 
 TEST(testToINI) {
@@ -5290,6 +5396,17 @@ TEST(testToINI) {
     asvJSON j;
     j.parse(std::string("{}"));
     ASSERT_EQ(j.toINI(), std::string(""));
+  }
+  // Keys containing [ ] are escaped in section headers
+  {
+    asvJSON j;
+    j.parse(std::string(R"({"a[b]":{"c[d]":"v"}})"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("a\\[b\\]]") != std::string::npos);
+    ASSERT(ini.find("[a[b]]") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT_EQ(std::string(j2.getString("a[b].c[d]")), "v");
   }
 }
 
@@ -5402,6 +5519,12 @@ TEST(testFromINI) {
     ASSERT_EQ(tags->arr->size(), size_t(2));
     ASSERT_EQ(std::string(tags->arr->at(0)->getString()), "cpp");
     ASSERT_EQ(std::string(tags->arr->at(1)->getString()), "json");
+  }
+  // Section keys with escaped brackets [ ]
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[a\\[b\\]]\nc[d] = v\n")));
+    ASSERT_EQ(std::string(j.getString("a[b].c[d]")), "v");
   }
 }
 
@@ -5981,6 +6104,9 @@ int main() {
 	RUN(testParseNested);
 	RUN(testParseEmpty);
 	RUN(testParseEmptyArray);
+	RUN(testParseUTF8BOM);
+	RUN(testParseValidateUTF8);
+	RUN(testNegativeDateTime);
 	
 	std::cout << "\n--- Put Tests ---\n";
 	RUN(testPutString);

@@ -13,14 +13,14 @@ namespace asvJSONInternal {
 
 // -- Helpers ----------------------------------------------------------------
 
-static std::string_view iniTrim(std::string_view s) {
+inline std::string_view iniTrim(std::string_view s) {
   while (!s.empty() && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r')) s.remove_prefix(1);
   while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.remove_suffix(1);
   return s;
 }
 
 // Find first unescaped ; or # in a bare value (pos of inline comment, or npos)
-static size_t iniFindComment(std::string_view s) {
+inline size_t iniFindComment(std::string_view s) {
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '\\') { i++; continue; }
     if (s[i] == ';' || s[i] == '#') return i;
@@ -29,7 +29,7 @@ static size_t iniFindComment(std::string_view s) {
 }
 
 // Unescape INI value
-static std::string iniUnescape(std::string_view s) {
+inline std::string iniUnescape(std::string_view s) {
   std::string out;
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '\\' && i + 1 < s.size()) {
@@ -57,7 +57,7 @@ static std::string iniUnescape(std::string_view s) {
 }
 
 // Escape an INI value for output
-static std::string iniEscape(std::string_view s) {
+inline std::string iniEscape(std::string_view s) {
   std::string out;
   for (auto c : s) {
     switch (c) {
@@ -75,8 +75,38 @@ static std::string iniEscape(std::string_view s) {
   return out;
 }
 
+// Escape a key for use inside a section header [...] (brackets/backslash)
+inline std::string iniEscapeSectionKey(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (auto c : s) {
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '[': out += "\\["; break;
+      case ']': out += "\\]"; break;
+      default: out += c;
+    }
+  }
+  return out;
+}
+
+// Unescape a section path segment read from a header
+inline std::string iniUnescapeSectionKey(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '\\' && i + 1 < s.size()) {
+      out += s[i + 1];
+      i++;
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
+}
+
 // Navigate or create nested path in the object tree
-static asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::string>& pathParts, bool create) {
+inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::string>& pathParts, bool create) {
   asvJSONValue* cur = root;
   for (const auto& seg : pathParts) {
     if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) {
@@ -98,7 +128,7 @@ static asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
 }
 
 // Format a value as INI text
-static void iniFormatVal(const asvJSONValue* v, std::string& out) {
+inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
   using T = asvJSONValue::Type;
   switch (v->type) {
     case T::STRING:
@@ -139,7 +169,7 @@ static void iniFormatVal(const asvJSONValue* v, std::string& out) {
 
 // Try to infer a typed value from a parsed INI string.
 // Quoted values always remain strings; bare values may be bool/int/double.
-static std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted) {
+inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted) {
   if (quoted) {
     return asvJSONValue::makeString(s.data(), s.size());
   }
@@ -159,7 +189,7 @@ static std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
 }
 
 // Insert a value into an object by key, converting duplicate keys to arrays
-static void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val) {
+inline void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!target || target->type != asvJSONValue::OBJECT || !target->obj) return;
   auto it = target->obj->find(key);
   if (it == target->obj->end()) {
@@ -179,7 +209,7 @@ static void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
 
 // Recursively emit object contents for a given section path (prefix).
 // prefix == current section path; emitHeader controls whether to emit a section header.
-static void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
+inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
                           bool emitHeader) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
 
@@ -198,7 +228,8 @@ static void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 
   for (const auto& [key, val] : *obj->obj) {
     if (val->type == asvJSONValue::OBJECT) {
-      std::string newPrefix = prefix.empty() ? key : prefix + "." + key;
+      std::string escKey = iniEscapeSectionKey(key);
+      std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
       bool subHasDirect = false;
       if (val->obj) {
         for (const auto& [sk, sv] : *val->obj) {
@@ -212,8 +243,9 @@ static void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         if (elem->type != asvJSONValue::OBJECT) { allObjects = false; break; }
       }
       if (allObjects && !val->arr->empty()) {
+        std::string escKey = iniEscapeSectionKey(key);
         for (const auto& elem : *val->arr) {
-          std::string newPrefix = prefix.empty() ? key : prefix + "." + key;
+          std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
           out += "[[" + newPrefix + "]]\n";
           if (elem->type == asvJSONValue::OBJECT) {
@@ -258,16 +290,17 @@ inline void asvJSONValue::toINI(std::string& out) const {
               if (sv->type != T::OBJECT) { hasDirect = true; break; }
             }
           }
-          iniEmitObject(val.get(), out, key, hasDirect || !val->obj || val->obj->empty());
+          iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty());
         } else if (val->type == T::ARRAY && val->arr) {
           bool allObjects = true;
           for (const auto& elem : *val->arr) {
             if (elem->type != T::OBJECT) { allObjects = false; break; }
           }
           if (allObjects && !val->arr->empty()) {
+            std::string escKey = iniEscapeSectionKey(key);
             for (const auto& elem : *val->arr) {
               if (!out.empty() && out.back() != '\n') out += '\n';
-              out += "[[" + key + "]]\n";
+              out += "[[" + escKey + "]]\n";
               if (elem->type == T::OBJECT) {
                 iniEmitObject(elem.get(), out, key, false);
               }
@@ -338,18 +371,25 @@ inline bool asvJSON::fromINI(std::string_view input) {
 
       // Section header [section] or [[section]]
       if (line[0] == '[') {
-        size_t end = line.find(']');
+        // Find the first unescaped closing bracket (keys may contain \] and \[)
+        auto findCloseBracket = [&](size_t from) -> size_t {
+          size_t i = from;
+          while (i < line.size()) {
+            if (line[i] == '\\' && i + 1 < line.size()) { i += 2; continue; }
+            if (line[i] == ']') return i;
+            i++;
+          }
+          return std::string_view::npos;
+        };
+
+        bool isArraySection = (line.size() > 1 && line[1] == '[');
+        size_t start = isArraySection ? 2 : 1;
+        size_t end = findCloseBracket(start);
         if (end == std::string_view::npos) throw asvJSONError("unclosed section bracket");
-
-        bool isArraySection = false;
-        size_t start = 1;
-        size_t nameLen = end - start;
-
-        if (line[1] == '[' && end + 1 < line.size() && line[end + 1] == ']') {
-          isArraySection = true;
-          start = 2;
-          nameLen = end - start;
+        if (isArraySection) {
+          if (end + 1 >= line.size() || line[end + 1] != ']') throw asvJSONError("malformed array section header");
         }
+        size_t nameLen = end - start;
 
         std::string_view sectionName = iniTrim(line.substr(start, nameLen));
         if (sectionName.empty()) throw asvJSONError("empty section name");
@@ -359,7 +399,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
         size_t dotStart = 0;
         for (size_t i = 0; i <= sectionName.size(); i++) {
           if (i == sectionName.size() || sectionName[i] == '.') {
-            newPath.push_back(std::string(iniTrim(sectionName.substr(dotStart, i - dotStart))));
+            newPath.push_back(iniUnescapeSectionKey(iniTrim(sectionName.substr(dotStart, i - dotStart))));
             dotStart = i + 1;
           }
         }

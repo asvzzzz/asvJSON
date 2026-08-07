@@ -10,7 +10,7 @@
 namespace asvJSONInternal {
 
 // Decode XML entities: &amp; &lt; &gt; &quot; &apos; &#NN; &#xNN;
-static std::string xmlDecodeEntities(std::string_view s) {
+inline std::string xmlDecodeEntities(std::string_view s) {
 	std::string out;
 	out.reserve(s.size());
 	for (size_t i = 0; i < s.size(); i++) {
@@ -224,19 +224,19 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 
 // ---------- XML Parser ----------
 
-static void xmlSkipSpaces(std::string_view s, size_t& pos) {
+inline void xmlSkipSpaces(std::string_view s, size_t& pos) {
 	while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r'))
 		pos++;
 }
 
-static std::string xmlParseName(std::string_view s, size_t& pos) {
+inline std::string xmlParseName(std::string_view s, size_t& pos) {
 	std::string name;
 	while (pos < s.size() && (std::isalnum(static_cast<unsigned char>(s[pos])) || s[pos] == '-' || s[pos] == '_' || s[pos] == ':' || s[pos] == '.'))
 		name += s[pos++];
 	return name;
 }
 
-static std::string xmlParseAttrValue(std::string_view s, size_t& pos) {
+inline std::string xmlParseAttrValue(std::string_view s, size_t& pos) {
 	char quote = s[pos];
 	pos++;
 	std::string val;
@@ -248,7 +248,7 @@ static std::string xmlParseAttrValue(std::string_view s, size_t& pos) {
 }
 
 // Detect value type from XML text content
-static std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
+inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 	if (s.empty()) return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE") return asvJSONValue::makeBool(true);
 	if (s == "false" || s == "FALSE") return asvJSONValue::makeBool(false);
@@ -271,7 +271,7 @@ static std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 }
 
 // Forward declaration
-static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth);
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth);
 
 // Segment for interleaved mixed content tracking
 struct XmlSegment {
@@ -282,7 +282,7 @@ struct XmlSegment {
 };
 
 // Parse a single element's children into segments (preserving interleaved order)
-static void xmlParseChildrenSegments(std::string_view s, size_t& pos,
+inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 	std::vector<XmlSegment>& segments, int depth)
 {
 	while (pos < s.size()) {
@@ -341,7 +341,7 @@ static void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 }
 
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
-static std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth) {
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth) {
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("XML nesting too deep");
 	if (pos >= s.size() || s[pos] != '<') throw asvJSONError("expected '<'");
 	pos++; // skip '<'

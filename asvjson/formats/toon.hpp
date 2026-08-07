@@ -5,14 +5,14 @@
 
 namespace asvJSONInternal {
 
-static std::string toonJsonEscape(const std::string& s) {
+inline std::string toonJsonEscape(const std::string& s) {
   std::string r;
   r.reserve(s.size() + 4);
   appendJsonEscaped(r, s);
   return r;
 }
 
-static bool toonIsJsonValue(std::string_view s) {
+inline bool toonIsJsonValue(std::string_view s) {
   if (s.empty()) return false;
   if (s.front() == '"' || s.front() == '{' || s.front() == '[') return true;
   if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) {
@@ -31,7 +31,7 @@ static bool toonIsJsonValue(std::string_view s) {
   return false;
 }
 
-static bool toonValNeedsQuotes(const std::string& s) {
+inline bool toonValNeedsQuotes(const std::string& s) {
   if (s.empty()) return true;
   if (s.front() == '"') return true;
   for (char c : s) if (c == ',' || c == '\n' || c == '\r') return true;
@@ -40,12 +40,12 @@ static bool toonValNeedsQuotes(const std::string& s) {
   return false;
 }
 
-static std::string toonQuoteVal(const std::string& s) {
+inline std::string toonQuoteVal(const std::string& s) {
   if (toonValNeedsQuotes(s)) return '"' + toonJsonEscape(s) + '"';
   return s;
 }
 
-static std::string toonLeafVal(const asvJSONValue* v) {
+inline std::string toonLeafVal(const asvJSONValue* v) {
   if (!v) return "null";
   switch (v->type) {
     case asvJSONValue::NULL_VAL: return "null";
@@ -83,7 +83,7 @@ static std::string toonLeafVal(const asvJSONValue* v) {
   }
 }
 
-static void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
+inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
@@ -140,13 +140,13 @@ static void valToToon(const asvJSONValue* v, std::string& out, int indent, const
 }
 
 // Wraps a bare TOON string value in JSON quotes if not already a valid JSON value
-static std::string toonJsonQuoteBare(std::string_view s) {
+inline std::string toonJsonQuoteBare(std::string_view s) {
   if (toonIsJsonValue(s)) return std::string(s);
   return '"' + toonJsonEscape(std::string(s)) + '"';
 }
 
 // TOON value splitter - splits by comma respecting quoted strings and escapes
-static std::vector<std::string> toonSplitCommas(std::string_view s) {
+inline std::vector<std::string> toonSplitCommas(std::string_view s) {
   std::vector<std::string> result;
   std::string cur;
   bool inQuotes = false;
@@ -168,7 +168,7 @@ static std::vector<std::string> toonSplitCommas(std::string_view s) {
 }
 
 // TOON -> JSON text converter
-static std::string toonToJson(std::string_view input) {
+inline std::string toonToJson(std::string_view input) {
   auto lines = splitLines(input);
   if (lines.empty()) return "{}";
 

@@ -5,13 +5,13 @@
 
 namespace asvJSONInternal {
 
-static void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
+inline void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
   out += "\"__BASE64__";
   out += encodeBase64(data, len);
   out += '"';
 }
 
-static void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
+inline void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
   out += "\"__EXT__";
   out += std::to_string(type);
   out += '_';
@@ -19,7 +19,7 @@ static void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::str
   out += '"';
 }
 
-static std::string goonLiteral(const asvJSONValue* v) {
+inline std::string goonLiteral(const asvJSONValue* v) {
   if (!v) return "_";
   switch (v->type) {
     case asvJSONValue::NULL_VAL: return "_";
@@ -29,11 +29,11 @@ static std::string goonLiteral(const asvJSONValue* v) {
   }
 }
 
-static bool goonIsSimpleValue(const asvJSONValue* v) {
+inline bool goonIsSimpleValue(const asvJSONValue* v) {
   return v && v->type != asvJSONValue::OBJECT && v->type != asvJSONValue::ARRAY;
 }
 
-static std::string goonFormatSpecial(const asvJSONValue* v) {
+inline std::string goonFormatSpecial(const asvJSONValue* v) {
   if (!v) return "_";
   switch (v->type) {
     case asvJSONValue::DATETIME: {
@@ -62,7 +62,7 @@ static std::string goonFormatSpecial(const asvJSONValue* v) {
   }
 }
 
-static bool goonNeedsQuotes(const std::string& s) {
+inline bool goonNeedsQuotes(const std::string& s) {
   if (s.empty()) return true;
   if (s.front() == '"') return true;
   for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
@@ -74,7 +74,7 @@ static bool goonNeedsQuotes(const std::string& s) {
   return false;
 }
 
-static void goonWriteString(const std::string& s, std::string& out, const std::unordered_map<std::string, int>* dict) {
+inline void goonWriteString(const std::string& s, std::string& out, const std::unordered_map<std::string, int>* dict) {
   if (dict) {
     auto it = dict->find(s);
     if (it != dict->end()) {
@@ -89,7 +89,7 @@ static void goonWriteString(const std::string& s, std::string& out, const std::u
 }
 
 // Build dictionary of frequently occurring strings for GOON compact mode
-static void goonBuildDictWalk(const asvJSONValue* v, std::unordered_map<std::string, int>& freq, int depth) {
+inline void goonBuildDictWalk(const asvJSONValue* v, std::unordered_map<std::string, int>& freq, int depth) {
   if (!v || !asvJSONValue::checkNestingDepth(depth)) return;
   switch (v->type) {
     case asvJSONValue::STRING:
@@ -108,7 +108,7 @@ static void goonBuildDictWalk(const asvJSONValue* v, std::unordered_map<std::str
   }
 }
 
-static std::unordered_map<std::string, int> goonBuildDict(const asvJSONValue* root) {
+inline std::unordered_map<std::string, int> goonBuildDict(const asvJSONValue* root) {
   std::unordered_map<std::string, int> freq;
   goonBuildDictWalk(root, freq, 0);
   std::unordered_map<std::string, int> dict;
@@ -118,7 +118,7 @@ static std::unordered_map<std::string, int> goonBuildDict(const asvJSONValue* ro
   return dict;
 }
 
-static void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict, std::string& out) {
+inline void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict, std::string& out) {
   if (dict.empty()) return;
   out += "$:";
   std::vector<std::pair<std::string, int>> entries(dict.begin(), dict.end());
@@ -132,9 +132,9 @@ static void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict
   out += '\n';
 }
 
-static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0, const std::unordered_map<std::string, int>* dict = nullptr);
+inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0, const std::unordered_map<std::string, int>* dict = nullptr);
 
-static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr) {
+inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr) {
   if (!arr || arr->size() == 0) {
     if (!key.empty()) {
       std::string pad(static_cast<size_t>(indent) * 2, ' ');
@@ -296,7 +296,7 @@ static void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   }
 }
 
-static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict) {
+inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict) {
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
@@ -391,7 +391,7 @@ static void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
 }
 
 // GOON -> JSON text converter (GOON decoder)
-static std::string goonToJson(std::string_view input) {
+inline std::string goonToJson(std::string_view input) {
   auto lines = splitLines(input);
   if (lines.empty()) return "{}";
 

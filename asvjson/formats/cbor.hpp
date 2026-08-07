@@ -5,7 +5,7 @@
 
 namespace asvJSONInternal {
 
-static void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
+inline void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
   uint8_t major = mt << 5;
   if (val <= 23) {
     out.push_back(major | static_cast<uint8_t>(val));
@@ -200,27 +200,34 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     if (major == 4) { // indefinite-length array
       auto arr = asvJSONValue::makeArray();
       if (!arr) throw asvJSONError("CBOR array alloc failed");
+      size_t count = 0;
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; break; }
+        if (count >= asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
         arr->arr->push_back(parseCBOR(data, pos, dataLen, depth + 1));
+        count++;
       }
       return arr;
     }
     if (major == 5) { // indefinite-length map
       auto obj = asvJSONValue::makeObject();
       if (!obj) throw asvJSONError("CBOR map alloc failed");
+      size_t count = 0;
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; break; }
+        if (count >= asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("CBOR map too large");
         auto k = parseCBOR(data, pos, dataLen, depth + 1);
         if (!k || k->type != asvJSONValue::STRING) throw asvJSONError("CBOR non-string map key");
         auto v = parseCBOR(data, pos, dataLen, depth + 1);
         if (!v) throw asvJSONError("CBOR map value failed");
         obj->obj->emplace(k->str_data, std::move(v));
+        count++;
       }
       return obj;
     }
     if (major == 2 || major == 3) { // indefinite-length byte/text string
       std::vector<uint8_t> allData;
+      size_t total = 0;
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; break; }
         auto chunk = parseCBOR(data, pos, dataLen, depth + 1);
@@ -232,7 +239,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
           srcLen = chunk->str_data.size();
         }
         if (!src) throw asvJSONError("CBOR indefinite string invalid chunk");
+        if (total + srcLen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("CBOR indefinite string too large");
         allData.insert(allData.end(), src, src + srcLen);
+        total += srcLen;
       }
       if (major == 2) {
         auto v = asvJSONValue::makeBinary(allData.data(), allData.size());

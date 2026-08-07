@@ -75,7 +75,8 @@ MIT license - see the `LICENSE` file for details.
 
 ### Thread Safety
 - **Reading:** Fully thread-safe - multiple threads can read the same `asvJSON` instance simultaneously.
-- **Writing:** Not thread-safe - a single `asvJSON` instance must not be written to concurrently from multiple threads.
+- **Writing:** Not thread-safe - a single `asvJSON` instance must not be written to concurrently from multiple threads, and reads must not overlap a write.
+- **Distinct instances:** Separate `asvJSON` instances can be used concurrently from different threads; format parsers use `thread_local` state (e.g. YAML tag maps), so no global mutable state is shared.
 - **Base64 custom charset:** Protected by `std::mutex` - `setBase64Chars()` and all encoding/decoding functions are safe to call concurrently from multiple threads.
 
 ## Limits
@@ -138,17 +139,18 @@ int main() {
 | `~asvJSON()` | Destructor. |
 | `asvJSON& operator=(const asvJSON& other)` | Copy assignment. |
 | `asvJSON& operator=(asvJSON&& other) noexcept` | Move assignment. |
-| `bool parse(const std::string& json)` | Parse JSON from `std::string`. |
-| `bool parse(std::string_view json)` | Parse JSON from `string_view` (zero-copy buffer). |
+| `bool parse(std::string_view json)` | Parse JSON. Accepts `std::string`, string literals, `const char*`, etc. (all convert to `std::string_view`). A UTF-8 BOM (`EF BB BF`) at the start is stripped automatically. |
 | `void clear()` | Clear all data, reset to empty state. |
 | `std::string getLastError() const` | Return last error message. |
 | *(field)* `bool allowNaNInfinity` | When `true`, parses/serializes `NaN`, `Infinity`, `-Infinity` (non-standard JSON). Default `false`. |
+| *(field)* `bool validateUTF8` | When `true`, `parse()` rejects input that is not well-formed UTF-8 (checked with `isValidUTF8`) and returns `false` with `lastError = "Invalid UTF-8 in input"`. A leading BOM is stripped before validation. Default `false`. |
 
 #### Serialization & File I/O
 
 | Method | Description |
 |--------|-------------|
 | `std::string serialize(bool pretty = false) const` | Serialize to JSON string. |
+| `size_t byteSize() const` | Size in bytes of the serialized JSON document. **WARNING:** performs a full serialization (allocating the whole output string) just to count bytes. For very large documents, serialize once with `serialize()` and use the returned string's `.size()`. |
 | `std::string toXML() const` | Serialize to XML document. |
 | `bool fromXML(std::string_view input)` | Parse XML string (elements, attributes, type detection, CDATA). |
 | `std::string toYAML() const` | Serialize to YAML document. |
@@ -189,9 +191,11 @@ Keys can be `const char*`, `std::string`, or `std::string_view`.
 | `void putBool(key, bool value)` | Add boolean. |
 | `void putNull(key)` | Add JSON null. |
 | `void putDateTime(key, time_t value)` | Add datetime (seconds since epoch). |
+
+> **Note on DateTime serialization:** timestamps that `gmtime` cannot convert to UTC (e.g. before 1970, or beyond the platform's supported range) render as the literal text `"null"` (i.e. serialize as the JSON string `"null"`), and `getDateTimeString()` returns `""` for them. Years 1970+ are fully supported.
 | `void putBinary(key, const uint8_t* data, size_t len)` | Add binary data. |
 | `void putBinary(key, const std::vector<uint8_t>& data)` | Add binary data. |
-| `void putBinChunked(key, const uint8_t* data, size_t size, size_t chunk_size = 76)` | Split binary into Base64 chunks. |
+| `bool putBinChunked(key, const uint8_t* data, size_t size, size_t chunk_size = 76)` | Split binary into Base64 chunks. Returns true on success, false if memory allocation fails. |
 | `void putObjectId(key, std::string_view oid)` | Add ObjectId (12-byte binary). |
 | `void putTimestamp(key, int64_t ts)` | Add timestamp (MessagePack-specific). |
 | `void putRegex(key, const char* pattern, const char* options)` | Add regular expression. |
@@ -208,7 +212,7 @@ Keys can be `const char*`, `std::string`, or `std::string_view`.
 | `getBool(key)` | `bool` | Boolean value. |
 | `getDateTime(key)` | `time_t` | Datetime (seconds). |
 | `getDateTimeMs(key)` | `int` | Milliseconds part of datetime. |
-| `getDateTimeString(key)` | `std::string` | ISO-8601 string. |
+| `getDateTimeString(key)` | `std::string` | ISO-8601 string. Returns `""` if the timestamp cannot be converted to UTC (e.g. before 1970). |
 | `getBinary(key)` | `std::vector<uint8_t>` | Binary data. |
 | `getBinChunked(key)` | `std::vector<uint8_t>` | Reconstruct binary from chunks. |
 | `getObjectId(key)` | `std::string` | ObjectId as 12-byte string. |

@@ -275,7 +275,7 @@ struct asvJSONValue {
 	}
 
 	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeExtension(int8_t extType, const uint8_t* data, size_t len) {
-		if (!data && len > 0) return nullptr;
+		if (!asvJSONValue::checkStringLen(len) || (!data && len > 0)) return nullptr;
 		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = EXTENSION;
@@ -536,15 +536,25 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 	}
 }
 
-inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v);
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth = 0);
 
 
+/// Thread safety:
+/// - Concurrent READS of the same const asvJSON instance are safe.
+/// - A write (parse, from*, set*, to*, serialization mutating state) must not
+///   run concurrently with any other operation on the same instance.
+/// - Distinct asvJSON instances are safe to use concurrently from separate
+///   threads; format-specific shared state uses thread_local storage.
 class asvJSON {
 public:
 	mutable std::string lastError;
 	bool allowNaNInfinity = false;
+	// When true, parse() validates that the entire input is well-formed UTF-8
+	// (using isValidUTF8 from detail/utf8.hpp) before parsing. Invalid byte
+	// sequences cause parse() to return false with lastError set. Off by default.
+	bool validateUTF8 = false;
 public:
-	size_t asvJSON::size() const {
+	size_t size() const {
 		return root ? root->size() : 0;
 	}
 private:
@@ -794,6 +804,7 @@ private:
 		size_t intStart = pos;
 		while (isDigit(cur())) next();
 		size_t intLen = pos - intStart;
+		if (intLen == 0) throw asvJSONError("Invalid number: digit required");
 		if (intLen > 1 && json[intStart] == '0') throw asvJSONError("Invalid number: leading zero not allowed");
 		bool isDouble = false;
 		if (cur() == '.') { isDouble = true; next(); if (!isDigit(cur())) throw asvJSONError("Invalid number: digit required after decimal point"); while (isDigit(cur())) next(); }
@@ -822,6 +833,7 @@ private:
 				return asvJSONValue::makeDouble(d);
 			}
 			if (ec == std::errc() && ptr != buf + numLen) throw asvJSONError("Invalid number");
+			if (ec != std::errc()) throw asvJSONError("Invalid number: out of range");
 		#else
 			std::string numStr(buf, numLen);
 			char* endptr;
@@ -872,6 +884,7 @@ public:
 	asvJSON(asvJSON&& other) noexcept
 		: lastError(std::move(other.lastError)),
 		  allowNaNInfinity(other.allowNaNInfinity),
+		  validateUTF8(other.validateUTF8),
 		  root(std::move(other.root)),
 		  jsonBuf(std::move(other.jsonBuf)),
 		  json(jsonBuf),
@@ -891,6 +904,7 @@ public:
 			parseDepth = other.parseDepth;
 			lastError = std::move(other.lastError);
 			allowNaNInfinity = other.allowNaNInfinity;
+			validateUTF8 = other.validateUTF8;
 			other.pos = 0;
 			other.parseDepth = 0;
 			other.json = std::string_view();
@@ -898,25 +912,14 @@ public:
 		return *this;
 	}
 
-	bool parse(const std::string& s) {
-		root = nullptr;
-		jsonBuf = s;
-		json = jsonBuf;
-		pos = 0;
-		try {
-			root = parseValue();
-			skip();
-			if (pos != json.size()) { root = nullptr; lastError = "Trailing chars"; return false; }
-			return root != nullptr;
-		} catch (const asvJSONError& e) {
-			lastError = e.what();
-			root = nullptr;
-			return false;
-		}
-	}
-
 	bool parse(std::string_view s) {
 		root = nullptr;
+		// Strip UTF-8 BOM (EF BB BF) if present
+		if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s.remove_prefix(3);
+		if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
+			lastError = "Invalid UTF-8 in input";
+			return false;
+		}
 		jsonBuf.assign(s.data(), s.size());
 		json = jsonBuf;
 		pos = 0;
@@ -955,6 +958,11 @@ public:
 		return out;
 	}
 
+	// Returns the size in bytes of the serialized JSON document.
+	// WARNING: this performs a FULL serialization (and allocates the entire
+	// output string) just to count its bytes, then discards it. For very large
+	// documents this doubles memory usage and is wasteful. Prefer serializing
+	// once with serialize() and using the returned string's size().
 	size_t byteSize() const {
 		if (!root) return 0;
 		std::string out;
@@ -987,8 +995,8 @@ public:
 		if (v->type == asvJSONValue::STRING) return std::string(v->str_data.data(), v->str_data.size());
 		if (v->type == asvJSONValue::DATETIME) {
 			char buf[32];
-			std::tm tm;
-			gmtimeSafe(&tm, &v->timestamp);
+			std::tm tm{};
+			if (!gmtimeSafe(&tm, &v->timestamp)) return "";
 			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
 			return std::string(buf);
 		}
@@ -1116,20 +1124,22 @@ public:
 		return ptr;
 	}
 
-	void putBinChunked(std::string_view key, const uint8_t* data, size_t size, size_t chunk_size = 76) {
+	// Returns true on success, false if memory allocation fails (no partial state).
+	bool putBinChunked(std::string_view key, const uint8_t* data, size_t size, size_t chunk_size = 76) {
 		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
-		if (!root) return;
+		if (!root) return false;
 		auto arr = asvJSONValue::makeArray();
-		if (!arr) return;
+		if (!arr) return false;
 		size_t bytes_per_chunk = (chunk_size / 4) * 3;
 		for (size_t i = 0; i < size; i += bytes_per_chunk) {
 			size_t chunk = std::min(bytes_per_chunk, size - i);
 			std::string encoded = encodeBase64(data + i, chunk);
 			auto v = asvJSONValue::makeString(encoded.c_str(), encoded.length());
-			if (!v) return;
+			if (!v) return false;
 			arr->arr->emplace_back(std::move(v));
 		}
 		root->obj->emplace(std::string(key), std::move(arr));
+		return true;
 	}
 
 	std::vector<uint8_t> getBinChunked(std::string_view key) const {
@@ -1458,9 +1468,10 @@ public:
 		if (!root) return "";
 		auto* v = root->get(key);
 		if (!v || v->type != asvJSONValue::DATETIME) return "";
+		// Dates gmtimeSafe cannot convert (e.g. before 1970) return "".
 		char buf[32];
-		std::tm tm;
-		gmtimeSafe(&tm, &v->timestamp);
+		std::tm tm{};
+		if (!gmtimeSafe(&tm, &v->timestamp)) return "";
 		if (v->datetime_ms > 0)
 			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
 		else
@@ -1499,6 +1510,12 @@ public:
 	}
 
 	// Array helpers
+	// Behavior: if the current root is not already an array, it is NOT
+	// replaced by the new value. Instead the existing root (if any) is
+	// wrapped as the first element of a new array, then `val` is appended
+	// as the last element. E.g. with root {"a":1}, arrayAddValue(2) yields
+	// [{"a":1}, 2]. With an empty document (no root) the array contains
+	// just `val`. Use setRoot()/clear() if replacement is intended instead.
 	asvJSONValue* arrayAddValue(std::unique_ptr<asvJSONValue> val) {
 		if (!val) return nullptr;
 		if (!root || root->type != asvJSONValue::ARRAY) {
@@ -1650,7 +1667,7 @@ public:
 
 // ======================= Type Formatting Helpers =======================
 
-static void fmtDoubleVal(double d, std::string& out) {
+inline void fmtDoubleVal(double d, std::string& out) {
 	if (d == 0.0) { out += '0'; return; }
 	std::string tmp;
 	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
@@ -1663,15 +1680,18 @@ static void fmtDoubleVal(double d, std::string& out) {
 	if (n > 0) out.append(buf, static_cast<size_t>(n));
 }
 
-static bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
+inline bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 	if (!allowNaNInfinity) return false;
-	if (std::isnan(d)) { out += "NaN"; return true; }
+	if (std::isnan(d)) { out += (std::signbit(d) ? "-NaN" : "NaN"); return true; }
 	if (d == INFINITY) { out += "Infinity"; return true; }
 	if (d == -INFINITY) { out += "-Infinity"; return true; }
 	return false;
 }
 
-static void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
+inline void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
+	// Timestamps that gmtimeSafe cannot convert to UTC (e.g. before 1970 or
+	// beyond the platform's supported range) render as the literal text "null"
+	// (the serializer wraps this in quotes, producing the JSON string "null").
 	char buf[32];
 	std::tm tm{};
 	if (!gmtimeSafe(&tm, &ts)) { out += "null"; return; }
@@ -1687,12 +1707,12 @@ static void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
 	}
 }
 
-static void fmtObjectIdHexVal(std::string_view s, std::string& out) {
+inline void fmtObjectIdHexVal(std::string_view s, std::string& out) {
 	static const char hex[] = "0123456789abcdef";
 	for (unsigned char c : s) { out += hex[c >> 4]; out += hex[c & 0xF]; }
 }
 
-static void fmtRegexVal(std::string_view s, std::string& out) {
+inline void fmtRegexVal(std::string_view s, std::string& out) {
 	size_t sep = 	s.rfind('\0');
 	out.push_back('"');
 	appendJsonEscaped(out, (sep != std::string_view::npos) ? s.substr(0, sep) : s);
@@ -1703,7 +1723,7 @@ static void fmtRegexVal(std::string_view s, std::string& out) {
 	out += '"';
 }
 
-static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
+inline void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
 	out += "__EXT__";
 	char buf[8];
 	snprintf(buf, sizeof(buf), "%d", static_cast<int>(type));
@@ -1712,7 +1732,7 @@ static void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string&
 	out += encodeBase64(data, len);
 }
 
-static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity) {
+inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity) {
 	switch (v->type) {
 		case asvJSONValue::NULL_VAL: out += "null"; break;
 		case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); break;
@@ -1798,8 +1818,9 @@ static void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 
 // ======================= Core inline definitions =======================
 
-inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth) {
 	if (!v) return nullptr;
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
 	switch (v->type) {
 		case asvJSONValue::NULL_VAL: return asvJSONValue::makeNull();
 		case asvJSONValue::BOOL_VAL: return asvJSONValue::makeBool(v->flag);
@@ -1825,7 +1846,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 			if (!a) return nullptr;
 			if (v->arr) {
 				a->arr->reserve(v->arr->size());
-				for (const auto& elem : *v->arr) { auto cloned = cloneValue(elem.get()); if (cloned) a->arr->push_back(std::move(cloned)); }
+				for (const auto& elem : *v->arr) { auto cloned = cloneValue(elem.get(), depth + 1); if (cloned) a->arr->push_back(std::move(cloned)); }
 			}
 			return a;
 		}
@@ -1837,7 +1858,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 				o->obj->reserve(v->obj->size());
 #endif
 				for (const auto& [k, val] : *v->obj) {
-					auto cloned = cloneValue(val.get());
+					auto cloned = cloneValue(val.get(), depth + 1);
 					if (cloned) o->obj->emplace(k, std::move(cloned));
 				}
 			}
@@ -1850,7 +1871,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v) {
 
 // JSON Pointer, Merge, Patch
 
-static std::string decodeJSONPointerKey(std::string_view seg) {
+inline std::string decodeJSONPointerKey(std::string_view seg) {
 	std::string out;
 	out.reserve(seg.size());
 	for (size_t i = 0; i < seg.size(); i++) {
@@ -2011,7 +2032,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 
 // Merge & Patch
 
-static void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch, int depth) {
+inline void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch, int depth) {
 	if (!target || !patch) return;
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
 	if (patch->type != asvJSONValue::OBJECT || !patch->obj) {
@@ -2083,9 +2104,10 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 	return result;
 }
 
-static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
+inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth = 0) {
 	if (!a && !b) return true;
 	if (!a || !b) return false;
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return false;
 	if (a->type != b->type) return false;
 	switch (a->type) {
 		case asvJSONValue::NULL_VAL: return true;
@@ -2104,7 +2126,7 @@ static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 			if (a->arr && b->arr) {
 				if (a->arr->size() != b->arr->size()) return false;
 				for (size_t i = 0; i < a->arr->size(); i++)
-					if (!valuesEqual((*a->arr)[i].get(), (*b->arr)[i].get())) return false;
+					if (!valuesEqual((*a->arr)[i].get(), (*b->arr)[i].get(), depth + 1)) return false;
 			}
 			return true;
 		}
@@ -2115,7 +2137,7 @@ static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
 				for (const auto& [k, v] : *a->obj) {
 					auto it = mapFind(*b->obj, k);
 					if (it == b->obj->end()) return false;
-					if (!valuesEqual(v.get(), it->second.get())) return false;
+					if (!valuesEqual(v.get(), it->second.get(), depth + 1)) return false;
 				}
 			}
 			return true;

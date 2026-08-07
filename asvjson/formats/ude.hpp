@@ -28,33 +28,33 @@ namespace asvJSONInternal {
 
 // ====================== Shared helpers ======================
 
-static std::string_view udeTrim(std::string_view s) {
+inline std::string_view udeTrim(std::string_view s) {
   while (!s.empty() && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r' || s[0] == '\n')) s.remove_prefix(1);
   while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n')) s.remove_suffix(1);
   return s;
 }
 
-static std::string udeToLower(std::string_view s) {
+inline std::string udeToLower(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (char c : s) out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
   return out;
 }
 
-static bool udeIsIdentStart(char c) {
+inline bool udeIsIdentStart(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-static bool udeIsIdentCont(char c) {
+inline bool udeIsIdentCont(char c) {
   return udeIsIdentStart(c) || (c >= '0' && c <= '9') || c == '-';
 }
 
-static bool udeIsUnquotedChar(char c) {
+inline bool udeIsUnquotedChar(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
          c == '.' || c == '_' || c == '~' || c == '+' || c == '/' || c == '=' || c == '-';
 }
 
-static int udeHexDigit(char c) {
+inline int udeHexDigit(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -63,13 +63,13 @@ static int udeHexDigit(char c) {
 
 // Recognized document separator lines (exact match only, so that a comment
 // merely containing the phrase "End of Document" does not split the stream).
-static bool udeIsDocSeparator(std::string_view line) {
+inline bool udeIsDocSeparator(std::string_view line) {
   return line == "// --- End of Document ---" ||
          line == "// UDE document separator";
 }
 
 // Split a UDE stream into documents on document separator lines.
-static std::vector<std::string> splitUdeDocuments(const std::string& text) {
+inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
   auto lines = splitLines(text);
   std::vector<std::string> docs;
   std::string cur;
@@ -90,7 +90,7 @@ static std::vector<std::string> splitUdeDocuments(const std::string& text) {
 
 // Try to interpret a bare token as a number (decimal / hex / octal / binary).
 // Returns nullptr when the token is not a valid UDE number literal.
-static std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
+inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
   if (tok.empty()) return nullptr;
   size_t i = 0;
   bool neg = false;
@@ -158,7 +158,7 @@ static std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
 // Fold a block scalar: a single newline between two non-empty lines becomes a
 // space; a run of one or more blank lines is preserved as a single paragraph
 // break. A trailing newline is left in place so that chomping can adjust it.
-static std::string udeFoldScalar(std::string_view s) {
+inline std::string udeFoldScalar(std::string_view s) {
   std::string res;
   res.reserve(s.size());
   size_t i = 0;
@@ -315,7 +315,7 @@ private:
     return pk;
   }
 
-  static bool udeKeyIsIdentLike(const std::string& key) {
+  inline bool udeKeyIsIdentLike(const std::string& key) {
     if (key.empty()) return false;
     size_t segStart = 0;
     int segs = 0;
@@ -761,7 +761,7 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
 // Only applied when the line cannot be a structured UDE document at all, so
 // that malformed documents and strict-mode rejections report their error
 // instead of silently degrading to a plain string.
-static std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& text) {
+inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& text) {
   std::string_view t = udeTrim(text);
   if (t.empty()) return nullptr;
   if (t.find('\n') != std::string_view::npos) return nullptr;
@@ -805,14 +805,14 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
 // A key can be written bare only if it is a plain identifier. Keys containing
 // dots must be quoted so that they round-trip as literal keys rather than
 // being re-expanded as dotted (nested) keys by the parser.
-static bool udeKeySafe(const std::string& key) {
+inline bool udeKeySafe(const std::string& key) {
   if (key.empty() || key.find('.') != std::string::npos) return false;
   if (!udeIsIdentStart(key[0])) return false;
   for (char c : key) if (!udeIsIdentCont(c)) return false;
   return true;
 }
 
-static void udeWriteQuoted(std::ostream& os, std::string_view s) {
+inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
   os << '"';
   for (unsigned char c : s) {
     switch (c) {
@@ -836,13 +836,13 @@ static void udeWriteQuoted(std::ostream& os, std::string_view s) {
   os << '"';
 }
 
-static void udeWriteKey(std::ostream& os, const std::string& k, bool strict) {
+inline void udeWriteKey(std::ostream& os, const std::string& k, bool strict) {
   // Strict mode requires all keys to be quoted (Section 3).
   if (!strict && udeKeySafe(k)) os << k;
   else udeWriteQuoted(os, k);
 }
 
-static bool udeStringNeedsQuote(std::string_view s, bool strict) {
+inline bool udeStringNeedsQuote(std::string_view s, bool strict) {
   if (s.empty()) return true;
   std::string lower = udeToLower(s);
   if (lower == "true" || lower == "false" || lower == "null") return true;
@@ -854,7 +854,7 @@ static bool udeStringNeedsQuote(std::string_view s, bool strict) {
   return false;
 }
 
-static void udeWriteIndent(std::ostream& os, int indent) {
+inline void udeWriteIndent(std::ostream& os, int indent) {
   for (int i = 0; i < indent; i++) os << "  ";
 }
 
@@ -863,7 +863,7 @@ static void udeWriteIndent(std::ostream& os, int indent) {
 // terminates the scalar once the base indent is known (Appendix A), the
 // string must not contain any blank line after content except a single
 // trailing blank line, and must contain at least one content line.
-static bool udeCanBlockEncode(std::string_view s) {
+inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
   size_t trailing = 0;
   while (trailing < s.size() && s[s.size() - 1 - trailing] == '\n') trailing++;
@@ -907,7 +907,7 @@ static bool udeCanBlockEncode(std::string_view s) {
 // emitting a '|+' header plus one trailing blank line so that the value
 // round-trips exactly. Strings that cannot round-trip as a block scalar are
 // written as quoted strings by the caller instead.
-static void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
+inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
   size_t k = 0;
   while (k < s.size() && s[s.size() - 1 - k] == '\n') k++;
   os << (k > 0 ? "|+\n" : "|\n");
@@ -923,9 +923,9 @@ static void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
 }
 
 // Forward declaration
-static void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict);
+inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict);
 
-static void udeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+inline void udeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
   if (indent == 0) {
     bool first = true;
     for (const auto& [k, sub] : *v->obj) {
@@ -949,7 +949,7 @@ static void udeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, 
   }
 }
 
-static void udeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, bool multiline, bool strict) {
+inline void udeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, bool multiline, bool strict) {
   if (!v->arr || v->arr->empty()) { os << "[]"; return; }
   bool allObjs = true;
   for (const auto& e : *v->arr) if (e->type != asvJSONValue::OBJECT) { allObjs = false; break; }
@@ -973,7 +973,7 @@ static void udeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, b
   }
 }
 
-static void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict) {
+inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict) {
   using T = asvJSONValue::Type;
   if (!v) { os << "null"; return; }
   switch (v->type) {

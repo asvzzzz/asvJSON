@@ -16,7 +16,7 @@
 
 namespace asvJSONInternal {
 
-static std::string json5ToJson(std::string_view input) {
+inline std::string json5ToJson(std::string_view input) {
   std::string out;
   out.reserve(input.size() + input.size() / 8);
 
@@ -336,7 +336,7 @@ static std::string json5ToJson(std::string_view input) {
   return out;
 }
 
-static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false) {
+inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false) {
   if (!v) { out += "null"; return; }
   if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
   std::string pad;
@@ -347,7 +347,7 @@ static void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::INT: out += std::to_string(v->num); break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
-      if (std::isnan(d)) { out += "NaN"; break; }
+      if (std::isnan(d)) { out += (std::signbit(d) ? "-NaN" : "NaN"); break; }
       if (std::isinf(d)) { out += (d > 0 ? "Infinity" : "-Infinity"); break; }
       std::string r; fmtDoubleVal(d, r); out += r;
       break;

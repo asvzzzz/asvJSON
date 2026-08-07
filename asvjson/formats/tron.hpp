@@ -7,7 +7,7 @@
 
 namespace asvJSONInternal {
 
-static std::string tronSchemaSignature(const asvJSONValue* v) {
+inline std::string tronSchemaSignature(const asvJSONValue* v) {
   if (!v || v->type != asvJSONValue::OBJECT || v->obj->empty()) return {};
   std::vector<std::string> keys;
   keys.reserve(v->obj->size());
@@ -21,7 +21,7 @@ static std::string tronSchemaSignature(const asvJSONValue* v) {
   return r;
 }
 
-static void tronDiscoverSchemas(const asvJSONValue* v,
+inline void tronDiscoverSchemas(const asvJSONValue* v,
     std::unordered_map<std::string, std::vector<std::string>>& firstKeys,
     std::unordered_map<std::string, size_t>& counts,
     std::unordered_set<const asvJSONValue*>& visited) {
@@ -46,14 +46,14 @@ static void tronDiscoverSchemas(const asvJSONValue* v,
   }
 }
 
-static std::string tronClassName(int idx) {
+inline std::string tronClassName(int idx) {
   std::string r(1, static_cast<char>('A' + (idx % 26)));
   int n = idx / 26;
   if (n > 0) r += std::to_string(n);
   return r;
 }
 
-static void tronSerializeVal(const asvJSONValue* v,
+inline void tronSerializeVal(const asvJSONValue* v,
     const std::unordered_map<std::string, std::string>& sigToClass,
     const std::unordered_map<std::string, std::vector<std::string>>& classKeys,
     std::string& out, bool allowNaNInfinity = false) {
@@ -217,11 +217,11 @@ struct TronTok {
   std::string text;
 };
 
-static std::string tronUnescape(const std::string& s) {
+inline std::string tronUnescape(const std::string& s) {
   return unescapeJsonString(s, false);
 }
 
-static std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfinity = false) {
+inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfinity = false) {
   std::vector<TronTok> toks;
   size_t i = 0;
   auto add = [&](TronTokType t, std::string s = {}) { toks.push_back({t, std::move(s)}); };
