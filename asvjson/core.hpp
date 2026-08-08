@@ -106,7 +106,7 @@ struct asvJSONValue {
 	static bool checkObjectSize(size_t n) noexcept { return n <= MAX_OBJECT_SIZE; }
 	static bool checkNestingDepth(int depth) noexcept { return depth <= static_cast<int>(MAX_NESTING_DEPTH); }
 
-	enum Type { NULL_VAL, STRING, OBJECT, ARRAY, INT, BOOL_VAL, DOUBLE, DATETIME, BINARY, OBJECTID, REGEX, TIMESTAMP, EXTENSION };
+    enum Type { NULL_VAL, STRING, OBJECT, ARRAY, INT, BOOL_VAL, DOUBLE, DATETIME, BINARY, OBJECTID, REGEX, TIMESTAMP, EXTENSION, CUSTOM_TAG };
 	Type type = NULL_VAL;
 
 	int8_t ext_type = 0;
