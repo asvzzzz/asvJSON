@@ -345,6 +345,29 @@ private:
     return parseScalar();
   }
 
+  // Unescape UDE strings – only \n, \t, \\\\ and \" are allowed.
+  static std::string udeUnescape(const std::string_view& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+      char c = raw[i];
+      if (c == '\\') {
+        if (i + 1 >= raw.size()) throw asvJSONError("UDE: invalid escape at end of string");
+        char e = raw[++i];
+        switch (e) {
+          case 'n': out.push_back('\n'); break;
+          case 't': out.push_back('\t'); break;
+          case '\\': out.push_back('\\'); break;
+          case '"': out.push_back('"'); break;
+          default: throw asvJSONError(std::string("UDE: invalid escape sequence \\" ) + e + " in string");
+        }
+      } else {
+        out.push_back(c);
+      }
+    }
+    return out;
+  }
+
   std::unique_ptr<asvJSONValue> parseQuotedString() {
     pos_++; // consume '"'
     size_t start = pos_;
@@ -361,7 +384,7 @@ private:
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume '"'
     try {
-      return asvJSONValue::makeStringView(unescapeJsonString(raw, true));
+      return asvJSONValue::makeStringView(udeUnescape(raw));
     } catch (const std::exception&) {
       throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
     }
@@ -423,7 +446,7 @@ private:
     if (!eof()) { pos_++; lineNum_++; }
 
     std::vector<std::string> content;
-    bool terminatedByBlank = false;
+    //bool terminatedByBlank = false; // removed - no longer needed
     size_t baseIndent = (explicitIndent >= 0) ? static_cast<size_t>(explicitIndent) : static_cast<size_t>(-1);
 
     while (!eof()) {
@@ -447,15 +470,9 @@ private:
         if (indent < baseIndent) break; // dedent terminates the scalar
         content.emplace_back(std::string(line.substr(baseIndent < line.size() ? baseIndent : line.size())));
       } else {
-        // An empty line terminates the block scalar when the base indentation
-        // is greater than zero (Appendix A, Block Scalar Semantics). The empty
-        // line is a pure terminator and never becomes part of the content; the
-        // line break that follows the last content line is still part of the
-        // scalar and is appended after the loop.
-        if (baseIndent > 0) {
-          terminatedByBlank = true;
-          break;
-        }
+        // Empty lines are part of the block scalar content (paragraph breaks).
+        // Termination occurs only when indentation decreases, which is handled
+        // above. Preserve the empty line.
         content.emplace_back("");
       }
 
@@ -472,7 +489,7 @@ private:
       if (i > 0) out += '\n';
       out += content[i];
     }
-    if (terminatedByBlank && !content.empty()) out += '\n';
+
 
     if (indicator == '>') {
       // Folded scalar: first fold (NEWLINE -> space), then chomping is
@@ -527,7 +544,7 @@ private:
   }
 
   void registerAnchor(const std::string& name, const asvJSONValue* v) {
-    if (anchors_.size() > 10000) throw asvJSONError("UDE: too many anchors");
+    if (anchors_.size() > 1000000) throw asvJSONError("UDE: too many anchors");
     auto c = cloneValue(v);
     if (!c) throw asvJSONError("UDE: failed to store anchor &" + name);
     anchors_[name] = std::move(c);
@@ -549,7 +566,7 @@ private:
     // graph contains a cycle and must be rejected (Appendix A, security).
     if (resolving_anchors_.count(name))
       throw asvJSONError("UDE: cyclic reference detected for alias *" + name);
-    if (aliasDepth_ >= 100) throw asvJSONError("UDE: anchor resolution depth exceeded");
+    if (aliasDepth_ >= 1024) throw asvJSONError("UDE: anchor resolution depth exceeded");
     resolving_anchors_.insert(name);
     aliasDepth_++;
     std::unique_ptr<asvJSONValue> res;
@@ -639,8 +656,19 @@ private:
       if (!r) throw asvJSONError("UDE: invalid regex");
       return r;
     }
-    // Unknown tags are preserved as the raw value.
-    return val;
+    // Preserve unknown tags using CUSTOM_TAG type.
+    auto custom = std::make_unique<asvJSONValue>();
+    custom->type = asvJSONValue::CUSTOM_TAG;
+    // Serialize the original value to preserve it for round‑trip
+    std::string serialized;
+    if (val->type == asvJSONValue::STRING) {
+      serialized = val->str_data;
+    } else {
+      // Use JSON serialization of the value (no pretty printing)
+      val->serialize(serialized, false);
+    }
+    custom->str_data = tag + " " + serialized;
+    return custom;
   }
 
   std::unique_ptr<asvJSONValue> parseTagged() {
@@ -689,10 +717,8 @@ private:
         } else if (it->second->type == asvJSONValue::OBJECT) {
           cur = it->second.get();
         } else {
-          auto no = asvJSONValue::makeObject();
-          auto* raw = no.get();
-          cur->obj->insert_or_assign(segs[i], std::move(no));
-          cur = raw;
+        // Existing key is not an object – cannot expand dotted key further.
+        throw asvJSONError("UDE: key conflict – intermediate key '" + segs[i] + "' is not an object");
         }
       }
       const std::string& leaf = segs.back();
@@ -1025,15 +1051,35 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       break;
     }
     case T::REGEX: {
-      os << "!regex ";
-      std::string r;
-      fmtRegexVal(v->str_data, r);
-      os << r;
-      break;
-    }
-    case T::TIMESTAMP: {
-      char buf[32];
-      auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+        os << "!regex ";
+        std::string r;
+        fmtRegexVal(v->str_data, r);
+        os << r;
+        break;
+      }
+      case T::CUSTOM_TAG: {
+        // str_data format: "tagName serializedValue"
+        size_t space = v->str_data.find(' ');
+        if (space != std::string::npos) {
+          std::string tag = v->str_data.substr(0, space);
+          std::string valStr = v->str_data.substr(space + 1);
+          os << '!' << tag << ' ';
+          // Decide quoting
+          if (udeStringNeedsQuote(valStr, strict)) {
+            udeWriteQuoted(os, valStr);
+          } else {
+            os << valStr;
+          }
+        } else {
+          // malformed, fallback to raw string
+          os << "!" << v->str_data;
+        }
+        break;
+      }
+      case T::TIMESTAMP: {
+        char buf[32];
+        auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+
       if (ec == std::errc()) os.write(buf, ptr - buf);
       else os << '0';
       break;
