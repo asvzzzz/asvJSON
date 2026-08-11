@@ -10,6 +10,8 @@
 //   - Values: quoted/unquoted strings, decimal/hex/octal/binary numbers,
 //     booleans (case-insensitive), null, inline or multi-line arrays/objects,
 //     block scalars (| and > with indent + chomp indicators)
+//   - Strings: double-quoted with JSON escapes + \xHH/\uXXXX/\UXXXXXXXX/\u{...}
+//     and line continuation; single-quoted (literal, '' escape); multiline
 //   - Anchors (&name) and aliases (*name) with cycle detection
 //   - Tags: !base64, !bin, !datetime, !ext, !regex; unknown tags preserve value
 //   - Strict mode rejects duplicate keys, unquoted keys, and special
@@ -304,6 +306,12 @@ private:
       pk.quoted = true;
       return pk;
     }
+    if (peek() == '\'') {
+      auto v = parseSingleQuotedString();
+      pk.name = std::move(v->str_data);
+      pk.quoted = true;
+      return pk;
+    }
     size_t start = pos_;
     while (!eof() && udeIsUnquotedChar(text_[pos_])) pos_++;
     if (pos_ == start) throw asvJSONError("UDE: invalid key at line " + std::to_string(lineNum_));
@@ -336,6 +344,7 @@ private:
     if (eof()) throw asvJSONError("UDE: expected value at line " + std::to_string(lineNum_));
     char c = peek();
     if (c == '"') return parseQuotedString();
+    if (c == '\'') return parseSingleQuotedString();
     if (c == '[') return parseArray();
     if (c == '{') return parseObject();
     if (c == '!') return parseTagged();
@@ -345,7 +354,12 @@ private:
     return parseScalar();
   }
 
-  // Unescape UDE strings – only \n, \t, \\\\ and \" are allowed.
+  // Unescape a double-quoted UDE string. Supports JSON escapes (\n, \t, \r,
+  // \b, \f, \\, \", \/), byte escapes \xHH, Unicode escapes \uXXXX (including
+  // surrogate pairs), \UXXXXXXXX and \u{...}, plus INI-style line continuation
+  // (backslash immediately before a line break joins the next line, stripping
+  // leading whitespace). Literal \r\n line breaks inside multiline strings are
+  // normalized to a single \n.
   static std::string udeUnescape(const std::string_view& raw) {
     std::string out;
     out.reserve(raw.size());
@@ -354,16 +368,110 @@ private:
       if (c == '\\') {
         if (i + 1 >= raw.size()) throw asvJSONError("UDE: invalid escape at end of string");
         char e = raw[++i];
+        // Line continuation: '\' immediately before a line break joins the next
+        // line and strips its leading whitespace (INI-style).
+        if (e == '\n' || e == '\r') {
+          if (e == '\r' && i + 1 < raw.size() && raw[i + 1] == '\n') i++;
+          i++;
+          while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t')) i++;
+          i--;
+          continue;
+        }
         switch (e) {
           case 'n': out.push_back('\n'); break;
           case 't': out.push_back('\t'); break;
+          case 'r': out.push_back('\r'); break;
+          case 'b': out.push_back('\b'); break;
+          case 'f': out.push_back('\f'); break;
+          case '/': out.push_back('/'); break;
           case '\\': out.push_back('\\'); break;
           case '"': out.push_back('"'); break;
+          case 'x': {
+            // Byte escape \xHH (1-2 hex digits).
+            int hi = (i + 1 < raw.size()) ? udeHexDigit(raw[i + 1]) : -1;
+            if (hi < 0) throw asvJSONError("UDE: invalid \\x escape in string");
+            i++;
+            int lo = (i + 1 < raw.size()) ? udeHexDigit(raw[i + 1]) : -1;
+            if (lo >= 0) i++;
+            out.push_back(static_cast<char>((hi << 4) | (lo < 0 ? 0 : lo)));
+            break;
+          }
+          case 'u':
+          case 'U': {
+            // Unicode escape: \uXXXX, \UXXXXXXXX or \u{...}.
+            if (e == 'u' && i + 1 < raw.size() && raw[i + 1] == '{') {
+              // \u{...} variable-length form.
+              size_t j = i + 2;
+              unsigned int cp = 0;
+              bool any = false;
+              while (j < raw.size() && raw[j] != '}') {
+                int d = udeHexDigit(raw[j]);
+                if (d < 0) throw asvJSONError("UDE: invalid \\u{...} escape in string");
+                cp = cp * 16u + static_cast<unsigned int>(d);
+                if (cp > 0x10FFFFu) throw asvJSONError("UDE: code point out of range in string");
+                any = true;
+                j++;
+              }
+              if (!any || j >= raw.size()) throw asvJSONError("UDE: unterminated \\u{...} escape in string");
+              i = j; // consume '}'
+              appendUtf8Codepoint(out, cp);
+              break;
+            }
+            size_t need = (e == 'u') ? 4 : 8;
+            if (i + need >= raw.size()) throw asvJSONError("UDE: invalid \\u/\\U escape in string");
+            unsigned int cp = 0;
+            for (size_t k = 1; k <= need; k++) {
+              int d = udeHexDigit(raw[i + k]);
+              if (d < 0) throw asvJSONError("UDE: invalid \\u/\\U escape in string");
+              cp = (cp << 4) | static_cast<unsigned int>(d);
+            }
+            i += need;
+            // Combine surrogate pairs (\uD800\uDC00 form).
+            if (cp >= 0xD800u && cp <= 0xDBFFu) {
+              if (i + 6 < raw.size() && raw[i + 1] == '\\' && raw[i + 2] == 'u') {
+                unsigned int lo = 0;
+                bool ok = true;
+                for (size_t k = 1; k <= 4; k++) {
+                  int d = udeHexDigit(raw[i + 2 + k]);
+                  if (d < 0) { ok = false; break; }
+                  lo = (lo << 4) | static_cast<unsigned int>(d);
+                }
+                if (ok && lo >= 0xDC00u && lo <= 0xDFFFu) {
+                  cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                  i += 6;
+                }
+              }
+            }
+            if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu))
+              throw asvJSONError("UDE: invalid code point in string");
+            appendUtf8Codepoint(out, cp);
+            break;
+          }
           default: throw asvJSONError(std::string("UDE: invalid escape sequence \\" ) + e + " in string");
         }
+      } else if (c == '\r') {
+        // Normalize literal \r\n and lone \r to \n (YAML line-break semantics).
+        if (i + 1 < raw.size() && raw[i + 1] == '\n') i++;
+        out.push_back('\n');
       } else {
         out.push_back(c);
       }
+    }
+    return out;
+  }
+
+  // Single-quoted UDE string: everything is literal, '' is the only escape
+  // (YAML-style). No backslash processing. Literal \r\n is normalized to \n.
+  static std::string udeUnescapeSingle(const std::string_view& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+      char c = raw[i];
+      if (c == '\'' && i + 1 < raw.size() && raw[i + 1] == '\'') { out.push_back('\''); i++; }
+      else if (c == '\r') {
+        if (i + 1 < raw.size() && raw[i + 1] == '\n') i++;
+        out.push_back('\n');
+      } else out.push_back(c);
     }
     return out;
   }
@@ -388,6 +496,25 @@ private:
     } catch (const std::exception&) {
       throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
     }
+  }
+
+  std::unique_ptr<asvJSONValue> parseSingleQuotedString() {
+    pos_++; // consume '\''
+    size_t start = pos_;
+    while (!eof()) {
+      char c = text_[pos_];
+      if (c == '\'') {
+        // '' is an escaped single quote, otherwise this closes the string.
+        if (pos_ + 1 < text_.size() && text_[pos_ + 1] == '\'') { pos_ += 2; continue; }
+        break;
+      }
+      if (c == '\n') lineNum_++;
+      pos_++;
+    }
+    if (eof()) throw asvJSONError("UDE: unterminated single-quoted string at line " + std::to_string(lineNum_));
+    std::string_view raw(text_.data() + start, pos_ - start);
+    pos_++; // consume '\''
+    return asvJSONValue::makeStringView(udeUnescapeSingle(raw));
   }
 
   std::unique_ptr<asvJSONValue> parseArray() {

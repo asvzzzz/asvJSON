@@ -46,7 +46,7 @@ Examples:
 
 **Dotted keys** (`DOT_KEY ::= IDENTIFIER ('.' IDENTIFIER)+`) are a shorthand for nesting: each dot‑separated segment creates one level of object. `a.b.c: 1` is the same object as `a: {b: {c: 1}}`. Because `a.b.c` also matches UNQUOTED_STRING, the lexer MUST prefer DOT_KEY (see the prioritization note in Appendix A) so dotted keys always produce nesting rather than a literal string key. To force a literal key containing dots, quote it: `"a.b.c": 1`.
 | **Colon** | `:` | Separates key and value. Whitespace around colon is allowed.
-| **String** | Quoted with double quotes (`"..."`) supporting escape sequences: `\n`, `\t`, `\\`, `\"`, `\uXXXX`. Unquoted strings are allowed and may contain only letters, digits, and `_ . ~ + / - =` (see `UNQUOTED_STRING` in Appendix A); they must not contain whitespace or any other punctuation. A leading `=` is discouraged (see the character note in Appendix A). In strict mode unquoted strings containing any non‑alphanumeric character must be quoted.
+| **String** | Double-quoted (`"..."`) supporting JSON escapes (`\n`, `\t`, `\r`, `\b`, `\f`, `\\`, `\"`, `\/`), byte escapes `\xHH`, and Unicode escapes `\uXXXX` (including surrogate pairs), `\UXXXXXXXX`, `\u{...}`. Single-quoted (`'...'`) strings are fully literal: the only escape is `''` for a literal quote. Both forms may span multiple lines; a backslash immediately before a line break inside a double-quoted string acts as an INI-style line continuation (joins lines and strips leading whitespace). Literal `\r\n` line breaks are normalized to `\n`. Unquoted strings are allowed and may contain only letters, digits, and `_ . ~ + / - =` (see `UNQUOTED_STRING` in Appendix A); they must not contain whitespace or any other punctuation. A leading `=` is discouraged (see the character note in Appendix A). In strict mode unquoted strings containing any non‑alphanumeric character must be quoted.
 | **Number** | Decimal, hexadecimal (`0x`), octal (`0o`), binary (`0b`). Floating point uses standard C‑style notation. | No leading zeros unless `0` itself.
 | **Boolean** | `true`, `false` (case‑insensitive).
 | **Null** | `null`.
@@ -214,8 +214,19 @@ BLOCK_COMMENT     ::= "/*" (NOT_STAR | "*" NOT_SLASH)* "*/"
 #   NOT_STAR  = any character except '*'
 #   NOT_SLASH = any character except '/'
 COLON             ::= ':'
-STRING            ::= '"' (ESC | ~["\\])* '"'
-ESC               ::= '\\' ["\\/bfnrt] | '\\u' [0-9a-fA-F]{4}
+# String semantics
+# DQ_STRING: JSON escapes plus \xHH (byte), \uXXXX (with surrogate pairs),
+# \UXXXXXXXX, \u{...} (code point), and line continuation '\' immediately before
+# a NEWLINE (joins lines, stripping leading whitespace). Literal \r\n inside a
+# multiline string is normalized to \n.
+# SQ_STRING: fully literal; the only escape is "''" (a literal quote). No
+# backslash processing is applied.
+STRING            ::= DQ_STRING | SQ_STRING
+DQ_STRING         ::= '"' (ESC | ~["\\])* '"'
+SQ_STRING         ::= "'" (SQ_ESC | ~['])* "'"
+SQ_ESC            ::= "''"
+ESC               ::= '\\' ["\\/bfnrt] | '\\x' HEXDIG HEXDIG | '\\u' HEXDIG{4} | '\\U' HEXDIG{8} | '\\u{' HEXDIG+ '}' | '\\' NEWLINE
+HEXDIG            ::= [0-9a-fA-F]
 NUMBER            ::= SIGNED_INT | SIGNED_FLOAT | HEX | OCTAL | BINARY
 SIGNED_INT        ::= '-'? INT
 SIGNED_FLOAT      ::= '-'? FLOAT

@@ -5752,6 +5752,113 @@ TEST(testFromUDE) {
   }
 }
 
+TEST(testUDEStringEscapes) {
+  // JSON control escapes \r \b \f \/
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"x\\ry\\bz\\fw\\/v\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "x\ry\bz\fw/v");
+  }
+  // Byte escapes \xHH (1-2 hex digits)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"\\x41\\x42\\x0a\"\n"));
+    std::string s = j.getString("a");
+    ASSERT_EQ(s.size(), size_t(3));
+    ASSERT_EQ(s[0], 'A');
+    ASSERT_EQ(s[1], 'B');
+    ASSERT_EQ(static_cast<unsigned char>(s[2]), 0x0A);
+  }
+  // Unicode \uXXXX (BMP, including surrogate pairs)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"\\u0041\\u00e9\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "A\xC3\xA9");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"\\uD83D\\uDE00\"\n")); // U+1F600 grinning face
+    std::string s = j.getString("a");
+    ASSERT_EQ(s, "\xF0\x9F\x98\x80");
+  }
+  // Unicode \UXXXXXXXX and \u{...}
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"\\U0001F600\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "\xF0\x9F\x98\x80");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"\\u{1F600}\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "\xF0\x9F\x98\x80");
+  }
+  // \r\n normalization inside a multiline string
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"line1\r\nline2\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "line1\nline2");
+  }
+  // Multiline double-quoted strings are allowed
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"first\nsecond\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "first\nsecond");
+  }
+  // Line continuation joins lines and strips leading whitespace
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"one \\\n  two\"\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "one two");
+  }
+  // Single-quoted strings are literal; '' is an escaped quote
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 'hello world'\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "hello world");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 'it''s'\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "it's");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 'C:\\path\\nope'\n")); // backslashes are literal
+    ASSERT_EQ(std::string(j.getString("a")), "C:\\path\\nope");
+  }
+  // Single-quoted keys are supported too
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("'a.b': 1\n"));
+    // The key is literal (not expanded as a dotted key).
+    auto* k = j.getRoot()->getConst("a.b");
+    ASSERT(k != nullptr);
+    ASSERT_EQ(k->getInt(), int64_t(1));
+    ASSERT(j.getNested("a") == nullptr);
+  }
+  // Round-trip: single-quoted input serializes to double-quoted output
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromUDE("a: 'O''Brien'\n"));
+    std::string ude = j.toUDE();
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("a")), "O'Brien");
+  }
+  // Invalid escapes are rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: \"\\q\"\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: \"\\xZZ\"\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: 'unterminated\n"));
+  }
+}
+
 TEST(testUDERoundTrip) {
   {
     asvJSON j;
@@ -6398,6 +6505,7 @@ int main() {
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
 	RUN(testFromUDE);
+	RUN(testUDEStringEscapes);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);

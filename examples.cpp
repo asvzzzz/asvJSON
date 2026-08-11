@@ -1238,6 +1238,23 @@ void example_from_ini() {
 	std::cout << std::endl;
 }
 
+void example_ude_strings() {
+	std::cout << "=== UDE String Escapes ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input =
+		"greeting: \"hello\\u{1F600} world\\n\"\n"
+		"path: 'C:\\Program Files\\app'\n"
+		"multiline: \"line one \\\n"
+		"            and line two\"\n";
+	if (json.fromUDE(input)) {
+		std::cout << "greeting = \"" << json.getString("greeting") << "\"" << std::endl;
+		std::cout << "path     = " << json.getString("path") << std::endl;
+		std::cout << "multiline= " << json.getString("multiline") << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_to_ude() {
 	std::cout << "=== UDE Output ===" << std::endl;
 
@@ -1336,6 +1353,7 @@ int main() {
 	example_from_ini();
 	example_to_ude();
 	example_from_ude();
+	example_ude_strings();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;
