@@ -739,6 +739,81 @@ private:
   }
 
   std::unique_ptr<asvJSONValue> applyTag(const std::string& tag, std::unique_ptr<asvJSONValue> val) {
+    // Explicit type tags: coerce the value to the requested scalar type.
+    if (tag == "int") {
+      if (val->type == asvJSONValue::INT) return val;
+      if (val->type == asvJSONValue::DOUBLE) {
+        if (val->dbl < static_cast<double>(INT64_MIN) || val->dbl > static_cast<double>(INT64_MAX) ||
+            val->dbl != std::floor(val->dbl))
+          throw asvJSONError("UDE: !int requires an integral value");
+        return asvJSONValue::makeInt(static_cast<int64_t>(val->dbl));
+      }
+      if (val->type == asvJSONValue::STRING) {
+        auto n = udeTryParseNumber(val->str_data);
+        if (!n || n->type != asvJSONValue::INT) throw asvJSONError("UDE: !int requires an integer literal");
+        return n;
+      }
+      throw asvJSONError("UDE: !int requires a numeric value");
+    }
+    if (tag == "float") {
+      if (val->type == asvJSONValue::DOUBLE) return val;
+      if (val->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(val->num));
+      if (val->type == asvJSONValue::STRING) {
+        auto n = udeTryParseNumber(val->str_data);
+        if (!n) throw asvJSONError("UDE: !float requires a numeric literal");
+        if (n->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(n->num));
+        return n;
+      }
+      throw asvJSONError("UDE: !float requires a numeric value");
+    }
+    if (tag == "string") {
+      if (val->type == asvJSONValue::STRING) return val;
+      if (val->type == asvJSONValue::INT) {
+        char buf[32];
+        auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val->num);
+        if (ec != std::errc()) throw asvJSONError("UDE: !string conversion failed");
+        return asvJSONValue::makeStringView(std::string_view(buf, ptr - buf));
+      }
+      if (val->type == asvJSONValue::DOUBLE) {
+        std::string tmp;
+        fmtDoubleVal(val->dbl, tmp);
+        return asvJSONValue::makeStringView(tmp);
+      }
+      if (val->type == asvJSONValue::BOOL_VAL) {
+        return asvJSONValue::makeStringView(val->flag ? "true" : "false");
+      }
+      throw asvJSONError("UDE: !string cannot convert this value");
+    }
+    if (tag == "bool") {
+      if (val->type == asvJSONValue::BOOL_VAL) return val;
+      if (val->type == asvJSONValue::INT) return asvJSONValue::makeBool(val->num != 0);
+      if (val->type == asvJSONValue::DOUBLE) return asvJSONValue::makeBool(val->dbl != 0.0);
+      if (val->type == asvJSONValue::STRING) {
+        std::string lower = udeToLower(val->str_data);
+        if (lower == "true" || lower == "yes" || lower == "on" || lower == "1") return asvJSONValue::makeBool(true);
+        if (lower == "false" || lower == "no" || lower == "off" || lower == "0") return asvJSONValue::makeBool(false);
+        throw asvJSONError("UDE: !bool requires true/false");
+      }
+      throw asvJSONError("UDE: !bool requires a boolean value");
+    }
+    if (tag == "null") {
+      // Explicit null (useful for merge patch semantics): value is discarded.
+      return asvJSONValue::makeNull();
+    }
+    if (tag == "schema") {
+      // Schema annotation: value is a schema reference (string) or an inline
+      // JSON Schema object. Preserved as a CUSTOM_TAG for user validation.
+      if (val->type == asvJSONValue::STRING || val->type == asvJSONValue::OBJECT) {
+        auto custom = std::make_unique<asvJSONValue>();
+        custom->type = asvJSONValue::CUSTOM_TAG;
+        std::string serialized;
+        if (val->type == asvJSONValue::STRING) serialized = val->str_data;
+        else val->serialize(serialized, false);
+        custom->str_data = "schema " + serialized;
+        return custom;
+      }
+      throw asvJSONError("UDE: !schema requires a string or object");
+    }
     if (tag == "base64") {
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !base64 requires a string value");
       bool err = false;
@@ -837,6 +912,11 @@ private:
     if (!eof() && peek() == '&') {
       anchor = parseAnchorName();
       skipWsAndComments();
+    }
+    if (eof() || peek() == '\n' || peek() == '\r') {
+      // A bare tag with no value. Only !null is meaningful here.
+      if (tag == "null") return asvJSONValue::makeNull();
+      throw asvJSONError("UDE: !" + tag + " requires a value");
     }
     auto val = parseValue();
     // Apply the tag first so the anchor references the final tagged value.
