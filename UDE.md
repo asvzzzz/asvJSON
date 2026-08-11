@@ -121,18 +121,20 @@ Chomping indicators:
 * `-` – strip all trailing newlines.
 No indicator defaults to keeping one newline (YAML default).
 
-Block scalar termination (Appendix A): the base indentation is the number of
-leading spaces on the first non‑empty line of the block. Every subsequent line
-must have at least that many leading spaces; extra spaces are part of the value.
-A line with fewer leading spaces terminates the scalar. An empty line (zero
-characters after the break) is treated as a line with zero indentation and
-*terminates* the block scalar whenever the base indentation is greater than
-zero — it contributes a single trailing line break (subject to chomping) and
-any content after it must start a new document construct. A leading empty line
-before the base indentation is known is preserved. Because of this rule, a
-single trailing newline is encodable (the terminator supplies it), but
-paragraph breaks via consecutive empty lines are not; the serializer therefore
-writes values containing blank interior or trailing lines as quoted strings.
+An optional explicit indentation indicator `|2`, `|0` (a digit right after the
+`|`/`>`) overrides the auto‑detected base indentation.
+
+Block scalar termination: the base indentation is the number of leading spaces
+on the first non‑empty line of the block. Every subsequent line must have at
+least that many leading spaces; extra spaces are part of the value. A line with
+fewer leading spaces terminates the scalar. Empty lines are **part of the
+content** (paragraph breaks) and never terminate the scalar by themselves; they
+are preserved, and the default (clip) chomping removes exactly one trailing
+newline.
+
+Tabs (Section 13): a tab is not allowed in the indentation margin of a block
+scalar — the margin must consist of spaces only (YAML rule). A tab after the
+margin is ordinary content.
 
 ---
 
@@ -224,7 +226,25 @@ people: [
 
 ---
 
-## 12. Future Work
+## 12. Limits and Resources
+The parser enforces documented resource limits:
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Anchor resolution depth | 100 | Alias chains resolving through more than 100 levels are rejected (Section 7). |
+| Number of anchors | 1,000,000 | `too many anchors` error once the per‑document count is reached. |
+| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser. |
+| String length | 10 MiB | Shared core limit. |
+| Object/array size | 1,000,000 entries | Shared core limit. |
+
+Tabs are **not** structural indentation anywhere in UDE (YAML rule). They are
+accepted as ordinary whitespace separators between tokens; inside a block
+scalar a tab in the indentation margin is an error (Section 6), while tabs
+after the margin are content.
+
+---
+
+## 13. Future Work
 * Standardized tag registry for third‑party extensions.
 * Schema validation (optional JSONSchema‑like validator).
 * Streaming parser for large documents.
@@ -361,8 +381,8 @@ TEXT_LINE         ::= ~[\n]*
 
 /* Block Scalar Semantics */
 /* The base indentation is the number of leading spaces on the first line of the block scalar. All subsequent lines must have at least this many spaces; any excess spaces are part of the value.
-   Empty lines (zero characters after NEWLINE) are treated as a line with zero indentation and terminate the block scalar if the base indentation is greater than zero.
-   The block scalar ends either when a line with fewer leading spaces than the base indentation appears, or at EOF. */
+   Empty lines are part of the content (paragraph breaks) and never terminate the scalar. The block scalar ends when a line with fewer leading spaces than the base indentation appears, or at EOF.
+   Tabs are not allowed in the indentation margin; the margin must be spaces only. */
 BOOLEAN           ::= [tT][rR][uU][eE] | [fF][aA][lL][sS][eE]
 NULL              ::= [nN][uU][lL][lL]
 ```
@@ -373,7 +393,7 @@ NULL              ::= [nN][uU][lL][lL]
 
 ---
 
-## 13. License
+## 14. License
 UDE is released under the MIT license. The specification text itself is public domain.
 
 ---

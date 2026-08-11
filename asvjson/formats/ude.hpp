@@ -281,6 +281,12 @@ public:
   std::unique_ptr<asvJSONValue> parseDocument();
 
 private:
+  // Documented resource limits (Section 10 of the UDE spec): the maximum
+  // alias resolution depth (100, matching the spec) and the maximum number of
+  // anchors that may be registered while parsing a document.
+  static constexpr int kMaxAliasDepth = 100;
+  static constexpr size_t kMaxAnchors = 1000000;
+
   // A parsed key plus whether it was quoted. Quoted keys are always literal;
   // unquoted dotted keys are expanded into nested objects. For dot-separated
   // keys with more than one segment, `segs` holds each segment together with
@@ -701,6 +707,15 @@ private:
       size_t indent = 0;
       while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t')) indent++;
       bool blank = (indent == line.size());
+      // YAML rule (Section 10): tabs may not be used for indentation. The
+      // indentation margin of a block scalar must consist of spaces only;
+      // tabs after the margin are part of the content.
+      if (!blank) {
+        for (size_t i = 0; i < indent; i++) {
+          if (line[i] == '\t')
+            throw asvJSONError("UDE: tab used as indentation in block scalar at line " + std::to_string(lineNum_));
+        }
+      }
 
       if (baseIndent == static_cast<size_t>(-1)) {
         if (!blank) {
@@ -793,7 +808,7 @@ private:
   }
 
   void registerAnchor(const std::string& name, const asvJSONValue* v) {
-    if (anchors_.size() > 1000000) throw asvJSONError("UDE: too many anchors");
+    if (anchors_.size() >= kMaxAnchors) throw asvJSONError("UDE: too many anchors");
     auto c = cloneValue(v);
     if (!c) throw asvJSONError("UDE: failed to store anchor &" + name);
     anchors_[name] = std::move(c);
@@ -815,7 +830,7 @@ private:
     // graph contains a cycle and must be rejected (Appendix A, security).
     if (resolving_anchors_.count(name))
       throw asvJSONError("UDE: cyclic reference detected for alias *" + name);
-    if (aliasDepth_ >= 1024) throw asvJSONError("UDE: anchor resolution depth exceeded");
+    if (aliasDepth_ >= kMaxAliasDepth) throw asvJSONError("UDE: anchor resolution depth exceeded");
     resolving_anchors_.insert(name);
     aliasDepth_++;
     std::unique_ptr<asvJSONValue> res;

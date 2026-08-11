@@ -6069,6 +6069,24 @@ TEST(testUDEEdgeCases) {
     ASSERT(a != nullptr && a->obj->size() == size_t(1));
     ASSERT_EQ(a->get("x")->getInt(), int64_t(1));
   }
+  // Tabs are allowed as whitespace separators between tokens
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a:\t1\nb:\t\"x\"\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(std::string(j.getString("b")), "x");
+  }
+  // Tabs are rejected in the block scalar indentation margin
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("msg: |\n\tline1\n"));
+  }
+  // Tabs after the margin are ordinary content
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  a\tb\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a\tb");
+  }
 }
 
 TEST(testUDEMergeKeys) {
