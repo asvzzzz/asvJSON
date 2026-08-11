@@ -6201,6 +6201,83 @@ TEST(testUDEDocuments) {
   }
 }
 
+TEST(testUDECustomTags) {
+  // Canonical !<name> <value> form: name stored separately from value
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("note: !custom \"some value\"\n"));
+    auto* v = j.get("note");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v->str_data), "custom");
+    ASSERT(v->custom_value != nullptr && v->custom_value->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->custom_value->str_data), "some value");
+  }
+  // Non-string values are preserved as structured values, not flattened text
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("n: !num 42\nf: !point {x: 1, y: 2}\n"));
+    auto* n = j.get("n");
+    ASSERT(n != nullptr && n->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT(n->custom_value != nullptr && n->custom_value->type == asvJSONValue::INT);
+    ASSERT_EQ(n->custom_value->num, int64_t(42));
+    auto* f = j.get("f");
+    ASSERT(f != nullptr && f->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT(f->custom_value != nullptr && f->custom_value->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(f->custom_value->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(f->custom_value->get("y")->getInt(), int64_t(2));
+  }
+  // Namespaced tags !ns:tag are representable
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("v: !app:version \"1.2.3\"\n"));
+    auto* v = j.get("v");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v->str_data), "app:version");
+  }
+  // Verbatim URI tags !<uri> are supported
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("v: !<tag:example.com,2026:type> 7\n"));
+    auto* v = j.get("v");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v->str_data), "tag:example.com,2026:type");
+    ASSERT(v->custom_value != nullptr && v->custom_value->type == asvJSONValue::INT);
+    ASSERT_EQ(v->custom_value->num, int64_t(7));
+  }
+  // Extended JSON representation: {"$customTag":{"name":...,"value":...}}
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("note: !custom \"some value\"\nn: !num 42\n"));
+    std::string json = j.serialize();
+    ASSERT(json.find("\"$customTag\":{\"name\":\"custom\",\"value\":\"some value\"}") != std::string::npos);
+    ASSERT(json.find("\"$customTag\":{\"name\":\"num\",\"value\":42}") != std::string::npos);
+  }
+  // UDE round-trip preserves name and value
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("note: !custom \"some value\"\nn: !num 42\nv: !app:version \"1.2.3\"\n"));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.get("note")->str_data), "custom");
+    ASSERT_EQ(std::string(j2.get("note")->custom_value->str_data), "some value");
+    ASSERT_EQ(j2.get("n")->custom_value->num, int64_t(42));
+    ASSERT_EQ(std::string(j2.get("v")->str_data), "app:version");
+  }
+  // !schema keeps the object/string as the structured value
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("s: !schema {type: object}\n"));
+    auto* v = j.get("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v->str_data), "schema");
+    ASSERT(v->custom_value != nullptr && v->custom_value->type == asvJSONValue::OBJECT);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.get("s")->str_data), "schema");
+    ASSERT(j2.get("s")->custom_value != nullptr);
+  }
+}
+
 TEST(testUDERoundTrip) {
   {
     asvJSON j;
@@ -6852,6 +6929,7 @@ int main() {
 	RUN(testUDEEdgeCases);
 	RUN(testUDEMergeKeys);
 	RUN(testUDEDocuments);
+	RUN(testUDECustomTags);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);

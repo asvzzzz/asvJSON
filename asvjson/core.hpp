@@ -121,6 +121,7 @@ struct asvJSONValue {
 
 	std::string str_data;
 	std::vector<uint8_t> bin_data;
+	std::unique_ptr<asvJSONValue> custom_value;  // value of a CUSTOM_TAG (name kept in str_data)
 	int64_t num = 0;
 	bool flag = false;
 	bool is_float32 = false;
@@ -140,6 +141,7 @@ struct asvJSONValue {
 		str_data = std::move(other.str_data);
 		obj = std::move(other.obj);
 		arr = std::move(other.arr);
+		custom_value = std::move(other.custom_value);
 		num = other.num;
 		flag = other.flag;
 		dbl = other.dbl;
@@ -163,6 +165,7 @@ struct asvJSONValue {
 			str_data = std::move(other.str_data);
 			obj = std::move(other.obj);
 			arr = std::move(other.arr);
+			custom_value = std::move(other.custom_value);
 			num = other.num;
 			flag = other.flag;
 			dbl = other.dbl;
@@ -186,6 +189,7 @@ struct asvJSONValue {
 		bin_data.clear();
 		if (type == OBJECT) { obj.reset(); }
 		else if (type == ARRAY) { arr.reset(); }
+		else if (type == CUSTOM_TAG) { custom_value.reset(); }
 		type = NULL_VAL;
 		datetime_ms = 0;
 	}
@@ -1823,9 +1827,12 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::CUSTOM_TAG: {
-			out += "{\"$customTag\":\"";
+			out += "{\"$customTag\":{\"name\":\"";
 			appendJsonEscaped(out, v->str_data);
-			out += "\"}";
+			out += "\",\"value\":";
+			if (v->custom_value) v->custom_value->serialize(out, allowNaNInfinity);
+			else out += "null";
+			out += "}}";
 			break;
 		}
 		default: out += "null"; break;
@@ -1862,6 +1869,11 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 			auto c = std::make_unique<asvJSONValue>();
 			c->type = asvJSONValue::CUSTOM_TAG;
 			c->str_data = v->str_data;
+			if (v->custom_value) {
+				auto cv = cloneValue(v->custom_value.get(), depth + 1);
+				if (!cv) return nullptr;
+				c->custom_value = std::move(cv);
+			}
 			return c;
 		}
 		case asvJSONValue::ARRAY: {
@@ -2144,7 +2156,12 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth 
 		case asvJSONValue::TIMESTAMP: return a->num == b->num;
 		case asvJSONValue::REGEX: return a->str_data == b->str_data;
 		case asvJSONValue::EXTENSION: return a->ext_type == b->ext_type && a->bin_data == b->bin_data;
-		case asvJSONValue::CUSTOM_TAG: return a->str_data == b->str_data;
+		case asvJSONValue::CUSTOM_TAG: {
+			if (a->str_data != b->str_data) return false;
+			if (static_cast<bool>(a->custom_value) != static_cast<bool>(b->custom_value)) return false;
+			if (a->custom_value) return valuesEqual(a->custom_value.get(), b->custom_value.get(), depth + 1);
+			return true;
+		}
 		case asvJSONValue::ARRAY: {
 			if (static_cast<bool>(a->arr) != static_cast<bool>(b->arr)) return false;
 			if (a->arr && b->arr) {

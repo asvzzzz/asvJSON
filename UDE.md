@@ -69,7 +69,7 @@ Examples:
 | **Block scalar indicator** | `|` (literal) or `>` (folded). Followed by an optional indentation level and optional chomping indicators (`+`, `-`). If no chomping indicator is supplied, the default is to keep a single trailing newline (standard YAML behavior).
 | **Anchor** | `&name`. Creates a reference that can be reused with `*name`.
 | **Alias** | `*name`. Replaces the anchor with its value; aliasing an alias is disallowed and will raise a cycle‑detected error. Maximum anchor depth is 100 levels.
-| **Tag** | `!type` prefix before any value (e.g., `!base64 "…"`). Tags are parsed by custom handlers; unknown tags are preserved as raw strings. The parser does not enforce the semantics of a tag – validation is delegated to user callbacks.
+| **Tag** | `!type` prefix before any value (e.g., `!base64 "…"`). Tags are parsed by custom handlers; unknown tags are preserved as `CUSTOM_TAG` with name and value stored separately (Section 8.1). The parser does not enforce the semantics of a tag – validation is delegated to user callbacks.
 
 ---
 
@@ -158,7 +158,26 @@ Tags allow custom data types to be represented in a type‑safe way:
 | `!datetime` | `!datetime "2026-07-30T14:45:00Z"` | ISO‑8601 timestamp. |
 | `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two‑token form like `!ext image/png "..."` would not parse. |
 
-The library provides handlers for the standard tags; unknown tags are stored as raw strings and can be processed by user‑defined callbacks.
+The library provides handlers for the standard tags. **Unknown tags** follow the *save* policy (the default of the three possible behaviors *error / save / ignore*): the tag and its value are preserved without data loss.
+
+### 8.1 Custom Tags (canonical form)
+An unknown tag stores its **name separately from its value**:
+
+```text
+!<name> <value>
+```
+
+* The name is a plain identifier, an optional namespace form `!ns:tag`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
+* The value is any UDE value (string, number, object, array, ...), not flattened text — `!point {x: 1, y: 2}` keeps the object intact.
+* In JSON (Extended JSON convention) a custom tag is represented as:
+
+```json
+{"$customTag":{"name":"custom","value":"some value"}}
+```
+
+* `!schema <string|object>` is stored the same way (tag name `schema`, value kept structured) so schema references and inline schemas round-trip.
+
+Unknown tags are processed by user‑defined callbacks via the `CUSTOM_TAG` value type.
 
 ---
 
@@ -262,7 +281,8 @@ UNQUOTED_STRING   ::= [A-Za-z0-9._~+/=-]+
 # with '=' should be quoted. This reconciles the token definition with the
 # statement in Section 3 that unquoted strings contain "no special characters".
 
-TAG               ::= '!' IDENTIFIER
+TAG               ::= '!' ( IDENTIFIER (':' IDENTIFIER | '.' IDENTIFIER)* | '<' TAG_URI '>' )
+TAG_URI           ::= [^>]+  // verbatim tag URI, e.g. tag:example.com,2026:type
 ANCHOR            ::= '&' IDENTIFIER
 ALIAS             ::= '*' IDENTIFIER
 WHITESPACE        ::= [ \t]+  // spaces and tabs

@@ -51,6 +51,12 @@ inline bool udeIsIdentCont(char c) {
   return udeIsIdentStart(c) || (c >= '0' && c <= '9') || c == '-';
 }
 
+// Tag names may include a namespace separator ':' (e.g. !ns:tag) or a dotted
+// prefix, so that registered tag namespaces are directly representable.
+inline bool udeIsTagChar(char c) {
+  return udeIsIdentCont(c) || c == ':' || c == '.';
+}
+
 inline bool udeIsUnquotedChar(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
          c == '.' || c == '_' || c == '~' || c == '+' || c == '/' || c == '=' || c == '-';
@@ -890,14 +896,13 @@ private:
     }
     if (tag == "schema") {
       // Schema annotation: value is a schema reference (string) or an inline
-      // JSON Schema object. Preserved as a CUSTOM_TAG for user validation.
+      // JSON Schema object. Preserved as a CUSTOM_TAG for user validation,
+      // with the tag name ("schema") stored separately from the value.
       if (val->type == asvJSONValue::STRING || val->type == asvJSONValue::OBJECT) {
         auto custom = std::make_unique<asvJSONValue>();
         custom->type = asvJSONValue::CUSTOM_TAG;
-        std::string serialized;
-        if (val->type == asvJSONValue::STRING) serialized = val->str_data;
-        else val->serialize(serialized, false);
-        custom->str_data = "schema " + serialized;
+        custom->str_data = "schema";
+        custom->custom_value = std::move(val);
         return custom;
       }
       throw asvJSONError("UDE: !schema requires a string or object");
@@ -974,27 +979,34 @@ private:
       if (!r) throw asvJSONError("UDE: invalid regex");
       return r;
     }
-    // Preserve unknown tags using CUSTOM_TAG type.
+    // Preserve unknown tags using CUSTOM_TAG type. The tag name is stored
+    // separately (str_data) from its value (custom_value), which is the
+    // canonical !<name> <value> form and round-trips without ambiguity.
     auto custom = std::make_unique<asvJSONValue>();
     custom->type = asvJSONValue::CUSTOM_TAG;
-    // Serialize the original value to preserve it for round‑trip
-    std::string serialized;
-    if (val->type == asvJSONValue::STRING) {
-      serialized = val->str_data;
-    } else {
-      // Use JSON serialization of the value (no pretty printing)
-      val->serialize(serialized, false);
-    }
-    custom->str_data = tag + " " + serialized;
+    custom->str_data = tag;
+    custom->custom_value = std::move(val);
     return custom;
   }
 
   std::unique_ptr<asvJSONValue> parseTagged() {
     pos_++; // consume '!'
-    size_t start = pos_;
-    while (!eof() && udeIsIdentCont(text_[pos_])) pos_++;
-    if (pos_ == start) throw asvJSONError("UDE: expected tag name at line " + std::to_string(lineNum_));
-    std::string tag(text_.substr(start, pos_ - start));
+    std::string tag;
+    if (!eof() && peek() == '<') {
+      // Verbatim URI tag: !<tag:example.com,2026:type> -- any content up to '>'.
+      pos_++;
+      size_t start = pos_;
+      while (!eof() && text_[pos_] != '>') pos_++;
+      if (eof()) throw asvJSONError("UDE: unterminated tag URI at line " + std::to_string(lineNum_));
+      tag.assign(text_.substr(start, pos_ - start));
+      if (tag.empty()) throw asvJSONError("UDE: empty tag URI at line " + std::to_string(lineNum_));
+      pos_++; // consume '>'
+    } else {
+      size_t start = pos_;
+      while (!eof() && udeIsTagChar(text_[pos_])) pos_++;
+      if (pos_ == start) throw asvJSONError("UDE: expected tag name at line " + std::to_string(lineNum_));
+      tag = std::string(text_.substr(start, pos_ - start));
+    }
     skipWsAndComments();
     std::string anchor;
     if (!eof() && peek() == '&') {
@@ -1508,22 +1520,12 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
         break;
       }
       case T::CUSTOM_TAG: {
-        // str_data format: "tagName serializedValue"
-        size_t space = v->str_data.find(' ');
-        if (space != std::string::npos) {
-          std::string tag = v->str_data.substr(0, space);
-          std::string valStr = v->str_data.substr(space + 1);
-          os << '!' << tag << ' ';
-          // Decide quoting
-          if (udeStringNeedsQuote(valStr, strict)) {
-            udeWriteQuoted(os, valStr);
-          } else {
-            os << valStr;
-          }
-        } else {
-          // malformed, fallback to raw string
-          os << "!" << v->str_data;
-        }
+        // str_data holds the tag name; custom_value holds the value. Unknown
+        // tags are emitted in the canonical "!<name> <value>" form so that a
+        // name containing special characters still round-trips exactly.
+        os << '!' << v->str_data << ' ';
+        if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent, true, strict);
+        else os << "null";
         break;
       }
       case T::TIMESTAMP: {
