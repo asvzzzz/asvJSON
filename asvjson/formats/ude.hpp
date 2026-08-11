@@ -705,6 +705,12 @@ private:
     if (lower == "false") return asvJSONValue::makeBool(false);
     if (lower == "null") return asvJSONValue::makeNull();
 
+    // Non-finite floats: .nan, -.nan, .inf, -.inf (YAML-style).
+    if (lower == ".nan") return asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN());
+    if (lower == "-.nan") return asvJSONValue::makeDouble(-std::numeric_limits<double>::quiet_NaN());
+    if (lower == ".inf" || lower == ".infinity") return asvJSONValue::makeDouble(std::numeric_limits<double>::infinity());
+    if (lower == "-.inf" || lower == "-.infinity") return asvJSONValue::makeDouble(-std::numeric_limits<double>::infinity());
+
     auto num = udeTryParseNumber(tok);
     if (num) return num;
 
