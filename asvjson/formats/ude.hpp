@@ -359,6 +359,13 @@ private:
     skipWs();
     if (eof()) throw asvJSONError("UDE: expected key at line " + std::to_string(lineNum_));
     ParsedKey pk;
+    // YAML-style merge key (Section: Merge Keys). '<' is not an unquoted
+    // character, so the bare "<<" form is recognized explicitly here.
+    if (peek() == '<' && pos_ + 1 < text_.size() && text_[pos_ + 1] == '<') {
+      pos_ += 2;
+      pk.name = "<<";
+      return pk;
+    }
     // A key may be dotted: each dot-separated segment is either a quoted
     // string (literal) or a plain identifier. "a.b.c" nests; "a.b".c nests
     // with a literal first segment "a.b"; a fully quoted "a.b.c" is a single
@@ -632,7 +639,12 @@ private:
       } else {
         val = parseValue();
       }
-      insertKey(obj.get(), std::move(pk), std::move(val));
+      // YAML-style merge key inside inline objects: "{<<: *default}".
+      if (pk.name == "<<" && !pk.quoted) {
+        applyMergeKey(obj.get(), std::move(val));
+      } else {
+        insertKey(obj.get(), std::move(pk), std::move(val));
+      }
       skipWsAndComments();
       if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
@@ -992,6 +1004,37 @@ private:
     return true;
   }
 
+  // Merge keys (YAML-compatible): "<<: *default" copies the entries of the
+  // referenced object into the current mapping. Keys already present in the
+  // target win over merged ones; for a sequence of objects, later objects win.
+  static void udeMergeInto(asvJSONValue* obj, const asvJSONValue* src) {
+    if (!obj || !obj->obj || !src || src->type != asvJSONValue::OBJECT || !src->obj) return;
+    for (const auto& [k, v] : *src->obj) {
+      if (obj->obj->find(k) == obj->obj->end()) {
+        auto copy = cloneValue(v.get());
+        if (copy) obj->obj->emplace(k, std::move(copy));
+      }
+    }
+  }
+
+  void applyMergeKey(asvJSONValue* obj, std::unique_ptr<asvJSONValue> val) {
+    if (!val) throw asvJSONError("UDE: merge key requires an object or sequence of objects");
+    if (val->type == asvJSONValue::OBJECT) {
+      udeMergeInto(obj, val.get());
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      // Later objects in the sequence take precedence (YAML semantics), so
+      // iterate in reverse: the first-processed source keeps its keys and
+      // earlier sources only fill in the gaps.
+      for (auto it = val->arr->rbegin(); it != val->arr->rend(); ++it) {
+        if ((*it)->type != asvJSONValue::OBJECT)
+          throw asvJSONError("UDE: merge key sequence must contain only objects");
+        udeMergeInto(obj, it->get());
+      }
+    } else {
+      throw asvJSONError("UDE: merge key requires an object or sequence of objects");
+    }
+  }
+
   void insertKey(asvJSONValue* obj, ParsedKey pk, std::unique_ptr<asvJSONValue> val) {
     if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) {
       throw asvJSONError("UDE: cannot insert key into non-object");
@@ -1071,7 +1114,12 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
       } else {
         val = parseValue();
       }
-      insertKey(root.get(), std::move(key), std::move(val));
+      // YAML-style merge key: "<<: *default" (only the unquoted form merges).
+      if (key.name == "<<" && !key.quoted) {
+        applyMergeKey(root.get(), std::move(val));
+      } else {
+        insertKey(root.get(), std::move(key), std::move(val));
+      }
       any = true;
     }
     return root;

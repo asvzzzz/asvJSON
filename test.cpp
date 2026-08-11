@@ -6071,6 +6071,61 @@ TEST(testUDEEdgeCases) {
   }
 }
 
+TEST(testUDEMergeKeys) {
+  // Basic merge: <<: *default copies entries of the anchored object
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("base: &def {a: 1, b: 2}\n<<: *def\nc: 3\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+    ASSERT_EQ(j.getInt("c"), int64_t(3));
+  }
+  // Explicit key defined before the merge wins
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 9\n<<: {a: 1, b: 2}\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(9));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // Explicit key defined after the merge overrides
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("<<: {a: 1}\na: 9\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(9));
+  }
+  // Sequence of merge sources: later objects win
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("m1: &m1 {a: 1, b: 2}\nm2: &m2 {b: 3, c: 4}\n<<: [*m1, *m2]\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(3));
+    ASSERT_EQ(j.getInt("c"), int64_t(4));
+  }
+  // Merge inside an inline object
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("d: &def {x: 1, y: 2}\nr: {<<: *def, z: 3}\n"));
+    auto* r = j.get("r");
+    ASSERT(r != nullptr && r->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(r->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(r->get("y")->getInt(), int64_t(2));
+    ASSERT_EQ(r->get("z")->getInt(), int64_t(3));
+  }
+  // A quoted "<<" is a literal key, not a merge
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"<<\": 5\n"));
+    auto* v = j.get("<<");
+    ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+    ASSERT_EQ(v->num, int64_t(5));
+  }
+  // Invalid merge value is rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("<<: 42\n"));
+  }
+}
+
 TEST(testUDERoundTrip) {
   {
     asvJSON j;
@@ -6720,6 +6775,7 @@ int main() {
 	RUN(testUDEStringEscapes);
 	RUN(testUDETypes);
 	RUN(testUDEEdgeCases);
+	RUN(testUDEMergeKeys);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);
