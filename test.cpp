@@ -6126,6 +6126,81 @@ TEST(testUDEMergeKeys) {
   }
 }
 
+TEST(testUDEDocuments) {
+  // YAML-style "---" document separator -> array of documents
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1\n---\nb: 2\n"));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(root->arr->size(), size_t(2));
+    ASSERT_EQ(root->arr->at(0)->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(root->arr->at(1)->get("b")->getInt(), int64_t(2));
+  }
+  // Leading "---" does not create an empty first document
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("---\na: 1\n"));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // "..." document end marker closes the current document
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1\n...\nb: 2\n"));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(root->arr->size(), size_t(2));
+  }
+  // Version header accepted: current and older minor versions
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# UDE v1.0\nname: test\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# UDE v1.1\nname: test\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // Future breaking major version is rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("# UDE v2.0\nname: test\n"));
+  }
+  // Pre-1.0 version is rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("# UDE v0.9\nname: test\n"));
+  }
+  // Malformed version headers are rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("# UDE v1\nname: test\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("# UDE vx.1\nname: test\n"));
+  }
+  // The "strict" flag in the header enables strict mode (quoted keys required)
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("# UDE v1.1 strict\n\"a\": 1\n\"a\": 2\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# UDE v1.1 strict\n\"a\": 1\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // Unknown flags are ignored (forward compatible)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("# UDE v1.1 experimental\nname: test\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+}
+
 TEST(testUDERoundTrip) {
   {
     asvJSON j;
@@ -6776,6 +6851,7 @@ int main() {
 	RUN(testUDETypes);
 	RUN(testUDEEdgeCases);
 	RUN(testUDEMergeKeys);
+	RUN(testUDEDocuments);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);

@@ -65,9 +65,17 @@ inline int udeHexDigit(char c) {
 
 // Recognized document separator lines (exact match only, so that a comment
 // merely containing the phrase "End of Document" does not split the stream).
+// "---" is the YAML-style document start marker; the legacy comment-style
+// separators remain accepted for backward compatibility.
 inline bool udeIsDocSeparator(std::string_view line) {
-  return line == "// --- End of Document ---" ||
+  return line == "---" ||
+         line == "// --- End of Document ---" ||
          line == "// UDE document separator";
+}
+
+// A "..." line is a YAML-style document end marker and is skipped entirely.
+inline bool udeIsDocEndMarker(std::string_view line) {
+  return line == "...";
 }
 
 // Split a UDE stream into documents on document separator lines.
@@ -75,13 +83,24 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
   auto lines = splitLines(text);
   std::vector<std::string> docs;
   std::string cur;
-  for (const auto& line : lines) {
+  for (size_t i = 0; i < lines.size(); ++i) {
+    const auto& line = lines[i];
     std::string_view t = udeTrim(line);
     if (udeIsDocSeparator(t)) {
       if (!cur.empty()) docs.push_back(cur);
       cur.clear();
       continue;
     }
+    if (udeIsDocEndMarker(t)) {
+      // End of the current document: close it, a following "---" opens the next.
+      if (!cur.empty()) docs.push_back(cur);
+      cur.clear();
+      continue;
+    }
+    // splitLines() adds a trailing empty line for input ending in '\n'; it is a
+    // reconstruction artifact, not a real line, and must not be re-appended
+    // (a spurious blank line would change block-scalar clip behavior).
+    if (i + 1 == lines.size() && line.empty()) continue;
     cur += line;
     cur += '\n';
   }
@@ -1139,8 +1158,61 @@ inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& tex
   return asvJSONValue::makeStringView(t);
 }
 
+// Versioning of the "# UDE vX.Y" header (Section 6 of the spec): the major
+// digit X is a breaking change, the minor digit Y is backward compatible.
+// The current implementation supports major version 1. Documents declaring a
+// newer major version are rejected; older minor versions are accepted.
+inline std::string udeHeaderVersion() {
+  return "1.1";
+}
+
+// Detect and validate an optional "# UDE vX.Y [flags]" header on the first
+// non-empty line. The header is stripped from the returned document text and
+// recognized flags (currently "strict") update `strict`. Unknown flags are
+// ignored so that forward-compatible minor versions keep working.
+inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict) {
+  size_t lineEnd = text.find('\n');
+  std::string_view first = (lineEnd == std::string_view::npos)
+    ? std::string_view(text) : std::string_view(text).substr(0, lineEnd);
+  std::string_view t = udeTrim(first);
+  if (t.size() < 6 || t.substr(0, 6) != "# UDE ") return text;
+  // t = "# UDE v1.1 [flags]"
+  std::string_view rest = t.substr(6); // "v1.1 [flags]"
+  if (rest.empty() || rest[0] != 'v') return text;
+  rest.remove_prefix(1);
+  size_t i = 0;
+  while (i < rest.size() && rest[i] >= '0' && rest[i] <= '9') i++;
+  if (i == 0) throw asvJSONError("UDE: malformed version header");
+  int major = 0;
+  for (size_t k = 0; k < i; k++) major = major * 10 + (rest[k] - '0');
+  if (i >= rest.size() || rest[i] != '.') throw asvJSONError("UDE: malformed version header");
+  i++;
+  size_t j = i;
+  while (j < rest.size() && rest[j] >= '0' && rest[j] <= '9') j++;
+  if (j == i) throw asvJSONError("UDE: malformed version header");
+  int minor = 0;
+  for (size_t k = i; k < j; k++) minor = minor * 10 + (rest[k] - '0');
+  if (major != 1) throw asvJSONError("UDE: unsupported UDE version v" + std::to_string(major) + "." + std::to_string(minor));
+  (void)minor;
+  // Optional flags after the version number.
+  size_t k = j;
+  while (k < rest.size()) {
+    while (k < rest.size() && (rest[k] == ' ' || rest[k] == '\t')) k++;
+    size_t start = k;
+    while (k < rest.size() && rest[k] != ' ' && rest[k] != '\t' && rest[k] != '\r') k++;
+    if (k == start) break;
+    std::string_view flag = rest.substr(start, k - start);
+    if (flag == "strict") strict = true;
+    // Unknown flags are ignored for forward compatibility.
+  }
+  // Strip the header line from the document text.
+  if (lineEnd == std::string_view::npos) return "";
+  return std::string(text.substr(lineEnd + 1));
+}
+
 inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool strict) {
-  std::vector<std::string> docs = splitUdeDocuments(text);
+  std::string body = udeStripAndCheckHeader(text, strict);
+  std::vector<std::string> docs = splitUdeDocuments(body);
   if (docs.size() > 1) {
     auto arr = asvJSONValue::makeArray();
     for (const auto& doc : docs) {
@@ -1159,10 +1231,10 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
     return arr;
   }
   try {
-    UDEParser p(text, strict);
+    UDEParser p(docs[0], strict);
     return p.parseDocument();
   } catch (const asvJSONError&) {
-    auto v = udePlainTextFallback(text);
+    auto v = udePlainTextFallback(docs[0]);
     if (!v) throw;
     return v;
   }

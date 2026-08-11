@@ -14,12 +14,23 @@ UDE is a human‑readable, machine‑efficient format that combines features of 
 A UDE file may contain one or more **documents** separated by a document separator line:
 
 ```text
+---
+```
+
+or the legacy comment-style separators (still accepted for backward compatibility):
+
+```text
 // UDE document separator
 // --- End of Document ---
 ```
+
+A `...` line closes the current document (a following `---` opens the next one).
 If no separator is present, the entire file is treated as a single document.
+Multiple documents parse to a JSON array of document values; a leading `---`
+does not create an empty first document.
 
 **Note:** Document separation is handled as a pre‑parsing step. The EBNF grammar defined in Appendix A is applied to each document chunk individually after the file is split by this separator.
+
 ### 2.1 Header (Optional)
 The first non‑empty line can be an optional header that identifies the format and may include flags:
 
@@ -28,7 +39,10 @@ The first non‑empty line can be an optional header that identifies the format 
 
 ```
 * `UDE` – literal marker.
-* `v1.0` – version of the UDE specification.
+* `v1.0` – version of the UDE specification. The major digit is a breaking change: documents declaring a major version other than `1` are rejected with an error. Minor versions are backward compatible, so older minor versions (e.g. `v1.0`) are accepted by a newer implementation.
+* `strict` – optional flag that enables strict mode for the whole stream.
+* Unknown flags are ignored so that forward‑compatible minor versions keep working.
+
 If no header is present, the document consists of a single plain‑text line. The parser treats it as a string value. A line is only treated as plain text when it cannot be a structured document at all (no `:` separator and no structured start character); malformed or strict‑mode‑rejected documents report an error instead of degrading to plain text.
 
 ---
@@ -179,8 +193,7 @@ people: [
   {name: Alice, age: 30},
   {name: Bob,   age: 25}
 ]
-// UDE document separator
-// --- End of Document ---
+---
 ```
 ---
 
