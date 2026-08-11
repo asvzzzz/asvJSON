@@ -6425,6 +6425,20 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j.fromUDE("msg: >\n  a\n  b\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "a b");
   }
+  // Trailing spaces inside block-scalar lines are preserved verbatim
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  a  \n  b\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a  \nb");
+  }
+  // A string with trailing spaces round-trips (serializer keeps them)
+  {
+    asvJSON j;
+    j.putString("msg", "a  \nb");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.getString("msg")), "a  \nb");
+  }
   // A single content line with one trailing newline round-trips as a folded
   // block scalar ('>'), which is the only case where folding is lossless
   {
