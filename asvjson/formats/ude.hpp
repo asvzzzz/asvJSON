@@ -92,31 +92,52 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
 
 // Try to interpret a bare token as a number (decimal / hex / octal / binary).
 // Returns nullptr when the token is not a valid UDE number literal.
+// Supports digit separators ('_' between digits) and, on int64 overflow,
+// stores the exact literal as a STRING with raw_number set (so it round-trips).
 inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
   if (tok.empty()) return nullptr;
+  // Validate digit separators: '_' must sit between two digits.
+  for (size_t i = 0; i < tok.size(); i++) {
+    if (tok[i] != '_') continue;
+    bool ok = i > 0 && i + 1 < tok.size();
+    if (!ok) return nullptr;
+    char a = tok[i - 1], b = tok[i + 1];
+    if (!((a >= '0' && a <= '9') || udeHexDigit(a) >= 0) ||
+        !((b >= '0' && b <= '9') || udeHexDigit(b) >= 0)) return nullptr;
+  }
+  std::string t;
+  t.reserve(tok.size());
+  for (char c : tok) if (c != '_') t += c;
+
   size_t i = 0;
   bool neg = false;
   // Per the UDE grammar SIGNED_INT ::= '-'? INT, a leading '+' is not a
   // valid numeric sign; such tokens are treated as unquoted strings.
-  if (tok[0] == '-') { neg = true; i = 1; }
+  if (t[0] == '-') { neg = true; i = 1; }
 
   // hex / octal / binary (the optional '-' belongs to the token itself)
-  if (i + 1 < tok.size() && tok[i] == '0') {
+  if (i + 1 < t.size() && t[i] == '0') {
     int base = 0;
-    char n = tok[i + 1];
+    char n = t[i + 1];
     if (n == 'x' || n == 'X') base = 16;
     else if (n == 'o' || n == 'O') base = 8;
     else if (n == 'b' || n == 'B') base = 2;
     if (base != 0) {
       size_t j = i + 2;
-      if (j >= tok.size()) return nullptr;
+      if (j >= t.size()) return nullptr;
       unsigned long long v = 0;
-      for (; j < tok.size(); j++) {
-        int d = udeHexDigit(tok[j]);
+      bool overflow = false;
+      for (; j < t.size(); j++) {
+        int d = udeHexDigit(t[j]);
         if (d < 0 || d >= base) return nullptr;
+        if (v > (std::numeric_limits<unsigned long long>::max() - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) { overflow = true; break; }
         v = v * static_cast<unsigned long long>(base) + static_cast<unsigned long long>(d);
       }
-      if (neg && v > static_cast<unsigned long long>(INT64_MAX)) return nullptr;
+      if (overflow || (neg && v > static_cast<unsigned long long>(INT64_MAX))) {
+        auto s = asvJSONValue::makeStringView(tok);
+        if (s) s->raw_number = true;
+        return s;
+      }
       int64_t iv = neg ? -static_cast<int64_t>(v) : static_cast<int64_t>(v);
       return asvJSONValue::makeInt(iv);
     }
@@ -124,36 +145,43 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
 
   // decimal int / float
   size_t j = i;
-  while (j < tok.size() && tok[j] >= '0' && tok[j] <= '9') j++;
+  while (j < t.size() && t[j] >= '0' && t[j] <= '9') j++;
   if (j == i) return nullptr;                       // no digits
-  if (tok[i] == '0' && j > i + 1) return nullptr;   // leading zeros are invalid
+  if (t[i] == '0' && j > i + 1) return nullptr;     // leading zeros are invalid
 
   bool isFloat = false;
-  if (j < tok.size() && tok[j] == '.') {
+  if (j < t.size() && t[j] == '.') {
     isFloat = true;
     j++;
-    while (j < tok.size() && tok[j] >= '0' && tok[j] <= '9') j++;
+    while (j < t.size() && t[j] >= '0' && t[j] <= '9') j++;
   }
-  if (j < tok.size() && (tok[j] == 'e' || tok[j] == 'E')) {
+  if (j < t.size() && (t[j] == 'e' || t[j] == 'E')) {
     isFloat = true;
     j++;
-    if (j < tok.size() && (tok[j] == '+' || tok[j] == '-')) j++;
+    if (j < t.size() && (t[j] == '+' || t[j] == '-')) j++;
     size_t expStart = j;
-    while (j < tok.size() && tok[j] >= '0' && tok[j] <= '9') j++;
+    while (j < t.size() && t[j] >= '0' && t[j] <= '9') j++;
     if (j == expStart) return nullptr;              // "1e" is invalid
   }
-  if (j != tok.size()) return nullptr;              // trailing junk
+  if (j != t.size()) return nullptr;                // trailing junk
 
   if (isFloat) {
     char* end = nullptr;
-    double d = std::strtod(tok.c_str(), &end);
-    if (!end || *end != 0 || !std::isfinite(d)) return nullptr;
+    errno = 0;
+    double d = std::strtod(t.c_str(), &end);
+    if (!end || *end != 0 || errno == ERANGE || !std::isfinite(d)) return nullptr;
     return asvJSONValue::makeDouble(d);
   }
   errno = 0;
   char* end = nullptr;
-  long long ll = std::strtoll(tok.c_str(), &end, 10);
-  if (errno == ERANGE || !end || *end != 0) return nullptr;
+  long long ll = std::strtoll(t.c_str(), &end, 10);
+  if (!end || *end != 0) return nullptr;
+  if (errno == ERANGE) {
+    // Big integer: keep the exact literal so round-trip is lossless.
+    auto s = asvJSONValue::makeStringView(tok);
+    if (s) s->raw_number = true;
+    return s;
+  }
   return asvJSONValue::makeInt(static_cast<int64_t>(ll));
 }
 
