@@ -5816,13 +5816,12 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j.fromUDE("msg: |-\n  hello\n\n\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "hello");
   }
-  // '+' keeps all trailing newlines
+  // '+' keeps all trailing newlines; empty lines are content and do not
+  // terminate the scalar (blank-line termination was removed)
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |+\n  hello\n\n\n"));
-    // The first empty line terminates the scalar (Appendix A), so only a
-    // single trailing newline is captured even with keep chomping.
-    ASSERT_EQ(std::string(j.getString("msg")), "hello\n");
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\n\n");
   }
   // Empty first line does not break the block scalar (implicit indent)
   {
@@ -5831,27 +5830,28 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT_EQ(std::string(j.getString("msg")), "\nhello");
   }
   // Empty first line with explicit indent: the base indent is known from the
-  // indicator, so a blank first line terminates the scalar (Appendix A)
+  // indicator, so a blank first line yields an empty value (clip chomping)
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |2\n\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "");
   }
-  // An empty line terminates the block when the base indent > 0 (Appendix A)
+  // Empty lines inside the block are preserved as content; the value ends with
+  // a single newline after clip chomping
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  a\n\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "a\n");
   }
-  // A block scalar terminated by an empty line can be followed by a new key
+  // A dedent terminates the scalar, so a following key is parsed normally
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  a\n\nother: 1\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "a\n");
     ASSERT_EQ(j.getInt("other"), int64_t(1));
   }
-  // Folded scalars fold a single break into a space; an empty line terminates
-  // the scalar rather than forming a paragraph break
+  // Folded scalars fold a single break into a space; a blank line is kept as a
+  // paragraph break
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: >\n  a\n\n"));
@@ -5862,13 +5862,27 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j.fromUDE("msg: >\n  a\n  b\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "a b");
   }
-  // Round-trip a string that ends with newlines via |+ serializer
+  // A single content line with one trailing newline round-trips as a folded
+  // block scalar ('>'), which is the only case where folding is lossless
   {
     asvJSON j;
     j.putString("msg", "hello\n");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: >") != std::string::npos);
     asvJSON j2;
-    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "hello\n");
+  }
+  // A string ending in multiple newlines cannot round-trip as a block scalar,
+  // so it is quoted instead
+  {
+    asvJSON j;
+    j.putString("msg", "hello\n\n");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: \"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "hello\n\n");
   }
   {
     asvJSON j;

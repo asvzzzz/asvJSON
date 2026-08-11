@@ -929,6 +929,21 @@ inline bool udeCanBlockEncode(std::string_view s) {
   return seenContent;
 }
 
+// A string can be written as a folded block scalar (>) only when folding is
+// lossless: folding turns internal newlines into spaces and collapses blank
+// lines into paragraph breaks, so the only string that round-trips is a single
+// content line with exactly one trailing newline. Anything else would change
+// the value, so those strings fall back to '|' or a quoted string.
+inline bool udeCanFoldEncode(std::string_view s) {
+  if (s.size() < 2 || s.back() != '\n') return false;
+  std::string_view body = s.substr(0, s.size() - 1);
+  if (body.find('\n') != std::string_view::npos) return false;
+  if (body.find('\r') != std::string_view::npos) return false;
+  char c0 = body[0];
+  if (c0 == ' ' || c0 == '\t') return false; // absorbed into the base indent
+  return true;
+}
+
 // Write a string as a block scalar. A single trailing newline is preserved by
 // emitting a '|+' header plus one trailing blank line so that the value
 // round-trips exactly. Strings that cannot round-trip as a block scalar are
@@ -946,6 +961,14 @@ inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
     i = eol + 1;
   }
   for (size_t j = 0; j < k; j++) os << '\n';
+}
+
+// Write a string as a folded block scalar. The '>' header with default (clip)
+// chomping preserves exactly one trailing newline; a trailing blank line must
+// be emitted so the decoder captures the break after the last content line,
+// making the value round-trip exactly.
+inline void udeWriteFoldedScalar(std::ostream& os, std::string_view s) {
+  os << ">\n  " << s.substr(0, s.size() - 1) << "\n\n";
 }
 
 // Forward declaration
@@ -1011,7 +1034,9 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       udeWriteArray(os, v, indent, lineContext, strict);
       break;
     case T::STRING: {
-      if (lineContext && udeCanBlockEncode(v->str_data)) {
+      if (lineContext && udeCanFoldEncode(v->str_data)) {
+        udeWriteFoldedScalar(os, v->str_data);
+      } else if (lineContext && udeCanBlockEncode(v->str_data)) {
         udeWriteBlockScalar(os, v->str_data);
       } else if (udeStringNeedsQuote(v->str_data, strict)) {
         udeWriteQuoted(os, v->str_data);
