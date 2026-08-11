@@ -1303,6 +1303,11 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       udeWriteArray(os, v, indent, lineContext, strict);
       break;
     case T::STRING: {
+      if (v->raw_number) {
+        // Exact numeric literal (e.g. big integer stored beyond int64 range).
+        os << v->str_data;
+        break;
+      }
       if (lineContext && udeCanFoldEncode(v->str_data)) {
         udeWriteFoldedScalar(os, v->str_data);
       } else if (lineContext && udeCanBlockEncode(v->str_data)) {
@@ -1323,7 +1328,13 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
     }
     case T::DOUBLE: {
       std::string tmp;
+      if (std::isnan(v->dbl)) { os << (std::signbit(v->dbl) ? "-.nan" : ".nan"); break; }
+      if (std::isinf(v->dbl)) { os << (v->dbl > 0 ? ".inf" : "-.inf"); break; }
       fmtDoubleVal(v->dbl, tmp);
+      // A double with an integral value must round-trip as a float, so append
+      // ".0" when fmtDoubleVal produced a plain integer literal.
+      if (!tmp.empty() && tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos && tmp.find('E') == std::string::npos)
+        tmp += ".0";
       os << tmp;
       break;
     }
