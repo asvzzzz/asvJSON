@@ -219,6 +219,34 @@ inline std::string udeFoldScalar(std::string_view s) {
   return res;
 }
 
+// Parse a UDE datetime value. Accepts the full ISO-8601 form handled by
+// tryParseDateTime (with optional fractional seconds and timezone offset) as
+// well as date-only "YYYY-MM-DD" (midnight UTC).
+inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
+  if (ms_out) *ms_out = 0;
+  // Date-only form: YYYY-MM-DD exactly.
+  if (sv.size() == 10 && sv[4] == '-' && sv[7] == '-') {
+    auto parse2 = [](const char* p, int& v) -> bool {
+      if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return false;
+      v = (p[0] - '0') * 10 + (p[1] - '0');
+      return true;
+    };
+    int year, month, day;
+    if (!parse2(sv.data(), year)) return false;
+    year = year * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
+    if (!parse2(sv.data() + 5, month) || month < 1 || month > 12) return false;
+    if (!parse2(sv.data() + 8, day) || day < 1 || day > 31) return false;
+    std::tm tm = {};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_isdst = 0;
+    out = asvjson_timegm(&tm);
+    return true;
+  }
+  return tryParseDateTime(sv, out, ms_out);
+}
+
 // ====================== Parser ======================
 
 class UDEParser {
@@ -855,7 +883,7 @@ private:
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !datetime requires a string value");
       time_t ts = 0;
       int ms = 0;
-      if (!tryParseDateTime(val->str_data, ts, &ms))
+      if (!udeTryParseDateTime(val->str_data, ts, &ms))
         throw asvJSONError("UDE: invalid datetime: " + val->str_data);
       return asvJSONValue::makeDateTime(ts, ms);
     }
