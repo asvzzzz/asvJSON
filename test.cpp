@@ -5790,6 +5790,25 @@ TEST(testUDERoundTrip) {
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "line1\nline2");
   }
+  // Unknown tags are preserved as CUSTOM_TAG: type, UDE round-trip, clone and
+  // JSON serialization all handle it without data corruption or UB
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("note: !custom \"some value\"\nn: !num 42\n"));
+    auto* v = j.get("note");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("note: !custom") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(j2.get("note") != nullptr && j2.get("note")->type == asvJSONValue::CUSTOM_TAG);
+    // Cloning (copy constructor) preserves the custom tag
+    asvJSON jc(j);
+    ASSERT(jc.get("note") != nullptr && jc.get("note")->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(j.serialize(), jc.serialize());
+    // JSON serialization marks the tagged value instead of silently dropping it
+    ASSERT(j.serialize().find("$customTag") != std::string::npos);
+  }
 }
 
 TEST(testUDEBlockScalarChomp) {

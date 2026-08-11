@@ -366,6 +366,7 @@ struct asvJSONValue {
 			case REGEX: return "regex";
 			case TIMESTAMP: return "timestamp";
 			case EXTENSION: return "extension";
+			case CUSTOM_TAG: return "custom_tag";
 			default: return "unknown";
 		}
 	}
@@ -445,6 +446,11 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 		case DOUBLE:
 		case DATETIME:
 		case BINARY:
+		case OBJECTID:
+		case REGEX:
+		case TIMESTAMP:
+		case EXTENSION:
+		case CUSTOM_TAG:
 			appendJsonToken(out, this, allowNaNInfinity);
 			break;
 		case OBJECT: {
@@ -493,6 +499,11 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 		case DOUBLE:
 		case DATETIME:
 		case BINARY:
+		case OBJECTID:
+		case REGEX:
+		case TIMESTAMP:
+		case EXTENSION:
+		case CUSTOM_TAG:
 			appendJsonToken(out, this, allowNaNInfinity);
 			break;
 		case OBJECT: {
@@ -1811,6 +1822,12 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			out += "\"}}";
 			break;
 		}
+		case asvJSONValue::CUSTOM_TAG: {
+			out += "{\"$customTag\":\"";
+			appendJsonEscaped(out, v->str_data);
+			out += "\"}";
+			break;
+		}
 		default: out += "null"; break;
 	}
 }
@@ -1841,6 +1858,12 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 		}
 		case asvJSONValue::TIMESTAMP: return asvJSONValue::makeTimestamp(v->num);
 		case asvJSONValue::EXTENSION: return asvJSONValue::makeExtension(v->ext_type, v->bin_data.data(), v->bin_data.size());
+		case asvJSONValue::CUSTOM_TAG: {
+			auto c = std::make_unique<asvJSONValue>();
+			c->type = asvJSONValue::CUSTOM_TAG;
+			c->str_data = v->str_data;
+			return c;
+		}
 		case asvJSONValue::ARRAY: {
 			auto a = asvJSONValue::makeArray();
 			if (!a) return nullptr;
@@ -2121,6 +2144,7 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth 
 		case asvJSONValue::TIMESTAMP: return a->num == b->num;
 		case asvJSONValue::REGEX: return a->str_data == b->str_data;
 		case asvJSONValue::EXTENSION: return a->ext_type == b->ext_type && a->bin_data == b->bin_data;
+		case asvJSONValue::CUSTOM_TAG: return a->str_data == b->str_data;
 		case asvJSONValue::ARRAY: {
 			if (static_cast<bool>(a->arr) != static_cast<bool>(b->arr)) return false;
 			if (a->arr && b->arr) {
