@@ -5993,6 +5993,84 @@ TEST(testUDETypes) {
   }
 }
 
+TEST(testUDEEdgeCases) {
+  // "a.b".c : literal first segment (contains a dot) + nested "c"
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"a.b\".c: 1\n"));
+    auto* ab = j.get("a.b");
+    ASSERT(ab != nullptr && ab->type == asvJSONValue::OBJECT);
+    auto* c = ab->get("c");
+    ASSERT(c != nullptr && c->type == asvJSONValue::INT);
+    ASSERT_EQ(c->num, int64_t(1));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    auto* ab2 = j2.get("a.b");
+    ASSERT(ab2 != nullptr && ab2->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(ab2->get("c")->getInt(), int64_t(1));
+  }
+  // A fully quoted dotted key is a single literal key
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"a.b.c\": 1\n"));
+    auto* v = j.get("a.b.c");
+    ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+    ASSERT_EQ(v->num, int64_t(1));
+  }
+  // Unquoted dotted key still nests
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a.b.c: 1\n"));
+    ASSERT_EQ(j.getByPointer("/a/b/c")->getInt(), int64_t(1));
+  }
+  // Mixed quoted/unquoted segments
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"my key\".sub: 2\n"));
+    auto* sub = j.get("my key");
+    ASSERT(sub != nullptr && sub->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(sub->get("sub")->getInt(), int64_t(2));
+  }
+  // Leading/trailing commas in arrays: [,], [1,], [1,,2]
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: [,]\n"));
+    auto* a = j.get("a");
+    ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(a->arr->size(), size_t(0));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: [1,]\n"));
+    auto* a = j.get("a");
+    ASSERT(a != nullptr && a->arr->size() == size_t(1));
+    ASSERT_EQ(a->arr->at(0)->num, int64_t(1));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: [1,,2]\n"));
+    auto* a = j.get("a");
+    ASSERT(a != nullptr && a->arr->size() == size_t(2));
+    ASSERT_EQ(a->arr->at(0)->num, int64_t(1));
+    ASSERT_EQ(a->arr->at(1)->num, int64_t(2));
+  }
+  // Leading/trailing commas in objects: {,}, {a:1,}
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: {,}\n"));
+    auto* a = j.get("a");
+    ASSERT(a != nullptr && a->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(a->obj->size(), size_t(0));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: {x: 1,}\n"));
+    auto* a = j.get("a");
+    ASSERT(a != nullptr && a->obj->size() == size_t(1));
+    ASSERT_EQ(a->get("x")->getInt(), int64_t(1));
+  }
+}
+
 TEST(testUDERoundTrip) {
   {
     asvJSON j;
@@ -6641,6 +6719,7 @@ int main() {
 	RUN(testFromUDE);
 	RUN(testUDEStringEscapes);
 	RUN(testUDETypes);
+	RUN(testUDEEdgeCases);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);

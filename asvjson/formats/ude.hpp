@@ -257,10 +257,13 @@ public:
 
 private:
   // A parsed key plus whether it was quoted. Quoted keys are always literal;
-  // unquoted dotted keys are expanded into nested objects.
+  // unquoted dotted keys are expanded into nested objects. For dot-separated
+  // keys with more than one segment, `segs` holds each segment together with
+  // its quoted flag, so that literal segments can contain dots ("a.b".c).
   struct ParsedKey {
     std::string name;
     bool quoted = false;
+    std::vector<std::pair<std::string, bool>> segs;
   };
 
   std::string_view text_;
@@ -356,30 +359,48 @@ private:
     skipWs();
     if (eof()) throw asvJSONError("UDE: expected key at line " + std::to_string(lineNum_));
     ParsedKey pk;
-    if (peek() == '"') {
-      auto v = parseQuotedString();
-      pk.name = std::move(v->str_data);
-      pk.quoted = true;
-      return pk;
+    // A key may be dotted: each dot-separated segment is either a quoted
+    // string (literal) or a plain identifier. "a.b.c" nests; "a.b".c nests
+    // with a literal first segment "a.b"; a fully quoted "a.b.c" is a single
+    // literal key (Section 3 of the UDE spec).
+    std::vector<std::pair<std::string, bool>> segs;
+    while (true) {
+      std::pair<std::string, bool> seg;
+      if (peek() == '"') {
+        auto v = parseQuotedString();
+        seg = { std::move(v->str_data), true };
+      } else if (peek() == '\'') {
+        auto v = parseSingleQuotedString();
+        seg = { std::move(v->str_data), true };
+      } else {
+        size_t start = pos_;
+        while (!eof() && udeIsUnquotedChar(text_[pos_]) && text_[pos_] != '.') pos_++;
+        if (pos_ == start) throw asvJSONError("UDE: invalid key at line " + std::to_string(lineNum_));
+        seg = { std::string(text_.data() + start, pos_ - start), false };
+      }
+      segs.push_back(std::move(seg));
+      if (!eof() && peek() == '.') { pos_++; continue; }
+      break;
     }
-    if (peek() == '\'') {
-      auto v = parseSingleQuotedString();
-      pk.name = std::move(v->str_data);
-      pk.quoted = true;
-      return pk;
-    }
-    size_t start = pos_;
-    while (!eof() && udeIsUnquotedChar(text_[pos_])) pos_++;
-    if (pos_ == start) throw asvJSONError("UDE: invalid key at line " + std::to_string(lineNum_));
-    pk.name.assign(text_.data() + start, pos_ - start);
     if (strict_) {
       // The spec (Section 3) requires all keys to be quoted in strict mode.
-      throw asvJSONError("UDE: strict mode requires all keys to be quoted (key: " + pk.name + ")");
+      for (const auto& s : segs) {
+        if (!s.second) throw asvJSONError("UDE: strict mode requires all keys to be quoted (key: " + s.first + ")");
+      }
+    }
+    for (const auto& s : segs) {
+      if (!pk.name.empty()) pk.name += '.';
+      pk.name += s.first;
+    }
+    if (segs.size() == 1) {
+      pk.quoted = segs[0].second;
+    } else {
+      pk.segs = std::move(segs);
     }
     return pk;
   }
 
-  inline bool udeKeyIsIdentLike(const std::string& key) {
+  static inline bool udeKeyIsIdentLike(const std::string& key) {
     if (key.empty()) return false;
     size_t segStart = 0;
     int segs = 0;
@@ -580,6 +601,7 @@ private:
       skipWsAndComments();
       if (eof()) throw asvJSONError("UDE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ']') { pos_++; break; }
+      if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
         throw asvJSONError("UDE: array too large");
       arr->arr->push_back(parseValue());
@@ -599,6 +621,7 @@ private:
       skipWsAndComments();
       if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
       if (peek() == '}') { pos_++; break; }
+      if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       ParsedKey pk = parseKey();
       skipWs();
       expect(':', ":");
@@ -959,38 +982,40 @@ private:
     return val;
   }
 
+  // Dotted keys expand into nested objects when every unquoted segment is a
+  // plain identifier; quoted segments are always literal and permitted, which
+  // is what makes "a.b".c (literal first segment containing a dot) work.
+  static bool udeDottedKeyExpandable(const std::vector<std::pair<std::string, bool>>& segs) {
+    for (const auto& s : segs) {
+      if (!s.second && !udeKeyIsIdentLike(s.first)) return false;
+    }
+    return true;
+  }
+
   void insertKey(asvJSONValue* obj, ParsedKey pk, std::unique_ptr<asvJSONValue> val) {
     if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) {
       throw asvJSONError("UDE: cannot insert key into non-object");
     }
-    // Dotted keys are expanded only when unquoted; a quoted key such as
-    // "a.b.c" is always a literal key (Section 3 of the UDE spec).
-    if (!pk.quoted && udeKeyIsIdentLike(pk.name) && pk.name.find('.') != std::string::npos) {
-      // dotted key: create nested objects
-      std::vector<std::string> segs;
-      size_t segStart = 0;
-      for (size_t i = 0; i <= pk.name.size(); i++) {
-        if (i == pk.name.size() || pk.name[i] == '.') {
-          segs.push_back(pk.name.substr(segStart, i - segStart));
-          segStart = i + 1;
-        }
-      }
+    // Multi-segment (dotted) keys expand into nested objects; a fully quoted
+    // key (single segment) is always a literal key (Section 3).
+    if (!pk.segs.empty() && udeDottedKeyExpandable(pk.segs)) {
       asvJSONValue* cur = obj;
-      for (size_t i = 0; i + 1 < segs.size(); i++) {
-        auto it = cur->obj->find(segs[i]);
+      for (size_t i = 0; i + 1 < pk.segs.size(); i++) {
+        const std::string& seg = pk.segs[i].first;
+        auto it = cur->obj->find(seg);
         if (it == cur->obj->end()) {
           auto no = asvJSONValue::makeObject();
           auto* raw = no.get();
-          cur->obj->emplace(segs[i], std::move(no));
+          cur->obj->emplace(seg, std::move(no));
           cur = raw;
         } else if (it->second->type == asvJSONValue::OBJECT) {
           cur = it->second.get();
         } else {
-        // Existing key is not an object – cannot expand dotted key further.
-        throw asvJSONError("UDE: key conflict – intermediate key '" + segs[i] + "' is not an object");
+          // Existing key is not an object – cannot expand dotted key further.
+          throw asvJSONError("UDE: key conflict – intermediate key '" + seg + "' is not an object");
         }
       }
-      const std::string& leaf = segs.back();
+      const std::string& leaf = pk.segs.back().first;
       auto it = cur->obj->find(leaf);
       if (it != cur->obj->end()) {
         if (strict_) throw asvJSONError("UDE: duplicate key '" + leaf + "' in strict mode");
