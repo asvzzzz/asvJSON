@@ -5752,8 +5752,7 @@ TEST(testFromUDE) {
   }
 }
 
-TEST(testUDEStringEscapes) {
-  // JSON control escapes \r \b \f \/
+TEST(testUDEStringEscapes) {  // JSON control escapes \r \b \f \/
   {
     asvJSON j;
     ASSERT(j.fromUDE("a: \"x\\ry\\bz\\fw\\/v\"\n"));
@@ -5856,6 +5855,141 @@ TEST(testUDEStringEscapes) {
   {
     asvJSON j;
     ASSERT(!j.fromUDE("a: 'unterminated\n"));
+  }
+}
+
+TEST(testUDETypes) {
+  // Explicit type tags: !int, !float, !string, !bool
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !int 42\nb: !int \"123\"\nc: !int 3.0\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("a"), int64_t(42));
+    ASSERT(j.get("b") != nullptr && j.get("b")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("b"), int64_t(123));
+    ASSERT(j.get("c") != nullptr && j.get("c")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("c"), int64_t(3));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !float 42\nb: !float \"1.5\"\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j.getDouble("a"), 42.0);
+    ASSERT(j.get("b") != nullptr && j.get("b")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j.getDouble("b"), 1.5);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !string 42\nb: !string 3.5\nc: !string true\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("a")), "42");
+    ASSERT_EQ(std::string(j.getString("b")), "3.5");
+    ASSERT_EQ(std::string(j.getString("c")), "true");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !bool \"yes\"\nb: !bool 0\nc: !bool true\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::BOOL_VAL);
+    ASSERT_EQ(j.getBool("a"), true);
+    ASSERT_EQ(j.getBool("b"), false);
+    ASSERT_EQ(j.getBool("c"), true);
+  }
+  // !null discards its value
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null 42\nb: !null\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+    ASSERT(j.get("b") != nullptr && j.get("b")->type == asvJSONValue::NULL_VAL);
+  }
+  // Invalid coercions are rejected
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: !int \"abc\"\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: !float [1]\n"));
+  }
+  // Digit separators
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1_000_000\nb: 0xFF_FF\nc: 3_14.5\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1000000));
+    ASSERT_EQ(j.getInt("b"), int64_t(65535));
+    ASSERT(j.get("c") != nullptr && j.get("c")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j.getDouble("c"), 314.5);
+  }
+  // Invalid separator placement is not a number
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1__000\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::STRING);
+  }
+  // Big integers stored as raw_number and round-trip
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 123456789012345678901234567890\n"));
+    auto* v = j.get("a");
+    ASSERT(v != nullptr);
+    ASSERT(v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(v->str_data, "123456789012345678901234567890");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    auto* v2 = j2.get("a");
+    ASSERT(v2 != nullptr);
+    ASSERT(v2->type == asvJSONValue::STRING);
+    ASSERT(v2->raw_number);
+    ASSERT_EQ(v2->str_data, "123456789012345678901234567890");
+  }
+  // NaN and Infinity round-trip as float literals
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: .nan\nb: .inf\nc: -.inf\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isnan(j.getDouble("a")));
+    ASSERT(std::isinf(j.getDouble("b")) && j.getDouble("b") > 0);
+    ASSERT(std::isinf(j.getDouble("c")) && j.getDouble("c") < 0);
+    std::string ude = j.toUDE();
+    ASSERT(ude.find(".nan") != std::string::npos);
+    ASSERT(ude.find(".inf") != std::string::npos);
+    ASSERT(ude.find("-.inf") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(std::isnan(j2.getDouble("a")));
+    ASSERT(std::isinf(j2.getDouble("b")));
+    ASSERT(std::isinf(j2.getDouble("c")));
+  }
+  // Integer-valued doubles serialize with ".0" so the type is preserved
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromUDE("a: 42.0\n"));
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("42.0") != std::string::npos);
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(j2.get("a") != nullptr && j2.get("a")->type == asvJSONValue::DOUBLE);
+  }
+  // !datetime: date-only and timezone offset
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !datetime \"2026-07-30\"\nb: !datetime \"2026-07-30T14:45:00+03:00\"\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::DATETIME);
+    ASSERT(j.get("b") != nullptr && j.get("b")->type == asvJSONValue::DATETIME);
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("!datetime \"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(j2.get("a")->type == asvJSONValue::DATETIME);
+    ASSERT(j2.get("b")->type == asvJSONValue::DATETIME);
+  }
+  // !schema preserves the annotation as a CUSTOM_TAG
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("s: !schema \"urn:example:person\"\n"));
+    ASSERT(j.get("s") != nullptr && j.get("s")->type == asvJSONValue::CUSTOM_TAG);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT(j2.get("s") != nullptr && j2.get("s")->type == asvJSONValue::CUSTOM_TAG);
   }
 }
 
@@ -6506,6 +6640,7 @@ int main() {
 	RUN(testToUDE);
 	RUN(testFromUDE);
 	RUN(testUDEStringEscapes);
+	RUN(testUDETypes);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);
