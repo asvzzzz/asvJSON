@@ -40,14 +40,26 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 			break;
 		}
 		case T::STRING: {
-			if (str_data.find('\n') != std::string_view::npos) {
-				out += prefix() + "|\n";
+			// Multi-line strings are emitted as literal block scalars with an
+			// explicit chomp indicator so round-trips preserve trailing line breaks.
+			if (str_data.find('\n') != std::string_view::npos && !str_data.empty() && str_data[0] != '\n') {
+				size_t trailing = 0;
+				while (trailing < str_data.size() && str_data[str_data.size() - 1 - trailing] == '\n') trailing++;
+				std::string ind;
+				if (trailing == 0) ind = "|-";
+				else if (trailing == 1) ind = "|";
+				else ind = "|+";
+				out += prefix() + ind + "\n";
 				for (size_t i = 0; i < str_data.size(); ) {
 					size_t eol = str_data.find('\n', i);
 					if (eol == std::string_view::npos) eol = str_data.size();
 					out += std::string((indent + 1) * 2, ' ') + std::string(str_data.data() + i, eol - i) + "\n";
 					i = eol + 1;
 				}
+			} else if (str_data.find('\n') != std::string_view::npos) {
+				// Leading (or only) blank lines cannot be represented by a literal
+				// block -- fall back to a double-quoted string with escapes.
+				out += prefix() + yamlDQuote(str_data) + "\n";
 			} else if (yamlNeedsQuotes(str_data)) {
 				out += prefix() + yamlQuote(str_data) + "\n";
 			} else {
@@ -1029,6 +1041,84 @@ inline std::string yamlStripAnchors(std::string_view s, std::string* outAnchor) 
 	return result;
 }
 
+// Collect a YAML block scalar (| or >). `header` is the block header text
+// (starting with the style char, may include an indent indicator [1-9] and a
+// chomp indicator +|-). `li` is the line index of the header line. Gathers
+// content lines, applies folding for '>', then chomps trailing line breaks:
+// clip (default) keeps one, '-' strips all, '+' keeps all.
+// parentIndent < 0 disables the "content must be deeper than parent" check.
+inline std::string yamlParseBlockScalar(const std::string& header, const std::vector<std::string>& lines, size_t& li, bool isFolded, int parentIndent) {
+	char chomp = 0; // 0 = clip, '+' = keep, '-' = strip
+	for (size_t h = 1; h < header.size(); h++) {
+		char ch = header[h];
+		if (ch == ' ' || ch == '\t') continue;
+		if (ch >= '1' && ch <= '9') continue; // explicit indent indicator (indent still auto-detected)
+		if (ch == '+' || ch == '-') { chomp = ch; continue; }
+		break; // comment or trailing text
+	}
+
+	std::string text;
+	int contentIndent = -1;
+	size_t ci = li + 1;
+	// splitLines appends a phantom empty line at EOF when input ends with '\n'.
+	// That line carries no real content, so it must be excluded from block-scalar
+	// collection (otherwise keep-chomp '+' would preserve a spurious trailing '\n').
+	size_t last = lines.size();
+	if (last > 0 && lines[last - 1].empty()) last--;
+	while (ci < last) {
+		int si = countIndent(lines[ci]);
+		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
+		std::string_view sc = stripIndent(lines[ci]);
+		if (sc.empty()) { if (contentIndent > 0) text += '\n'; ci++; continue; }
+		if (sc[0] == '#') { ci++; continue; }
+		if (parentIndent >= 0 && si <= parentIndent) break;
+		if (contentIndent < 0) contentIndent = si;
+		if (si >= contentIndent) {
+			text += sc; text += '\n';
+			ci++;
+			continue;
+		}
+		break;
+	}
+	if (ci > li + 1) li = ci - 1;
+
+	if (isFolded) {
+		std::string folded;
+		bool prevNewline = false;
+		for (size_t i = 0; i < text.size(); i++) {
+			if (text[i] == '\n') {
+				if (prevNewline) { folded += '\n'; }
+				prevNewline = true;
+			} else {
+				if (prevNewline && !folded.empty() && folded.back() != '\n') folded += ' ';
+				prevNewline = false;
+				folded += text[i];
+			}
+		}
+		text = folded;
+	}
+
+	size_t trailing = 0;
+	while (trailing < text.size() && text[text.size() - 1 - trailing] == '\n') trailing++;
+	if (chomp == '-') {
+		text.erase(text.size() - trailing);
+	} else if (chomp == 0) {
+		text.erase(text.size() - trailing);
+		if (!text.empty()) text += '\n';
+	}
+	return text;
+}
+
+// YAML forbids using tabs for indentation (Section 10). A tab appearing in the
+// leading whitespace of a line is a structural error; throw to match UDE behavior.
+inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
+	for (char c : line) {
+		if (c == ' ') continue;
+		if (c == '\t') throw asvJSONError("YAML: tab used as indentation at line " + std::to_string(lineNum));
+		break;
+	}
+}
+
 // Parse a single YAML document (no multi-doc handling)
 inline std::string yamlParseDoc(std::string_view input) {
 	auto lines = splitLines(input);
@@ -1119,6 +1209,7 @@ inline std::string yamlParseDoc(std::string_view input) {
 		int yamlLineNum = static_cast<int>(li) + 1;
 		try {
 		int indent = countIndent(lines[li]);
+		yamlRejectTabIndent(lines[li], yamlLineNum);
 		std::string content = std::string(stripIndent(lines[li]));
 		if (content.empty() || content[0] == '#') continue;
 
@@ -1202,46 +1293,15 @@ inline std::string yamlParseDoc(std::string_view input) {
 		}
 
 		// --- Block scalar "|" (literal) or ">" (folded) ---
+		// Parse the header (style char, optional indent indicator [1-9], optional
+		// chomp indicator +|-), collect content lines, fold if needed, then apply
+		// chomping: clip (default) keeps one trailing line break, '-' strips all,
+		// '+' keeps all (YAML 1.2 spec).
 		if (content[0] == '|' || content[0] == '>') {
 			bool isFolded = (content[0] == '>');
 			closeFrames(stack, out, indent);
 
-			std::string text;
-			int contentIndent = -1;
-			size_t ci = li + 1;
-			while (ci < lines.size()) {
-				int si = countIndent(lines[ci]);
-				std::string_view sc = stripIndent(lines[ci]);
-				if (sc.empty()) { if (contentIndent > 0) text += '\n'; ci++; continue; }
-				if (sc[0] == '#') { ci++; continue; }
-				if (contentIndent < 0) contentIndent = si;
-				if (si >= contentIndent) {
-					if (!text.empty()) text += '\n';
-					text += sc;
-					ci++;
-					continue;
-				}
-				break;
-			}
-			if (ci > li + 1) li = ci - 1;
-
-			if (isFolded) {
-				std::string folded;
-				bool prevNewline = false;
-				for (size_t i = 0; i < text.size(); i++) {
-					if (text[i] == '\n') {
-						if (prevNewline) { folded += '\n'; }
-						prevNewline = true;
-					} else {
-						if (prevNewline && !folded.empty() && folded.back() != '\n') folded += ' ';
-						prevNewline = false;
-						folded += text[i];
-					}
-				}
-				text = folded;
-			}
-
-			while (!text.empty() && text.back() == '\n') text.pop_back();
+			std::string text = yamlParseBlockScalar(content, lines, li, isFolded, -1);
 
 			addComma(stack, out);
 			if (!stack.empty()) stack.back().first = false;
@@ -1299,42 +1359,7 @@ inline std::string yamlParseDoc(std::string_view input) {
 
 				if (valPart[0] == '|' || valPart[0] == '>') {
 					bool isFolded = (valPart[0] == '>');
-					std::string text;
-					int contentIndent = -1;
-					size_t ci = li + 1;
-					while (ci < lines.size()) {
-						int si = countIndent(lines[ci]);
-						std::string_view sc = stripIndent(lines[ci]);
-						if (sc.empty()) { if (contentIndent > 0) text += '\n'; ci++; continue; }
-						if (sc[0] == '#') { ci++; continue; }
-						if (si > indent) {
-							if (contentIndent < 0) contentIndent = si;
-							if (si >= contentIndent) {
-								if (!text.empty()) text += '\n';
-								text += sc;
-								ci++;
-								continue;
-							}
-						}
-						break;
-					}
-					if (ci > li + 1) li = ci - 1;
-					if (isFolded) {
-						std::string folded;
-						bool prevNewline = false;
-						for (size_t i = 0; i < text.size(); i++) {
-							if (text[i] == '\n') {
-								if (prevNewline) { folded += '\n'; }
-								prevNewline = true;
-							} else {
-								if (prevNewline && !folded.empty() && folded.back() != '\n') folded += ' ';
-								prevNewline = false;
-								folded += text[i];
-							}
-						}
-						text = folded;
-					}
-					while (!text.empty() && text.back() == '\n') text.pop_back();
+					std::string text = yamlParseBlockScalar(valPart, lines, li, isFolded, indent);
 					std::string escaped;
 					for (auto c : text) {
 						switch (c) {

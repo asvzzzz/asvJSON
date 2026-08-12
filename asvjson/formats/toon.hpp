@@ -1,5 +1,12 @@
 #pragma once
-// TOON serialization/parsing for asvJSON++
+// TOON (Token-Oriented Object Notation) serialization/parsing for asvJSON++
+//
+// Compact JSON-like format using 2-space indentation instead of braces:
+//   key: value            -- object member (value may be a bare token or JSON)
+//   - item                -- array element
+//   key:                  -- nested object / array (children indented)
+//   key[N]{"f1","f2"}:    -- tabular array; subsequent indented lines are rows
+// Strings are quoted only when required; full round-trip via toTOON()/fromTOON().
 
 #include "../core.hpp"
 

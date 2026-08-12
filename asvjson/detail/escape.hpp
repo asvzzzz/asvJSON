@@ -69,6 +69,23 @@ inline std::string yamlQuote(std::string_view s) {
 	return out;
 }
 
+inline std::string yamlDQuote(std::string_view s) {
+	std::string out = "\"";
+	for (auto c : s) {
+		switch (c) {
+			case '\n': out += "\\n"; break;
+			case '\t': out += "\\t"; break;
+			case '\r': out += "\\r"; break;
+			case '\\': out += "\\\\"; break;
+			case '"': out += "\\\""; break;
+			case '\0': out += "\\0"; break;
+			default: out += c;
+		}
+	}
+	out += '"';
+	return out;
+}
+
 inline std::string yamlQuoteKey(std::string_view s) {
 	if (yamlNeedsQuotes(s)) return yamlQuote(s);
 	return std::string(s);

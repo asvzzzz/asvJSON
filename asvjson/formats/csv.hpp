@@ -48,13 +48,16 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
 	if (s == "false" || s == "FALSE" || s == "F") return asvJSONValue::makeBool(false);
-	if (!s.empty() && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
+	if (!s.empty() && (s[0] == '+' || s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
+		// Skip a leading '+' (some from_chars implementations reject it) but keep
+		// it for '-' which is universally accepted.
+		const char* b = s.data() + (s[0] == '+' ? 1 : 0);
 		long long v;
-		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+		auto [ptr, ec] = std::from_chars(b, s.data() + s.size(), v);
 		if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeInt(v);
 		double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
-		auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
+		auto [ptr2, ec2] = std::from_chars(b, s.data() + s.size(), d);
 		if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
 		char* end; errno = 0;

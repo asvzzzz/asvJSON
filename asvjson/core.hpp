@@ -100,6 +100,7 @@ struct asvJSONValue {
 	static constexpr size_t MAX_STRING_LEN = 10 * 1024 * 1024;
 	static constexpr size_t MAX_ARRAY_SIZE = 1000000;
 	static constexpr size_t MAX_OBJECT_SIZE = 1000000;
+	static constexpr int MAX_DOUBLE_SIG_DIGITS = 17; // DBL_DECIMAL_DIG
 
 	static bool checkStringLen(size_t len) noexcept { return len <= MAX_STRING_LEN; }
 	static bool checkArraySize(size_t n) noexcept { return n <= MAX_ARRAY_SIZE; }
@@ -184,7 +185,7 @@ struct asvJSONValue {
 		return *this;
 	}
 
-	void destroy() {
+	void destroy() noexcept {
 		str_data.clear();
 		bin_data.clear();
 		if (type == OBJECT) { obj.reset(); }
@@ -838,7 +839,7 @@ private:
 					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
 				}
 				// Also check if exponent shifts digits beyond double precision
-				if (sigDigits > 17) {
+				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					// Precision would be lost - store as raw number string
 					auto v = asvJSONValue::makeString(buf, numLen);
 					v->raw_number = true;
@@ -861,7 +862,7 @@ private:
 				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
 					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
 				}
-				if (sigDigits > 17) {
+				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					auto v = asvJSONValue::makeString(buf, numLen);
 					v->raw_number = true;
 					return v;

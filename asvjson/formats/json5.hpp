@@ -256,8 +256,11 @@ inline std::string json5ToJson(std::string_view input) {
         std::string digits;
         while (i < input.size() && std::isxdigit(static_cast<unsigned char>(input[i]))) { digits += input[i++]; }
         i--;
+        errno = 0;
         char* end = nullptr;
         unsigned long long val = strtoull(digits.c_str(), &end, 16);
+        if (errno == ERANGE || end != digits.c_str() + digits.size())
+          throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
         continue;
       }
@@ -266,8 +269,11 @@ inline std::string json5ToJson(std::string_view input) {
         std::string digits;
         while (i < input.size() && input[i] >= '0' && input[i] <= '7') { digits += input[i++]; }
         i--;
+        errno = 0;
         char* end = nullptr;
         unsigned long long val = strtoull(digits.c_str(), &end, 8);
+        if (errno == ERANGE || end != digits.c_str() + digits.size())
+          throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
         continue;
       }
@@ -276,8 +282,11 @@ inline std::string json5ToJson(std::string_view input) {
         std::string digits;
         while (i < input.size() && (input[i] == '0' || input[i] == '1')) { digits += input[i++]; }
         i--;
+        errno = 0;
         char* end = nullptr;
         unsigned long long val = strtoull(digits.c_str(), &end, 2);
+        if (errno == ERANGE || end != digits.c_str() + digits.size())
+          throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
         continue;
       }

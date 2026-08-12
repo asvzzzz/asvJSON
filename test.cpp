@@ -1034,6 +1034,21 @@ TEST(testBSONCorruptedData) {
 	if (ok) throw std::runtime_error("null data should fail");
 }
 
+TEST(testBSONDecimal128) {
+	// BSON decimal128 (element type 0x13) is rejected rather than silently
+	// replaced with null, which would lose data.
+	uint8_t data[] = {
+		0x18, 0x00, 0x00, 0x00, // int32 length = 24
+		0x13, 'd', 0x00,        // type decimal128, key "d"
+		0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+		0x00                    // document terminator
+	};
+	asvJSON json;
+	bool ok = json.fromBSON(data, sizeof(data));
+	if (ok) throw std::runtime_error("decimal128 should fail");
+	ASSERT(!json.getLastError().empty());
+}
+
 TEST(testMessagePackCorruptedData) {
 	asvJSON json;
 	// null/empty data
@@ -2798,7 +2813,7 @@ TEST(testFromYAML) {
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("text: |\n  hello\n  world"));
-		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld");
+		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld\n");
 	}
 	// Quoted keys
 	{
@@ -2902,13 +2917,59 @@ TEST(testFromYAML) {
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("text: >\n  hello\n  world"));
-		ASSERT_EQ(std::string(json.getString("text")), "hello world");
+		ASSERT_EQ(std::string(json.getString("text")), "hello world\n");
 	}
 	// Folded block scalar with empty line
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("text: >\n  para1\n\n  para2"));
-		ASSERT_EQ(std::string(json.getString("text")), "para1\npara2");
+		ASSERT_EQ(std::string(json.getString("text")), "para1\npara2\n");
+	}
+	// Literal block scalar with strip chomp (|-) removes trailing newline
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |-\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld");
+	}
+	// Literal block scalar with keep chomp (|+) preserves all trailing newlines
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |+\n  hello\n\n"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello\n\n");
+	}
+	// Folded block scalar with strip chomp (>-)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >-\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello world");
+	}
+	// Folded block scalar with keep chomp (>+)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >+\n  hello\n\n"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello\n");
+	}
+	// Block scalar with indent indicator digit (ignored in favor of auto-detect)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |2-\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld");
+	}
+	// Round-trip: multi-line strings with and without trailing newline
+	{
+		asvJSON json;
+		json.putString("a", "line1\nline2");
+		json.putString("b", "line1\nline2\n");
+		json.putString("c", "line1\n\nline2\n\n");
+		json.putString("d", "leading\n\n");
+		json.putString("e", "\nlead");
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		ASSERT_EQ(std::string(j2.getString("a")), "line1\nline2");
+		ASSERT_EQ(std::string(j2.getString("b")), "line1\nline2\n");
+		ASSERT_EQ(std::string(j2.getString("c")), "line1\n\nline2\n\n");
+		ASSERT_EQ(std::string(j2.getString("d")), "leading\n\n");
+		ASSERT_EQ(std::string(j2.getString("e")), "\nlead");
 	}
 	// Double-quoted YAML string with \n escape
 	{
@@ -3306,6 +3367,18 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(!json.fromYAML("bad: !!float not-a-number"));
 		ASSERT(std::string(json.lastError).find("line") != std::string::npos);
+	}
+	// Tab used as indentation is a structural error (matches UDE behavior)
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a:\n\t- 1\n\t- 2"));
+		ASSERT(std::string(json.lastError).find("tab") != std::string::npos);
+	}
+	// Tab inside a block scalar body is also rejected
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("text: |\n\t  hello"));
+		ASSERT(std::string(json.lastError).find("tab") != std::string::npos);
 	}
 }
 
@@ -4314,6 +4387,15 @@ TEST(testFromCSV) {
     ASSERT(r->get("d")->type == asvJSONValue::NULL_VAL);
     ASSERT_EQ(std::string(r->get("e")->getString()), "hello");
   }
+  // Leading plus sign detected as a number
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b,c\n+42,+3.14,+x")));
+    auto r = json.getRoot()->get(static_cast<size_t>(0));
+    ASSERT_EQ(r->get("a")->getInt(), 42);
+    ASSERT(r->get("b")->getDouble() > 3.13 && r->get("b")->getDouble() < 3.15);
+    ASSERT_EQ(std::string(r->get("c")->getString()), "+x");
+  }
   // Empty cell -> null
   {
     asvJSON json;
@@ -4921,6 +5003,13 @@ TEST(testFromJSON5) {
     asvJSON j;
     ASSERT(j.fromJSON5(std::string_view("{'val':0xFF}")));
     ASSERT_EQ(j.getInt("val"), int64_t(255));
+  }
+  // Overflowing hex / octal / binary numbers are rejected, not silently wrapped
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("{'val':0xFFFFFFFFFFFFFFFFFFFFFFFF}")));
+    ASSERT(!j.fromJSON5(std::string_view("{'val':0o77777777777777777777777777}")));
+    ASSERT(!j.fromJSON5(std::string_view("{'val':0b11111111111111111111111111111111111111111111111111111111111111111}")));
   }
   // Octal numbers
   {
@@ -6894,8 +6983,7 @@ int main() {
 	RUN(testJSONPatchTestIntDouble);
 	
 	std::cout << "\n--- Corrupted Data Tests ---\n";
-	RUN(testBSONCorruptedData);
-	RUN(testMessagePackCorruptedData);
+	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);
 	
 	std::cout << "\n--- Duplicate Key Tests ---\n";
 	RUN(testDuplicateKeyNoLeak);

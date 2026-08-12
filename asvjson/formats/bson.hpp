@@ -333,8 +333,10 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 			case 0x13: {
 				if (pos + 16 > dataLen) throw asvJSONError("BSON decimal128: unexpected end");
 				pos += 16;
-				obj->obj->emplace(key, asvJSONValue::makeNull());
-				break;
+				// Decimal128 is a 128-bit IEEE-754 decimal float that cannot be
+				// represented losslessly by this library; fail rather than silently
+				// replacing the value with null.
+				throw asvJSONError("BSON decimal128 is not supported");
 			}
 			default: throw asvJSONError(std::string("BSON unknown element type: ") + std::to_string(elemType));
 		}

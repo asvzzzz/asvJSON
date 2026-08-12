@@ -1,5 +1,15 @@
 #pragma once
-// GOON serialization/parsing for asvJSON++
+// GOON (Greatly Optimized Object Notation) serialization/parsing for asvJSON++
+//
+// JSON superset with YAML-like indentation:
+//   name: John                   -- object members
+//   - item                       -- list items
+//   name[N]{col1,col2}:          -- tabular array; comma-separated rows follow
+//   []:                          -- bare list with `- value` items
+//   T / F / _ / ~                -- true / false / null / empty string
+//   $: $1="value" then $1        -- dictionary references
+// Special types use __BASE64__/__EXT__ prefixes. Decoder builds intermediate
+// JSON then parses via the JSON parser; full round-trip via toGOON()/fromGOON().
 
 #include "../core.hpp"
 

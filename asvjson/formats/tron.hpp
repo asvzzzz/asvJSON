@@ -1,5 +1,13 @@
 #pragma once
-// TRON serialization/parsing for asvJSON++
+// TRON (Token Reduced Object Notation) serialization/parsing for asvJSON++
+//
+// JSON superset that hoists repeated property sets into class definitions:
+//   class A: name,age            -- schema for objects with keys {name,age}
+//   A(Alice,30)                  -- positional instantiation
+//   A(name=Alice,age=30)         -- named instantiation
+//   class B(A): z                -- inheritance (B = A's props + z)
+// Comments use `#` to end of line; trailing commas allowed. Full round-trip
+// via toTRON()/fromTRON().
 
 #include "../core.hpp"
 
