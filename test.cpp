@@ -5758,7 +5758,7 @@ TEST(testUDEStringEscapes) {  // JSON control escapes \r \b \f \/
     ASSERT(j.fromUDE("a: \"x\\ry\\bz\\fw\\/v\"\n"));
     ASSERT_EQ(std::string(j.getString("a")), "x\ry\bz\fw/v");
   }
-  // Byte escapes \xHH (1-2 hex digits)
+  // Byte escapes \xHH (exactly 2 hex digits)
   {
     asvJSON j;
     ASSERT(j.fromUDE("a: \"\\x41\\x42\\x0a\"\n"));
@@ -5767,6 +5767,12 @@ TEST(testUDEStringEscapes) {  // JSON control escapes \r \b \f \/
     ASSERT_EQ(s[0], 'A');
     ASSERT_EQ(s[1], 'B');
     ASSERT_EQ(static_cast<unsigned char>(s[2]), 0x0A);
+  }
+  // A single hex digit is rejected (\xHH requires exactly two)
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: \"\\x4\"\n"));
+    ASSERT(!j.fromUDE("a: \"\\xA\"\n"));
   }
   // Unicode \uXXXX (BMP, including surrogate pairs)
   {
@@ -6293,6 +6299,71 @@ TEST(testUDECustomTags) {
     ASSERT(j2.fromUDE(j.toUDE()));
     ASSERT_EQ(std::string(j2.get("s")->str_data), "schema");
     ASSERT(j2.get("s")->custom_value != nullptr);
+  }
+}
+
+TEST(testUDEEncoding) {
+  // UTF-8 BOM is stripped, document parses normally
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\xEF\xBB\xBF" "a: 1\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // UTF-16 LE with BOM (ASCII payload)
+  {
+    std::string in = "\xFF\xFE";
+    for (char c : std::string("name: test\n")) { in += c; in += '\x00'; }
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // UTF-16 BE with BOM
+  {
+    std::string in = "\xFE\xFF";
+    for (char c : std::string("name: test\n")) { in += '\x00'; in += c; }
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // UTF-16 LE with BOM and a surrogate pair (emoji) plus non-ASCII text
+  {
+    // "emoji: \"\U0001F600\"\n" -- UTF-16 LE: 0xD83D 0xDE00 for the emoji
+    std::string in = "\xFF\xFE";
+    for (char c : std::string("emoji: \"")) { in += c; in += '\x00'; }
+    in += '\x3D'; in += '\xD8'; // high surrogate 0xD83D
+    in += '\x00'; in += '\xDE'; // low surrogate  0xDE00
+    in += '"'; in += '\x00';
+    in += '\n'; in += '\x00';
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(std::string(j.getString("emoji")), "\xF0\x9F\x98\x80");
+  }
+  // UTF-32 LE with BOM (build bytes explicitly: std::string literals with
+  // embedded NUL truncate via strlen, so no literal here)
+  {
+    std::string in;
+    in += (char)0xFF; in += (char)0xFE; in += (char)0x00; in += (char)0x00;
+    for (char c : std::string("name: test\n")) { in += c; in += '\x00'; in += '\x00'; in += '\x00'; }
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // UTF-32 BE with BOM
+  {
+    std::string in;
+    in += (char)0x00; in += (char)0x00; in += (char)0xFE; in += (char)0xFF;
+    for (char c : std::string("name: test\n")) { in += '\x00'; in += '\x00'; in += '\x00'; in += c; }
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  // UTF-8 BOM is not discarded: header and multi-document streams still work
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\xEF\xBB\xBF" "a: 1\n---\nb: 2\n"));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(root->arr->size(), size_t(2));
   }
 }
 
@@ -6962,6 +7033,7 @@ int main() {
 	RUN(testUDEMergeKeys);
 	RUN(testUDEDocuments);
 	RUN(testUDECustomTags);
+	RUN(testUDEEncoding);
 	RUN(testUDERoundTrip);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);

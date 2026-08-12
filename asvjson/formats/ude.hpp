@@ -57,6 +57,89 @@ inline bool udeIsTagChar(char c) {
   return udeIsIdentCont(c) || c == ':' || c == '.';
 }
 
+// ====================== Encoding / BOM (Section 9) ======================
+
+inline void udeAppendUtf8(std::string& out, uint32_t cp) {
+  if (cp <= 0x7F) out.push_back(static_cast<char>(cp));
+  else if (cp <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else if (cp <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+}
+
+// Decode UTF-16 (with BOM already stripped) to UTF-8, combining surrogate pairs.
+inline void udeDecodeUtf16(std::string& out, const uint8_t* p, size_t n, bool littleEndian) {
+  size_t i = 0;
+  while (i + 1 < n) {
+    uint16_t u = littleEndian ? static_cast<uint16_t>(p[i] | (static_cast<uint16_t>(p[i + 1]) << 8))
+                              : static_cast<uint16_t>((static_cast<uint16_t>(p[i]) << 8) | p[i + 1]);
+    i += 2;
+    uint32_t cp = u;
+    if (u >= 0xD800 && u <= 0xDBFF && i + 1 < n) {
+      uint16_t u2 = littleEndian ? static_cast<uint16_t>(p[i] | (static_cast<uint16_t>(p[i + 1]) << 8))
+                                 : static_cast<uint16_t>((static_cast<uint16_t>(p[i]) << 8) | p[i + 1]);
+      if (u2 >= 0xDC00 && u2 <= 0xDFFF) {
+        cp = 0x10000 + ((static_cast<uint32_t>(u - 0xD800)) << 10) + (u2 - 0xDC00);
+        i += 2;
+      }
+    }
+    udeAppendUtf8(out, cp);
+  }
+}
+
+// Decode UTF-32 (with BOM already stripped) to UTF-8.
+inline void udeDecodeUtf32(std::string& out, const uint8_t* p, size_t n, bool littleEndian) {
+  for (size_t i = 0; i + 3 < n; i += 4) {
+    uint32_t cp = littleEndian ? (static_cast<uint32_t>(p[i]) | (static_cast<uint32_t>(p[i + 1]) << 8) |
+                                  (static_cast<uint32_t>(p[i + 2]) << 16) | (static_cast<uint32_t>(p[i + 3]) << 24))
+                               : ((static_cast<uint32_t>(p[i]) << 24) | (static_cast<uint32_t>(p[i + 1]) << 16) |
+                                  (static_cast<uint32_t>(p[i + 2]) << 8) | static_cast<uint32_t>(p[i + 3]));
+    if (cp > 0x10FFFF) cp = 0xFFFD;
+    udeAppendUtf8(out, cp);
+  }
+}
+
+// Normalize the byte order mark: a UTF-8 BOM is stripped, UTF-16/UTF-32 input
+// (detected by its BOM) is transcoded to UTF-8 so that Windows-produced UDE
+// files parse correctly. The BOM itself is a byte-order signature, not part of
+// the document text, and is consumed without altering the remaining content.
+// Returns true when a BOM was present.
+inline bool udeNormalizeEncoding(const std::string& in, std::string& out) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(in.data());
+  size_t n = in.size();
+  if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) {
+    out.assign(in.data() + 3, n - 3);
+    return true;
+  }
+  if (n >= 4 && p[0] == 0xFF && p[1] == 0xFE && p[2] == 0x00 && p[3] == 0x00) {
+    udeDecodeUtf32(out, p + 4, n - 4, true);
+    return true;
+  }
+  if (n >= 4 && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE && p[3] == 0xFF) {
+    udeDecodeUtf32(out, p + 4, n - 4, false);
+    return true;
+  }
+  if (n >= 2 && p[0] == 0xFF && p[1] == 0xFE) {
+    udeDecodeUtf16(out, p + 2, n - 2, true);
+    return true;
+  }
+  if (n >= 2 && p[0] == 0xFE && p[1] == 0xFF) {
+    udeDecodeUtf16(out, p + 2, n - 2, false);
+    return true;
+  }
+  out = in;
+  return false;
+}
+
 inline bool udeIsUnquotedChar(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
          c == '.' || c == '_' || c == '~' || c == '+' || c == '/' || c == '=' || c == '-';
@@ -502,13 +585,13 @@ private:
           case '\\': out.push_back('\\'); break;
           case '"': out.push_back('"'); break;
           case 'x': {
-            // Byte escape \xHH (1-2 hex digits).
-            int hi = (i + 1 < raw.size()) ? udeHexDigit(raw[i + 1]) : -1;
-            if (hi < 0) throw asvJSONError("UDE: invalid \\x escape in string");
-            i++;
-            int lo = (i + 1 < raw.size()) ? udeHexDigit(raw[i + 1]) : -1;
-            if (lo >= 0) i++;
-            out.push_back(static_cast<char>((hi << 4) | (lo < 0 ? 0 : lo)));
+            // Byte escape \xHH — exactly two hex digits (Section 6).
+            if (i + 2 >= raw.size()) throw asvJSONError("UDE: invalid \\x escape in string");
+            int hi = udeHexDigit(raw[i + 1]);
+            int lo = udeHexDigit(raw[i + 2]);
+            if (hi < 0 || lo < 0) throw asvJSONError("UDE: invalid \\x escape in string");
+            out.push_back(static_cast<char>((hi << 4) | lo));
+            i += 2;
             break;
           }
           case 'u':
@@ -751,8 +834,9 @@ private:
 
     if (indicator == '>') {
       // Folded scalar: first fold (NEWLINE -> space), then chomping is
-      // applied to the folded result. An empty line terminates the scalar
-      // (Appendix A) rather than forming a paragraph break.
+      // applied to the folded result. Empty lines are part of the content
+      // and become paragraph breaks (Section 6); they never terminate the
+      // scalar — termination happens only on a dedent, in the loop above.
       out = udeFoldScalar(out);
     }
 
@@ -1238,7 +1322,9 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
 }
 
 inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool strict) {
-  std::string body = udeStripAndCheckHeader(text, strict);
+  std::string normalized;
+  udeNormalizeEncoding(text, normalized);
+  std::string body = udeStripAndCheckHeader(normalized, strict);
   std::vector<std::string> docs = splitUdeDocuments(body);
   if (docs.size() > 1) {
     auto arr = asvJSONValue::makeArray();
@@ -1326,10 +1412,11 @@ inline void udeWriteIndent(std::ostream& os, int indent) {
 }
 
 // A string can be written as a block scalar only when it round-trips through
-// the parser. Since an empty line (a line with no characters after the break)
-// terminates the scalar once the base indent is known (Appendix A), the
-// string must not contain any blank line after content except a single
-// trailing blank line, and must contain at least one content line.
+// the parser. Blank lines are content (they are never terminators) and
+// round-trip correctly, but the encoder keeps a conservative subset here:
+// at least one content line, no leading whitespace (absorbed into the base
+// indent), and at most one trailing blank line. Other strings are written as
+// quoted strings by the caller instead.
 inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
   size_t trailing = 0;
@@ -1345,7 +1432,7 @@ inline bool udeCanBlockEncode(std::string_view s) {
     for (char c : line) if (c != ' ' && c != '\t' && c != '\r') { blank = false; break; }
     if (nl == std::string_view::npos) {
       // Final line without a trailing break; a blank one after content would
-      // terminate the scalar and lose the break.
+      // lose that break under clip chomping and fail to round-trip.
       if (blank && seenContent) return false;
       if (!blank) {
         if (trailingBlank) return false; // blank line followed by more content

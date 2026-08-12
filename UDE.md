@@ -350,9 +350,10 @@ BLOCK_SCALAR     ::= SCALAR_INDICATOR INT? CHOMP_INDICATOR? WS? NEWLINE INDENTED
 # Folded Scalar Semantics
 # Note: In a folded scalar, first the text is folded (NEWLINE → space), then chomping indicators are applied. This mirrors YAML behaviour.
 # When the scalar indicator is '>' (folded), the following rules apply:
-# * A single NEWLINE after a line of text is replaced by a space.
-# * An empty line terminates the scalar (Appendix A), so it cannot form a
-#   paragraph break; only the fold-to-space applies to the collected text.
+# * A single NEWLINE between two non-empty lines is replaced by a space.
+# * Empty lines are part of the content: a run of one or more blank lines
+#   between non-empty lines is preserved as a single paragraph break
+#   (one NEWLINE), exactly as in YAML block folding.
 # * The resulting string may be further processed by the tag handlers if present.
 # These semantics are identical to YAML's folded scalar rules and allow
 # multi‑line values to be stored as a single logical line in UDE.
@@ -362,11 +363,11 @@ INDENTED_TEXT     ::= (WHITESPACE* TEXT_LINE NEWLINE)* WHITESPACE* TEXT_LINE
 
 # Indentation handling
 # Each line in a block scalar must have at least the base indentation
-# The first line determines the base indent; subsequent lines with less
-# indentation terminate the scalar. Empty lines are treated as a line
-# with zero indentation and terminate the scalar when the base indentation
-# is greater than zero (Appendix A); the terminating empty line supplies a
-# single trailing line break subject to chomping.
+# The first non-empty line determines the base indent; subsequent lines with
+# less indentation terminate the scalar. Empty lines are part of the content
+# (paragraph breaks) and never terminate the scalar by themselves
+# (Section 6); a trailing blank line supplies the single line break that clip
+# chomping keeps.
 # Example:
 #   key: |
 #     alpha
