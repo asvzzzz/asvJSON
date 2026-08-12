@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+build_gcc*/
+*.obj
+*.o
+*.a
+
+# MSVC
+*.exe
+*.pdb
+*.ilk
+*.log
+
+# Local agent instructions (never commit)
+AGENTS.md
