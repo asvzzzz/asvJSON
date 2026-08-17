@@ -100,6 +100,7 @@ struct asvJSONValue {
 	static constexpr size_t MAX_STRING_LEN = 10 * 1024 * 1024;
 	static constexpr size_t MAX_ARRAY_SIZE = 1000000;
 	static constexpr size_t MAX_OBJECT_SIZE = 1000000;
+	static constexpr size_t MAX_CLONE_NODES = 100000000; // guard against memory exhaustion on huge trees
 	static constexpr int MAX_DOUBLE_SIG_DIGITS = 17; // DBL_DECIMAL_DIG
 
 	static bool checkStringLen(size_t len) noexcept { return len <= MAX_STRING_LEN; }
@@ -1843,8 +1844,11 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 
 // ======================= Core inline definitions =======================
 
-inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth) {
+inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int depth, size_t& nodes) {
 	if (!v) return nullptr;
+	// Node budget guards against memory exhaustion when cloning huge (wide)
+	// trees that never hit the depth limit.
+	if (++nodes > asvJSONValue::MAX_CLONE_NODES) return nullptr;
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
 	switch (v->type) {
 		case asvJSONValue::NULL_VAL: return asvJSONValue::makeNull();
@@ -1871,7 +1875,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 			c->type = asvJSONValue::CUSTOM_TAG;
 			c->str_data = v->str_data;
 			if (v->custom_value) {
-				auto cv = cloneValue(v->custom_value.get(), depth + 1);
+				auto cv = cloneValueImpl(v->custom_value.get(), depth + 1, nodes);
 				if (!cv) return nullptr;
 				c->custom_value = std::move(cv);
 			}
@@ -1882,7 +1886,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 			if (!a) return nullptr;
 			if (v->arr) {
 				a->arr->reserve(v->arr->size());
-				for (const auto& elem : *v->arr) { auto cloned = cloneValue(elem.get(), depth + 1); if (cloned) a->arr->push_back(std::move(cloned)); }
+				for (const auto& elem : *v->arr) { auto cloned = cloneValueImpl(elem.get(), depth + 1, nodes); if (cloned) a->arr->push_back(std::move(cloned)); }
 			}
 			return a;
 		}
@@ -1894,7 +1898,7 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 				o->obj->reserve(v->obj->size());
 #endif
 				for (const auto& [k, val] : *v->obj) {
-					auto cloned = cloneValue(val.get(), depth + 1);
+					auto cloned = cloneValueImpl(val.get(), depth + 1, nodes);
 					if (cloned) o->obj->emplace(k, std::move(cloned));
 				}
 			}
@@ -1902,6 +1906,11 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 		}
 	}
 	return asvJSONValue::makeNull();
+}
+
+inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth) {
+	size_t nodes = 0;
+	return cloneValueImpl(v, depth, nodes);
 }
 
 

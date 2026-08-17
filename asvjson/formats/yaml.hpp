@@ -355,6 +355,17 @@ inline std::string yamlArrayToSetObject(std::string_view arr) {
 // Tag directives (%TAG handle prefix) for the current document being parsed
 static thread_local std::unordered_map<std::string, std::string> yamlDocTagMap;
 
+// RAII guard: snapshot the thread-local tag map on entry and restore it on
+// scope exit (including via exception). A failed parse can no longer leak
+// partial %TAG directives into a subsequent parse on the same thread.
+struct YamlDocTagMapGuard {
+	std::unordered_map<std::string, std::string> saved_;
+	YamlDocTagMapGuard() { saved_.swap(yamlDocTagMap); }
+	~YamlDocTagMapGuard() { yamlDocTagMap.swap(saved_); }
+	YamlDocTagMapGuard(const YamlDocTagMapGuard&) = delete;
+	YamlDocTagMapGuard& operator=(const YamlDocTagMapGuard&) = delete;
+};
+
 // Resolve a tag shorthand using %TAG directives (longest handle match wins)
 inline std::string yamlResolveTag(std::string_view rawTag) {
 	std::string s(rawTag);
@@ -1060,12 +1071,10 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	std::string text;
 	int contentIndent = -1;
 	size_t ci = li + 1;
-	// splitLines appends a phantom empty line at EOF when input ends with '\n'.
-	// That line carries no real content, so it must be excluded from block-scalar
-	// collection (otherwise keep-chomp '+' would preserve a spurious trailing '\n').
-	size_t last = lines.size();
-	if (last > 0 && lines[last - 1].empty()) last--;
-	while (ci < last) {
+	// splitLines does not emit a phantom trailing empty line at EOF, so all
+	// remaining lines here are real content (a genuine trailing blank line is
+	// collected and keeps block-scalar chomp semantics correct).
+	while (ci < lines.size()) {
 		int si = countIndent(lines[ci]);
 		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
 		std::string_view sc = stripIndent(lines[ci]);
@@ -1121,12 +1130,13 @@ inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 
 // Parse a single YAML document (no multi-doc handling)
 inline std::string yamlParseDoc(std::string_view input) {
+	// Restore the previous tag-map state on exit (even on exception).
+	YamlDocTagMapGuard tagGuard;
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 
 	// Scan for directives (%YAML, %TAG) at the beginning of the document
 	// Directives are at indent 0 and precede any content
-	yamlDocTagMap.clear();
 	size_t dirEnd = 0;
 	while (dirEnd < lines.size()) {
 		std::string_view c = stripIndent(lines[dirEnd]);

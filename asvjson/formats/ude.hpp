@@ -186,10 +186,9 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
       cur.clear();
       continue;
     }
-    // splitLines() adds a trailing empty line for input ending in '\n'; it is a
-    // reconstruction artifact, not a real line, and must not be re-appended
-    // (a spurious blank line would change block-scalar clip behavior).
-    if (i + 1 == lines.size() && line.empty()) continue;
+    // splitLines() does NOT emit a phantom trailing empty line at EOF, so the
+    // last line here is always real content (a genuine trailing blank line is
+    // re-appended with its '\n', preserving block-scalar clip behavior).
     cur += line;
     cur += '\n';
   }

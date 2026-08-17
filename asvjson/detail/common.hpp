@@ -71,8 +71,8 @@ static std::vector<std::string> splitLines(std::string_view input) {
 	std::vector<std::string> lines;
 	if (input.empty()) return lines;
 	size_t start = 0;
-	for (size_t i = 0; i <= input.size(); i++) {
-		if (i == input.size() || input[i] == '\n') {
+	for (size_t i = 0; i < input.size(); i++) {
+		if (input[i] == '\n') {
 			if (i > start && input[i - 1] == '\r')
 				lines.push_back(std::string(input.substr(start, i - start - 1)));
 			else
@@ -80,6 +80,11 @@ static std::vector<std::string> splitLines(std::string_view input) {
 			start = i + 1;
 		}
 	}
+	// A trailing '\n' terminates the final line; it does NOT open an empty
+	// phantom line at EOF. (Earlier versions emitted that phantom, which forced
+	// every consumer to compensate — e.g. block-scalar chomp counted a spurious
+	// trailing '\n'.)
+	if (start < input.size()) lines.push_back(std::string(input.substr(start)));
 	return lines;
 }
 
