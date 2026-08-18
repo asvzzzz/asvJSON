@@ -333,6 +333,12 @@ SEP               ::= WS? ',' WS? | NEWLINE
 VALUES            ::= VALUE (SEP VALUE)* SEP?
 PAIRS             ::= PAIR (SEP PAIR)* SEP?
 PAIR              ::= KEY WS COLON WS VALUE
+# Inline comment note: a single-line (# or //) or block (/* */) comment may
+# also follow the VALUE on the same line, e.g. `key: value # note` or
+# `key: value /* note */`. Such comments are ignored by the parser and are
+# NOT part of VALUE. They appear only outside quoted strings; a '#' inside a
+# double- or single-quoted string is literal text. (The parser skips them via
+# skipWsAndComments() after the value.)
 KEY   ::= IDENTIFIER | STRING | DOT_KEY | UNQUOTED_STRING
 
 # Prioritization note
