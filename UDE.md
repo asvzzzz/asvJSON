@@ -71,6 +71,30 @@ Examples:
 | **Alias** | `*name`. Replaces the anchor with its value; aliasing an alias is disallowed and will raise a cycle‑detected error. Maximum anchor depth is 100 levels.
 | **Tag** | `!type` prefix before any value (e.g., `!base64 "…"`). Tags are parsed by custom handlers; unknown tags are preserved as `CUSTOM_TAG` with name and value stored separately (Section 8.1). The parser does not enforce the semantics of a tag – validation is delegated to user callbacks.
 
+### 3.1 String Escape Sequences
+
+Inside double‑quoted strings (`DQ_STRING`) the following escape sequences are recognized (see `ESC` in Appendix A):
+
+| Escape | Code point / meaning |
+|--------|----------------------|
+| `\"` | Double quote (U+0022) |
+| `\\` | Backslash (U+005C) |
+| `\/` | Solidus (U+002F, optional, JSON‑style) |
+| `\b` | Backspace (U+0008) |
+| `\f` | Form feed (U+000C) |
+| `\n` | Line feed (U+000A) |
+| `\r` | Carriage return (U+000D) |
+| `\t` | Horizontal tab (U+0009) |
+| `\xHH` | One byte, exactly two hex digits (`HH` in `00`–`FF`) |
+| `\uXXXX` | One BMP code point, exactly four hex digits; valid surrogate pairs are joined automatically |
+| `\UXXXXXXXX` | One code point in U+0000…U+10FFFF, exactly eight hex digits |
+| `\u{…}` | One code point, one or more hex digits inside braces (Rust/JS style) |
+| `\<newline>` | Line continuation: joins the current line with the next, stripping leading whitespace (INI style) |
+
+Single‑quoted strings (`SQ_STRING`) are fully literal: the only escape is `''`, which represents a literal single quote; no other backslash processing occurs.
+
+A code point above U+10FFFF, an invalid surrogate pair, or a malformed escape (e.g. `\x` without two hex digits, a truncated `\u`/`\U`, or an unknown escape letter) is a parse error reported with the line number, e.g. `UDE: invalid escape sequence in string at line N`.
+
 ---
 
 
@@ -132,7 +156,7 @@ content** (paragraph breaks) and never terminate the scalar by themselves; they
 are preserved, and the default (clip) chomping removes exactly one trailing
 newline.
 
-Tabs (Section 13): a tab is not allowed in the indentation margin of a block
+Tabs (Section 12): a tab is not allowed in the indentation margin of a block
 scalar — the margin must consist of spaces only (YAML rule). A tab after the
 margin is ordinary content.
 
@@ -147,6 +171,10 @@ point1: *def
 point2: {x: 3, y: 4}
 ```
 Aliases (`*name`) are replaced with the anchored value during parsing. An alias that has no matching anchor — whether it is a forward reference (referenced before the `&anchor` is defined) or a typo — is a hard error in **all** modes: the parser raises `UDE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Cycles (`*a` resolving to a value that contains `*a`) are likewise rejected with a cycle‑detected error; the maximum resolution depth is 100 levels.
+
+### 7.1 Merge Keys
+
+UDE supports the YAML‑style merge key `<<`. A mapping may contain `<<: *anchor` (or `<<: [*a, *b]`) to inline the anchored object's members into the current object. Only the unquoted form `<<` merges. The anchored value must be an object or a sequence of objects; existing keys in the target object take precedence over merged keys, and for a sequence of objects later entries win. A non‑object anchor or a sequence containing a non‑object is a parse error (`UDE: merge key requires an object or sequence of objects`).
 
 ---
 
@@ -244,10 +272,33 @@ after the margin are content.
 
 ---
 
-## 13. Future Work
+## 13. Error Handling
+
+UDE parsing is fail‑fast: the parser reports a problem by throwing a C++ exception of type `asvJSONError`. The message always begins with the prefix `UDE: ` and, where the position is known, ends with ` at line <N>` giving the 1‑based line number in the source document. Column information is **not** tracked, and there is no numeric error‑code enumeration — the message text itself is the diagnostic.
+
+The following conditions raise an error (non‑exhaustive; messages are verbatim):
+
+* **Syntax / structure** — `UDE: expected ':' after key …`, `UDE: expected key at line N`, `UDE: expected value at line N`, `UDE: unterminated object/array/string/single‑quoted string/tag URI/block comment at line N`, `UDE: unexpected top‑level collection at line N`, `UDE: trailing content after block scalar`, `UDE: trailing content after top‑level collection`.
+* **Block scalar** — `UDE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
+* **Numbers / escapes** — `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid escape sequence in string at line N`.
+* **Anchors / aliases** — `UDE: undefined alias *<name>`, `UDE: cyclic reference detected for alias *<name>`, `UDE: anchor resolution depth exceeded` (depth > 100), `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
+* **Duplicate keys** — `UDE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
+* **Strict mode** — `UDE: strict mode requires all keys to be quoted (key: …)`, `UDE: strict mode requires quoting value: <tok>`, `UDE: missing value after ':' at line N`.
+* **Tags** — e.g. `UDE: !int requires an integral value`, `UDE: !base64 requires a string value`, `UDE: !datetime requires a string value`, `UDE: !ext requires "type:data"`, `UDE: invalid base64 data`, `UDE: invalid regex`, `UDE: empty tag URI at line N`.
+* **Resource limits** — `UDE: array too large`, `UDE: binary data too large`, `UDE: extension data too large`, `UDE: too many documents` (see §12).
+* **Header / version** — `UDE: malformed version header`, `UDE: unsupported UDE version vX.Y` (a major version other than `1` is rejected).
+
+There is no error‑recovery mode: the first error aborts parsing. Callers that need partial results must catch the exception; the partially built DOM is not returned.
+
+---
+
+## 14. Future Work
 * Standardized tag registry for third‑party extensions.
 * Schema validation (optional JSONSchema‑like validator).
 * Streaming parser for large documents.
+* External URI references (`!uri` tag) for out‑of‑line binary payloads.
+* Formal, machine‑checkable error codes (currently diagnostics are free‑form strings).
+* Configurable pretty‑print options (indent width, tab indentation, key sorting, line wrapping).
 
 ---
 
@@ -404,7 +455,7 @@ NULL              ::= [nN][uU][lL][lL]
 
 ---
 
-## 14. License
+## 15. License
 UDE is released under the MIT license. The specification text itself is public domain.
 
 ---
