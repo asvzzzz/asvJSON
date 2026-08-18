@@ -318,7 +318,7 @@ PLAIN_TEXT          ::= ~[\n]*
 # document whose remaining content is a single non-empty line that fails to
 # parse as DOC_LINE (e.g. "hello world" with no colon) MUST fall through to
 # PLAIN_TEXT rather than being accepted as an empty document with dangling text.
-DOC_LINE          ::= LINE | BLOCK_COMMENT | COMMENT
+DOC_LINE          ::= WS? (LINE | BLOCK_COMMENT | COMMENT)
 HEADER            ::= '# UDE v' VERSION_STRING
 LINE              ::= WS (KEY COLON VALUE | BLOCK_SCALAR | COLLECTION)
 COLLECTION        ::= OBJECT | ARRAY
