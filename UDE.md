@@ -183,10 +183,21 @@ Tags allow custom data types to be represented in a type‑safe way:
 
 | Tag | Syntax | Meaning |
 |-----|--------|---------|
+| `!int` | `!int <number>` | Coerces/validates the value as an integer; a non‑integral numeric is rejected (`UDE: !int requires an integral value`). |
+| `!float` | `!float <number>` | Coerces/validates the value as a floating‑point number. |
+| `!string` | `!string <value>` | Coerces the value to a string (e.g. `!string 42` → `"42"`). |
+| `!bool` | `!bool <true\|false>` | Coerces/validates a boolean value. |
+| `!null` | `!null` | Produces an explicit null value. |
 | `!base64` | `!base64 "<data>"` | Decoded binary data from base64 string. |
 | `!bin` | `!bin 0x<hex>` | Binary data represented as hex literal. |
 | `!datetime` | `!datetime "2026-07-30T14:45:00Z"` | ISO‑8601 timestamp. |
 | `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two‑token form like `!ext image/png "..."` would not parse. |
+| `!regex` | `!regex "<pattern>"` or `!regex "<pattern>\|<opts>"` | Regular expression with optional flags. |
+| `!schema` | `!schema <string\|object>` | Schema reference or inline schema; stored as a custom tag with name `schema` (see 8.1). |
+
+These **explicit type‑cast tags** (`!int`, `!float`, `!string`, `!bool`, `!null`) force a specific runtime type on the following value and validate it; a value of the wrong type is a parse error. They are the UDE equivalent of YAML's explicit type tags.
+
+> **Note on `!!value`:** UDE does **not** support the YAML `!!value` / `!!yaml` core‑schema tags. UDE tags are always single‑token `!name` forms or verbatim `!<uri>` forms (Section 8.1). The absence of `!!value` is intentional and is **not** a specification discrepancy.
 
 The library provides handlers for the standard tags. **Unknown tags** follow the *save* policy (the default of the three possible behaviors *error / save / ignore*): the tag and its value are preserved without data loss.
 
