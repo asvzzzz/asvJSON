@@ -50,7 +50,7 @@ If no header is present, the document consists of a single plain‑text line. Th
 ## 3. Lexical Elements
 | Element | Syntax | Notes |
 |---------|--------|-------|
-| **Comment** | `# comment…`, `// comment…`, or multi‑line `/* … */` | Begins at first non‑whitespace character and continues until end of line for single‑line comments, or until closing `*/` for block comments. Comments are ignored by the parser.
+| **Comment** | `# comment…`, `// comment…`, or multi‑line `/* … */` | Begins at first non‑whitespace character and continues until end of line for single‑line comments, or until the first closing `*/` for block comments. Block comments are **not nestable** — the first `*/` always closes the comment. Comments are ignored by the parser. A single‑line or block comment may also follow a value on the same line, e.g. `key: value # note` or `key: value /* note */`; such trailing comments are ignored and are not part of the value (see the inline comment note in Appendix A).
 | **Key** | Unquoted identifier (`[A-Za-z_][A-Za-z0-9_-]*`), quoted string (`"..."`), dotted key (`a.b.c`), or UNQUOTED_STRING (`[A-Za-z0-9._~+/=-]+`). | In *default* mode keys may be unquoted if they match the regex; in *strict* mode all keys must be quoted or escaped. Trailing commas are allowed, but duplicate keys produce an error only in strict mode.
 
 Examples:
@@ -65,7 +65,7 @@ Examples:
 | **Boolean** | `true`, `false` (case‑insensitive).
 | **Null** | `null`.
 | **Array start/end** | `[` and `]`. Elements separated by commas or newlines; a trailing comma is permitted in both modes and is safely ignored by the parser (does not create an extra null element).
-| **Object start/end** | `{` and `}`. Key/value pairs separated by commas or newlines; duplicate keys are only reported as errors when strict mode is enabled.
+| **Object start/end** | `{` and `}`. Key/value pairs separated by commas or newlines; duplicate keys are only reported as errors when strict mode is enabled. In default (permissive) mode a duplicate key does **not** raise an error — the last occurrence silently overrides earlier values for that key (`insert_or_assign` semantics).
 | **Block scalar indicator** | `|` (literal) or `>` (folded). Followed by an optional indentation level and optional chomping indicators (`+`, `-`). If no chomping indicator is supplied, the default is to keep a single trailing newline (standard YAML behavior).
 | **Anchor** | `&name`. Creates a reference that can be reused with `*name`.
 | **Alias** | `*name`. Replaces the anchor with its value; aliasing an alias is disallowed and will raise a cycle‑detected error. Maximum anchor depth is 100 levels.
@@ -146,7 +146,7 @@ default: &def {x: 1, y: 2}
 point1: *def
 point2: {x: 3, y: 4}
 ```
-Aliases (`*name`) are replaced with the anchored value during parsing.
+Aliases (`*name`) are replaced with the anchored value during parsing. An alias that has no matching anchor — whether it is a forward reference (referenced before the `&anchor` is defined) or a typo — is a hard error in **all** modes: the parser raises `UDE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Cycles (`*a` resolving to a value that contains `*a`) are likewise rejected with a cycle‑detected error; the maximum resolution depth is 100 levels.
 
 ---
 
@@ -190,7 +190,7 @@ A parser can be instantiated in **strict mode** where the following rules apply:
 * All keys must be quoted (`"..."`); unquoted keys are rejected (Section 3).
 * Unquoted values that contain special characters are rejected.
 * Mixed type arrays (e.g., `[1, "two"]`) are allowed; schema validation may reject them if desired.
-* Anchors must be defined before they are referenced.
+* Anchors must be defined before they are referenced (an undefined alias is rejected in all modes, not only strict — see Section 7).
 
 Strict mode is useful when data integrity is critical; the default permissive mode aims for maximum compatibility with existing YAML/INI files.
 
@@ -283,7 +283,7 @@ NUMBER            ::= SIGNED_INT | SIGNED_FLOAT | HEX | OCTAL | BINARY
 SIGNED_INT        ::= '-'? INT
 SIGNED_FLOAT      ::= '-'? FLOAT
 INT               ::= '0' | [1-9][0-9]*
-FLOAT             ::= [0-9]+("."[0-9]*)?(E[+-]?[0-9]+)?
+FLOAT             ::= [0-9]+("." [0-9]*)? ([eE][+-]?[0-9]+)?
 # Note: A leading digit before the decimal point is required. Forms like '.5' or
 # '-.5' are not valid FLOAT literals; they are lexed as UNQUOTED_STRING instead.
 # This is a deliberate restriction to avoid ambiguity with dotted keys.
@@ -308,6 +308,7 @@ ALIAS             ::= '*' IDENTIFIER
 WHITESPACE        ::= [ \t]+  // spaces and tabs
 NEWLINE           ::= '\r'? '\n'
 WS                ::= WHITESPACE*
+SPACES            ::= ' '+  // spaces only; tabs are NOT allowed in the indentation margin of a block scalar
 VERSION_STRING    ::= [0-9]+ '.' [0-9]+  // e.g., 1.0
 ```### Grammar
 ```
@@ -332,7 +333,7 @@ SEP               ::= WS? ',' WS? | NEWLINE
 
 VALUES            ::= VALUE (SEP VALUE)* SEP?
 PAIRS             ::= PAIR (SEP PAIR)* SEP?
-PAIR              ::= KEY WS COLON WS VALUE
+PAIR              ::= KEY WS COLON WS VALUE (WS? COMMENT)?
 # Inline comment note: a single-line (# or //) or block (/* */) comment may
 # also follow the VALUE on the same line, e.g. `key: value # note` or
 # `key: value /* note */`. Such comments are ignored by the parser and are
@@ -349,9 +350,11 @@ VALUE             ::= STRING | NUMBER | BOOLEAN | NULL | UNQUOTED_STRING | ALIAS
 TAGGED_VALUE      ::= TAG WS? ANCHOR? WS? VALUE
 ANCHORED_VALUE    ::= ANCHOR WS? VALUE
 
-BLOCK_SCALAR     ::= SCALAR_INDICATOR INT? CHOMP_INDICATOR? WS? NEWLINE INDENTED_TEXT
+BLOCK_SCALAR     ::= SCALAR_INDICATOR INDENT_DIGIT? CHOMP_INDICATOR? WS? NEWLINE INDENTED_TEXT
 
-# Note: An optional integer may precede the chomp indicator, mirroring YAML syntax (e.g., '|2-' or '>3+').
+# Note: An optional SINGLE decimal digit may precede the chomp indicator,
+# mirroring YAML syntax (e.g., '|2-' or '>3+'). The indicator is exactly one
+# digit in 0-9; multi-digit or signed values are NOT permitted.
 
 # Folded Scalar Semantics
 # Note: In a folded scalar, first the text is folded (NEWLINE → space), then chomping indicators are applied. This mirrors YAML behaviour.
@@ -365,7 +368,8 @@ BLOCK_SCALAR     ::= SCALAR_INDICATOR INT? CHOMP_INDICATOR? WS? NEWLINE INDENTED
 # multi‑line values to be stored as a single logical line in UDE.
 SCALAR_INDICATOR  ::= '|' | '>'
 CHOMP_INDICATOR   ::= '+' | '-'
-INDENTED_TEXT     ::= (WHITESPACE* TEXT_LINE NEWLINE)* WHITESPACE* TEXT_LINE
+INDENT_DIGIT      ::= [0-9]
+INDENTED_TEXT     ::= (SPACES* TEXT_LINE NEWLINE)* SPACES* TEXT_LINE
 
 # Indentation handling
 # Each line in a block scalar must have at least the base indentation
