@@ -238,7 +238,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	return out;
 }
 
-inline std::string yamlParseInlineValue(std::string_view s);
+inline std::string yamlParseInlineValue(std::string_view s, int depth = 0);
 
 // Convert unescaped regex "pattern|opts" to internal pattern|opts
 inline std::string yamlRegexToInternal(std::string_view s) {
@@ -380,10 +380,11 @@ inline std::string yamlResolveTag(std::string_view rawTag) {
 	return s;
 }
 
-// Forward declarations for flow parser (used by tagged value handler)
+// Forward declaration for flow parser (used by tagged value handler)
 inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
-    std::unordered_set<std::string>* resolving);
+    std::unordered_set<std::string>* resolving,
+    int depth = 0);
 
 // Parse tagged YAML value -- handles all !!word / !word tags
 inline std::string yamlParseTaggedValue(std::string_view s) {
@@ -586,13 +587,13 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		if (val[0] == '[') {
 			std::string tmp(val);
 			size_t fp = 0;
-			std::string flowJson = yamlParseFlowValue(tmp, fp, nullptr, nullptr);
+			std::string flowJson = yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
 			return yamlArrayToSetObject(flowJson);
 		}
 		if (val[0] == '{') {
 			std::string tmp(val);
 			size_t fp = 0;
-			return yamlParseFlowValue(tmp, fp, nullptr, nullptr);
+			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
 		}
 		return std::string(val);
 	}
@@ -603,7 +604,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		if (val[0] == '[' || val[0] == '{') {
 			std::string tmp(val);
 			size_t fp = 0;
-			return yamlParseFlowValue(tmp, fp, nullptr, nullptr);
+			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
 		}
 		return "[]";
 	}
@@ -684,18 +685,17 @@ inline std::string yamlResolveAlias(std::string_view aliasName,
 }
 
 // Forward declarations for flow parsers (anchored versions support &/* inside flow)
-inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
-    std::unordered_map<std::string, std::string>* anchors = nullptr,
-    std::unordered_set<std::string>* resolving = nullptr);
 inline std::string yamlParseFlowMap(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors = nullptr,
-    std::unordered_set<std::string>* resolving = nullptr);
+    std::unordered_set<std::string>* resolving = nullptr,
+    int depth = 0);
 inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors = nullptr,
-    std::unordered_set<std::string>* resolving = nullptr);
+    std::unordered_set<std::string>* resolving = nullptr,
+    int depth = 0);
 
 // Parse a complete YAML inline value and return JSON string
-inline std::string yamlParseInlineValue(std::string_view s) {
+inline std::string yamlParseInlineValue(std::string_view s, int depth) {
 	while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) s.remove_prefix(1);
 	if (s.empty()) return "null";
 	if (s[0] == '!' && s.size() > 1) return yamlParseTaggedValue(s);
@@ -747,7 +747,7 @@ inline std::string yamlParseInlineValue(std::string_view s) {
 		if (s[0] == '{' || s[0] == '[') {
 			std::string tmp(s);
 			size_t fp = 0;
-			return yamlParseFlowValue(tmp, fp);
+			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, depth);
 		}
 	}
 	return yamlScalarToJson(s);
@@ -770,7 +770,6 @@ inline std::string yamlEscKey(std::string_view s) {
 
 // Forward declarations needed by flow parsers
 inline std::string yamlParseTaggedValue(std::string_view s);
-inline std::string yamlParseInlineValue(std::string_view s);
 
 // Gather complete flow collection text across multiple lines, stripping comments
 inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::string_view firstPart, size_t& li) {
@@ -819,11 +818,12 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 	return result;
 }
 
-inline std::string yamlParseFlowValue(const std::string& s, size_t& pos);
-
 inline std::string yamlParseFlowMap(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
-    std::unordered_set<std::string>* resolving) {
+    std::unordered_set<std::string>* resolving,
+    int depth) {
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		throw asvJSONError("YAML: flow nesting too deep");
 	pos++; // skip {
 	std::string out = "{";
 	bool first = true;
@@ -833,12 +833,12 @@ inline std::string yamlParseFlowMap(const std::string& s, size_t& pos,
 		if (s[pos] == ',') { pos++; continue; }
 		if (!first) out += ",";
 		first = false;
-		std::string key = yamlParseFlowValue(s, pos, anchors, resolving);
+		std::string key = yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
 		while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n')) pos++;
 		if (pos < s.size() && s[pos] == ':') {
 			pos++;
 			while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n')) pos++;
-			out += key + ":" + yamlParseFlowValue(s, pos, anchors, resolving);
+			out += key + ":" + yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
 		} else {
 			out += key + ":null";
 		}
@@ -850,7 +850,10 @@ inline std::string yamlParseFlowMap(const std::string& s, size_t& pos,
 
 inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
-    std::unordered_set<std::string>* resolving) {
+    std::unordered_set<std::string>* resolving,
+    int depth) {
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		throw asvJSONError("YAML: flow nesting too deep");
 	pos++; // skip [
 	std::string out = "[";
 	bool first = true;
@@ -860,7 +863,7 @@ inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
 		if (s[pos] == ',') { pos++; continue; }
 		if (!first) out += ",";
 		first = false;
-		out += yamlParseFlowValue(s, pos, anchors, resolving);
+		out += yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
 	}
 	if (pos < s.size() && s[pos] == ']') pos++;
 	out += "]";
@@ -869,7 +872,8 @@ inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
 
 inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
-    std::unordered_set<std::string>* resolving) {
+    std::unordered_set<std::string>* resolving,
+    int depth) {
 	while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n')) pos++;
 	if (pos >= s.size()) return "null";
 	// Handle &anchor inside flow
@@ -880,7 +884,7 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 		std::string name(s, ns, ne - ns);
 		pos = ne;
 		while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) pos++;
-		std::string val = yamlParseFlowValue(s, pos, anchors, resolving);
+		std::string val = yamlParseFlowValue(s, pos, anchors, resolving, depth);
 		if (anchors->size() >= MAX_YAML_ANCHORS) throw asvJSONError("YAML: too many anchors");
 		(*anchors)[name] = val;
 		return val;
@@ -894,19 +898,19 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 		pos = ne;
 		return yamlResolveAlias(name, *anchors, *resolving);
 	}
-	if (s[pos] == '{') return yamlParseFlowMap(s, pos, anchors, resolving);
-	if (s[pos] == '[') return yamlParseFlowSeq(s, pos, anchors, resolving);
+	if (s[pos] == '{') return yamlParseFlowMap(s, pos, anchors, resolving, depth);
+	if (s[pos] == '[') return yamlParseFlowSeq(s, pos, anchors, resolving, depth);
 	if (s[pos] == '"') {
 		size_t start = pos; pos++;
 		while (pos < s.size()) { if (s[pos] == '\\') pos += 2; else if (s[pos] == '"') break; else pos++; }
 		if (pos < s.size()) pos++;
-		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start));
+		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start), depth);
 	}
 	if (s[pos] == '\'') {
 		size_t start = pos; pos++;
 		while (pos < s.size()) { if (s[pos] == '\'' && pos + 1 < s.size() && s[pos + 1] == '\'') pos += 2; else if (s[pos] == '\'') break; else pos++; }
 		if (pos < s.size()) pos++;
-		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start));
+		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start), depth);
 	}
 	if (s[pos] == '!' && pos + 1 < s.size()) {
 		size_t tagStart = pos; pos++;
@@ -938,7 +942,7 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 	std::string_view sv(s.data() + start, pos - start);
 	while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t')) sv.remove_suffix(1);
 	if (sv.empty()) return "null";
-	return yamlParseInlineValue(sv);
+	return yamlParseInlineValue(sv, depth);
 }
 
 inline std::string yamlToJson(std::string_view input);
@@ -1052,6 +1056,8 @@ inline std::string yamlStripAnchors(std::string_view s, std::string* outAnchor) 
 	return result;
 }
 
+inline void yamlRejectTabIndent(const std::string& line, int lineNum);
+
 // Collect a YAML block scalar (| or >). `header` is the block header text
 // (starting with the style char, may include an indent indicator [1-9] and a
 // chomp indicator +|-). `li` is the line index of the header line. Gathers
@@ -1060,16 +1066,17 @@ inline std::string yamlStripAnchors(std::string_view s, std::string* outAnchor) 
 // parentIndent < 0 disables the "content must be deeper than parent" check.
 inline std::string yamlParseBlockScalar(const std::string& header, const std::vector<std::string>& lines, size_t& li, bool isFolded, int parentIndent) {
 	char chomp = 0; // 0 = clip, '+' = keep, '-' = strip
+	int explicitIndent = 0;
 	for (size_t h = 1; h < header.size(); h++) {
 		char ch = header[h];
 		if (ch == ' ' || ch == '\t') continue;
-		if (ch >= '1' && ch <= '9') continue; // explicit indent indicator (indent still auto-detected)
+		if (ch >= '1' && ch <= '9') { explicitIndent = ch - '0'; continue; }
 		if (ch == '+' || ch == '-') { chomp = ch; continue; }
 		break; // comment or trailing text
 	}
 
 	std::string text;
-	int contentIndent = -1;
+	int contentIndent = explicitIndent > 0 ? explicitIndent : -1;
 	size_t ci = li + 1;
 	// splitLines does not emit a phantom trailing empty line at EOF, so all
 	// remaining lines here are real content (a genuine trailing blank line is
@@ -1384,7 +1391,7 @@ inline std::string yamlParseDoc(std::string_view input) {
 				} else if (valPart[0] == '{' || valPart[0] == '[') {
 					std::string flowText = yamlGatherFlow(lines, valPart, li);
 					size_t fp = 0;
-					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving);
+					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
 				} else if (valPart[0] == '!' && valPart.size() > 1) {
 					out += yamlParseTaggedValue(valPart);
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
@@ -1419,7 +1426,7 @@ inline std::string yamlParseDoc(std::string_view input) {
 					// Output flow value directly as value for this key
 					std::string flowText = yamlGatherFlow(lines, std::string(stripIndent(lines[scan])), scan);
 					size_t fp = 0;
-					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving);
+					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
 					li = scan; // skip flow lines
 					stack.back().hasVal = true;
 				} else {
@@ -1467,7 +1474,7 @@ inline std::string yamlToJson(std::string_view input) {
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 
-	// Find document boundaries: "---" at indent 0
+	// Find document boundaries: "---" or "..." at indent 0
 	std::vector<std::pair<size_t, size_t>> docs; // [firstLine, pastEnd)
 	size_t docStart = 0;
 	bool inDoc = false;
@@ -1486,6 +1493,13 @@ inline std::string yamlToJson(std::string_view input) {
 			if (pendingDirStart != SIZE_MAX) {
 				docStart = pendingDirStart; // include directives before ---
 				pendingDirStart = SIZE_MAX;
+			}
+			continue;
+		}
+		if (stripped == "..." && countIndent(lines[i]) == 0) {
+			if (inDoc) {
+				docs.back().second = i; // end at document-end marker
+				inDoc = false;
 			}
 			continue;
 		}
