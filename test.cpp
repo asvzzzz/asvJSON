@@ -2587,6 +2587,30 @@ TEST(testFromXML) {
 		ASSERT(inner != nullptr);
 		ASSERT(inner->get("x")->type == asvJSONValue::NULL_VAL);
 	}
+	// xsi:nil with custom namespace prefix (inst:nil with xmlns:inst=XSI)
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root xmlns:inst=\"http://www.w3.org/2001/XMLSchema-instance\"><age inst:nil=\"true\"/></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->get("age")->type == asvJSONValue::NULL_VAL);
+	}
+	// xsi:nil with custom prefix - value "1" instead of "true"
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root xmlns:x=\"http://www.w3.org/2001/XMLSchema-instance\"><x:age x:nil=\"1\"/></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->get("x:age")->type == asvJSONValue::NULL_VAL);
+	}
+	// xsi:nil with wrong prefix mapping should NOT be treated as nil
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root xmlns:inst=\"http://example.com\"><age inst:nil=\"true\">value</age></root>"));
+		auto* inner = json.getRoot()->get("root");
+		ASSERT(inner != nullptr);
+		ASSERT(inner->get("age")->type != asvJSONValue::NULL_VAL);
+	}
 	// DOCTYPE skipped before root
 	{
 		asvJSON json;

@@ -271,7 +271,7 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 }
 
 // Forward declaration
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth);
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap);
 
 // Segment for interleaved mixed content tracking
 struct XmlSegment {
@@ -283,7 +283,8 @@ struct XmlSegment {
 
 // Parse a single element's children into segments (preserving interleaved order)
 inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
-	std::vector<XmlSegment>& segments, int depth)
+	std::vector<XmlSegment>& segments, int depth,
+	std::unordered_map<std::string, std::string>& nsMap)
 {
 	while (pos < s.size()) {
 		xmlSkipSpaces(s, pos);
@@ -325,7 +326,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 				pos = end + 2; continue;
 			}
 			std::string childName;
-			auto childVal = xmlParseElement(s, pos, childName, depth + 1);
+			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap);
 			if (childVal) segments.push_back({true, "", std::move(childName), std::move(childVal)});
 		} else {
 			size_t start = pos;
@@ -341,7 +342,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 }
 
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth) {
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap) {
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("XML nesting too deep");
 	if (pos >= s.size() || s[pos] != '<') throw asvJSONError("expected '<'");
 	pos++; // skip '<'
@@ -367,25 +368,42 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 	}
 
-	// xsi:nil="true" - treat element as JSON null
+	// Accumulate xmlns declarations from this element into the nsMap
+	for (const auto& [k, v] : attrs) {
+		if (k.size() > 6 && k.substr(0, 6) == "xmlns:") nsMap[std::string(k.substr(6))] = v;
+	}
+
+	// xsi:nil detection: check any prefix:*nil attribute whose prefix
+	// maps to http://www.w3.org/2001/XMLSchema-instance.
+	// Also accepts literal xsi:nil without xmlns declaration (common shorthand).
 	{
-		auto nilIt = attrs.find("xsi:nil");
-		if (nilIt != attrs.end() && (nilIt->second == "true" || nilIt->second == "1")) {
-			if (pos < s.size() && s[pos] == '/') { pos++; if (pos < s.size() && s[pos] == '>') pos++; }
-			else if (pos < s.size() && s[pos] == '>') {
-				pos++;
-				// Skip to matching closing tag, tolerant of whitespace before >
-				std::string closeTag = "</" + elemName;
-				size_t closePos = s.find(closeTag, pos);
-				if (closePos != std::string_view::npos) {
-					size_t afterName = closePos + closeTag.size();
-					while (afterName < s.size() && (s[afterName] == ' ' || s[afterName] == '\t' || s[afterName] == '\n' || s[afterName] == '\r'))
-						afterName++;
-					if (afterName < s.size() && s[afterName] == '>')
-						pos = afterName + 1;
+		static const std::string xsiUri = "http://www.w3.org/2001/XMLSchema-instance";
+		// Find any attribute ending with ":nil" matching XSI namespace
+		for (const auto& [k, v] : attrs) {
+			if (k.size() < 5 || k.substr(k.size() - 4) != ":nil") continue;
+			std::string prefix(k.data(), k.size() - 4);
+			// Accept if prefix maps to XSI URI, or if literal "xsi" without xmlns decl
+			auto it = nsMap.find(prefix);
+			bool match = (it != nsMap.end() && it->second == xsiUri);
+			if (!match && prefix == "xsi" && !nsMap.count("xsi")) match = true;
+			if (!match) continue;
+			if (v == "true" || v == "1") {
+				if (pos < s.size() && s[pos] == '/') { pos++; if (pos < s.size() && s[pos] == '>') pos++; }
+				else if (pos < s.size() && s[pos] == '>') {
+					pos++;
+					// Skip to matching closing tag, tolerant of whitespace before >
+					std::string closeTag = "</" + elemName;
+					size_t closePos = s.find(closeTag, pos);
+					if (closePos != std::string_view::npos) {
+						size_t afterName = closePos + closeTag.size();
+						while (afterName < s.size() && (s[afterName] == ' ' || s[afterName] == '\t' || s[afterName] == '\n' || s[afterName] == '\r'))
+							afterName++;
+						if (afterName < s.size() && s[afterName] == '>')
+							pos = afterName + 1;
+					}
 				}
+				return asvJSONValue::makeNull();
 			}
-			return asvJSONValue::makeNull();
 		}
 	}
 
@@ -405,7 +423,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
-	xmlParseChildrenSegments(s, pos, segments, depth + 1);
+	xmlParseChildrenSegments(s, pos, segments, depth + 1, nsMap);
 
 	// Closing tag
 	xmlSkipSpaces(s, pos);
@@ -627,11 +645,12 @@ inline bool asvJSON::fromXML(std::string_view input) {
 
 		// Parse all top-level elements, combining into one object
 		auto obj = asvJSONValue::makeObject();
+		std::unordered_map<std::string, std::string> nsMap;
 		int count = 0;
 		while (pos < input.size()) {
 			if (!skipProlog()) break;
 			std::string name;
-			auto val = xmlParseElement(input, pos, name, 0);
+			auto val = xmlParseElement(input, pos, name, 0, nsMap);
 			if (!val) break;
 			obj->obj->emplace(std::move(name), std::move(val));
 			count++;
