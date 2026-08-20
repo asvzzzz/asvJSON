@@ -154,7 +154,7 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 					break;
 				}
 				case 'u': {
-					if (i + 4 > s.size()) break;
+					if (i + 4 >= s.size()) break;
 					auto hex = [&](size_t off) -> int {
 						char c = s[i + off];
 						if (c >= '0' && c <= '9') return c - '0';
@@ -164,7 +164,7 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 					};
 					unsigned int cp = 0;
 					for (int j = 0; j < 4; j++) { int h = hex(1 + j); if (h < 0) break; cp = (cp << 4) | static_cast<unsigned int>(h); }
-					if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
+					if (cp >= 0xD800 && cp <= 0xDBFF && i + 10 <= s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
 						unsigned int lo = 0;
 						for (int j = 0; j < 4; j++) { int h = hex(6 + j); if (h < 0) break; lo = (lo << 4) | static_cast<unsigned int>(h); }
 						if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
@@ -198,13 +198,21 @@ inline std::string yamlUnescapeSingle(std::string_view s) {
 	return out;
 }
 
-// Remove trailing comment from a line (respecting quotes)
+// Remove trailing comment from a line (respecting quotes and escapes)
 inline std::string_view yamlStripComment(std::string_view s) {
 	bool inSQ = false, inDQ = false;
 	for (size_t i = 0; i < s.size(); i++) {
-		if (!inDQ && !inSQ && s[i] == '#') return s.substr(0, i);
-		if (s[i] == '"' && !inSQ) inDQ = !inDQ;
-		if (s[i] == '\'' && !inDQ) inSQ = !inSQ;
+		if (inDQ) {
+			if (s[i] == '\\' && i + 1 < s.size()) { i++; continue; }
+			if (s[i] == '"') inDQ = false;
+		} else if (inSQ) {
+			if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') { i++; continue; }
+			if (s[i] == '\'') inSQ = false;
+		} else {
+			if (s[i] == '#') return s.substr(0, i);
+			if (s[i] == '"') inDQ = true;
+			if (s[i] == '\'') inSQ = true;
+		}
 	}
 	return s;
 }
@@ -946,7 +954,7 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 }
 
 inline std::string yamlToJson(std::string_view input);
-inline std::string yamlParseDoc(std::string_view input);
+inline std::string yamlParseDoc(std::string_view input, int depth = 0);
 
 // Pre-scan lines for &anchor definitions, building name->JSON map.
 // For block anchors, extracts child lines and recursively calls yamlToJson.
@@ -1024,7 +1032,7 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 					}
 					childYaml = normalized;
 				}
-				anchors[name] = yamlParseDoc(childYaml);
+				anchors[name] = yamlParseDoc(childYaml, depth + 1);
 			} else {
 				anchors[name] = "null";
 			}
@@ -1136,7 +1144,7 @@ inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 }
 
 // Parse a single YAML document (no multi-doc handling)
-inline std::string yamlParseDoc(std::string_view input) {
+inline std::string yamlParseDoc(std::string_view input, int depth) {
 	// Restore the previous tag-map state on exit (even on exception).
 	YamlDocTagMapGuard tagGuard;
 	auto lines = splitLines(input);
@@ -1179,7 +1187,7 @@ inline std::string yamlParseDoc(std::string_view input) {
 	// Pre-scan for anchors (each document has independent anchor namespace)
 	std::unordered_map<std::string, std::string> anchors;
 	std::unordered_set<std::string> resolving;
-	yamlBuildAnchorMap(lines, anchors);
+	yamlBuildAnchorMap(lines, anchors, depth);
 
 	std::string out;
 	std::vector<FormatFrame> stack;
@@ -1303,6 +1311,20 @@ inline std::string yamlParseDoc(std::string_view input) {
 				out += "null";
 			} else if (rest.size() > 1 && rest[0] == '*') {
 				out += yamlResolveAlias(rest.substr(1), anchors, resolving);
+			} else if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
+				bool isFolded = (rest[0] == '>');
+				std::string text = yamlParseBlockScalar(rest, lines, li, isFolded, indent);
+				std::string escaped;
+				for (auto c : text) {
+					switch (c) {
+						case '"': escaped += "\\\""; break;
+						case '\\': escaped += "\\\\"; break;
+						case '\n': escaped += "\\n"; break;
+						case '\t': escaped += "\\t"; break;
+						default: escaped += c;
+					}
+				}
+				out += "\"" + escaped + "\"";
 			} else {
 				out += yamlParseInlineValue(rest);
 			}

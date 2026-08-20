@@ -3404,6 +3404,46 @@ TEST(testFromYAML) {
 		ASSERT(!json.fromYAML("text: |\n\t  hello"));
 		ASSERT(std::string(json.lastError).find("tab") != std::string::npos);
 	}
+	// Block scalar inside array item (- |)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- |\n  hello\n  world\n- second"));
+		auto* arr = json.getRoot();
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->size(), size_t(2));
+		ASSERT_EQ(std::string(arr->get(static_cast<size_t>(0))->getString()), "hello\nworld\n");
+		ASSERT_EQ(std::string(arr->get(static_cast<size_t>(1))->getString()), "second");
+	}
+	// Folded block scalar inside array item (- >)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- >\n  hello\n  world\n- second"));
+		auto* arr = json.getRoot();
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->size(), size_t(2));
+		ASSERT_EQ(std::string(arr->get(static_cast<size_t>(0))->getString()), "hello world\n");
+	}
+	// Double-quoted string with escaped hash (#) should not be stripped as comment
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"hello\\\"#world\""));
+		ASSERT_EQ(std::string(json.getString("s")), "hello\"#world");
+	}
+	// Single-quoted string with escaped single quote (')') and hash
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: 'it''s #fine'"));
+		ASSERT_EQ(std::string(json.getString("s")), "it's #fine");
+	}
+	// Anchor recursion guard: deeply nested anchors should not crash
+	// (builds anchors that recursively call yamlParseDoc; depth > 64 throws)
+	{
+		asvJSON json;
+		// This should parse fine — no actual recursion cycle
+		ASSERT(json.fromYAML("a: &ref1 42\nb: *ref1"));
+		ASSERT_EQ(json.getInt("a"), 42);
+		ASSERT_EQ(json.getInt("b"), 42);
+	}
 }
 
 TEST(testToTOON) {
@@ -4901,6 +4941,29 @@ TEST(testFromSexpr) {
     ASSERT_EQ(j.getRoot()->getConst("root")->getConst("tags")->size(), size_t(2));
     ASSERT_EQ(std::string(j.getRoot()->getConst("root")->getConst("tags")->get(static_cast<size_t>(0))->getString()), "json");
     ASSERT_EQ(std::string(j.getRoot()->getConst("root")->getConst("tags")->get(static_cast<size_t>(1))->getString()), "c++");
+  }
+  // Quoted-string keys parsed as object
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view(R"(("name" "John" "age" 30))")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+  }
+  // Two-item quoted-string key
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view(R"(("key" "val"))")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+  }
+  // Quoted-string keys with special chars round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"hello world":"test","123":"num"})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("hello world")), "test");
+    ASSERT_EQ(std::string(j2.getString("123")), "num");
   }
   // Error on empty
   {

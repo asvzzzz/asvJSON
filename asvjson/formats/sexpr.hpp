@@ -141,7 +141,7 @@ inline std::string sexprTokenToJson(const SexprToken& token) {
 }
 
 inline bool sexprTypeIsKey(int t) {
-  return t == SEXPR_SYMBOL || t == SEXPR_NUMBER ||
+  return t == SEXPR_SYMBOL || t == SEXPR_STRING || t == SEXPR_NUMBER ||
          t == SEXPR_TRUE || t == SEXPR_FALSE || t == SEXPR_NIL;
 }
 
@@ -192,18 +192,17 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // Object-vs-list heuristic for a parenthesized group:
   // - Odd-length groups are always lists.
   // - Even-length groups are objects only if all even-indexed items are
-  //   string/symbol keys. A 2-item group is treated as an object ONLY when
-  //   the first item is a symbol (this avoids misclassifying "("a" "b")" and
-  //   plain string pairs as objects).
-  // - When the group starts with a symbol key but the remaining items are not
-  //   objects, the values are emitted as an array: {key: [v1, v2, ...]}.
+  //   string/symbol keys. A 2-item group is treated as an object when
+  //   the first item is a symbol or string.
+  // - When the group starts with a string/symbol key but the remaining items
+  //   are not objects, the values are emitted as an array: {key: [v1, v2, ...]}.
   // This is intentionally heuristic — S-Expressions have no inherent
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
   if (items.size() >= 2 && items.size() % 2 == 0) {
     // For 2-item lists, only treat as object if first item is a symbol
     if (items.size() == 2) {
-      isObj = (itemTypes[0] == SEXPR_SYMBOL);
+      isObj = (itemTypes[0] == SEXPR_SYMBOL || itemTypes[0] == SEXPR_STRING);
     } else {
       isObj = true;
       for (size_t j = 0; j < items.size(); j += 2) {
@@ -213,7 +212,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   }
 
   // Fallback: if first item is a symbol-key, emit {key: values}
-  if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
+  if (!isObj && items.size() >= 2 && (itemTypes[0] == SEXPR_SYMBOL || itemTypes[0] == SEXPR_STRING)) {
     std::string key = items[0];
     if (items.size() == 2) {
       return '{' + key + ':' + items[1] + '}';
