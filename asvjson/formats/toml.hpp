@@ -152,8 +152,8 @@ inline std::string_view trimSV(std::string_view s) {
 }
 
 // Strip comment (#) from line, respecting quoted strings
-inline std::string_view stripComment(std::string_view line) {
-  bool inBasic = false, inLiteral = false, escape = false;
+inline std::string_view stripComment(std::string_view line, bool& inBasic, bool& inLiteral) {
+  bool escape = false;
   for (size_t i = 0; i < line.size(); i++) {
     char c = line[i];
     if (escape) { escape = false; continue; }
@@ -194,7 +194,7 @@ inline std::string parseTomlKey(std::string_view& s) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok) appendCodepoint(cp, key); else key += c;
+          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, key); else key += c;
         }
         else if (c == 'U') {
           int count = 8; unsigned long cp = 0; bool ok = true;
@@ -206,7 +206,7 @@ inline std::string parseTomlKey(std::string_view& s) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok && cp <= 0x10FFFF) appendCodepoint(cp, key); else key += c;
+          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, key); else key += c;
         }
         else key += c;
         continue;
@@ -361,7 +361,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok) appendCodepoint(cp, val); else val += c;
+          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
         }
         else if (c == 'U') {
           int count = 8; unsigned long cp = 0; bool ok = true;
@@ -373,7 +373,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok && cp <= 0x10FFFF) appendCodepoint(cp, val); else val += c;
+          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
         }
         else val += c;
         continue;
@@ -495,7 +495,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok) appendCodepoint(cp, val); else val += c;
+          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
         }
         else if (c == 'U') {
           int count = 8; unsigned long cp = 0; bool ok = true;
@@ -507,7 +507,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
             else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
             else ok = false;
           }
-          if (ok && cp <= 0x10FFFF) appendCodepoint(cp, val); else val += c;
+          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
         }
         else val += c;
         continue;
@@ -717,13 +717,17 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     bool isArrayTable = false;
 
     auto lines = splitLines(input);
+    bool inMlString = false; // inside a multiline string continuation
+    bool stripInBasic = false, stripInLiteral = false; // persistent state for stripComment
     for (size_t lineNum = 0; lineNum < lines.size(); lineNum++) {
       std::string_view line = trimSV(lines[lineNum]);
       if (line.empty()) continue;
 
-      line = stripComment(line);
-      line = trimSV(line);
-      if (line.empty()) continue;
+      if (!inMlString) {
+        line = stripComment(line, stripInBasic, stripInLiteral);
+        line = trimSV(line);
+        if (line.empty()) continue;
+      }
 
       // Table header [table] or [[array]]
       if (line[0] == '[') {
@@ -790,6 +794,10 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         if (closePos != std::string::npos && closePos > 2) {
           vtmp = vtmp.substr(0, closePos + 3);
           valueStr = vtmp;
+          // Reset persistent stripComment state — the multiline string
+          // was fully consumed on this line.
+          stripInBasic = false;
+          stripInLiteral = false;
         } else {
           std::string accum = vtmp;
           bool found = false;
@@ -800,6 +808,9 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               accum += '\n' + mlLine.substr(0, cp + 3);
               lineNum = ml;
               found = true;
+              // Reset persistent stripComment state — multiline string closed
+              stripInBasic = false;
+              stripInLiteral = false;
               break;
             }
             accum += '\n' + mlLine;

@@ -86,13 +86,11 @@ inline const char* getBase64Chars() {
 	return customBase64Chars.empty() ? ASVJSON_BASE64_CHARS : customBase64Chars.c_str();
 }
 
-inline int decodeBase64Value(char c) {
-	if (c >= 'A' && c <= 'Z') return c - 'A';
-	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-	if (c >= '0' && c <= '9') return c - '0' + 52;
-	if (c == '+') return 62;
-	if (c == '/') return 63;
-	return -1;
+// decodeBase64Value removed: it hardcoded the standard alphabet and
+// ignored custom charsets. Use decodeBase64Char() (table-based) instead.
+
+inline int decodeBase64Char(char c) {
+	return getDecodeTable()[static_cast<unsigned char>(c)];
 }
 
 /**
@@ -102,13 +100,17 @@ inline int decodeBase64Value(char c) {
  * @return Base64-encoded string
  */
 inline std::string encodeBase64(const uint8_t* input, size_t len) {
-	static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	static const char defaultTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	std::string out;
 	out.reserve(((len + 2) / 3) * 4 + 8);
-	const char* table = chars;
+	// Copy table under lock to avoid UAF if setBase64Chars is called concurrently
+	char table[64];
 	{
 		std::lock_guard<std::mutex> lock(base64Mutex());
-		if (!customBase64Chars.empty()) table = customBase64Chars.c_str();
+		if (!customBase64Chars.empty())
+			std::memcpy(table, customBase64Chars.data(), 64);
+		else
+			std::memcpy(table, defaultTable, 64);
 	}
 	for (size_t i = 0; i < len; i += 3) {
 		unsigned int v = static_cast<unsigned char>(input[i]) << 16;
@@ -133,10 +135,24 @@ inline std::vector<uint8_t> decodeBase64Fast(const char* str, size_t len, bool* 
 	if (error) *error = false;
 	if (len == 0) return {};
 	if (len % 4 != 0) { if (error) *error = true; return {}; }
-	const int8_t* table = getDecodeTable();
+	// Copy decode table under lock to avoid race with setBase64Chars/rebuildDecodeTable.
+	// getDecodeTable() (no lock) ensures first-time initialization.
+	int8_t table[256];
+	getDecodeTable(); // ensure initialized
+	{
+		std::lock_guard<std::mutex> lock(base64Mutex());
+		std::memcpy(table, getDecodeTableRaw(), 256);
+	}
 	size_t padding = 0;
 	if (len >= 1 && str[len - 1] == '=') padding++;
 	if (len >= 2 && str[len - 2] == '=') padding++;
+	// Reject non-standard padding positions (RFC 4648: padding only at end)
+	{
+		bool midPad = false;
+		for (size_t i = 0; i + padding < len; i++)
+			if (str[i] == '=') { midPad = true; break; }
+		if (midPad) { if (error) *error = true; return {}; }
+	}
 	size_t outLen = (len / 4) * 3 - padding;
 	std::vector<uint8_t> out(outLen);
 	for (size_t i = 0, j = 0; i < len; i += 4) {
@@ -155,10 +171,6 @@ inline std::vector<uint8_t> decodeBase64Fast(const char* str, size_t len, bool* 
 		if (j < outLen) out[j++] = static_cast<uint8_t>(v & 0xFF);
 	}
 	return out;
-}
-
-inline int decodeBase64Char(char c) {
-	return getDecodeTable()[static_cast<unsigned char>(c)];
 }
 
 } // namespace asvJSONInternal

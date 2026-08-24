@@ -227,9 +227,12 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	if (s == "NaN" || s == ".NaN" || s == ".nan" || s == ".NAN") return "NaN";
 	if (s == "Infinity" || s == ".Inf" || s == ".inf" || s == ".INF") return "Infinity";
 	if (s == "-Infinity" || s == "-.Inf" || s == "-.inf" || s == "-.INF") return "-Infinity";
-	char* end = nullptr;
-	std::strtod(s.data(), &end);
-	if (end == s.data() + s.size() && s.size() > 0) return std::string(s);
+	// Use from_chars instead of strtod — safe with non-null-terminated string_view
+	{
+		double d;
+		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), d);
+		if (ec == std::errc() && ptr == s.data() + s.size() && s.size() > 0) return std::string(s);
+	}
 	std::string out = "\"";
 	for (auto c : s) {
 		switch (c) {

@@ -25,18 +25,22 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 			else if (ent == "apos") out += '\'';
 			else if (!ent.empty() && ent[0] == '#') {
 				if (ent.size() > 1 && ent[1] == 'x') {
-					char* ep = nullptr;
-					long cp = std::strtol(ent.data() + 2, &ep, 16);
-					if (ep > ent.data() + 2 && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+					const char* first = ent.data() + 2;
+					const char* last = ent.data() + ent.size();
+					unsigned long cp = 0;
+					auto [ptr, ec] = std::from_chars(first, last, cp, 16);
+					if (ec == std::errc() && ptr > first && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
 						if (cp <= 0x7F) out += static_cast<char>(cp);
 						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 					}
 				} else {
-					char* ep = nullptr;
-					long cp = std::strtol(ent.data() + 1, &ep, 10);
-					if (ep > ent.data() + 1 && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+					const char* first = ent.data() + 1;
+					const char* last = ent.data() + ent.size();
+					unsigned long cp = 0;
+					auto [ptr, ec] = std::from_chars(first, last, cp, 10);
+					if (ec == std::errc() && ptr > first && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
 						if (cp <= 0x7F) out += static_cast<char>(cp);
 						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
@@ -122,7 +126,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				out += pad + "<" + xmlSanitizeElementName(name);
 				for (const auto& [k, v] : *obj) {
 					if (k == "#content") continue;
-					if (!k.empty() && k[0] == '@') out += " " + k.substr(1) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
+					if (!k.empty() && k[0] == '@') out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
 				}
 				out += ">";
 				for (const auto& item : *(contentIt->second->arr)) {
@@ -176,7 +180,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			}
 			out += pad + "<" + xmlSanitizeElementName(name);
 			for (const auto& [k, v] : *obj) {
-				if (!k.empty() && k[0] == '@') out += " " + k.substr(1) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
+				if (!k.empty() && k[0] == '@') out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
 			}
 			out += ">\n";
 			for (const auto& [k, v] : *obj) {

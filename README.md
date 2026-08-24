@@ -77,7 +77,7 @@ MIT license - see the `LICENSE` file for details.
 - **Reading:** Fully thread-safe - multiple threads can read the same `asvJSON` instance simultaneously.
 - **Writing:** Not thread-safe - a single `asvJSON` instance must not be written to concurrently from multiple threads, and reads must not overlap a write.
 - **Distinct instances:** Separate `asvJSON` instances can be used concurrently from different threads; format parsers use `thread_local` state (e.g. YAML tag maps), so no global mutable state is shared.
-- **Base64 custom charset:** Protected by `std::mutex` - `setBase64Chars()` and all encoding/decoding functions are safe to call concurrently from multiple threads.
+- **Base64 custom charset:** `encodeBase64()` and `decodeBase64Fast()` are thread-safe (they snapshot the charset under a lock). `setBase64Chars()` is **not** thread-safe — call it before starting concurrent encoding/decoding.
 
 ## Limits
 
@@ -385,7 +385,7 @@ Factory methods return `std::unique_ptr<asvJSONValue>`. Automatic lifetime manag
 |----------|-------------|
 | `cloneValue(const asvJSONValue* v)` | Deep-clone any value (returns new allocation). |
 | `valuesEqual(const asvJSONValue* a, const asvJSONValue* b)` | Deep value comparison. |
-| `setBase64Chars(const std::string& chars)` | Set custom Base64 alphabet (64 chars). Thread-safe. |
+| `setBase64Chars(const std::string& chars)` | Set custom Base64 alphabet (64 chars). **Not thread-safe** — call before concurrent use. |
 | `getBase64Chars()` | Get current Base64 alphabet. Thread-safe. |
 | `base64_encode(const uint8_t* data, size_t len)` | Encode to Base64 string. |
 | `base64_decode_fast(const char* str, size_t len, bool* error)` | Decode Base64 to bytes. |

@@ -162,6 +162,9 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			if (str_data.size() >= 12)
 				out.insert(out.end(), str_data.begin(), str_data.begin() + 12);
 			else {
+				// Defensive: makeObjectId enforces exactly 12 bytes, so this
+				// path is unreachable via public API.  Guard against direct
+				// struct construction with short data.
 				out.insert(out.end(), str_data.begin(), str_data.end());
 				for (size_t i = str_data.size(); i < 12; i++) out.push_back(0);
 			}
@@ -340,6 +343,11 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				if (pos + 8 > dataLen) throw asvJSONError("BSON timestamp");
 				uint32_t ts; readLE32(data, pos, ts);
 				uint32_t inc; readLE32(data, pos, inc);
+				// BSON timestamp = {t: uint32, i: uint32 increment}.
+				// Increment is discarded: asvJSONValue::TIMESTAMP stores only
+				// the seconds field.  toBSON writes i=0.  This is a known,
+				// documented loss — the BSON timestamp type is primarily used
+				// internally by MongoDB and rarely round-trips through JSON.
 				(void)inc;
 				obj->obj->emplace(key, asvJSONValue::makeTimestamp(static_cast<int64_t>(ts)));
 				break;

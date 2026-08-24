@@ -67,7 +67,7 @@ struct FormatFrame {
 	std::string prefix;
 };
 
-static std::vector<std::string> splitLines(std::string_view input) {
+inline std::vector<std::string> splitLines(std::string_view input) {
 	std::vector<std::string> lines;
 	if (input.empty()) return lines;
 	size_t start = 0;
@@ -88,7 +88,7 @@ static std::vector<std::string> splitLines(std::string_view input) {
 	return lines;
 }
 
-static int countIndent(const std::string& s) {
+inline int countIndent(const std::string& s) {
 	int n = 0;
 	for (auto c : s) {
 		if (c == ' ') n++;
@@ -98,13 +98,13 @@ static int countIndent(const std::string& s) {
 	return n;
 }
 
-static std::string_view stripIndent(const std::string& s) {
+inline std::string_view stripIndent(const std::string& s) {
 	size_t pos = 0;
 	while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) pos++;
 	return std::string_view(s).substr(pos);
 }
 
-static void closeFrames(std::vector<FormatFrame>& stack, std::string& out, int indent) {
+inline void closeFrames(std::vector<FormatFrame>& stack, std::string& out, int indent) {
 	while (!stack.empty()) {
 		auto& top = stack.back();
 		if (top.isRoot) break;
@@ -114,7 +114,7 @@ static void closeFrames(std::vector<FormatFrame>& stack, std::string& out, int i
 	}
 }
 
-static void addComma(std::vector<FormatFrame>& stack, std::string& out) {
+inline void addComma(std::vector<FormatFrame>& stack, std::string& out) {
 	if (!stack.empty() && !stack.back().first && stack.back().hasVal) {
 		out += ',';
 		if (!stack.back().prefix.empty()) out += ' ';

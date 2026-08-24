@@ -5257,9 +5257,10 @@ TEST(testToSexpr) {
     asvJSON j;
     ASSERT(j.parse(std::string_view("{}")));
     std::string s = j.toSexpr();
-    ASSERT_EQ(s, "()");
+    ASSERT_EQ(s, "(() #t)");
     asvJSON j2;
     ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->type, asvJSONValue::OBJECT);
     ASSERT_EQ(j2.getRoot()->size(), size_t(0));
   }
   // Empty array

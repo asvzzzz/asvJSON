@@ -6,7 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-  add_compile_options(/Zc:__cplusplus /utf-8)
+  add_compile_options(/Zc:__cplusplus /utf-8 /W4)
+else()
+  add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
 add_executable(examples examples.cpp)

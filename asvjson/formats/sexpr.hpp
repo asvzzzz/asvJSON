@@ -44,9 +44,47 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
             case 'n': s += '\n'; break;
             case 't': s += '\t'; break;
             case 'r': s += '\r'; break;
+            case 'b': s += '\b'; break;
+            case 'f': s += '\f'; break;
             case '"': s += '"'; break;
             case '\\': s += '\\'; break;
             case '/': s += '/'; break;
+            case 'u': case 'U': {
+              bool isUpper = (input[i] == 'u');
+              int count = isUpper ? 8 : 4;
+              if (i + 1 + count > input.size()) {
+                s += '\\'; s += isUpper ? 'U' : 'u';
+                break;
+              }
+              unsigned long cp = 0;
+              bool ok = true;
+              for (int k = 1; k <= count; k++) {
+                char h = input[i + k];
+                if (h >= '0' && h <= '9') cp = (cp << 4) | (h - '0');
+                else if (h >= 'a' && h <= 'f') cp = (cp << 4) | (h - 'a' + 10);
+                else if (h >= 'A' && h <= 'F') cp = (cp << 4) | (h - 'A' + 10);
+                else { ok = false; break; }
+              }
+              if (!ok || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                for (int k = 0; k <= count; k++) s += input[i + k];
+              } else if (cp < 0x80) {
+                s += static_cast<char>(cp);
+              } else if (cp < 0x800) {
+                s += static_cast<char>(0xC0 | (cp >> 6));
+                s += static_cast<char>(0x80 | (cp & 0x3F));
+              } else if (cp < 0x10000) {
+                s += static_cast<char>(0xE0 | (cp >> 12));
+                s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                s += static_cast<char>(0x80 | (cp & 0x3F));
+              } else {
+                s += static_cast<char>(0xF0 | (cp >> 18));
+                s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                s += static_cast<char>(0x80 | (cp & 0x3F));
+              }
+              i += count;
+              break;
+            }
             default: s += '\\'; s += input[i]; break;
           }
           i++;
@@ -153,7 +191,7 @@ inline std::string sexprKeyJson(const std::string& item, int type) {
 }
 
 inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size_t& pos, int depth = 0) {
-  if (depth > 256) throw asvJSONError("S-Expression nesting too deep");
+  if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("S-Expression nesting too deep");
 
   if (pos >= tokens.size()) throw asvJSONError("unexpected end of S-Expression");
   if (tokens[pos].type == SEXPR_RPAREN) throw asvJSONError("unexpected closing parenthesis");
@@ -199,6 +237,13 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // This is intentionally heuristic — S-Expressions have no inherent
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
+
+  // Empty object marker: (() #t) — empty group + true sentinel
+  if (items.size() == 2 && items[0] == "[]" && items[1] == "true"
+      && itemTypes[0] == -1 && itemTypes[1] == SEXPR_TRUE) {
+    return "{}";
+  }
+
   if (items.size() >= 2 && items.size() % 2 == 0) {
     // For 2-item lists, only treat as object if first item is a bare symbol
     if (items.size() == 2) {
@@ -288,6 +333,12 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::OBJECT: {
       out += '(';
+      if (v->obj->empty()) {
+        // Empty object: encode as (() #t) so parser can distinguish from
+        // empty array ().
+        out += "() #t)";
+        break;
+      }
       bool first = true;
       for (const auto& [k, child] : *(v->obj)) {
         if (!first) out += ' ';
