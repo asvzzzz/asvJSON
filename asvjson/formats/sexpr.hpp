@@ -194,8 +194,9 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // - Even-length groups are objects only if all even-indexed items are
   //   string/symbol keys. A 2-item group is treated as an object when
   //   the first item is a symbol or string.
-  // - When the group starts with a string/symbol key but the remaining items
+  // - When the group starts with a bare symbol key but the remaining items
   //   are not objects, the values are emitted as an array: {key: [v1, v2, ...]}.
+  //   Quoted strings are data values, never keys, in this fallback.
   // This is intentionally heuristic — S-Expressions have no inherent
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
@@ -211,8 +212,10 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
     }
   }
 
-  // Fallback: if first item is a symbol-key, emit {key: values}
-  if (!isObj && items.size() >= 2 && (itemTypes[0] == SEXPR_SYMBOL || itemTypes[0] == SEXPR_STRING)) {
+  // Fallback: if first item is a bare symbol key, emit {key: values}.
+  // A quoted string in first position is data, not a key — odd-length
+  // groups are always lists, so ("a" "b" "c") stays an array.
+  if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
     std::string key = items[0];
     if (items.size() == 2) {
       return '{' + key + ':' + items[1] + '}';

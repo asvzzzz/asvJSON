@@ -145,7 +145,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       break;
     }
     case T::REGEX: {
-      // CBOR tag 35 (regular expression) + text string "pattern|options"
+      // CBOR tag 35 (regular expression) + text string "pattern\0options" (see makeRegex)
       out.push_back(0xD8); out.push_back(0x23); // tag 35
       cborWriteUint(out, 3, str_data.size());
       out.insert(out.end(), str_data.begin(), str_data.end());
@@ -201,20 +201,23 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       auto arr = asvJSONValue::makeArray();
       if (!arr) throw asvJSONError("CBOR array alloc failed");
       size_t count = 0;
+      bool terminated = false;
       while (pos < dataLen) {
-        if (data[pos] == 0xFF) { pos++; break; }
+        if (data[pos] == 0xFF) { pos++; terminated = true; break; }
         if (count >= asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
         arr->arr->push_back(parseCBOR(data, pos, dataLen, depth + 1));
         count++;
       }
+      if (!terminated) throw asvJSONError("CBOR indefinite array missing terminator");
       return arr;
     }
     if (major == 5) { // indefinite-length map
       auto obj = asvJSONValue::makeObject();
       if (!obj) throw asvJSONError("CBOR map alloc failed");
       size_t count = 0;
+      bool terminated = false;
       while (pos < dataLen) {
-        if (data[pos] == 0xFF) { pos++; break; }
+        if (data[pos] == 0xFF) { pos++; terminated = true; break; }
         if (count >= asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("CBOR map too large");
         auto k = parseCBOR(data, pos, dataLen, depth + 1);
         if (!k || k->type != asvJSONValue::STRING) throw asvJSONError("CBOR non-string map key");
@@ -223,13 +226,15 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         obj->obj->emplace(k->str_data, std::move(v));
         count++;
       }
+      if (!terminated) throw asvJSONError("CBOR indefinite map missing terminator");
       return obj;
     }
     if (major == 2 || major == 3) { // indefinite-length byte/text string
       std::vector<uint8_t> allData;
       size_t total = 0;
+      bool terminated = false;
       while (pos < dataLen) {
-        if (data[pos] == 0xFF) { pos++; break; }
+        if (data[pos] == 0xFF) { pos++; terminated = true; break; }
         auto chunk = parseCBOR(data, pos, dataLen, depth + 1);
         if (!chunk) throw asvJSONError("CBOR indefinite string chunk");
         const auto* src = (chunk->type == asvJSONValue::BINARY) ? chunk->bin_data.data() : nullptr;
@@ -243,6 +248,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         allData.insert(allData.end(), src, src + srcLen);
         total += srcLen;
       }
+      if (!terminated) throw asvJSONError("CBOR indefinite string missing terminator");
       if (major == 2) {
         auto v = asvJSONValue::makeBinary(allData.data(), allData.size());
         if (!v) throw asvJSONError("CBOR binary alloc failed");
@@ -259,10 +265,12 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
   switch (major) {
     case 0: { // Unsigned integer
       uint64_t val = cborReadArg(data, pos, dataLen, info);
+      if (val > 0x7FFFFFFFFFFFFFFFULL) throw asvJSONError("CBOR unsigned integer out of range");
       return asvJSONValue::makeInt(static_cast<int64_t>(val));
     }
     case 1: { // Negative integer
       uint64_t val = cborReadArg(data, pos, dataLen, info);
+      if (val > 0x7FFFFFFFFFFFFFFFULL) throw asvJSONError("CBOR negative integer out of range");
       return asvJSONValue::makeInt(static_cast<int64_t>(-1) - static_cast<int64_t>(val));
     }
     case 2: { // Byte string
@@ -326,13 +334,17 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         return val; // pass through unknown
       }
       if (tag == 35) {
-        // Regular expression
+        // Regular expression: stored as "pattern\0options" (NUL-separated, see makeRegex)
         if (val->type == asvJSONValue::STRING) {
           const std::string& s = val->str_data;
-          size_t sep = s.rfind('|');
-          const char* optPtr = nullptr;
-          if (sep != std::string::npos && sep + 1 < s.length()) optPtr = s.c_str() + sep + 1;
-          auto re = asvJSONValue::makeRegex(sep != std::string::npos ? s.c_str() : s.c_str(), optPtr);
+          size_t sep = s.find('\0');
+          if (sep != std::string::npos) {
+            std::string pattern = s.substr(0, sep);
+            std::string opts = s.substr(sep + 1);
+            auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
+            if (re) return re;
+          }
+          auto re = asvJSONValue::makeRegex(s.c_str(), nullptr);
           if (re) return re;
         }
         return val;

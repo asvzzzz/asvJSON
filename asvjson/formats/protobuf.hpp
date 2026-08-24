@@ -528,12 +528,12 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
               else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(raw))); }
             }
           } else if (type == "sint32" || type == "sint64") {
-            while (pos < end) { uint64_t v = protoReadVarint(data, size, pos); arr->arr->push_back(asvJSONValue::makeInt(protoZigZagDecode(v))); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeInt(protoZigZagDecode(v))); }
           } else if (type == "bool") {
-            while (pos < end) { uint64_t v = protoReadVarint(data, size, pos); arr->arr->push_back(asvJSONValue::makeBool(v != 0)); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeBool(v != 0)); }
           } else {
             // int32, int64, uint32, uint64, enum, or unknown -- packed varint
-            while (pos < end) { uint64_t v = protoReadVarint(data, size, pos); arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(v))); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(v))); }
           }
         } else pos = end;
         return arr;
@@ -721,7 +721,14 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
     }
     if (num.empty() || num == "-") return asvJSONValue::makeInt(0);
     if (hasDot || hasExp) return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
-    return asvJSONValue::makeInt(std::strtoll(num.c_str(), nullptr, 10));
+    long long l;
+    auto [ip, iec] = std::from_chars(num.c_str(), num.c_str() + num.size(), l);
+    if (iec == std::errc() && ip == num.c_str() + num.size()) return asvJSONValue::makeInt(l);
+    // Out-of-range integer: preserve the exact literal so the round-trip is lossless
+    // (same convention as core JSON and UDE).
+    auto v = asvJSONValue::makeStringView(std::string_view(num));
+    if (v) v->raw_number = true;
+    return v;
   }
   std::string id = protoTextParseIdent(text, pos);
   if (id.empty()) return nullptr;

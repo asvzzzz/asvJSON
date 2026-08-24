@@ -850,13 +850,27 @@ private:
 				return asvJSONValue::makeDouble(d);
 			}
 			if (ec == std::errc() && ptr != buf + numLen) throw asvJSONError("Invalid number");
-			if (ec != std::errc()) throw asvJSONError("Invalid number: out of range");
+			if (ec != std::errc()) {
+				// Overflow (e.g. 1e999): from_chars sets d to ±inf. Honor allowNaNInfinity.
+				// Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected, as before.
+				if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) {
+					return asvJSONValue::makeDouble(d);
+				}
+				throw asvJSONError("Invalid number: out of range");
+			}
 		#else
 			std::string numStr(buf, numLen);
 			char* endptr;
 			errno = 0;
 			d = std::strtod(numStr.c_str(), &endptr);
-			if (errno == ERANGE) throw asvJSONError("Invalid number: out of range");
+			if (errno == ERANGE) {
+				// Overflow (e.g. 1e999): strtod sets d to ±HUGE_VAL. Honor allowNaNInfinity.
+				// Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected, as before.
+				if (allowNaNInfinity && std::isinf(d)) {
+					return asvJSONValue::makeDouble(d);
+				}
+				throw asvJSONError("Invalid number: out of range");
+			}
 			if (endptr != numStr.c_str() + numLen) throw asvJSONError("Invalid number");
 			{
 				size_t sigDigits = 0;
@@ -1147,6 +1161,7 @@ public:
 		if (!root) return false;
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) return false;
+		if (chunk_size < 4) chunk_size = 4; // min base64 quantum (4 chars = 3 bytes), prevents zero-advance loop
 		size_t bytes_per_chunk = (chunk_size / 4) * 3;
 		for (size_t i = 0; i < size; i += bytes_per_chunk) {
 			size_t chunk = std::min(bytes_per_chunk, size - i);

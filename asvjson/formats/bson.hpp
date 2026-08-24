@@ -109,7 +109,19 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 		}
 		case T::DATETIME: {
 			out.push_back(0x09);
-			int64_t ms = static_cast<int64_t>(timestamp) * 1000 + datetime_ms;
+			int64_t t = timestamp;
+			int64_t m = datetime_ms;
+			// Guard t*1000+m against signed overflow without performing it.
+			bool overflow = false;
+			if (t > 0)
+				overflow = m >= 0 ? t > (std::numeric_limits<int64_t>::max() - m) / 1000
+			                     : t > std::numeric_limits<int64_t>::max() / 1000;
+			else if (t < 0)
+				overflow = m <= 0 ? t < (std::numeric_limits<int64_t>::min() - m) / 1000
+			                     : t < std::numeric_limits<int64_t>::min() / 1000;
+			if (overflow)
+				throw asvJSONError("BSON datetime out of int64 milliseconds range");
+			int64_t ms = t * 1000 + m;
 			writeLE64(out, static_cast<uint64_t>(ms));
 			break;
 		}
@@ -140,8 +152,9 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 		case T::TIMESTAMP: {
 			out.push_back(0x11);
 			uint32_t t = static_cast<uint32_t>(num);
-			writeLE32(out, 0);
+			// BSON 0x11 layout is {t: uint32, i: uint32}; t comes first.
 			writeLE32(out, t);
+			writeLE32(out, 0);
 			break;
 		}
 		case T::OBJECTID: {
@@ -179,7 +192,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 	size_t docStart = pos;
 	readLE32(data, pos, docSize);
 	if (docSize < 5 || docStart + docSize > dataLen) throw asvJSONError("BSON invalid document size");
-	uint32_t docEnd = docStart + docSize - 1;
+	size_t docEnd = docStart + docSize - 1;
 	auto obj = asvJSONValue::makeObject();
 	if (!obj) throw asvJSONError("BSON alloc failed");
 	while (pos < docEnd) {
@@ -188,10 +201,11 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		size_t keyStart = pos;
 		while (pos < docEnd && data[pos] != 0) pos++;
 		if (pos >= docEnd) throw asvJSONError("BSON missing key null");
-		std::string key(reinterpret_cast<const char*>(data + keyStart), pos - keyStart);
+		size_t keyLen = pos - keyStart;
+		if (keyLen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("BSON key too long");
+		std::string key(reinterpret_cast<const char*>(data + keyStart), keyLen);
 		pos++;
 		if (pos > docEnd) throw asvJSONError("BSON element past end");
-		if (key.size() > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("BSON key too long");
 		switch (elemType) {
 			case 0x01: { if (pos + 8 > dataLen) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
 			case 0x02: {
@@ -288,21 +302,29 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				uint64_t ms = 0;
 				for (int i = 0; i < 8; i++) ms |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
-				time_t ts = static_cast<time_t>(ms / 1000);
-				int ms_rem = static_cast<int>(ms % 1000);
-				obj->obj->emplace(key, asvJSONValue::makeDateTime(ts, ms_rem));
+				// BSON stores signed 64-bit UTC milliseconds; interpret as signed.
+				int64_t ms64 = static_cast<int64_t>(ms);
+				int64_t q = ms64 / 1000;
+				int64_t r = ms64 % 1000;
+				if (r < 0) { q--; r += 1000; } // floor semantics for negative values
+				obj->obj->emplace(key, asvJSONValue::makeDateTime(static_cast<time_t>(q), static_cast<int>(r)));
 				break;
 			}
 			case 0x0A: obj->obj->emplace(key, asvJSONValue::makeNull()); break;
 			case 0x0B: {
 				size_t patStart = pos;
 				while (pos < docEnd && data[pos] != 0) pos++;
-				std::string pattern(reinterpret_cast<const char*>(data + patStart), pos - patStart);
+				if (pos >= docEnd) throw asvJSONError("BSON regex missing pattern terminator");
+				size_t patLen = pos - patStart;
 				pos++;
 				size_t optStart = pos;
 				while (pos < docEnd && data[pos] != 0) pos++;
-				std::string options(reinterpret_cast<const char*>(data + optStart), pos - optStart);
+				if (pos >= docEnd) throw asvJSONError("BSON regex missing options terminator");
+				size_t optLen = pos - optStart;
 				pos++;
+				if (patLen + optLen > asvJSONValue::MAX_STRING_LEN - 2) throw asvJSONError("BSON regex too large");
+				std::string pattern(reinterpret_cast<const char*>(data + patStart), patLen);
+				std::string options(reinterpret_cast<const char*>(data + optStart), optLen);
 				auto val = asvJSONValue::makeRegex(pattern.c_str(), options.c_str());
 				if (!val) throw asvJSONError("BSON regex invalid or too large");
 				obj->obj->emplace(key, std::move(val));
@@ -341,7 +363,9 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 			default: throw asvJSONError(std::string("BSON unknown element type: ") + std::to_string(elemType));
 		}
 	}
-	if (pos < dataLen && data[pos] == 0) pos++;
+	// BSON documents must end with exactly one 0x00 byte at docEnd.
+	if (pos != docEnd || data[docEnd] != 0) throw asvJSONError("BSON missing terminator");
+	pos = docEnd + 1;
 	return obj;
 }
 

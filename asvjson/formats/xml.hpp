@@ -257,6 +257,15 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 		long long v;
 		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
 		if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeInt(v);
+		bool allDigits = (s.size() > 1);
+		const char* p0 = (s[0] == '-') ? s.data() + 1 : s.data();
+		for (const char* p = p0; p < s.data() + s.size(); ++p)
+			if (*p < '0' || *p > '9') { allDigits = false; break; }
+		if (allDigits) {
+			auto r = asvJSONValue::makeString(s.data(), s.size());
+			if (r) r->raw_number = true;
+			return r;
+		}
 		double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 		auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);

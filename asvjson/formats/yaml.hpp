@@ -1553,12 +1553,19 @@ inline std::string yamlToJson(std::string_view input) {
 
 	auto buildDocInput = [&](size_t start, size_t end) -> std::string {
 		std::string sub;
+		bool haveAny = false;
+		bool lastEmpty = false;
 		for (size_t i = start; i < end; i++) {
 			std::string_view c = stripIndent(lines[i]);
 			if ((c == "---" || c == "...") && countIndent(lines[i]) == 0) continue;
-			if (!sub.empty()) sub += '\n';
+			if (haveAny) sub += '\n';
 			sub += lines[i];
+			haveAny = true;
+			lastEmpty = lines[i].empty();
 		}
+		// A trailing empty line must survive the round-trip through splitLines:
+		// joining with '\n' drops one trailing newline, so restore it here.
+		if (haveAny && lastEmpty) sub += '\n';
 		return sub;
 	};
 

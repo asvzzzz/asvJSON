@@ -4,6 +4,7 @@
 
 #include "../core.hpp"
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -178,10 +179,22 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
   if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
   // Try int (base 10 — no octal surprises)
   if (!s.empty()) {
+    errno = 0;
     char* end = nullptr;
     long long ll = std::strtoll(s.c_str(), &end, 10);
-    if (end && *end == 0) return asvJSONValue::makeInt(static_cast<int64_t>(ll));
+    if (end && *end == 0) {
+      if (errno == ERANGE) {
+        // Out-of-range integer: preserve the exact literal so the round-trip is
+        // lossless (same convention as core JSON and UDE) instead of silently
+        // clamping to LLONG_MAX.
+        auto v = asvJSONValue::makeStringView(std::string_view(s));
+        if (v) v->raw_number = true;
+        return v;
+      }
+      return asvJSONValue::makeInt(static_cast<int64_t>(ll));
+    }
     // Try double
+    errno = 0;
     double d = std::strtod(s.c_str(), &end);
     if (end && *end == 0) return asvJSONValue::makeDouble(d);
   }

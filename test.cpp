@@ -9,6 +9,8 @@ using namespace asvJSONInternal;
 #include <atomic>
 #include <mutex>
 #include <random>
+#include <limits>
+#include <crtdbg.h>
 
 int passed = 0;
 int failed = 0;
@@ -761,6 +763,38 @@ TEST(testBigNumberRoundTrip) {
 	}
 }
 
+TEST(testNumberOverflow) {
+	// 1e999 overflows to +inf
+	{
+		asvJSON json;
+		if (json.parse(std::string("{\"a\": 1e999}"))) throw std::runtime_error("1e999 should be rejected without allowNaNInfinity");
+		json.allowNaNInfinity = true;
+		if (!json.parse(std::string("{\"a\": 1e999}"))) throw std::runtime_error("1e999 should be accepted with allowNaNInfinity");
+		if (!std::isinf(json.getDouble("a")) || json.getDouble("a") < 0) throw std::runtime_error("1e999 should be +inf");
+	}
+	// -1e999 overflows to -inf
+	{
+		asvJSON json;
+		if (json.parse(std::string("{\"a\": -1e999}"))) throw std::runtime_error("-1e999 should be rejected without allowNaNInfinity");
+		json.allowNaNInfinity = true;
+		if (!json.parse(std::string("{\"a\": -1e999}"))) throw std::runtime_error("-1e999 should be accepted with allowNaNInfinity");
+		if (!std::isinf(json.getDouble("a")) || json.getDouble("a") > 0) throw std::runtime_error("-1e999 should be -inf");
+	}
+	// 1e-999 underflows to 0 -> rejected even with allowNaNInfinity (finite result)
+	{
+		asvJSON json;
+		if (json.parse(std::string("{\"a\": 1e-999}"))) throw std::runtime_error("1e-999 should be rejected without allowNaNInfinity");
+		json.allowNaNInfinity = true;
+		if (json.parse(std::string("{\"a\": 1e-999}"))) throw std::runtime_error("1e-999 should be rejected even with allowNaNInfinity (underflow, finite)");
+	}
+	// Normal large-but-finite doubles still parse fine
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"a\": 1e308}")));
+		if (json.getDouble("a") != 1e308) throw std::runtime_error("1e308 should round-trip exactly");
+	}
+}
+
 TEST(testGetObjectIdView) {
 	asvJSON json;
 	const char oid[12] = {'5','0','7','f','1','f','7','7','b','c','f','8'};
@@ -1108,6 +1142,22 @@ TEST(testMessagePackCorruptedData) {
 	}
 }
 
+TEST(testMsgPackUInt64Overflow) {
+	// uint64 (0xCF) value above int64 max (0xFFFFFFFFFFFFFFFF)
+	// must be rejected before makeInt() (which performs no range check).
+	std::vector<uint8_t> data = { 0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	asvJSON json;
+	bool ok = json.fromMessagePack(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromMessagePack accepted uint64 above int64 max");
+	ASSERT(!json.getLastError().empty());
+
+	// Boundary: 0x7FFFFFFFFFFFFFFF must still parse as INT64_MAX.
+	std::vector<uint8_t> maxData = { 0xCF, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	asvJSON json2;
+	if (!json2.fromMessagePack(maxData.data(), maxData.size())) throw std::runtime_error("fromMessagePack rejected int64 max");
+	ASSERT_EQ(json2.getRoot()->getInt(), INT64_MAX);
+}
+
 TEST(testDuplicateKeyNoLeak) {
 	asvJSON json;
 	json.parse(std::string("{\"a\": 1}"));
@@ -1197,6 +1247,17 @@ TEST(testPutBinChunked) {
 	ASSERT(json2.putBinChunked("empty", nullptr, 0, 76));
 	auto emptyRet = json2.getBinChunked("empty");
 	ASSERT_EQ(emptyRet.size(), 0U);
+	// Small chunk sizes (clamped to 4) must not hang and must round-trip
+	asvJSON json3;
+	uint8_t data2[50];
+	for (size_t i = 0; i < 50; i++) data2[i] = static_cast<uint8_t>(250 - i);
+	for (size_t cs : {size_t(0), size_t(1), size_t(3), size_t(4), size_t(5)}) {
+		std::string key = "cs" + std::to_string(cs);
+		ASSERT(json3.putBinChunked(key, data2, 50, cs));
+		auto r = json3.getBinChunked(key);
+		ASSERT_EQ(r.size(), 50U);
+		for (size_t i = 0; i < 50; i++) ASSERT_EQ(r[i], data2[i]);
+	}
 }
 
 TEST(testGetKeys) {
@@ -1639,6 +1700,164 @@ TEST(testBSONArray) {
 	}
 }
 
+TEST(testBSONTimestampRoundtrip) {
+	asvJSON json;
+	asvJSONValue* v = json.putTimestamp("ts", 1234567890LL);
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(v->num, 1234567890LL);
+
+	auto bson = json.toBSON();
+	ASSERT(bson.size() > 0);
+
+	asvJSON json2;
+	bool ok = json2.fromBSON(bson.data(), bson.size());
+	ASSERT(ok);
+	auto* v2 = json2.getRoot()->get("ts");
+	ASSERT(v2 != nullptr);
+	ASSERT_EQ(v2->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(v2->num, 1234567890LL);
+}
+
+TEST(testBSONTimestampDecode) {
+	// Hand-crafted BSON: {t: TIMESTAMP{t=1234, i=5678}}; increment must be ignored
+	std::vector<uint8_t> bson = {
+		0x10, 0x00, 0x00, 0x00, // total document size = 16
+		0x11,                   // BSON type: timestamp
+		't', 0x00,              // key "t"
+		0xD2, 0x04, 0x00, 0x00, // t = 1234 (LE32)
+		0x32, 0x16, 0x00, 0x00, // i = 5678 (LE32, must be ignored)
+		0x00                    // terminator
+	};
+	asvJSON json;
+	bool ok = json.fromBSON(bson.data(), bson.size());
+	ASSERT(ok);
+	auto* v = json.getRoot()->get("t");
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(v->num, 1234LL);
+}
+
+TEST(testBSONDateTimeRoundtrip) {
+	asvJSON json;
+	asvJSONValue* v = json.putDateTime("dt", 1705314645, 123);
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(v->timestamp, 1705314645LL);
+	ASSERT_EQ(v->datetime_ms, 123);
+
+	auto bson = json.toBSON();
+	ASSERT(bson.size() > 0);
+
+	asvJSON json2;
+	bool ok = json2.fromBSON(bson.data(), bson.size());
+	ASSERT(ok);
+	auto* v2 = json2.getRoot()->get("dt");
+	ASSERT(v2 != nullptr);
+	ASSERT_EQ(v2->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(v2->timestamp, 1705314645LL);
+	ASSERT_EQ(v2->datetime_ms, 123);
+}
+
+TEST(testBSONDateTimeNegativeRoundtrip) {
+	// putDateTime(0, -500) normalizes to (-1, 500); encoded ms = -500
+	asvJSON json;
+	asvJSONValue* v = json.putDateTime("dt", 0, -500);
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(v->timestamp, -1LL);
+	ASSERT_EQ(v->datetime_ms, 500);
+
+	auto bson = json.toBSON();
+	asvJSON json2;
+	bool ok = json2.fromBSON(bson.data(), bson.size());
+	ASSERT(ok);
+	auto* v2 = json2.getRoot()->get("dt");
+	ASSERT(v2 != nullptr);
+	ASSERT_EQ(v2->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(v2->timestamp, -1LL);
+	ASSERT_EQ(v2->datetime_ms, 500);
+}
+
+TEST(testBSONDateTimeOverflow) {
+	// t*1000+m overflows int64: toBSON must throw instead of producing UB
+	{
+		asvJSON json;
+		json.putDateTime("dt", std::numeric_limits<time_t>::max(), 0);
+		bool threw = false;
+		try {
+			json.toBSON();
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(threw);
+	}
+	{
+		asvJSON json;
+		json.putDateTime("dt", std::numeric_limits<time_t>::min(), 999);
+		bool threw = false;
+		try {
+			json.toBSON();
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(threw);
+	}
+}
+
+TEST(testBSONStrictTerminator) {
+	uint8_t data[] = {
+		0x05, 0x00, 0x00, 0x00, // int32 length = 5
+		0x01                    // non-zero document terminator
+	};
+	asvJSON json;
+	bool ok = json.fromBSON(data, sizeof(data));
+	if (ok) throw std::runtime_error("non-zero BSON terminator should fail");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testBSONMalformedRegex) {
+	{
+		uint8_t data[] = {
+			0x08, 0x00, 0x00, 0x00, // int32 length = 8
+			0x0B, 'r', 0x00,        // type regex, key "r"
+			0x78                    // pattern without NUL terminator
+		};
+		asvJSON json;
+		bool ok = json.fromBSON(data, sizeof(data));
+		if (ok) throw std::runtime_error("BSON regex missing pattern terminator should fail");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		uint8_t data[] = {
+			0x0A, 0x00, 0x00, 0x00, // int32 length = 10
+			0x0B, 'r', 0x00,        // type regex, key "r"
+			0x78, 0x00,             // pattern "x"
+			0x69                    // options without NUL terminator
+		};
+		asvJSON json;
+		bool ok = json.fromBSON(data, sizeof(data));
+		if (ok) throw std::runtime_error("BSON regex missing options terminator should fail");
+		ASSERT(!json.getLastError().empty());
+	}
+}
+
+TEST(testBSONOversizedKey) {
+	size_t keyLen = asvJSONValue::MAX_STRING_LEN + 1;
+	size_t docSize = 4 + 1 + keyLen + 1 + 1; // header, type, key, key NUL, value byte
+	std::vector<uint8_t> data(docSize, 'a');
+	uint32_t sz = static_cast<uint32_t>(docSize);
+	std::memcpy(data.data(), &sz, 4);
+	data[4] = 0x08;
+	data[4 + 1 + keyLen] = 0x00;
+	data.back() = 0x00;
+
+	asvJSON json;
+	bool ok = json.fromBSON(data.data(), data.size());
+	if (ok) throw std::runtime_error("BSON key longer than MAX_STRING_LEN should fail");
+	ASSERT(!json.getLastError().empty());
+}
+
 TEST(testISODateTime) {
 	{
 		asvJSON json;
@@ -2042,6 +2261,33 @@ TEST(testCBORRegex) {
 	auto* v = json2.getRoot()->get("re");
 	ASSERT(v != nullptr);
 	ASSERT_EQ(v->type, asvJSONValue::REGEX);
+
+	std::string pattern, options;
+	ASSERT(json2.getRegex("re", pattern, options));
+	ASSERT_EQ(pattern, std::string("pattern"));
+	ASSERT_EQ(options, std::string("ims"));
+
+	// Pattern containing the old, wrong '|' separator must keep its options intact.
+	asvJSON json3;
+	json3.putRegex("rx", "a|b", "g");
+	auto cbor3 = json3.toCBOR();
+	asvJSON json4;
+	ASSERT(json4.fromCBOR(cbor3.data(), cbor3.size()));
+	std::string p3, o3;
+	ASSERT(json4.getRegex("rx", p3, o3));
+	ASSERT_EQ(p3, std::string("a|b"));
+	ASSERT_EQ(o3, std::string("g"));
+
+	// Empty options round-trip.
+	asvJSON json5;
+	json5.putRegex("ro", "xyz", "");
+	auto cbor5 = json5.toCBOR();
+	asvJSON json6;
+	ASSERT(json6.fromCBOR(cbor5.data(), cbor5.size()));
+	std::string p5, o5;
+	ASSERT(json6.getRegex("ro", p5, o5));
+	ASSERT_EQ(p5, std::string("xyz"));
+	ASSERT_EQ(o5, std::string(""));
 }
 
 TEST(testCBORExtension) {
@@ -2182,6 +2428,53 @@ TEST(testCBORFloat16) {
 	auto* v = json.getRoot();
 	ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
 	ASSERT_EQ(v->dbl, 1.0);
+}
+
+TEST(testCBORUInt64Overflow) {
+	// Unsigned int with 64-bit value above int64 max (0xFFFFFFFFFFFFFFFF)
+	// must be rejected before makeInt() (which performs no range check).
+	std::vector<uint8_t> data = { 0x1B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted unsigned int above int64 max");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testCBORNegInt64Overflow) {
+	// Negative int with magnitude 0xFFFFFFFFFFFFFFFF would map to INT64_MIN-1,
+	// out of range, and must be rejected.
+	std::vector<uint8_t> data = { 0x3B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted negative int below int64 min");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testCBORIndefiniteArrayTruncated) {
+	// Indefinite-length array (0x9F) with no 0xFF terminator must be rejected.
+	std::vector<uint8_t> data = { 0x9F, 0x01, 0x02 };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted indefinite array missing terminator");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testCBORIndefiniteMapTruncated) {
+	// Indefinite-length map (0xBF) with no 0xFF terminator must be rejected.
+	std::vector<uint8_t> data = { 0xBF, 0x61, 0x61, 0x01 };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted indefinite map missing terminator");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testCBORIndefiniteStringTruncated) {
+	// Indefinite-length text string (0x7F) with no 0xFF terminator must be rejected.
+	std::vector<uint8_t> data = { 0x7F, 0x61, 0x61 };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted indefinite string missing terminator");
+	ASSERT(!json.getLastError().empty());
 }
 
 TEST(testObjectKeyEscapes) {
@@ -2690,6 +2983,49 @@ TEST(testFromXML) {
 		ASSERT(json.fromXML("<root>hello<child>world</child></root>"));
 		ASSERT(json.getString("root.#text") == "hello");
 		ASSERT(json.getString("root.child") == "world");
+	}
+}
+
+TEST(testFromXMLIntOverflow) {
+	// int64 overflow must be preserved as an exact literal (raw_number), not degraded to double
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>99999999999999999999</root>"));
+		auto* v = json.get("root");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
+	}
+	// Negative overflow
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>-99999999999999999999</root>"));
+		auto* v = json.get("root");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "-99999999999999999999");
+	}
+	// In-range integers still INT; decimals still DOUBLE
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><a>42</a><b>3.14</b></root>"));
+		auto* a = json.getNested("root.a");
+		ASSERT(a != nullptr && a->type == asvJSONValue::INT);
+		ASSERT_EQ(json.getInt("root.a"), int64_t(42));
+		auto* b = json.getNested("root.b");
+		ASSERT(b != nullptr && b->type == asvJSONValue::DOUBLE);
+	}
+	// Round-trip: toXML preserves the exact literal
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root>99999999999999999999</root>"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("root");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
 	}
 }
 
@@ -4197,6 +4533,25 @@ TEST(testProtobufTextFormat) {
 	ASSERT_EQ(json2.getBool("flag"), true);
 }
 
+TEST(testProtobufTextIntOverflow) {
+	// int64 overflow in text format must be preserved as an exact literal (raw_number),
+	// not silently clamped to LLONG_MAX — same convention as core JSON and UDE.
+	asvJSON json2;
+	ASSERT(json2.fromProtobufText("big: 99999999999999999999999"));
+	auto* v = json2.getRoot()->get("big");
+	ASSERT(v != nullptr);
+	ASSERT(v->type == asvJSONValue::STRING);
+	ASSERT(v->raw_number);
+	std::string out = json2.serialize();
+	ASSERT(out.find("99999999999999999999999") != std::string::npos);
+
+	// In-range integers must still parse as int
+	asvJSON json3;
+	ASSERT(json3.fromProtobufText("big: 12345"));
+	ASSERT(json3.isInt("big"));
+	ASSERT_EQ(json3.getInt("big"), 12345);
+}
+
 TEST(testProtobufStaticConverters) {
 	// Static helper: protobufFromString / stringFromProtobuf (numeric keys = field numbers)
 	std::string jsonStr = R"({"1":1,"2":"hello"})";
@@ -4322,6 +4677,37 @@ TEST(testProtobufPackedFixed) {
 		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
 		ASSERT_EQ(vArr->arr->size(), size_t(2));
 		ASSERT_EQ(vArr->arr->at(0)->getInt(), 10000000000LL);
+	}
+	// Malformed packed varint: the last byte of the packed field has the
+	// continuation bit set (incomplete varint), and a following field's bytes
+	// happen to complete it. Before the fix, the decoder read past the field's
+	// `end` (bounded by the whole buffer size) and produced a bogus value
+	// (vals=[2048]) while skipping the real `other` field. It must now reject
+	// the input with "malformed varint: unexpected end".
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"int32","repeated":true,"packed":true},
+			"other":{"id":2,"type":"int32"}
+		})";
+		// field 1 (wire 2): tag 0x0A, len=0x01, payload 0x80 (incomplete varint)
+		// field 2 (wire 0): tag 0x10, value 0x2A
+		const uint8_t raw[] = {0x0A, 0x01, 0x80, 0x10, 0x2A};
+		asvJSON json;
+		ASSERT(!json.fromProtobuf(raw, sizeof(raw), schemaJson));
+	}
+	// Same shape, but the following field is large enough that the pre-fix
+	// desynced read completes on a following byte and the whole message still
+	// "parses" (producing vals=[2048], other missing) instead of erroring.
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"int32","repeated":true,"packed":true},
+			"other":{"id":2,"type":"int32"}
+		})";
+		// field 1 (wire 2): tag 0x0A, len=0x01, payload 0x80 (incomplete varint)
+		// field 2 (wire 0): tag 0x10, value 0x2A, then field 3 (wire 0) tag 0x18 value 0x00
+		const uint8_t raw[] = {0x0A, 0x01, 0x80, 0x10, 0x2A, 0x18, 0x00};
+		asvJSON json;
+		ASSERT(!json.fromProtobuf(raw, sizeof(raw), schemaJson));
 	}
 }
 
@@ -4524,6 +4910,47 @@ TEST(testFromCSV) {
   {
     asvJSON json;
     ASSERT(!json.fromCSV(std::string_view("a\n\"unclosed")));
+  }
+}
+
+TEST(testFromCSVIntOverflow) {
+  // int64 overflow must be preserved as an exact literal (raw_number), not degraded to double
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("big\n99999999999999999999")));
+    auto* v = json.getRoot()->get(static_cast<size_t>(0))->get("big");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
+  }
+  // Negative overflow
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("neg\n-99999999999999999999")));
+    auto* v = json.getRoot()->get(static_cast<size_t>(0))->get("neg");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(std::string(v->getString()), "-99999999999999999999");
+  }
+  // In-range integers still INT; decimals still DOUBLE
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("a,b\n42,3.14")));
+    ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::INT);
+    ASSERT_EQ(json.getRoot()->get(static_cast<size_t>(0))->get("a")->getInt(), int64_t(42));
+    ASSERT(json.getRoot()->get(static_cast<size_t>(0))->get("b")->type == asvJSONValue::DOUBLE);
+  }
+  // Round-trip: toCSV preserves the exact literal
+  {
+    asvJSON json;
+    ASSERT(json.fromCSV(std::string_view("big\n99999999999999999999")));
+    std::string csv = json.toCSV();
+    asvJSON json2;
+    ASSERT(json2.fromCSV(std::string_view(csv)));
+    auto* v = json2.getRoot()->get(static_cast<size_t>(0))->get("big");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
   }
 }
 
@@ -4964,6 +5391,19 @@ TEST(testFromSexpr) {
     ASSERT(j2.fromSexpr(std::string_view(s)));
     ASSERT_EQ(std::string(j2.getString("hello world")), "test");
     ASSERT_EQ(std::string(j2.getString("123")), "num");
+  }
+  // Quoted strings are data, not keys — odd-length group stays an array
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view(R"((items ("apple" "banana" "cherry") count 3))")));
+    ASSERT(j.isArray("items"));
+    auto* arr = j.getArray("items");
+    ASSERT(arr != nullptr);
+    ASSERT_EQ(arr->size(), size_t(3));
+    ASSERT_EQ(std::string(arr->get(0)->getString()), "apple");
+    ASSERT_EQ(std::string(arr->get(1)->getString()), "banana");
+    ASSERT_EQ(std::string(arr->get(2)->getString()), "cherry");
+    ASSERT_EQ(j.getInt("count"), int64_t(3));
   }
   // Error on empty
   {
@@ -5483,19 +5923,19 @@ TEST(testFromJSON5) {
   // Zs space: U+3000 (IDEOGRAPHIC SPACE) between tokens
   {
     asvJSON j;
-    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE3, 0x80, 0x80, '\"', 'b', '\"', ']', 0 };
+    const char inp[] = { '[', '\"', 'a', '\"', ',', (char)0xE3, (char)0x80, (char)0x80, '\"', 'b', '\"', ']', 0 };
     ASSERT(j.fromJSON5(std::string_view(inp, 12)));
   }
   // Zs space: U+205F (MEDIUM MATHEMATICAL SPACE) between tokens
   {
     asvJSON j;
-    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE2, 0x81, 0x9F, '\"', 'b', '\"', ']', 0 };
+    const char inp[] = { '[', '\"', 'a', '\"', ',', (char)0xE2, (char)0x81, (char)0x9F, '\"', 'b', '\"', ']', 0 };
     ASSERT(j.fromJSON5(std::string_view(inp, 12)));
   }
   // Multiple Zs spaces before unquoted key
   {
     asvJSON j;
-    const char inp[] = { '{', 0xE2, 0x80, 0x83, 0xC2, 0xA0, 'k', 'e', 'y', ':', '1', '}', 0 };
+    const char inp[] = { '{', (char)0xE2, (char)0x80, (char)0x83, (char)0xC2, (char)0xA0, 'k', 'e', 'y', ':', '1', '}', 0 };
     ASSERT(j.fromJSON5(std::string_view(inp, 12)));
     ASSERT_EQ(j.getRoot()->getConst("key")->getInt(), int64_t(1));
   }
@@ -5701,6 +6141,36 @@ TEST(testFromINI) {
     asvJSON j;
     ASSERT(j.fromINI(std::string("[a\\[b\\]]\nc[d] = v\n")));
     ASSERT_EQ(std::string(j.getString("a[b].c[d]")), "v");
+  }
+}
+
+TEST(testFromINIIntOverflow) {
+  // int64 overflow must be preserved as an exact literal (raw_number), not clamped to LLONG_MAX
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("big = 99999999999999999999999\n")));
+    auto* v = j.get("big");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(std::string(j.getString("big")), "99999999999999999999999");
+  }
+  // Negative overflow
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("neg = -99999999999999999999999\n")));
+    auto* v = j.get("neg");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    ASSERT_EQ(std::string(j.getString("neg")), "-99999999999999999999999");
+  }
+  // In-range integers still parse as INT
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("n = 12345\nn2 = -9876543210123\n")));
+    ASSERT(j.get("n") != nullptr && j.get("n")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("n"), int64_t(12345));
+    ASSERT(j.get("n2") != nullptr && j.get("n2")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("n2"), int64_t(-9876543210123));
   }
 }
 
@@ -6899,6 +7369,7 @@ TEST(testByteSizeWithCountAndName) {
 }
 
 int main() {
+	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Test Suite" << std::endl;
 	std::cout << "========================================" << std::endl << std::endl;
@@ -6999,6 +7470,7 @@ int main() {
 	RUN(testGetObjectIdView);
 	RUN(testInvalidNumber);
 	RUN(testBigNumberRoundTrip);
+	RUN(testNumberOverflow);
 	RUN(testRemoveByPointer);
 	
 	std::cout << "\n--- Merge Tests ---\n";
@@ -7070,7 +7542,7 @@ int main() {
 	RUN(testJSONPatchTestIntDouble);
 	
 	std::cout << "\n--- Corrupted Data Tests ---\n";
-	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);
+	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);	RUN(testMsgPackUInt64Overflow);
 	
 	std::cout << "\n--- Duplicate Key Tests ---\n";
 	RUN(testDuplicateKeyNoLeak);
@@ -7089,6 +7561,16 @@ int main() {
 
 	std::cout << "\n--- BSON Array Tests ---\n";
 	RUN(testBSONArray);
+
+	std::cout << "\n--- BSON Timestamp/DateTime Tests ---\n";
+	RUN(testBSONTimestampRoundtrip);
+	RUN(testBSONTimestampDecode);
+	RUN(testBSONDateTimeRoundtrip);
+	RUN(testBSONDateTimeNegativeRoundtrip);
+	RUN(testBSONDateTimeOverflow);
+	RUN(testBSONStrictTerminator);
+	RUN(testBSONMalformedRegex);
+	RUN(testBSONOversizedKey);
 
 	std::cout << "\n--- ISO 8601 DateTime Tests ---\n";
 	RUN(testISODateTime);
@@ -7136,6 +7618,11 @@ int main() {
 	RUN(testCBORIndefiniteArray);
 	RUN(testCBORIndefiniteMap);
 	RUN(testCBORFloat16);
+	RUN(testCBORUInt64Overflow);
+	RUN(testCBORNegInt64Overflow);
+	RUN(testCBORIndefiniteArrayTruncated);
+	RUN(testCBORIndefiniteMapTruncated);
+	RUN(testCBORIndefiniteStringTruncated);
 
 	std::cout << "\n--- Protobuf Tests ---\n";
 	RUN(testProtobufBasic);
@@ -7143,6 +7630,7 @@ int main() {
 	RUN(testProtobufNested);
 	RUN(testProtobufSchema);
 	RUN(testProtobufTextFormat);
+	RUN(testProtobufTextIntOverflow);
 	RUN(testProtobufStaticConverters);
 	RUN(testProtobufStringOverload);
 	RUN(testProtobufPackedFixed);
@@ -7150,6 +7638,7 @@ int main() {
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);
 	RUN(testFromXML);
+	RUN(testFromXMLIntOverflow);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
@@ -7158,6 +7647,7 @@ int main() {
 	std::cout << "\n--- CSV Serialization Tests ---\n";
 	RUN(testToCSV);
 	RUN(testFromCSV);
+	RUN(testFromCSVIntOverflow);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
@@ -7198,6 +7688,7 @@ int main() {
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);
 	RUN(testFromINI);
+	RUN(testFromINIIntOverflow);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
