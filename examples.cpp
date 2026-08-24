@@ -1248,7 +1248,11 @@ void example_ude_strings() {
 		"multiline: \"line one \\\n"
 		"            and line two\"\n";
 	if (json.fromUDE(input)) {
-		std::cout << "greeting = \"" << json.getString("greeting") << "\"" << std::endl;
+		std::string g = json.getString("greeting");
+		// escape newlines for clean display
+		std::string display;
+		for (char c : g) { if (c == '\n') { display += '\\'; display += 'n'; } else display += c; }
+		std::cout << "greeting = \"" << display << "\"" << std::endl;
 		std::cout << "path     = " << json.getString("path") << std::endl;
 		std::cout << "multiline= " << json.getString("multiline") << std::endl;
 	}

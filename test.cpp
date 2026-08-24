@@ -5376,11 +5376,14 @@ TEST(testFromSexpr) {
     ASSERT_EQ(std::string(j.getString("name")), "John");
     ASSERT_EQ(j.getInt("age"), int64_t(30));
   }
-  // Two-item quoted-string key
+  // Two quoted strings: array, not object (round-trip fidelity)
   {
     asvJSON j;
     ASSERT(j.fromSexpr(std::string_view(R"(("key" "val"))")));
-    ASSERT_EQ(std::string(j.getString("key")), "val");
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->size(), size_t(2));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "key");
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(1))->getString()), "val");
   }
   // Quoted-string keys with special chars round-trip
   {
@@ -5409,6 +5412,32 @@ TEST(testFromSexpr) {
   {
     asvJSON j;
     ASSERT(!j.fromSexpr(std::string_view("")));
+  }
+  // #true / #false are SYMBOLS, not booleans (only #t / #f are booleans)
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a #true b #false)")));
+    ASSERT_EQ(std::string(j.getString("a")), "#true");
+    ASSERT_EQ(std::string(j.getString("b")), "#false");
+  }
+  // Trailing dot or bare exponent rejected as number
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a 1.)")));
+    ASSERT_EQ(std::string(j.getString("a")), "1.");
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view("(b 1e)")));
+    ASSERT_EQ(std::string(j2.getString("b")), "1e");
+    asvJSON j3;
+    ASSERT(j3.fromSexpr(std::string_view("(c 1E)")));
+    ASSERT_EQ(std::string(j3.getString("c")), "1E");
+  }
+  // Unknown escape sequences preserve backslash
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view(R"(("a\q41b"))")));
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "a\\q41b");
   }
 }
 

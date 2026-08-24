@@ -47,7 +47,7 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
             case '"': s += '"'; break;
             case '\\': s += '\\'; break;
             case '/': s += '/'; break;
-            default: s += input[i]; break;
+            default: s += '\\'; s += input[i]; break;
           }
           i++;
           continue;
@@ -58,11 +58,6 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
       if (!closed) throw asvJSONError("unclosed string in S-Expression");
       tokens.push_back({SEXPR_STRING, s});
       continue;
-    }
-
-    if (c == '#' && i + 1 < input.size()) {
-      if (input[i + 1] == 't') { tokens.push_back({SEXPR_TRUE, ""}); i += 2; continue; }
-      if (input[i + 1] == 'f') { tokens.push_back({SEXPR_FALSE, ""}); i += 2; continue; }
     }
 
     std::string val;
@@ -102,6 +97,9 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
               isNum = false; break;
             }
           }
+          // number cannot end with '.' or bare exponent
+          if (isNum && (val.back() == '.' || val.back() == 'e' || val.back() == 'E'))
+            isNum = false;
         }
       }
       if (isNum) tokens.push_back({SEXPR_NUMBER, val});
@@ -192,8 +190,9 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // Object-vs-list heuristic for a parenthesized group:
   // - Odd-length groups are always lists.
   // - Even-length groups are objects only if all even-indexed items are
-  //   string/symbol keys. A 2-item group is treated as an object when
-  //   the first item is a symbol or string.
+  //   string/symbol keys. A 2-item group is an object ONLY when the first
+  //   item is a bare symbol (or a marked key). Quoted strings in position 0
+  //   are data → array.
   // - When the group starts with a bare symbol key but the remaining items
   //   are not objects, the values are emitted as an array: {key: [v1, v2, ...]}.
   //   Quoted strings are data values, never keys, in this fallback.
@@ -201,9 +200,9 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
   if (items.size() >= 2 && items.size() % 2 == 0) {
-    // For 2-item lists, only treat as object if first item is a symbol
+    // For 2-item lists, only treat as object if first item is a bare symbol
     if (items.size() == 2) {
-      isObj = (itemTypes[0] == SEXPR_SYMBOL || itemTypes[0] == SEXPR_STRING);
+      isObj = (itemTypes[0] == SEXPR_SYMBOL);
     } else {
       isObj = true;
       for (size_t j = 0; j < items.size(); j += 2) {
