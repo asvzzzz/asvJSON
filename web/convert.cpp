@@ -152,7 +152,9 @@ int main(int argc, char** argv) {
       }
 
       bool ok = false;
-      if (fromFmt == "JSON5") ok = j.fromJSON5(text);
+      if (fromFmt.empty()) {
+        ok = j.fromAny(text);
+      } else if (fromFmt == "JSON5") ok = j.fromJSON5(text);
       else if (fromFmt == "XML") ok = j.fromXML(text);
       else if (fromFmt == "YAML") ok = j.fromYAML(text);
       else if (fromFmt == "CSV") ok = j.fromCSV(text);

@@ -883,10 +883,13 @@ inline std::string asvJSON::toGOON() const {
 }
 
 inline bool asvJSON::fromGOON(std::string_view input) {
+  formatType = FormatType::Unknown;
   try {
     if (input.empty()) throw asvJSONError("empty input");
     std::string json = goonToJson(input);
-    return parse(std::string_view(json));
+    bool ok = parse(std::string_view(json));
+    if (ok) formatType = FormatType::GOON;
+    return ok;
   } catch (const asvJSONError& e) {
     lastError = e.what();
     return false;

@@ -177,7 +177,7 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
   // Case-insensitive bool
   if (s == "true" || s == "True" || s == "TRUE") return asvJSONValue::makeBool(true);
   if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
-  // Try int (base 10 — no octal surprises)
+  // Try int (base 10 -- no octal surprises)
   if (!s.empty()) {
     errno = 0;
     char* end = nullptr;
@@ -342,6 +342,7 @@ inline void asvJSONValue::toINI(std::string& out) const {
 // -- Decoder ----------------------------------------------------------------
 
 inline bool asvJSON::fromINI(std::string_view input) {
+  formatType = FormatType::Unknown;
   try {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
@@ -545,6 +546,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
       }
     }
 
+    formatType = FormatType::INI;
     return true;
 
   } catch (const asvJSONError& e) {

@@ -706,6 +706,7 @@ inline void tomlObjSet(asvJSONValue* obj, const std::string& key, std::unique_pt
 }
 
 inline bool asvJSON::fromTOML(std::string_view input) {
+  formatType = FormatType::Unknown;
   try {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
@@ -794,7 +795,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         if (closePos != std::string::npos && closePos > 2) {
           vtmp = vtmp.substr(0, closePos + 3);
           valueStr = vtmp;
-          // Reset persistent stripComment state — the multiline string
+          // Reset persistent stripComment state -- the multiline string
           // was fully consumed on this line.
           stripInBasic = false;
           stripInLiteral = false;
@@ -808,7 +809,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               accum += '\n' + mlLine.substr(0, cp + 3);
               lineNum = ml;
               found = true;
-              // Reset persistent stripComment state — multiline string closed
+              // Reset persistent stripComment state -- multiline string closed
               stripInBasic = false;
               stripInLiteral = false;
               break;
@@ -864,6 +865,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       }
     }
 
+    formatType = FormatType::TOML;
     return true;
 
   } catch (const asvJSONError& e) {

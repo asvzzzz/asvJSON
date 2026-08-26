@@ -82,7 +82,7 @@ inline std::vector<std::string> splitLines(std::string_view input) {
 	}
 	// A trailing '\n' terminates the final line; it does NOT open an empty
 	// phantom line at EOF. (Earlier versions emitted that phantom, which forced
-	// every consumer to compensate — e.g. block-scalar chomp counted a spurious
+	// every consumer to compensate -- e.g. block-scalar chomp counted a spurious
 	// trailing '\n'.)
 	if (start < input.size()) lines.push_back(std::string(input.substr(start)));
 	return lines;

@@ -7452,6 +7452,999 @@ TEST(testByteSizeWithCountAndName) {
 	ASSERT_EQ(j.byteSize(), j.serialize().size());
 }
 
+TEST(testFromAnyAndFormatType) {
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny(R"({"a":1})"));
+		ASSERT(doc.getFormatType() == FormatType::JSON);
+		ASSERT(doc.serialize().find("\"a\"") != std::string::npos);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("a: 1\nb: 2\n"));
+		ASSERT(doc.getFormatType() == FormatType::YAML);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny(R"(<root><a>1</a></root>)"));
+		ASSERT(doc.getFormatType() == FormatType::XML);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("name,age,city\nAlice,30,NY\nBob,25,LA\n"));
+		ASSERT(doc.getFormatType() == FormatType::CSV);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("[section]\nkey = value\n"));
+		ASSERT(doc.getFormatType() == FormatType::INI);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("(root (a 1))"));
+		ASSERT(doc.getFormatType() == FormatType::SExpr);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("{a: 1}"));
+		ASSERT(doc.getFormatType() == FormatType::JSON5);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("[1]\n[2]\n"));
+		ASSERT(doc.getFormatType() == FormatType::JSONLines);
+	}
+	{
+		asvJSON doc;
+		ASSERT(!doc.fromAny(""));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny(R"({"a":1})"));
+		ASSERT(doc.getFormatType() == FormatType::JSON);
+		doc.fromAny("a: 1\n");
+		ASSERT(doc.getFormatType() == FormatType::YAML);
+	}
+}
+
+TEST(testJSONSchema) {
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"name":{"type":"string"},"age":{"type":"number"}},"required":["name"]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"name":"Alice","age":30})")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"age":30})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(!err.empty());
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","items":{"type":"number"}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","items":{"type":"number"}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,"two",3])")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","minLength":2,"maxLength":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("abc")")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","minLength":2,"maxLength":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("a")")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","minimum":0,"maximum":10})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","minimum":0,"maximum":10})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("15")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"x":{"type":"integer"}},"additionalProperties":false})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"x":1,"y":2})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"enum":[1,2,3]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("2")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"enum":[1,2,3]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("4")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":42})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("42")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"number"},{"minimum":5}]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("10")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"number"},{"minimum":5}]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("3")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"anyOf":[{"type":"string"},{"type":"number"}]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("hello")")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"oneOf":[{"type":"string"},{"type":"number"}]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("hello")")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"not":{"type":"null"}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("42")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"boolean"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("true")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"null"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("null")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2])")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1])")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"a":{"type":"number"}},"patternProperties":{"^x_":{"type":"string"}},"additionalProperties":false})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"x_foo":"hi","a":1})")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","pattern":"^[a-z]+$"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("hello")")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","pattern":"^[a-z]+$"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"("Hello")")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","exclusiveMinimum":0,"exclusiveMaximum":10})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","exclusiveMinimum":0,"exclusiveMaximum":10})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("0")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"a":{"type":"number"}},"required":["a"],"if":{"properties":{"a":{"const":1}}},"then":{"properties":{"b":{"type":"string"}},"required":["b"]}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":"hi"})")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","properties":{"a":{"type":"number"}},"required":["a"],"if":{"properties":{"a":{"const":1}}},"then":{"properties":{"b":{"type":"string"}},"required":["b"]}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":["string","null"]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("null")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":["string","null"]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("42")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+}
+
+TEST(testJSONPath) {
+	// -- dot notation --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"name":"Alice","age":30})")));
+		auto r = doc.query("$.name");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT_EQ(r[0]->str_data, "Alice");
+	}
+	// -- bracket notation --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"name":"Alice"})")));
+		auto r = doc.query("$['name']");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT_EQ(r[0]->str_data, "Alice");
+	}
+	// -- nested access --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"b":{"c":99}}})")));
+		auto r = doc.query("$.a.b.c");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 99);
+	}
+	// -- array index --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[1]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 20);
+	}
+	// -- negative index --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[-1]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 30);
+	}
+	// -- slice [0:2] --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30,40])")));
+		auto r = doc.query("$[0:2]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 10);
+		ASSERT(r[1]->num == 20);
+	}
+	// -- slice [1:] --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[1:]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 20);
+		ASSERT(r[1]->num == 30);
+	}
+	// -- slice [::2] --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30,40,50])")));
+		auto r = doc.query("$[::2]");
+		ASSERT_EQ(r.size(), size_t(3));
+		ASSERT(r[0]->num == 10);
+		ASSERT(r[1]->num == 30);
+		ASSERT(r[2]->num == 50);
+	}
+	// -- slice [::-1] --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[::-1]");
+		ASSERT_EQ(r.size(), size_t(3));
+		ASSERT(r[0]->num == 30);
+		ASSERT(r[1]->num == 20);
+		ASSERT(r[2]->num == 10);
+	}
+	// -- wildcard --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":2,"c":3})")));
+		auto r = doc.query("$.*");
+		ASSERT_EQ(r.size(), size_t(3));
+	}
+	// -- array wildcard --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		auto r = doc.query("$[*]");
+		ASSERT_EQ(r.size(), size_t(3));
+	}
+	// -- recursive descent --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"b":1},"c":{"b":2}})")));
+		auto r = doc.query("$..b");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- filter: simple --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":1},{"v":2},{"v":3}])")));
+		auto r = doc.query("$[?(@.v == 2)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->obj->find("v")->second->num == 2);
+	}
+	// -- filter: comparison operators --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":1},{"v":2},{"v":3}])")));
+		auto r = doc.query("$[?(@.v > 1)]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- filter: && and || --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":10},{"a":2,"b":20},{"a":3,"b":30}])")));
+		auto r = doc.query("$[?(@.a == 1 && @.b == 10)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		auto r2 = doc.query("$[?(@.a == 1 || @.a == 3)]");
+		ASSERT_EQ(r2.size(), size_t(2));
+	}
+	// -- filter: ! (not) --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":1},{"v":2},{"v":3}])")));
+		auto r = doc.query("$[?(!(@.v == 2))]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- filter: parentheses --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":2},{"a":3}])")));
+		auto r = doc.query("$[?((@.a == 1) || (@.a == 3))]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- function: length() --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"items":[1,2,3]},{"items":[1,2]}])")));
+		auto r = doc.query("$[?(@.items.length() > 2)]");
+		ASSERT_EQ(r.size(), size_t(1));
+	}
+	// -- function: length() on string --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"name":"hello"})")));
+		auto r = doc.query("$.name.length()");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 5);
+	}
+	// -- function: count() --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"x":1},{"x":2}])")));
+		auto r = doc.query("$[?(@.x.count() == 1)]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- function: min/max/sum/avg --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"values":[10,20,30]})")));
+		auto rMin = doc.query("$.values.min()");
+		ASSERT_EQ(rMin.size(), size_t(1));
+		ASSERT(rMin[0]->num == 10);
+		auto rMax = doc.query("$.values.max()");
+		ASSERT_EQ(rMax.size(), size_t(1));
+		ASSERT(rMax[0]->num == 30);
+		auto rSum = doc.query("$.values.sum()");
+		ASSERT_EQ(rSum.size(), size_t(1));
+		ASSERT(rSum[0]->type == asvJSONValue::DOUBLE);
+	}
+	// -- function: match() --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"email":"alice@example.com"},{"email":"bob@test.com"}])")));
+		auto r = doc.query("$[?(match(@.email, '^alice'))]");
+		ASSERT_EQ(r.size(), size_t(1));
+	}
+	// -- function: search() --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"name":"John Smith"},{"name":"Jane Doe"}])")));
+		auto r = doc.query("$[?(search(@.name, 'ohn'))]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT_EQ(r[0]->obj->find("name")->second->str_data, "John Smith");
+	}
+	// -- queryFirst --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"b":42}})")));
+		auto* v = doc.queryFirst("$.a.b");
+		ASSERT(v != nullptr);
+		ASSERT(v->num == 42);
+	}
+	// -- queryFirst: not found --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		auto* v = doc.queryFirst("$.b");
+		ASSERT(v == nullptr);
+	}
+	// -- empty results --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		auto r = doc.query("$.b");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+	// -- isValidPath --
+	{
+		ASSERT(asvJSON::isValidPath("$"));
+		ASSERT(asvJSON::isValidPath("$.name"));
+		ASSERT(asvJSON::isValidPath("$[0]"));
+		ASSERT(asvJSON::isValidPath("$..name"));
+		ASSERT(!asvJSON::isValidPath("name"));
+		ASSERT(!asvJSON::isValidPath(""));
+	}
+	// -- nested filter --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"users":[{"name":"Alice","scores":[90,85,95]},{"name":"Bob","scores":[70,60]}]})")));
+		auto r = doc.query("$.users[?(@.scores.length() > 2)].name");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT_EQ(r[0]->str_data, "Alice");
+	}
+	// -- chained bracket + dot --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"items":[{"name":"a"},{"name":"b"}]})")));
+		auto r = doc.query("$.items[0].name");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT_EQ(r[0]->str_data, "a");
+	}
+	// -- bracket string in object --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"b":{"c":99}}})")));
+		auto r = doc.query("$['a']['b']['c']");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 99);
+	}
+	// -- value() function --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"x":42})")));
+		auto r = doc.query("$.x.value()");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 42);
+	}
+	// -- less-than / less-equal --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":1},{"v":2},{"v":3}])")));
+		auto r = doc.query("$[?(@.v < 3)]");
+		ASSERT_EQ(r.size(), size_t(2));
+		auto r2 = doc.query("$[?(@.v <= 2)]");
+		ASSERT_EQ(r2.size(), size_t(2));
+	}
+}
+
+TEST(testJsonSax) {
+	// -- basic object --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onStartObject() override { ev->push_back("{"); }
+			void onEndObject() override { ev->push_back("}"); }
+			void onKey(std::string_view k) override { ev->push_back(std::string("key:") + std::string(k)); }
+			void onStringValue(std::string_view v) override { ev->push_back(std::string("str:") + std::string(v)); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+			void onDoubleValue(double v) override { ev->push_back("dbl:" + std::to_string(v)); }
+			void onBoolValue(bool v) override { ev->push_back(v ? "bool:true" : "bool:false"); }
+			void onNullValue() override { ev->push_back("null"); }
+		} h;
+		h.ev = &events;
+		JsonSaxParser parser;
+		ASSERT(parser.parse(R"({"a":1,"b":"hello","c":true,"d":null,"e":3.14})", h));
+		ASSERT_EQ(events.size(), size_t(12));
+		ASSERT_EQ(events[0], "{");
+		ASSERT_EQ(events[1], "key:a");
+		ASSERT_EQ(events[2], "int:1");
+		ASSERT_EQ(events[3], "key:b");
+		ASSERT_EQ(events[4], "str:hello");
+		ASSERT_EQ(events[5], "key:c");
+		ASSERT_EQ(events[6], "bool:true");
+		ASSERT_EQ(events[7], "key:d");
+		ASSERT_EQ(events[8], "null");
+		ASSERT_EQ(events[9], "key:e");
+		ASSERT_EQ(events[10].substr(0, 4), "dbl:");
+		ASSERT_EQ(events[11], "}");
+	}
+
+	// -- basic array --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onStartArray() override { ev->push_back("["); }
+			void onEndArray() override { ev->push_back("]"); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonSaxParser parser;
+		ASSERT(parser.parse("[1,2,3]", h));
+		ASSERT_EQ(events.size(), size_t(5));
+		ASSERT_EQ(events[0], "[");
+		ASSERT_EQ(events[1], "int:1");
+		ASSERT_EQ(events[2], "int:2");
+		ASSERT_EQ(events[3], "int:3");
+		ASSERT_EQ(events[4], "]");
+	}
+
+	// -- nested structure --
+	{
+		int objCount = 0, arrCount = 0;
+		struct : JsonSaxHandler {
+			int* oc; int* ac;
+			void onStartObject() override { (*oc)++; }
+			void onStartArray() override { (*ac)++; }
+		} h;
+		h.oc = &objCount; h.ac = &arrCount;
+		JsonSaxParser parser;
+		ASSERT(parser.parse(R"({"a":[{"b":1},{"c":[2,3]}]})", h));
+		ASSERT_EQ(objCount, 3);
+		ASSERT_EQ(arrCount, 2);
+	}
+
+	// -- empty object and array --
+	{
+		int objCount = 0, arrCount = 0;
+		struct : JsonSaxHandler {
+			int* oc; int* ac;
+			void onStartObject() override { (*oc)++; }
+			void onStartArray() override { (*ac)++; }
+		} h;
+		h.oc = &objCount; h.ac = &arrCount;
+		JsonSaxParser parser;
+		ASSERT(parser.parse("{}", h));
+		ASSERT_EQ(objCount, 1);
+		ASSERT(parser.parse("[]", h));
+		ASSERT_EQ(arrCount, 1);
+	}
+
+	// -- string escapes --
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonSaxParser parser;
+		ASSERT(parser.parse(R"("hello\nworld")", h));
+		ASSERT_EQ(val, "hello\nworld");
+		ASSERT(parser.parse(R"("tab\there")", h));
+		ASSERT_EQ(val, "tab\there");
+		ASSERT(parser.parse("\"quote: \\\"hi\\\"\"", h));
+		ASSERT_EQ(val, "quote: \"hi\"");
+	}
+
+	// -- unicode escape --
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonSaxParser parser;
+		ASSERT(parser.parse("\"\\u0041\"", h));
+		ASSERT_EQ(val, "A");
+		ASSERT(parser.parse("\"\\uD83D\\uDE00\"", h));
+		ASSERT(val.size() > 0); // emoji
+	}
+
+	// -- error: unexpected char --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonSaxParser parser;
+		ASSERT(!parser.parse("abc", h));
+		ASSERT(errored);
+	}
+
+	// -- error: unclosed string --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonSaxParser parser;
+		ASSERT(!parser.parse(R"("unclosed)", h));
+		ASSERT(errored);
+	}
+
+	// -- parseSax via asvJSON --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onStartObject() override { ev->push_back("{"); }
+			void onEndObject() override { ev->push_back("}"); }
+			void onKey(std::string_view k) override { ev->push_back(std::string("key:") + std::string(k)); }
+			void onStringValue(std::string_view v) override { ev->push_back(std::string("str:") + std::string(v)); }
+		} h;
+		h.ev = &events;
+		asvJSON doc;
+		ASSERT(doc.parseSax(R"({"x":"y"})", h));
+		ASSERT_EQ(events.size(), size_t(4));
+	}
+}
+
+TEST(testJsonStream) {
+	// -- basic: feed in chunks --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onStartObject() override { ev->push_back("{"); }
+			void onEndObject() override { ev->push_back("}"); }
+			void onKey(std::string_view k) override { ev->push_back(std::string("key:") + std::string(k)); }
+			void onStringValue(std::string_view v) override { ev->push_back(std::string("str:") + std::string(v)); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(std::string_view("{\"name")));
+		ASSERT(sp.feed(std::string_view("\":\"Ali")));
+		ASSERT(sp.feed(std::string_view("ce\",\"ag")));
+		ASSERT(sp.feed(std::string_view("e\":30}")));
+		ASSERT(sp.finish());
+		ASSERT_EQ(events.size(), size_t(6));
+		ASSERT_EQ(events[0], "{");
+		ASSERT_EQ(events[1], "key:name");
+		ASSERT_EQ(events[2], "str:Alice");
+		ASSERT_EQ(events[3], "key:age");
+		ASSERT_EQ(events[4], "int:30");
+		ASSERT_EQ(events[5], "}");
+	}
+
+	// -- feed byte by byte --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onStartArray() override { ev->push_back("["); }
+			void onEndArray() override { ev->push_back("]"); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonStreamParser sp(h);
+		std::string input = "[1,2,3]";
+		for (char c : input) {
+			ASSERT(sp.feed(std::string_view(&c, 1)));
+		}
+		ASSERT(sp.finish());
+		ASSERT_EQ(events.size(), size_t(5));
+		ASSERT_EQ(events[0], "[");
+		ASSERT_EQ(events[1], "int:1");
+		ASSERT_EQ(events[2], "int:2");
+		ASSERT_EQ(events[3], "int:3");
+		ASSERT_EQ(events[4], "]");
+	}
+
+	// -- string split across chunks --
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(R"(  "hel)"));
+		ASSERT(sp.feed(R"(lo wor)"));
+		ASSERT(sp.feed(R"(ld"  )"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, "hello world");
+	}
+
+	// -- number split across chunks --
+	{
+		int64_t val = 0;
+		struct : JsonSaxHandler {
+			int64_t* v;
+			void onIntegerValue(int64_t i) override { *v = i; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("12"));
+		ASSERT(sp.feed("34"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, 1234);
+	}
+
+	// -- double across chunks --
+	{
+		double val = 0;
+		struct : JsonSaxHandler {
+			double* v;
+			void onDoubleValue(double d) override { *v = d; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("3.1"));
+		ASSERT(sp.feed("4"));
+		ASSERT(sp.finish());
+		ASSERT(std::abs(val - 3.14) < 0.01);
+	}
+
+	// -- nested objects --
+	{
+		int depth = 0, maxDepth = 0;
+		struct : JsonSaxHandler {
+			int* depth; int* maxDepth;
+			void onStartObject() override { (*depth)++; if (*depth > *maxDepth) *maxDepth = *depth; }
+			void onEndObject() override { (*depth)--; }
+		} h;
+		h.depth = &depth; h.maxDepth = &maxDepth;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(R"({"a":{"b":{"c":1}}})"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(maxDepth, 3);
+	}
+
+	// -- incomplete string error --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(R"("incomplete)"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- empty input --
+	{
+		JsonSaxHandler h;
+		JsonStreamParser sp(h);
+		ASSERT(sp.finish());
+	}
+
+	// -- single value --
+	{
+		bool val = false;
+		struct : JsonSaxHandler {
+			bool* v;
+			void onBoolValue(bool b) override { *v = b; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("true"));
+		ASSERT(sp.finish());
+		ASSERT(val);
+	}
+
+	// -- comments across chunks --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("[1, // comment\n2]"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(events.size(), size_t(2));
+		ASSERT_EQ(events[0], "int:1");
+		ASSERT_EQ(events[1], "int:2");
+	}
+}
+
+TEST(testSaxToDom) {
+	// -- basic object --
+	{
+		JsonSaxToDom adapter;
+		JsonSaxParser parser;
+		ASSERT(parser.parse(R"({"name":"Alice","age":30,"active":true,"data":null})", adapter));
+		auto result = adapter.getResult();
+		ASSERT(result != nullptr);
+		ASSERT_EQ(result->type, asvJSONValue::OBJECT);
+		ASSERT_EQ(result->obj->find("name")->second->str_data, "Alice");
+		ASSERT(result->obj->find("age")->second->num == 30);
+		ASSERT(result->obj->find("active")->second->getBool());
+		ASSERT(result->obj->find("data")->second->type == asvJSONValue::NULL_VAL);
+	}
+
+	// -- basic array --
+	{
+		JsonSaxToDom adapter;
+		JsonSaxParser parser;
+		ASSERT(parser.parse("[1,2,3]", adapter));
+		auto result = adapter.getResult();
+		ASSERT(result != nullptr);
+		ASSERT_EQ(result->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(result->arr->size(), size_t(3));
+		ASSERT((*result->arr)[0]->num == 1);
+		ASSERT((*result->arr)[1]->num == 2);
+		ASSERT((*result->arr)[2]->num == 3);
+	}
+
+	// -- nested structure --
+	{
+		JsonSaxToDom adapter;
+		JsonSaxParser parser;
+		ASSERT(parser.parse(R"({"items":[{"x":10},{"x":20}]})", adapter));
+		auto result = adapter.getResult();
+		ASSERT(result != nullptr);
+		auto* items = result->obj->find("items")->second.get();
+		ASSERT_EQ(items->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(items->arr->size(), size_t(2));
+		ASSERT((*items->arr)[0]->obj->find("x")->second->num == 10);
+		ASSERT((*items->arr)[1]->obj->find("x")->second->num == 20);
+	}
+
+	// -- via streaming parser --
+	{
+		JsonSaxToDom adapter;
+		JsonStreamParser sp(adapter);
+		ASSERT(sp.feed(R"({"a":1,"b":[2,3]})"));
+		ASSERT(sp.finish());
+		auto result = adapter.getResult();
+		ASSERT(result != nullptr);
+		ASSERT(result->obj->find("a")->second->num == 1);
+		auto* b = result->obj->find("b")->second.get();
+		ASSERT_EQ(b->arr->size(), size_t(2));
+		ASSERT((*b->arr)[0]->num == 2);
+		ASSERT((*b->arr)[1]->num == 3);
+	}
+
+	// -- round-trip: DOM -> SAX -> DOM --
+	{
+		asvJSON original;
+		original.parse(std::string_view(R"({"x":42,"y":"hello","z":[1,true,null]})"));
+		std::string serialized = original.serialize();
+
+		JsonSaxToDom adapter;
+		JsonSaxParser parser;
+		parser.parse(serialized, adapter);
+		auto result = adapter.getResult();
+
+		// Verify values directly on the SAX-constructed DOM
+		ASSERT_EQ(result->obj->find("x")->second->num, 42.0);
+		ASSERT_EQ(result->obj->find("y")->second->str_data, "hello");
+		auto* z = result->obj->find("z")->second.get();
+		ASSERT_EQ(z->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(z->arr->size(), size_t(3));
+		ASSERT((*z->arr)[0]->num == 1);
+		ASSERT((*z->arr)[1]->getBool());
+		ASSERT((*z->arr)[2]->type == asvJSONValue::NULL_VAL);
+	}
+
+	// -- streaming to DOM with large chunked input --
+	{
+		JsonSaxToDom adapter;
+		JsonStreamParser sp(adapter);
+		// Feed a large array in small chunks
+		std::string input = "[";
+		for (int i = 0; i < 100; i++) {
+			if (i > 0) input += ",";
+			input += std::to_string(i);
+		}
+		input += "]";
+		// Feed in 16-byte chunks
+		for (size_t i = 0; i < input.size(); i += 16) {
+			size_t len = std::min(size_t(16), input.size() - i);
+			ASSERT(sp.feed(std::string_view(input.data() + i, len)));
+		}
+		ASSERT(sp.finish());
+		auto result = adapter.getResult();
+		ASSERT(result != nullptr);
+		ASSERT_EQ(result->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(result->arr->size(), size_t(100));
+		ASSERT((*result->arr)[0]->num == 0);
+		ASSERT((*result->arr)[99]->num == 99);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -7789,6 +8782,20 @@ int main() {
 	RUN(testUDESpecConformance);
 	RUN(testUDEStrict);
 	RUN(testUDEAnchors);
+
+	std::cout << "\n--- FromAny & FormatType Tests ---\n";
+	RUN(testFromAnyAndFormatType);
+
+	std::cout << "\n--- JSON Schema Tests ---\n";
+	RUN(testJSONSchema);
+
+	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
+	RUN(testJSONPath);
+
+	std::cout << "\n--- JSON SAX Parser Tests ---\n";
+	RUN(testJsonSax);
+	RUN(testJsonStream);
+	RUN(testSaxToDom);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

@@ -514,6 +514,7 @@ asvJSONValue* TronParseState::parseValue() {
 }
 
 inline bool asvJSON::fromTRON(std::string_view input) {
+  formatType = FormatType::Unknown;
   try {
     auto toks = tronTokenize(input, allowNaNInfinity);
     TronParseState state(toks);
@@ -574,6 +575,7 @@ inline bool asvJSON::fromTRON(std::string_view input) {
     if (state.peek().type != TronTokType::END)
       throw asvJSONError("trailing tokens after root value");
     root.reset(state.root);
+    formatType = FormatType::TRON;
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();

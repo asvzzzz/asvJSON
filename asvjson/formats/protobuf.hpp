@@ -127,7 +127,7 @@ inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
   auto it = obj->obj->find(key);
   if (it != obj->obj->end()) {
-    // Repeated field вЂ” convert to array if not already
+    // Repeated field -- convert to array if not already
     if (it->second->type == asvJSONValue::ARRAY && it->second->arr) {
       it->second->arr->push_back(std::move(val));
     } else {
@@ -911,6 +911,7 @@ inline std::vector<uint8_t> asvJSON::toProtobuf(const std::string& schemaJson) c
 
 inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::string& schemaJson) {
   root = nullptr;
+  formatType = FormatType::Unknown;
   if (!data || size < 1) return false;
   try {
     std::shared_ptr<ProtoSchema> schema;
@@ -919,6 +920,7 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
       if (sj.parse(schemaJson)) schema = protoParseSchema(sj.getRoot());
     }
     root = protoDecodeRoot(static_cast<const uint8_t*>(data), size, schema.get());
+    if (root) formatType = FormatType::Protobuf;
     return root != nullptr;
   } catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
 }
@@ -931,6 +933,7 @@ inline std::string asvJSON::toProtobufText() const {
 
 inline bool asvJSON::fromProtobufText(const std::string& text) {
   root = nullptr;
+  formatType = FormatType::Unknown;
   try {
     size_t pos = 0;
     protoTextSkipWS(text, pos);
@@ -958,6 +961,7 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
         if (val) root = std::move(val);
       }
     }
+    if (root) formatType = FormatType::ProtobufText;
     return root != nullptr;
   } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
 }

@@ -584,7 +584,7 @@ private:
           case '\\': out.push_back('\\'); break;
           case '"': out.push_back('"'); break;
           case 'x': {
-            // Byte escape \xHH — exactly two hex digits (Section 6).
+            // Byte escape \xHH -- exactly two hex digits (Section 6).
             if (i + 2 >= raw.size()) throw asvJSONError("UDE: invalid \\x escape in string");
             int hi = udeHexDigit(raw[i + 1]);
             int lo = udeHexDigit(raw[i + 2]);
@@ -835,7 +835,7 @@ private:
       // Folded scalar: first fold (NEWLINE -> space), then chomping is
       // applied to the folded result. Empty lines are part of the content
       // and become paragraph breaks (Section 6); they never terminate the
-      // scalar — termination happens only on a dedent, in the loop above.
+      // scalar -- termination happens only on a dedent, in the loop above.
       out = udeFoldScalar(out);
     }
 
@@ -1183,8 +1183,8 @@ private:
         } else if (it->second->type == asvJSONValue::OBJECT) {
           cur = it->second.get();
         } else {
-          // Existing key is not an object – cannot expand dotted key further.
-          throw asvJSONError("UDE: key conflict – intermediate key '" + seg + "' is not an object");
+          // Existing key is not an object - cannot expand dotted key further.
+          throw asvJSONError("UDE: key conflict - intermediate key '" + seg + "' is not an object");
         }
       }
       const std::string& leaf = pk.segs.back().first;
@@ -1671,6 +1671,7 @@ inline std::string asvJSON::toUDE(bool strict) const {
 }
 
 inline bool asvJSON::fromUDE(std::string_view input, bool strict) {
+  formatType = FormatType::Unknown;
   try {
     root = nullptr;
     auto parsed = asvJSONInternal::parseUDE(std::string(input), strict);
@@ -1679,6 +1680,7 @@ inline bool asvJSON::fromUDE(std::string_view input, bool strict) {
       return false;
     }
     root = std::move(parsed);
+    formatType = FormatType::UDE;
     return true;
   } catch (const std::exception& e) {
     lastError = e.what();

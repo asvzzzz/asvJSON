@@ -1,6 +1,6 @@
-/* asvJSON++ Converter — standalone cross-platform HTTP server
+/* asvJSON++ Converter -- standalone cross-platform HTTP server
    Serves static frontend and handles /api/convert POST.
-   No external dependencies — uses BSD sockets (POSIX/WinSock).
+   No external dependencies -- uses BSD sockets (POSIX/WinSock).
 */
 
 // Include asvJSON before Windows headers to avoid TRUE/FALSE macro conflicts
@@ -224,7 +224,9 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       }
 
       bool ok = false;
-      if (fromFmt == "JSON5") ok = j.fromJSON5(textData);
+      if (fromFmt.empty()) {
+        ok = j.fromAny(textData);
+      } else if (fromFmt == "JSON5") ok = j.fromJSON5(textData);
       else if (fromFmt == "XML") ok = j.fromXML(textData);
       else if (fromFmt == "YAML") ok = j.fromYAML(textData);
       else if (fromFmt == "CSV") ok = j.fromCSV(textData);
@@ -385,7 +387,7 @@ private:
             // A full implementation would parse chunk sizes
             return buf;
           }
-          // No body indicator — assume done
+          // No body indicator -- assume done
           return buf;
         }
 

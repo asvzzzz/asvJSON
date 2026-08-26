@@ -184,7 +184,7 @@ inline bool sexprTypeIsKey(int t) {
 inline std::string sexprKeyJson(const std::string& item, int type) {
   if (type == SEXPR_NUMBER || type == SEXPR_TRUE ||
       type == SEXPR_FALSE || type == SEXPR_NIL) {
-    // Bare JSON value — wrap in quotes for JSON object key
+    // Bare JSON value -- wrap in quotes for JSON object key
     return '"' + item + '"';
   }
   return item;
@@ -210,7 +210,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
       itemTypes.push_back(sub.empty() ? SEXPR_NIL : (sub[0] == '{' ? -2 : -1));
       items.push_back(std::move(sub));
     } else if (tokens[pos].type == SEXPR_STRING && !tokens[pos].value.empty() && tokens[pos].value[0] == SEXPR_KEY_MARK) {
-      // Marked string key from encoder — strip marker and treat as symbol
+      // Marked string key from encoder -- strip marker and treat as symbol
       SexprToken stripped = tokens[pos];
       stripped.value = stripped.value.substr(1);
       items.push_back(sexprTokenToJson(stripped));
@@ -230,15 +230,15 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // - Even-length groups are objects only if all even-indexed items are
   //   string/symbol keys. A 2-item group is an object ONLY when the first
   //   item is a bare symbol (or a marked key). Quoted strings in position 0
-  //   are data → array.
+  //   are data -> array.
   // - When the group starts with a bare symbol key but the remaining items
   //   are not objects, the values are emitted as an array: {key: [v1, v2, ...]}.
   //   Quoted strings are data values, never keys, in this fallback.
-  // This is intentionally heuristic — S-Expressions have no inherent
+  // This is intentionally heuristic -- S-Expressions have no inherent
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
 
-  // Empty object marker: (() #t) — empty group + true sentinel
+  // Empty object marker: (() #t) -- empty group + true sentinel
   if (items.size() == 2 && items[0] == "[]" && items[1] == "true"
       && itemTypes[0] == -1 && itemTypes[1] == SEXPR_TRUE) {
     return "{}";
@@ -257,14 +257,14 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   }
 
   // Fallback: if first item is a bare symbol key, emit {key: values}.
-  // A quoted string in first position is data, not a key — odd-length
+  // A quoted string in first position is data, not a key -- odd-length
   // groups are always lists, so ("a" "b" "c") stays an array.
   if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
     std::string key = items[0];
     if (items.size() == 2) {
       return '{' + key + ':' + items[1] + '}';
     }
-    // Check if all remaining items are objects — merge into single object
+    // Check if all remaining items are objects -- merge into single object
     bool allObj = true;
     for (size_t j = 1; j < items.size(); j++) {
       if (itemTypes[j] != -2) { allObj = false; break; }
@@ -273,7 +273,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
       std::string r = '{' + key + ":{";
       for (size_t j = 1; j < items.size(); j++) {
         if (j > 1) r += ',';
-        // Each item is {"k":"v"} — strip outer braces to merge key-value pairs
+        // Each item is {"k":"v"} -- strip outer braces to merge key-value pairs
         const auto& s = items[j];
         if (s.size() >= 2 && s.front() == '{' && s.back() == '}') {
           r += s.substr(1, s.size() - 2);
@@ -391,6 +391,7 @@ inline std::string asvJSON::toSexpr() const {
 }
 
 inline bool asvJSON::fromSexpr(std::string_view input) {
+  formatType = FormatType::Unknown;
   try {
     if (input.empty()) throw asvJSONError("empty input");
     auto tokens = sexprTokenize(input);
@@ -398,7 +399,9 @@ inline bool asvJSON::fromSexpr(std::string_view input) {
     size_t pos = 0;
     std::string json = sexprTokensToJson(tokens, pos);
     if (pos != tokens.size()) throw asvJSONError("unexpected tokens after S-Expression");
-    return parse(std::string_view(json));
+    bool ok = parse(std::string_view(json));
+    if (ok) formatType = FormatType::SExpr;
+    return ok;
   } catch (const asvJSONError& e) {
     lastError = e.what();
     return false;

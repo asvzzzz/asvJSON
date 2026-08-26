@@ -1267,6 +1267,156 @@ void example_to_ude() {
 	std::cout << json.toUDE() << std::endl;
 }
 
+void example_from_any() {
+	std::cout << "=== fromAny() Auto-Detection ===" << std::endl;
+
+	{
+		asvJSON json;
+		if (json.fromAny(R"({"name":"Alice","age":30})")) {
+			std::cout << "Detected JSON, name=" << json.getString("name") << std::endl;
+		}
+	}
+	{
+		asvJSON json;
+		if (json.fromAny("name: Alice\nage: 30\n")) {
+			std::cout << "Detected YAML, name=" << json.getString("name") << std::endl;
+		}
+	}
+	{
+		asvJSON json;
+		if (json.fromAny(R"(<root><name>Alice</name><age>30</age></root>)")) {
+			std::cout << "Detected XML, name=" << json.getString("name") << std::endl;
+		}
+	}
+	{
+		asvJSON json;
+		if (json.fromAny(R"({name: 'Alice', age: 30})")) {
+			std::cout << "Detected JSON5, name=" << json.getString("name") << std::endl;
+		}
+	}
+	{
+		asvJSON json;
+		if (json.fromAny("[section]\nkey = value\n")) {
+			std::cout << "Detected INI" << std::endl;
+		}
+	}
+	{
+		asvJSON json;
+		auto ft = json.getFormatType();
+		std::cout << "Format type enum value: " << static_cast<int>(ft) << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_json_schema() {
+	std::cout << "=== JSON Schema Validation ===" << std::endl;
+
+	asvJSON schema;
+	schema.parse(std::string_view(R"({
+		"type": "object",
+		"properties": {
+			"name": {"type": "string", "minLength": 1},
+			"age": {"type": "number", "minimum": 0},
+			"email": {"type": "string", "pattern": "^.+@.+$"}
+		},
+		"required": ["name", "age"]
+	})"));
+
+	// Valid document
+	{
+		asvJSON doc;
+		doc.parse(std::string_view(R"({"name":"Alice","age":30,"email":"alice@example.com"})"));
+		std::string err;
+		if (doc.validate(schema, err)) {
+			std::cout << "Valid: yes" << std::endl;
+		} else {
+			std::cout << "Valid: no, error: " << err << std::endl;
+		}
+	}
+
+	// Missing required field
+	{
+		asvJSON doc;
+		doc.parse(std::string_view(R"({"age":30})"));
+		std::string err;
+		if (doc.validate(schema, err)) {
+			std::cout << "Valid: yes" << std::endl;
+		} else {
+			std::cout << "Missing 'name': " << err << std::endl;
+		}
+	}
+
+	// Wrong type
+	{
+		asvJSON doc;
+		doc.parse(std::string_view(R"({"name":"Bob","age":"thirty"})"));
+		std::string err;
+		if (doc.validate(schema, err)) {
+			std::cout << "Valid: yes" << std::endl;
+		} else {
+			std::cout << "Wrong type: " << err << std::endl;
+		}
+	}
+	std::cout << std::endl;
+}
+
+void example_jsonpath() {
+	std::cout << "=== JSONPath Queries ===" << std::endl;
+
+	asvJSON doc;
+	doc.parse(std::string_view(R"({
+		"store": {
+			"book": [
+				{"title":"Sayings of the Century","price":8.95},
+				{"title":"Sword of Honour","price":12.99},
+				{"title":"Moby Dick","price":8.99}
+			],
+			"bicycle": {"color":"red","price":19.95}
+		}
+	})"));
+
+	// Dot notation
+	auto r1 = doc.query("$.store.bicycle.color");
+	if (!r1.empty()) std::cout << "Bicycle color: " << r1[0]->str_data << std::endl;
+
+	// Array access
+	auto r2 = doc.query("$.store.book[0].title");
+	if (!r2.empty()) std::cout << "First book: " << r2[0]->str_data << std::endl;
+
+	// Slice
+	auto r3 = doc.query("$.store.book[0:2].title");
+	std::cout << "First two books: ";
+	for (auto* v : r3) std::cout << v->str_data << " ";
+	std::cout << std::endl;
+
+	// Recursive descent
+	auto r4 = doc.query("$..price");
+	std::cout << "All prices: ";
+	for (auto* v : r4) {
+		if (v->type == asvJSONValue::DOUBLE) std::cout << v->dbl << " ";
+		else std::cout << v->num << " ";
+	}
+	std::cout << std::endl;
+
+	// Filter
+	auto r5 = doc.query("$.store.book[?(@.price < 10)].title");
+	std::cout << "Cheap books: ";
+	for (auto* v : r5) std::cout << v->str_data << " ";
+	std::cout << std::endl;
+
+	// Wildcard
+	auto r6 = doc.query("$.store.book[*].title");
+	std::cout << "All book titles: ";
+	for (auto* v : r6) std::cout << v->str_data << " ";
+	std::cout << std::endl;
+
+	// queryFirst
+	auto* v = doc.queryFirst("$.store.bicycle.price");
+	if (v) std::cout << "queryFirst price: " << v->dbl << std::endl;
+
+	std::cout << std::endl;
+}
+
 void example_from_ude() {
 	std::cout << "=== UDE Input ===" << std::endl;
 
@@ -1277,6 +1427,65 @@ void example_from_ude() {
 		          << " age=" << json.getInt("age")
 		          << " active=" << json.getBool("active")
 		          << " tags[0]=" << json.getRoot()->getConst("tags")->get(static_cast<size_t>(0))->getString()
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void example_json_sax() {
+	std::cout << "=== JSON SAX/Streaming Parser ===" << std::endl;
+
+	// Single-pass SAX parser (requires full input)
+	std::cout << "\n  Single-pass SAX parser:" << std::endl;
+	{
+		struct : JsonSaxHandler {
+			void onStartObject() override { std::cout << "  {"; }
+			void onEndObject() override { std::cout << " }"; }
+			void onKey(std::string_view k) override { std::cout << " " << k << ":"; }
+			void onStringValue(std::string_view v) override { std::cout << "\"" << v << "\""; }
+			void onIntegerValue(int64_t v) override { std::cout << v; }
+			void onBoolValue(bool v) override { std::cout << (v ? "true" : "false"); }
+			void onNullValue() override { std::cout << "null"; }
+		} handler;
+		JsonSaxParser parser;
+		parser.parse(R"({"name":"Alice","age":30,"active":true,"data":null})", handler);
+		std::cout << std::endl;
+	}
+
+	// Streaming parser (chunk-based incremental)
+	std::cout << "\n  Streaming parser (chunked input):" << std::endl;
+	{
+		std::vector<std::string> keys;
+		std::vector<int64_t> values;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* k;
+			std::vector<int64_t>* v;
+			void onKey(std::string_view key) override { k->push_back(std::string(key)); }
+			void onIntegerValue(int64_t val) override { v->push_back(val); }
+		} handler;
+		handler.k = &keys;
+		handler.v = &values;
+		JsonStreamParser sp(handler);
+		// Feed data in small chunks to simulate network streaming
+		sp.feed(std::string_view("{\"x\":1"));
+		sp.feed(std::string_view(",\"y\":2"));
+		sp.feed(std::string_view(",\"z\":3}"));
+		sp.finish();
+		for (size_t i = 0; i < keys.size(); i++) {
+			std::cout << "  " << keys[i] << "=" << values[i];
+		}
+		std::cout << std::endl;
+	}
+
+	// SAX-to-DOM adapter
+	std::cout << "\n  SAX-to-DOM adapter:" << std::endl;
+	{
+		JsonSaxToDom adapter;
+		JsonSaxParser parser;
+		parser.parse(R"({"lang":"C++","version":17,"features":["fast","header-only"]})", adapter);
+		auto result = adapter.getResult();
+		std::cout << "  lang=" << result->obj->find("lang")->second->str_data
+		          << " version=" << result->obj->find("version")->second->num
 		          << std::endl;
 	}
 	std::cout << std::endl;
@@ -1358,6 +1567,10 @@ int main() {
 	example_to_ude();
 	example_from_ude();
 	example_ude_strings();
+	example_from_any();
+	example_json_schema();
+	example_jsonpath();
+	example_json_sax();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

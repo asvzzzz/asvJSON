@@ -78,6 +78,7 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 }
 
 inline bool asvJSON::fromCSV(std::string_view input) {
+	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 
@@ -136,6 +137,7 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 		if (arr->arr->empty()) throw asvJSONError("no data rows");
 
 		root = std::move(arr);
+		formatType = FormatType::CSV;
 		return true;
 	} catch (const asvJSONError& e) {
 		lastError = e.what();

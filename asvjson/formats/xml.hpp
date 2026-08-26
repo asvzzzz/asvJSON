@@ -613,6 +613,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 }
 
 inline bool asvJSON::fromXML(std::string_view input) {
+	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 
@@ -671,6 +672,7 @@ inline bool asvJSON::fromXML(std::string_view input) {
 		if (count == 0) throw asvJSONError("failed to parse root element");
 
 		root = std::move(obj);
+		formatType = FormatType::XML;
 		return true;
 	} catch (const asvJSONError& e) {
 		lastError = e.what();

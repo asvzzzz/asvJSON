@@ -227,7 +227,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	if (s == "NaN" || s == ".NaN" || s == ".nan" || s == ".NAN") return "NaN";
 	if (s == "Infinity" || s == ".Inf" || s == ".inf" || s == ".INF") return "Infinity";
 	if (s == "-Infinity" || s == "-.Inf" || s == "-.inf" || s == "-.INF") return "-Infinity";
-	// Use from_chars instead of strtod — safe with non-null-terminated string_view
+	// Use from_chars instead of strtod -- safe with non-null-terminated string_view
 	{
 		double d;
 		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), d);
@@ -1586,11 +1586,14 @@ inline std::string yamlToJson(std::string_view input) {
 }
 
 inline bool asvJSON::fromYAML(std::string_view input) {
+	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 		std::string json = yamlToJson(input);
 		allowNaNInfinity = true;
-		return parse(std::string_view(json));
+		bool ok = parse(std::string_view(json));
+		if (ok) formatType = FormatType::YAML;
+		return ok;
 	} catch (const asvJSONError& e) {
 		lastError = e.what();
 		return false;

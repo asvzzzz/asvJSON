@@ -23,7 +23,7 @@ inline bool toonIsJsonValue(std::string_view s) {
   if (s.empty()) return false;
   if (s.front() == '"' || s.front() == '{' || s.front() == '[') return true;
   if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) {
-    // Validate full number — reject e.g. "1.12.0" (two dots)
+    // Validate full number -- reject e.g. "1.12.0" (two dots)
     bool hasDot = false, hasExp = false;
     for (size_t i = (s.front() == '-' || s.front() == '+') ? 1 : 0; i < s.size(); i++) {
       if (s[i] >= '0' && s[i] <= '9') continue;
@@ -356,8 +356,11 @@ inline std::string asvJSON::toTOON() const {
 }
 
 inline bool asvJSON::fromTOON(std::string_view input) {
+  formatType = FormatType::Unknown;
   std::string json = toonToJson(input);
-  return parse(std::string_view(json));
+  bool ok = parse(std::string_view(json));
+  if (ok) formatType = FormatType::TOON;
+  return ok;
 }
 
 } // namespace asvJSONInternal

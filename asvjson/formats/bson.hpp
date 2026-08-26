@@ -346,7 +346,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				// BSON timestamp = {t: uint32, i: uint32 increment}.
 				// Increment is discarded: asvJSONValue::TIMESTAMP stores only
 				// the seconds field.  toBSON writes i=0.  This is a known,
-				// documented loss — the BSON timestamp type is primarily used
+				// documented loss -- the BSON timestamp type is primarily used
 				// internally by MongoDB and rarely round-trips through JSON.
 				(void)inc;
 				obj->obj->emplace(key, asvJSONValue::makeTimestamp(static_cast<int64_t>(ts)));

@@ -556,12 +556,37 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth = 0);
 
 
+enum class FormatType {
+  Unknown,
+  JSON,
+  JSON5,
+  JSONLines,
+  YAML,
+  XML,
+  CSV,
+  TOML,
+  INI,
+  SExpr,
+  TOON,
+  TRON,
+  GOON,
+  UDE,
+  MessagePack,
+  CBOR,
+  BSON,
+  Protobuf,
+  ProtobufText,
+};
+
 /// Thread safety:
 /// - Concurrent READS of the same const asvJSON instance are safe.
 /// - A write (parse, from*, set*, to*, serialization mutating state) must not
 ///   run concurrently with any other operation on the same instance.
 /// - Distinct asvJSON instances are safe to use concurrently from separate
 ///   threads; format-specific shared state uses thread_local storage.
+
+struct JsonSaxHandler; // forward declaration for parseSax()
+
 class asvJSON {
 public:
 	mutable std::string lastError;
@@ -580,6 +605,7 @@ private:
 	std::string_view json;
 	size_t pos = 0;
 	int parseDepth = 0;
+	FormatType formatType = FormatType::Unknown;
 
 	inline void skip() {
 		while (pos < json.size()) {
@@ -851,7 +877,7 @@ private:
 			}
 			if (ec == std::errc() && ptr != buf + numLen) throw asvJSONError("Invalid number");
 			if (ec != std::errc()) {
-				// Overflow (e.g. 1e999): from_chars sets d to ±inf. Honor allowNaNInfinity.
+				// Overflow (e.g. 1e999): from_chars sets d to +/-inf. Honor allowNaNInfinity.
 				// Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected, as before.
 				if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) {
 					return asvJSONValue::makeDouble(d);
@@ -864,7 +890,7 @@ private:
 			errno = 0;
 			d = std::strtod(numStr.c_str(), &endptr);
 			if (errno == ERANGE) {
-				// Overflow (e.g. 1e999): strtod sets d to ±HUGE_VAL. Honor allowNaNInfinity.
+				// Overflow (e.g. 1e999): strtod sets d to +/-HUGE_VAL. Honor allowNaNInfinity.
 				// Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected, as before.
 				if (allowNaNInfinity && std::isinf(d)) {
 					return asvJSONValue::makeDouble(d);
@@ -945,6 +971,7 @@ public:
 
 	bool parse(std::string_view s) {
 		root = nullptr;
+		formatType = FormatType::Unknown;
 		// Strip UTF-8 BOM (EF BB BF) if present
 		if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s.remove_prefix(3);
 		if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
@@ -958,6 +985,7 @@ public:
 			root = parseValue();
 			skip();
 			if (pos != json.size()) { root = nullptr; lastError = "Trailing chars"; return false; }
+			formatType = FormatType::JSON;
 			return root != nullptr;
 		} catch (const asvJSONError& e) {
 			lastError = e.what();
@@ -1631,6 +1659,7 @@ public:
 	}
 
 	[[nodiscard]] const std::string& getLastError() const noexcept { return lastError; }
+	[[nodiscard]] FormatType getFormatType() const noexcept { return formatType; }
 
 	static std::string typeToString(asvJSONValue::Type t) {
 		return std::string(asvJSONValue::typeToString(t));
@@ -1659,6 +1688,12 @@ public:
 	bool fromJSONLines(std::string_view input);
 	std::string toINI() const;
 	bool fromINI(std::string_view input);
+	bool fromAny(std::string_view input);
+	/// @brief Parse JSON using SAX callbacks (no DOM allocation).
+	/// @param input JSON input string.
+	/// @param handler SAX event handler.
+	/// @return true on success, false on error (check getLastError()).
+	bool parseSax(std::string_view input, JsonSaxHandler& handler);
 	/// @brief Transfer ownership of the root value to the caller.
 	/// @return Unique pointer to the root value (may be null).
 	/// @note After calling, the document becomes empty; it can be reused via parse().
@@ -1678,6 +1713,15 @@ public:
 	const asvJSONValue* getByPointer(std::string_view ptr) const;
 	bool setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value);
 	bool removeByPointer(std::string_view ptr);
+
+	// JSON Schema validation
+	bool validate(const asvJSON& schema) const;
+	bool validate(const asvJSON& schema, std::string& error) const;
+
+	// JSONPath (RFC 9535)
+	std::vector<const asvJSONValue*> query(std::string_view path) const;
+	const asvJSONValue* queryFirst(std::string_view path) const;
+	static bool isValidPath(std::string_view path);
 
 	// Merge & Patch
 	void merge(const asvJSON& other);
@@ -2272,24 +2316,28 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
 
 inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	root = nullptr;
+	formatType = FormatType::Unknown;
 	if (!data || size < 1) return false;
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
 		size_t pos = 0;
 		root = parseMessagePack(u, pos, size, 0);
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
+		formatType = FormatType::MessagePack;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
 }
 
 inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 	root = nullptr;
+	formatType = FormatType::Unknown;
 	if (!data || size < 1) return false;
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
 		size_t pos = 0;
 		root = parseCBOR(u, pos, size, 0);
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
+		formatType = FormatType::CBOR;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
 }
@@ -2406,6 +2454,7 @@ inline std::string asvJSON::toJSONLines() const {
 }
 
 inline bool asvJSON::fromJSONLines(std::string_view input) {
+	formatType = FormatType::Unknown;
 	try {
 		auto arr = asvJSONValue::makeArray();
 		size_t pos = 0;
@@ -2424,6 +2473,7 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 			pos = end + 1;
 		}
 		root = std::move(arr);
+		formatType = FormatType::JSONLines;
 		return true;
 	} catch (const asvJSONError& e) {
 		lastError = e.what();
@@ -2437,11 +2487,13 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 
 inline bool asvJSON::fromBSON(const void* data, size_t size) {
 	root = nullptr;
+	formatType = FormatType::Unknown;
 	if (!data || size < 5) return false;
 	try {
 		size_t pos = 0;
 		root = parseBSON(static_cast<const uint8_t*>(data), pos, size, 0);
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
+		formatType = FormatType::BSON;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
 }

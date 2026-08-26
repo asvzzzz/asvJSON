@@ -481,6 +481,7 @@ inline std::string asvJSON::toJSON5(bool pretty) const {
 }
 
 inline bool asvJSON::fromJSON5(std::string_view input) {
+  formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
   bool prevNaN = allowNaNInfinity;
   allowNaNInfinity = true;
@@ -488,6 +489,7 @@ inline bool asvJSON::fromJSON5(std::string_view input) {
     std::string json = json5ToJson(input);
     bool ok = parse(std::string_view(json));
     allowNaNInfinity = prevNaN;
+    if (ok) formatType = FormatType::JSON5;
     return ok;
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;
