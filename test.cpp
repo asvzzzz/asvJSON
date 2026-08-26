@@ -3799,7 +3799,7 @@ TEST(testFromYAML) {
 	// (builds anchors that recursively call yamlParseDoc; depth > 64 throws)
 	{
 		asvJSON json;
-		// This should parse fine — no actual recursion cycle
+		// This should parse fine - no actual recursion cycle
 		ASSERT(json.fromYAML("a: &ref1 42\nb: *ref1"));
 		ASSERT_EQ(json.getInt("a"), 42);
 		ASSERT_EQ(json.getInt("b"), 42);
@@ -4559,7 +4559,7 @@ TEST(testProtobufTextFormat) {
 
 TEST(testProtobufTextIntOverflow) {
 	// int64 overflow in text format must be preserved as an exact literal (raw_number),
-	// not silently clamped to LLONG_MAX — same convention as core JSON and UDE.
+	// not silently clamped to LLONG_MAX - same convention as core JSON and UDE.
 	asvJSON json2;
 	ASSERT(json2.fromProtobufText("big: 99999999999999999999999"));
 	auto* v = json2.getRoot()->get("big");
@@ -5420,7 +5420,7 @@ TEST(testFromSexpr) {
     ASSERT_EQ(std::string(j2.getString("hello world")), "test");
     ASSERT_EQ(std::string(j2.getString("123")), "num");
   }
-  // Quoted strings are data, not keys — odd-length group stays an array
+  // Quoted strings are data, not keys - odd-length group stays an array
   {
     asvJSON j;
     ASSERT(j.fromSexpr(std::string_view(R"((items ("apple" "banana" "cherry") count 3))")));

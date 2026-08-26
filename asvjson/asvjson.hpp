@@ -261,13 +261,13 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
 
   auto ext = asvjsonExtractExt(filename);
 
-  // Binary formats — pass raw bytes
+  // Binary formats - pass raw bytes
   if (ext == "bson") { formatType = FormatType::BSON; return fromBSON(content); }
   if (ext == "mp" || ext == "msgpack" || ext == "msg") { formatType = FormatType::MessagePack; return fromMessagePack(content); }
   if (ext == "cbor") { formatType = FormatType::CBOR; return fromCBOR(content); }
   if (ext == "pb" || ext == "protobuf" || ext == "proto") { formatType = FormatType::Protobuf; return fromProtobuf(content); }
 
-  // Text formats — use string_view dispatch
+  // Text formats - use string_view dispatch
   if (ext == "json")  { formatType = FormatType::JSON;     return parse(content); }
   if (ext == "json5" || ext == "jsonc") { formatType = FormatType::JSON5;     return fromJSON5(content); }
   if (ext == "jsonl" || ext == "ndjson") { formatType = FormatType::JSONLines; return fromJSONLines(content); }
@@ -284,14 +284,14 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "ude")  { formatType = FormatType::UDE;      return fromUDE(content); }
   if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
 
-  // Unknown extension — auto-detect from content
+  // Unknown extension - auto-detect from content
   return fromAny(content);
 }
 
 inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) const {
   auto ext = asvjsonExtractExt(filename);
 
-  // Binary formats — write raw bytes
+  // Binary formats - write raw bytes
   if (ext == "bson") {
     auto data = toBSON();
     std::ofstream out(filename, std::ios::binary);
