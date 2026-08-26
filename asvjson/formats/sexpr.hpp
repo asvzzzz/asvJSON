@@ -50,7 +50,7 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
             case '\\': s += '\\'; break;
             case '/': s += '/'; break;
             case 'u': case 'U': {
-              bool isUpper = (input[i] == 'u');
+              bool isUpper = (input[i] == 'U');
               int count = isUpper ? 8 : 4;
               if (i + 1 + count > input.size()) {
                 s += '\\'; s += isUpper ? 'U' : 'u';

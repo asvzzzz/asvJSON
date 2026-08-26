@@ -3349,6 +3349,30 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("s: \"\\u0048\\u0065\\u006c\\u006c\\u006f\""));
 		ASSERT_EQ(std::string(json.getString("s")), "Hello");
 	}
+	// Double-quoted YAML string: short \x (one hex digit) -- must not read out of bounds
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\x4\""));
+		ASSERT_EQ(std::string(json.getString("s")), "4");
+	}
+	// Double-quoted YAML string: \x with zero hex digits -- escape dropped
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\x\""));
+		ASSERT_EQ(std::string(json.getString("s")), "");
+	}
+	// Double-quoted YAML string: valid \x41 -> 'A'
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\x41\""));
+		ASSERT_EQ(std::string(json.getString("s")), "A");
+	}
+	// Double-quoted YAML string: short \u (three hex digits) -- must not read out of bounds
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: \"\\u004\""));
+		ASSERT_EQ(std::string(json.getString("s")), "004");
+	}
 	// Explicit tag !!str -- forces number to string
 	{
 		asvJSON json;
@@ -5436,9 +5460,39 @@ TEST(testFromSexpr) {
   // Unknown escape sequences preserve backslash
   {
     asvJSON j;
-    ASSERT(j.fromSexpr(std::string_view(R"(("a\q41b"))")));
+    std::string in1 = R"(("a\q41b"))";
+    ASSERT(j.fromSexpr(std::string_view(in1)));
     ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
     ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "a\\q41b");
+  }
+  // \u (4-digit) and \U (8-digit) Unicode escapes decode to the code point
+  {
+    asvJSON j;
+    std::string in2 = R"("x\u0041")";
+    ASSERT(j.fromSexpr(std::string_view(in2)));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "xA");
+
+    asvJSON j2;
+    std::string in3 = R"("x\U0001F600")";
+    ASSERT(j2.fromSexpr(std::string_view(in3)));
+    ASSERT_EQ(std::string(j2.getRoot()->getString()), "x\xF0\x9F\x98\x80");
+
+    // é = U+00E9, 3-byte UTF-8
+    asvJSON j3;
+    std::string in4 = R"("x\u00e9")";
+    ASSERT(j3.fromSexpr(std::string_view(in4)));
+    ASSERT_EQ(std::string(j3.getRoot()->getString()), "x\xC3\xA9");
+  }
+  // Round-trip: non-ASCII survives toSexpr -> fromSexpr
+  {
+    asvJSON j;
+    std::string in5 = R"({"a":"x\u00e9","b":"y\u0001F600"})";
+    ASSERT(j.parse(std::string_view(in5)));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a")), "x\u00e9");
+    ASSERT_EQ(std::string(j2.getString("b")), "y\u0001F600");
   }
 }
 

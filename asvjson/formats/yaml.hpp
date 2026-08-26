@@ -140,7 +140,7 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 				case '/': out += '/'; break;
 				case '0': out += '\0'; break;
 				case 'x': {
-					if (i + 2 > s.size()) break;
+					if (i + 2 >= s.size()) break;
 					auto hex = [&](size_t off) -> int {
 						char c = s[i + off];
 						if (c >= '0' && c <= '9') return c - '0';
