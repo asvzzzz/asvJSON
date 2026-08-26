@@ -268,15 +268,16 @@ private:
 
     if (isDouble) {
       double d = 0;
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
       if (ec != std::errc() || ptr != buf + numLen) {
-        // Try strtod as fallback
-        char saved = buf[numLen];
-        char* mutableBuf = const_cast<char*>(buf);
-        mutableBuf[numLen] = '\0';
-        d = std::strtod(buf, nullptr);
-        mutableBuf[numLen] = saved;
+    #endif
+        // Copy to local string for null-terminated strtod (input_ may be string_view)
+        std::string numStr(buf, numLen);
+        d = std::strtod(numStr.c_str(), nullptr);
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       }
+    #endif
       if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) {
         handler_->onError("NaN or Infinity not allowed");
         throw std::runtime_error("NaN or Infinity not allowed");
@@ -287,11 +288,8 @@ private:
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, l);
       if (ec != std::errc() || ptr != buf + numLen) {
         // Too large for int64 -- emit as double if possible, else as raw string
-        char saved = buf[numLen];
-        char* mutableBuf = const_cast<char*>(buf);
-        mutableBuf[numLen] = '\0';
-        double d = std::strtod(buf, nullptr);
-        mutableBuf[numLen] = saved;
+        std::string numStr(buf, numLen);
+        double d = std::strtod(numStr.c_str(), nullptr);
         handler_->onDoubleValue(d);
       } else {
         handler_->onIntegerValue(l);
@@ -778,14 +776,14 @@ private:
 
     if (isDouble) {
       double d = 0;
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       auto [ptr, ec] = std::from_chars(buf, buf + len, d);
       if (ec != std::errc() || ptr != buf + len) {
-        char saved = buf[len];
-        char* mb = const_cast<char*>(buf);
-        mb[len] = '\0';
-        d = std::strtod(buf, nullptr);
-        mb[len] = saved;
+    #endif
+        d = std::strtod(numStr.c_str(), nullptr);
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       }
+    #endif
       if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) {
         setError("NaN or Infinity not allowed");
         return false;
@@ -795,11 +793,7 @@ private:
       long long l = 0;
       auto [ptr, ec] = std::from_chars(buf, buf + len, l);
       if (ec != std::errc() || ptr != buf + len) {
-        char saved = buf[len];
-        char* mb = const_cast<char*>(buf);
-        mb[len] = '\0';
-        double d = std::strtod(buf, nullptr);
-        mb[len] = saved;
+        double d = std::strtod(numStr.c_str(), nullptr);
         handler_.onDoubleValue(d);
       } else {
         handler_.onIntegerValue(l);

@@ -60,18 +60,17 @@ inline int protoReadTag(const uint8_t* data, size_t size, size_t& pos, int& fiel
 
 // ======================= Schema types =======================
 
-struct ProtoField;
-struct ProtoSchema {
-  std::unordered_map<std::string, ProtoField> fields;
-  std::unordered_map<int, std::string> numberToName;
-};
-
 struct ProtoField {
   int number = 0;
   std::string type;
   bool repeated = false;
   bool packed = true;
-  std::shared_ptr<ProtoSchema> schema;
+  std::shared_ptr<struct ProtoSchema> schema;
+};
+
+struct ProtoSchema {
+  std::unordered_map<std::string, ProtoField> fields;
+  std::unordered_map<int, std::string> numberToName;
 };
 
 inline ProtoField protoParseOneField(const asvJSONValue* val) {

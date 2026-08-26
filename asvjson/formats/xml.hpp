@@ -275,9 +275,10 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 		auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
 		if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
+		std::string tmp(s);
 		char* end; errno = 0;
-		d = std::strtod(s.data(), &end);
-		if (errno != ERANGE && end == s.data() + s.size()) return asvJSONValue::makeDouble(d);
+		d = std::strtod(tmp.c_str(), &end);
+		if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return asvJSONValue::makeDouble(d);
 #endif
 	}
 	return asvJSONValue::makeString(s.data(), s.size());

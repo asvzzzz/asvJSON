@@ -172,7 +172,7 @@ inline std::vector<const asvJSONValue*> jpSlice(const asvJSONValue* n,
 
   if (step > 0) {
     for (int64_t i = start; i < end; i += step)
-      r.push_back((*n->arr)[static_cast<size_t>(i)].get());
+      if (i >= 0 && i < sz) r.push_back((*n->arr)[static_cast<size_t>(i)].get());
   } else {
     for (int64_t i = start; i > end; i += step)
       if (i >= 0 && i < sz) r.push_back((*n->arr)[static_cast<size_t>(i)].get());
@@ -237,11 +237,17 @@ inline bool jpIsZeroArgFunc(const std::string& s) {
          s == "sum" || s == "avg" || s == "value";
 }
 
-inline const asvJSONValue* jpApplyFunc(const std::string& fn, const asvJSONValue* arg);
+inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const asvJSONValue* arg);
 
 class JPFilterEval {
   PathLexer& lex_;
   const asvJSONValue* cur_;
+  std::vector<std::unique_ptr<asvJSONValue>> temp_vals_;
+
+  const asvJSONValue* hold(std::unique_ptr<asvJSONValue> val) {
+    temp_vals_.push_back(std::move(val));
+    return temp_vals_.back().get();
+  }
 
   struct BoolVal { bool val; };
 
@@ -285,8 +291,9 @@ class JPFilterEval {
       if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
         lex_.next();
         if (lex_.peek().type == TokType::RPAREN) lex_.next();
-        node = jpApplyFunc(p.val, node);
-        if (!node) return nullptr;
+        auto r = jpApplyFunc(p.val, node);
+        if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
+        else return nullptr;
       } else {
         node = jpGetProp(node, p.val);
         if (!node) return nullptr;
@@ -322,47 +329,29 @@ class JPFilterEval {
     if (t.type == TokType::NUMBER) {
       lex_.next();
       if (t.val.find('.') != std::string::npos) {
-        static thread_local asvJSONValue litDbl;
-        litDbl.destroy();
-        litDbl = std::move(*asvJSONValue::makeDouble(std::stod(t.val)));
-        return &litDbl;
+        return hold(asvJSONValue::makeDouble(std::stod(t.val)));
       }
-      static thread_local asvJSONValue litInt;
-      litInt.destroy();
-      litInt = std::move(*asvJSONValue::makeInt(std::stoll(t.val)));
-      return &litInt;
+      return hold(asvJSONValue::makeInt(std::stoll(t.val)));
     }
 
     if (t.type == TokType::STRING) {
       lex_.next();
-      static thread_local asvJSONValue litStr;
-      litStr.destroy();
-      litStr = std::move(*asvJSONValue::makeString(t.val.data(), t.val.size()));
-      return &litStr;
+      return hold(asvJSONValue::makeString(t.val.data(), t.val.size()));
     }
 
     if (t.type == TokType::TRUE_LIT) {
       lex_.next();
-      static thread_local asvJSONValue litBool;
-      litBool.destroy();
-      litBool = std::move(*asvJSONValue::makeBool(true));
-      return &litBool;
+      return hold(asvJSONValue::makeBool(true));
     }
 
     if (t.type == TokType::FALSE_LIT) {
       lex_.next();
-      static thread_local asvJSONValue litBool;
-      litBool.destroy();
-      litBool = std::move(*asvJSONValue::makeBool(false));
-      return &litBool;
+      return hold(asvJSONValue::makeBool(false));
     }
 
     if (t.type == TokType::NULL_LIT) {
       lex_.next();
-      static thread_local asvJSONValue litNull;
-      litNull.destroy();
-      litNull = std::move(*asvJSONValue::makeNull());
-      return &litNull;
+      return hold(asvJSONValue::makeNull());
     }
 
     if (t.type != TokType::IDENT) return nullptr;
@@ -384,10 +373,7 @@ class JPFilterEval {
         try {
           std::regex re(pat);
           bool res = std::regex_search(strNode->str_data, re);
-          static thread_local asvJSONValue boolResult;
-          boolResult.destroy();
-          boolResult = std::move(*asvJSONValue::makeBool(res));
-          return &boolResult;
+          return hold(asvJSONValue::makeBool(res));
         } catch (...) { return nullptr; }
       }
 
@@ -417,17 +403,11 @@ class JPFilterEval {
         } else if (arg->type == asvJSONValue::OBJECT && arg->obj) {
           len = static_cast<int64_t>(arg->obj->size());
         }
-        static thread_local asvJSONValue intResult;
-        intResult.destroy();
-        intResult = std::move(*asvJSONValue::makeInt(len));
-        return &intResult;
+        return hold(asvJSONValue::makeInt(len));
       }
 
       if (fn == "count") {
-        static thread_local asvJSONValue intResult;
-        intResult.destroy();
-        intResult = std::move(*asvJSONValue::makeInt(arg ? 1 : 0));
-        return &intResult;
+        return hold(asvJSONValue::makeInt(arg ? 1 : 0));
       }
 
       if (fn == "min" || fn == "max" || fn == "sum" || fn == "avg") {
@@ -446,11 +426,8 @@ class JPFilterEval {
           }
         }
         if (fn == "min" || fn == "max") return best;
-        static thread_local asvJSONValue numResult;
-        numResult.destroy();
-        if (fn == "avg" && count > 0) numResult = std::move(*asvJSONValue::makeDouble(acc / count));
-        else numResult = std::move(*asvJSONValue::makeDouble(acc));
-        return &numResult;
+        if (fn == "avg" && count > 0) return hold(asvJSONValue::makeDouble(acc / count));
+        return hold(asvJSONValue::makeDouble(acc));
       }
     }
 
@@ -494,6 +471,7 @@ public:
 
 struct PathResult {
   std::vector<const asvJSONValue*> values;
+  std::vector<std::unique_ptr<asvJSONValue>> owned;
   std::string error;
 };
 
@@ -665,7 +643,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
   if (lex.peek().type == TokType::RBRACKET) lex.next();
 }
 
-inline const asvJSONValue* jpApplyFunc(const std::string& fn, const asvJSONValue* arg) {
+inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const asvJSONValue* arg) {
   if (fn == "length") {
     if (!arg) return nullptr;
     int64_t len = 0;
@@ -683,16 +661,10 @@ inline const asvJSONValue* jpApplyFunc(const std::string& fn, const asvJSONValue
     } else if (arg->type == asvJSONValue::OBJECT && arg->obj) {
       len = static_cast<int64_t>(arg->obj->size());
     }
-    static thread_local asvJSONValue intResult;
-    intResult.destroy();
-    intResult = std::move(*asvJSONValue::makeInt(len));
-    return &intResult;
+    return asvJSONValue::makeInt(len);
   }
   if (fn == "count") {
-    static thread_local asvJSONValue intResult;
-    intResult.destroy();
-    intResult = std::move(*asvJSONValue::makeInt(arg ? 1 : 0));
-    return &intResult;
+    return asvJSONValue::makeInt(arg ? 1 : 0);
   }
   if (fn == "min" || fn == "max" || fn == "sum" || fn == "avg") {
     if (!arg || arg->type != asvJSONValue::ARRAY || !arg->arr) return nullptr;
@@ -709,15 +681,12 @@ inline const asvJSONValue* jpApplyFunc(const std::string& fn, const asvJSONValue
         if (fn == "max" && jpCompare(e.get(), best) > 0) best = e.get();
       }
     }
-    if (fn == "min" || fn == "max") return best;
-    static thread_local asvJSONValue numResult;
-    numResult.destroy();
-    if (fn == "avg" && cnt > 0) numResult = std::move(*asvJSONValue::makeDouble(acc / cnt));
-    else numResult = std::move(*asvJSONValue::makeDouble(acc));
-    return &numResult;
+    if (fn == "min" || fn == "max") return cloneValue(best);
+    if (fn == "avg" && cnt > 0) return asvJSONValue::makeDouble(acc / cnt);
+    return asvJSONValue::makeDouble(acc);
   }
   if (fn == "value") {
-    return arg;
+    return arg ? cloneValue(arg) : nullptr;
   }
   return nullptr;
 }
@@ -738,8 +707,8 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
         if (lex.peek().type == TokType::RPAREN) lex.next();
         std::vector<const asvJSONValue*> next;
         for (auto* n : current) {
-          const asvJSONValue* r = jpApplyFunc(seg.val, n);
-          if (r) next.push_back(r);
+          auto r = jpApplyFunc(seg.val, n);
+          if (r) { res.owned.push_back(std::move(r)); next.push_back(res.owned.back().get()); }
         }
         current = std::move(next);
       } else {
@@ -800,11 +769,14 @@ inline bool jpIsValid(std::string_view path) {
 }
 
 inline std::vector<const asvJSONValue*> asvJSON::query(std::string_view path) const {
-  return jpQuery(root.get(), path).values;
+  auto r = jpQuery(root.get(), path);
+  pathOwned = std::move(r.owned);
+  return std::move(r.values);
 }
 
 inline const asvJSONValue* asvJSON::queryFirst(std::string_view path) const {
   auto r = jpQuery(root.get(), path);
+  pathOwned = std::move(r.owned);
   return r.values.empty() ? nullptr : r.values.front();
 }
 

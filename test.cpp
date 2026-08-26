@@ -6001,7 +6001,7 @@ TEST(testFromJSON5) {
   // Zs space: U+2003 (EM SPACE) between tokens
   {
     asvJSON j;
-    const char inp[] = { '[', '\"', 'a', '\"', ',', 0xE2, 0x80, 0x83, '\"', 'b', '\"', ']', 0 };
+    const char inp[] = { '[', '\"', 'a', '\"', ',', static_cast<char>(0xE2), static_cast<char>(0x80), static_cast<char>(0x83), '\"', 'b', '\"', ']', 0 };
     ASSERT(j.fromJSON5(std::string_view(inp, 12)));
   }
   // Zs space: U+3000 (IDEOGRAPHIC SPACE) between tokens
@@ -8773,6 +8773,623 @@ TEST(testReadWriteFileAny) {
 	}
 }
 
+TEST(testOperatorBracket) {
+	// --- Object key access ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"Alice","age":30})");
+		ASSERT_EQ(std::string(doc["name"].getString()), "Alice");
+		ASSERT_EQ(doc["age"].getInt(), 30);
+	}
+	// --- Nested access ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"user":{"address":{"city":"Moscow","zip":"101000"}}})");
+		ASSERT_EQ(std::string(doc["user"]["address"]["city"].getString()), "Moscow");
+		ASSERT_EQ(std::string(doc["user"]["address"]["zip"].getString()), "101000");
+	}
+	// --- Array index access ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"items":[10,20,30]})");
+		ASSERT_EQ(doc["items"][0].getInt(), 10);
+		ASSERT_EQ(doc["items"][1].getInt(), 20);
+		ASSERT_EQ(doc["items"][2].getInt(), 30);
+	}
+	// --- Null propagation: missing key returns null proxy ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":1})");
+		auto proxy = doc["nonexistent"];
+		ASSERT(!proxy);
+		ASSERT(proxy.isNull());
+		// Chaining on null should stay null
+		auto deep = doc["nonexistent"]["foo"]["bar"];
+		ASSERT(!deep);
+		ASSERT(deep.isNull());
+	}
+	// --- Null propagation: non-object intermediate ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":"string"})");
+		auto proxy = doc["a"]["key"];
+		ASSERT(!proxy);
+	}
+	// --- Mixed object/array navigation ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"users":[{"name":"Alice","scores":[90,95]},{"name":"Bob","scores":[80,85]}]})");
+		ASSERT_EQ(std::string(doc["users"][0]["name"].getString()), "Alice");
+		ASSERT_EQ(doc["users"][0]["scores"][1].getInt(), 95);
+		ASSERT_EQ(std::string(doc["users"][1]["name"].getString()), "Bob");
+		ASSERT_EQ(doc["users"][1]["scores"][0].getInt(), 80);
+	}
+	// --- Type checking via proxy ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"num":42,"str":"hello","flag":true,"flt":3.14,"nil":null})");
+		ASSERT(doc["num"].type() == asvJSONValue::INT);
+		ASSERT(doc["str"].type() == asvJSONValue::STRING);
+		ASSERT(doc["flag"].type() == asvJSONValue::BOOL_VAL);
+		ASSERT(doc["flt"].type() == asvJSONValue::DOUBLE);
+		ASSERT(doc["nil"].type() == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(doc["num"].getInt(), int64_t(42));
+		ASSERT(doc["flag"].getBool());
+	}
+	// --- Proxy from asvJSONValue directly ---
+	{
+		auto root = asvJSONValue::makeObject();
+		auto inner = asvJSONValue::makeObject();
+		inner->obj->emplace("x", asvJSONValue::makeInt(42));
+		root->obj->emplace("a", std::move(inner));
+		auto proxy = (*root)["a"]["x"];
+		ASSERT(proxy);
+		ASSERT_EQ(proxy.getInt(), 42);
+	}
+	// --- Empty doc ---
+	{
+		asvJSON doc;
+		doc.parse("{}");
+		auto proxy = doc["key"];
+		ASSERT(!proxy);
+	}
+	// --- hasKey via proxy ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"user":{"name":"Alice"}})");
+		ASSERT(doc["user"].hasKey("name"));
+		ASSERT(!doc["user"].hasKey("age"));
+		ASSERT(!doc["missing"].hasKey("anything"));
+	}
+	// --- size via proxy ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"arr":[1,2,3],"obj":{"a":1}})");
+		ASSERT_EQ(doc["arr"].size(), size_t(3));
+		ASSERT_EQ(doc["obj"].size(), size_t(1));
+		ASSERT_EQ(doc["missing"].size(), size_t(0));
+	}
+}
+
+TEST(testIteratorAPI) {
+	// --- Object iteration on asvJSON (for auto& [key, val] : doc) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"Alice","age":30,"active":true})");
+		std::map<std::string, std::string> collected;
+		for (auto& [key, val] : doc) {
+			if (val->type == asvJSONValue::STRING) collected[key] = val->getString();
+			else if (val->type == asvJSONValue::INT) collected[key] = std::to_string(val->getInt());
+			else if (val->type == asvJSONValue::BOOL_VAL) collected[key] = val->getBool() ? "true" : "false";
+		}
+		ASSERT_EQ(collected.size(), size_t(3));
+		ASSERT_EQ(collected["name"], "Alice");
+		ASSERT_EQ(collected["age"], "30");
+		ASSERT_EQ(collected["active"], "true");
+	}
+	// --- Object iteration on asvJSONValue (for auto& [key, val] : *val) ---
+	{
+		auto root = asvJSONValue::makeObject();
+		root->obj->emplace("x", asvJSONValue::makeInt(10));
+		root->obj->emplace("y", asvJSONValue::makeInt(20));
+		int64_t sum = 0;
+		for (auto& [key, val] : *root) {
+			if (val->type == asvJSONValue::INT) sum += val->getInt();
+		}
+		ASSERT_EQ(sum, int64_t(30));
+	}
+	// --- Object iteration on JsonProxy ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":{"x":1,"y":2},"b":3})");
+		int64_t sum = 0;
+		for (auto& [key, val] : doc["a"]) {
+			if (val->type == asvJSONValue::INT) sum += val->getInt();
+		}
+		ASSERT_EQ(sum, int64_t(3));
+	}
+	// --- Null proxy iteration (empty range) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"x":1})");
+		size_t count = 0;
+		for (auto& [key, val] : doc["missing"]) { (void)key; (void)val; count++; }
+		ASSERT_EQ(count, size_t(0));
+	}
+	// --- Array iteration via values() on asvJSON ---
+	{
+		asvJSON doc;
+		doc.parse(R"([10,20,30])");
+		int64_t sum = 0;
+		for (auto& val : doc.values()) {
+			if (val->type == asvJSONValue::INT) sum += val->getInt();
+		}
+		ASSERT_EQ(sum, int64_t(60));
+	}
+	// --- Array iteration via values() on asvJSONValue ---
+	{
+		auto root = asvJSONValue::makeArray();
+		root->arr->push_back(asvJSONValue::makeInt(5));
+		root->arr->push_back(asvJSONValue::makeInt(15));
+		int64_t sum = 0;
+		for (auto& val : root->values()) {
+			sum += val->getInt();
+		}
+		ASSERT_EQ(sum, int64_t(20));
+	}
+	// --- Array iteration via JsonProxy::values() ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"items":[{"id":1},{"id":2},{"id":3}]})");
+		int64_t total = 0;
+		for (auto& item : doc["items"].values()) {
+			auto* id = item->get("id");
+			if (id) total += id->getInt();
+		}
+		ASSERT_EQ(total, int64_t(6));
+	}
+	// --- Empty object iteration ---
+	{
+		asvJSON doc;
+		doc.parse("{}");
+		size_t count = 0;
+		for (auto& [key, val] : doc) { (void)key; (void)val; count++; }
+		ASSERT_EQ(count, size_t(0));
+	}
+	// --- Empty array iteration ---
+	{
+		asvJSON doc;
+		doc.parse("[]");
+		size_t count = 0;
+		for (auto& val : doc.values()) { (void)val; count++; }
+		ASSERT_EQ(count, size_t(0));
+	}
+	// --- Const iteration ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":1,"b":2})");
+		const auto& cdoc = doc;
+		int64_t sum = 0;
+		for (const auto& [key, val] : cdoc) {
+			if (val->type == asvJSONValue::INT) sum += val->getInt();
+		}
+		ASSERT_EQ(sum, int64_t(3));
+	}
+	// --- Nested: iterate object inside array ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"users":[{"name":"Alice","score":90},{"name":"Bob","score":80}]})");
+		int64_t totalScore = 0;
+		for (auto& user : doc["users"].values()) {
+			auto* score = user->get("score");
+			if (score) totalScore += score->getInt();
+		}
+		ASSERT_EQ(totalScore, int64_t(170));
+	}
+	// --- getRoot() iteration (backward compat) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"k":"v"})");
+		bool found = false;
+		for (auto& [key, val] : *doc.getRoot()) {
+			if (key == "k" && std::string(val->getString()) == "v") found = true;
+		}
+		ASSERT(found);
+	}
+}
+
+TEST(testEmplacePush) {
+	// emplace into object
+	{
+		auto obj = asvJSONValue::makeObject();
+		ASSERT(obj->emplace("x", asvJSONValue::makeInt(42)));
+		ASSERT_EQ(obj->get("x")->getInt(), int64_t(42));
+		// overwrite
+		ASSERT(obj->emplace("x", asvJSONValue::makeInt(99)));
+		ASSERT_EQ(obj->get("x")->getInt(), int64_t(99));
+	}
+	// emplace auto-creates object
+	{
+		auto val = asvJSONValue::makeNull();
+		ASSERT(val->emplace("a", asvJSONValue::makeBool(true)));
+		ASSERT(val->type == asvJSONValue::OBJECT);
+		ASSERT(val->get("a")->getBool());
+	}
+	// push into array
+	{
+		auto arr = asvJSONValue::makeArray();
+		ASSERT(arr->push(asvJSONValue::makeInt(1)));
+		ASSERT(arr->push(asvJSONValue::makeInt(2)));
+		ASSERT_EQ(arr->size(), size_t(2));
+		ASSERT_EQ((*arr->arr)[0]->getInt(), int64_t(1));
+		ASSERT_EQ((*arr->arr)[1]->getInt(), int64_t(2));
+	}
+	// push auto-creates array
+	{
+		auto val = asvJSONValue::makeNull();
+		ASSERT(val->push(asvJSONValue::makeStringView("hello")));
+		ASSERT(val->type == asvJSONValue::ARRAY);
+	}
+	// push null returns false
+	{
+		auto arr = asvJSONValue::makeArray();
+		ASSERT(!arr->push(nullptr));
+	}
+	// emplace null returns false
+	{
+		auto obj = asvJSONValue::makeObject();
+		ASSERT(!obj->emplace("k", nullptr));
+	}
+}
+
+TEST(testEquality) {
+	// Primitives
+	{
+		auto a = asvJSONValue::makeInt(42);
+		auto b = asvJSONValue::makeInt(42);
+		auto c = asvJSONValue::makeInt(43);
+		ASSERT(*a == *b);
+		ASSERT(*a != *c);
+	}
+	// Strings
+	{
+		auto a = asvJSONValue::makeStringView("hello");
+		auto b = asvJSONValue::makeStringView("hello");
+		auto c = asvJSONValue::makeStringView("world");
+		ASSERT(*a == *b);
+		ASSERT(*a != *c);
+	}
+	// Different types
+	{
+		auto a = asvJSONValue::makeInt(1);
+		auto b = asvJSONValue::makeBool(true);
+		ASSERT(*a != *b);
+	}
+	// Null
+	{
+		auto a = asvJSONValue::makeNull();
+		auto b = asvJSONValue::makeNull();
+		ASSERT(*a == *b);
+	}
+	// Objects
+	{
+		auto a = asvJSONValue::makeObject();
+		a->emplace("x", asvJSONValue::makeInt(1));
+		auto b = asvJSONValue::makeObject();
+		b->emplace("x", asvJSONValue::makeInt(1));
+		ASSERT(*a == *b);
+		b->emplace("y", asvJSONValue::makeInt(2));
+		ASSERT(*a != *b);
+	}
+	// Arrays
+	{
+		auto a = asvJSONValue::makeArray();
+		a->push(asvJSONValue::makeInt(1));
+		a->push(asvJSONValue::makeInt(2));
+		auto b = asvJSONValue::makeArray();
+		b->push(asvJSONValue::makeInt(1));
+		b->push(asvJSONValue::makeInt(2));
+		ASSERT(*a == *b);
+		b->push(asvJSONValue::makeInt(3));
+		ASSERT(*a != *b);
+	}
+	// Nested
+	{
+		asvJSON da, db;
+		da.parse(R"({"a":{"b":1},"c":[1,2]})");
+		db.parse(R"({"a":{"b":1},"c":[1,2]})");
+		ASSERT(*da.getRoot() == *db.getRoot());
+	}
+	// Booleans
+	{
+		auto a = asvJSONValue::makeBool(true);
+		auto b = asvJSONValue::makeBool(true);
+		auto c = asvJSONValue::makeBool(false);
+		ASSERT(*a == *b);
+		ASSERT(*a != *c);
+	}
+	// Doubles
+	{
+		auto a = asvJSONValue::makeDouble(3.14);
+		auto b = asvJSONValue::makeDouble(3.14);
+		auto c = asvJSONValue::makeDouble(2.71);
+		ASSERT(*a == *b);
+		ASSERT(*a != *c);
+	}
+	// via asvJSON
+	{
+		asvJSON da, db;
+		da.parse(R"({"x":1,"y":"hi"})");
+		db.parse(R"({"x":1,"y":"hi"})");
+		ASSERT(*da.getRoot() == *db.getRoot());
+		db.parse(R"({"x":1,"y":"bye"})");
+		ASSERT(*da.getRoot() != *db.getRoot());
+	}
+}
+
+TEST(testMergeDeep) {
+	// Basic object merge — other overrides
+	{
+		asvJSON base, overlay;
+		base.parse(R"({"a":1,"b":2})");
+		overlay.parse(R"({"b":3,"c":4})");
+		base.merge(overlay);
+		ASSERT_EQ(base.get("a")->getInt(), int64_t(1));
+		ASSERT_EQ(base.get("b")->getInt(), int64_t(3));
+		ASSERT_EQ(base.get("c")->getInt(), int64_t(4));
+	}
+	// Deep merge — nested objects recurse
+	{
+		asvJSON base, overlay;
+		base.parse(R"({"a":{"x":1,"y":2}})");
+		overlay.parse(R"({"a":{"y":3,"z":4}})");
+		base.merge(overlay);
+		ASSERT_EQ(base.getNested("a.x")->getInt(), int64_t(1));
+		ASSERT_EQ(base.getNested("a.y")->getInt(), int64_t(3));
+		ASSERT_EQ(base.getNested("a.z")->getInt(), int64_t(4));
+	}
+	// Merge into empty
+	{
+		asvJSON base, overlay;
+		overlay.parse(R"({"k":"v"})");
+		base.merge(overlay);
+		ASSERT_EQ(std::string(base.get("k")->getString()), "v");
+	}
+	// Merge non-object overwrites
+	{
+		asvJSON base, overlay;
+		base.parse(R"({"a":1})");
+		overlay.parse(R"("string")");
+		base.merge(overlay);
+		ASSERT_EQ(std::string(base.getRoot()->getString()), "string");
+	}
+	// Merge null in patch removes key (RFC 7396)
+	{
+		asvJSON base, patch;
+		base.parse(R"({"a":1,"b":2})");
+		patch.parse(R"({"b":null})");
+		base.merge(patch);
+		ASSERT_EQ(base.get("a")->getInt(), int64_t(1));
+		ASSERT(!base.hasKey("b"));
+	}
+}
+
+TEST(testDiff) {
+	// Identical — empty diff
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1})");
+		b.parse(R"({"x":1})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(0));
+	}
+	// Added key
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1})");
+		b.parse(R"({"x":1,"y":2})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(1));
+		auto* op = (*d.getRoot()->arr)[0]->get("op");
+		ASSERT(std::string(op->getString()) == "add");
+		ASSERT_EQ((*d.getRoot()->arr)[0]->get("value")->getInt(), int64_t(2));
+	}
+	// Removed key
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1,"y":2})");
+		b.parse(R"({"x":1})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(1));
+		auto* op = (*d.getRoot()->arr)[0]->get("op");
+		ASSERT(std::string(op->getString()) == "remove");
+	}
+	// Replaced value
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1})");
+		b.parse(R"({"x":2})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(1));
+		auto* op = (*d.getRoot()->arr)[0]->get("op");
+		ASSERT(std::string(op->getString()) == "replace");
+	}
+	// Nested diff
+	{
+		asvJSON a, b;
+		a.parse(R"({"a":{"x":1}})");
+		b.parse(R"({"a":{"x":2}})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(1));
+		auto* path = (*d.getRoot()->arr)[0]->get("path");
+		ASSERT(std::string(path->getString()) == "a.x");
+	}
+	// Array diff
+	{
+		asvJSON a, b;
+		a.parse(R"([1,2,3])");
+		b.parse(R"([1,9,3,4])");
+		auto d = a.diff(b);
+		// index 1: replace 2→9, index 3: add 4
+		ASSERT_EQ(d.getRoot()->size(), size_t(2));
+	}
+	// Type change
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1})");
+		b.parse(R"({"x":"hello"})");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(1));
+		auto* op = (*d.getRoot()->arr)[0]->get("op");
+		ASSERT(std::string(op->getString()) == "replace");
+	}
+	// Both empty
+	{
+		asvJSON a, b;
+		a.parse("{}");
+		b.parse("{}");
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(0));
+	}
+	// Both null
+	{
+		asvJSON a, b;
+		auto d = a.diff(b);
+		ASSERT_EQ(d.getRoot()->size(), size_t(0));
+	}
+}
+
+TEST(testPrettyPrint) {
+	// --- YAML compact (flow) vs pretty (block) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"Alice","age":30,"active":true})");
+
+		std::string block = doc.toYAML(true);
+		std::string flow = doc.toYAML(false);
+
+		// Block mode should have --- header and key: value pairs
+		ASSERT(block.find("---") != std::string::npos);
+		ASSERT(block.find("name:") != std::string::npos);
+
+		// Compact mode should have flow-style object
+		ASSERT(flow.find("{") != std::string::npos);
+		ASSERT(flow.find("}") != std::string::npos);
+		ASSERT(flow.find("name:") != std::string::npos);
+
+		// Flow should be shorter
+		ASSERT(flow.size() <= block.size());
+	}
+	// --- YAML nested objects ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"server":{"host":"localhost","port":8080}})");
+
+		std::string block = doc.toYAML(true);
+		std::string flow = doc.toYAML(false);
+
+		// Block has indented nested keys
+		ASSERT(block.find("host:") != std::string::npos);
+		ASSERT(block.find("port:") != std::string::npos);
+		// Flow should inline the nested object
+		ASSERT(flow.find("{") != std::string::npos);
+	}
+	// --- YAML arrays ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"tags":["cpp","json","lib"]})");
+
+		std::string block = doc.toYAML(true);
+		std::string flow = doc.toYAML(false);
+
+		// Block mode uses "- " prefix for array items
+		ASSERT(block.find("- ") != std::string::npos);
+		// Flow mode uses [a, b, c]
+		ASSERT(flow.find("[") != std::string::npos);
+		ASSERT(flow.find("]") != std::string::npos);
+	}
+	// --- YAML empty containers ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"obj":{},"arr":[]})");
+
+		std::string flow = doc.toYAML(false);
+		ASSERT(flow.find("{}") != std::string::npos);
+		ASSERT(flow.find("[]") != std::string::npos);
+	}
+
+	// --- TOML pretty (expanded) vs compact (inline tables) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"server","config":{"host":"localhost","port":8080}})");
+
+		std::string expanded = doc.toTOML(true);
+		std::string compact = doc.toTOML(false);
+
+		// Expanded uses [section] headers
+		ASSERT(expanded.find("[config]") != std::string::npos);
+		ASSERT(expanded.find("host = ") != std::string::npos);
+
+		// Compact uses inline table syntax
+		ASSERT(compact.find("{") != std::string::npos);
+		ASSERT(compact.find("host") != std::string::npos);
+		// No section headers in compact mode
+		ASSERT(compact.find("[config]") == std::string::npos);
+	}
+	// --- TOML compact: arrays ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"items":[1,2,3]})");
+
+		std::string compact = doc.toTOML(false);
+		ASSERT(compact.find("[1, 2, 3]") != std::string::npos);
+	}
+
+	// --- INI pretty (sections) vs compact (flat dotted keys) ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"server","db":{"host":"localhost","port":5432}})");
+
+		std::string pretty = doc.toINI(true);
+		std::string compact = doc.toINI(false);
+
+		// Pretty uses section headers
+		ASSERT(pretty.find("[db]") != std::string::npos);
+		ASSERT(pretty.find("host = ") != std::string::npos);
+
+		// Compact uses dotted flat keys
+		ASSERT(compact.find("db.host = ") != std::string::npos);
+		ASSERT(compact.find("db.port = ") != std::string::npos);
+		// No section headers in compact mode
+		ASSERT(compact.find("[db]") == std::string::npos);
+	}
+	// --- INI compact: nested sections ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":{"b":{"c":42}}})");
+
+		std::string compact = doc.toINI(false);
+		ASSERT(compact.find("a.b.c = 42") != std::string::npos);
+
+		std::string pretty = doc.toINI(true);
+		ASSERT(pretty.find("[a.b]") != std::string::npos);
+	}
+
+	// --- Default is pretty=true ---
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":1,"b":{"x":2}})");
+
+		// toYAML() without args should be block style
+		std::string yamlDefault = doc.toYAML();
+		ASSERT(yamlDefault.find("---") != std::string::npos);
+
+		// toTOML() without args should use section headers
+		std::string tomlDefault = doc.toTOML();
+		ASSERT(tomlDefault.find("[b]") != std::string::npos);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -8877,9 +9494,9 @@ int main() {
 	RUN(testBigNumberRoundTrip);
 	RUN(testNumberOverflow);
 	RUN(testRemoveByPointer);
-	
 	std::cout << "\n--- Merge Tests ---\n";
 	RUN(testMerge);
+
 	RUN(testMergeWithNonObject);
 	RUN(testApplyPatch);
 	RUN(testApplyMergePatch);
@@ -9127,6 +9744,27 @@ int main() {
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
 	RUN(testReadWriteFileAny);
+
+	std::cout << "\n--- operator[] Tests ---\n";
+	RUN(testOperatorBracket);
+
+	std::cout << "\n--- Iterator API Tests ---\n";
+	RUN(testIteratorAPI);
+
+	std::cout << "\n--- Emplace/Push Tests ---\n";
+	RUN(testEmplacePush);
+
+	std::cout << "\n--- Equality Tests ---\n";
+	RUN(testEquality);
+
+	std::cout << "\n--- Deep Merge Tests ---\n";
+	RUN(testMergeDeep);
+
+	std::cout << "\n--- Diff Tests ---\n";
+	RUN(testDiff);
+
+	std::cout << "\n--- Pretty-Print Tests ---\n";
+	RUN(testPrettyPrint);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

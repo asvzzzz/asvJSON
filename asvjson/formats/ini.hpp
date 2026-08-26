@@ -223,7 +223,7 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
 // Recursively emit object contents for a given section path (prefix).
 // prefix == current section path; emitHeader controls whether to emit a section header.
 inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
-                          bool emitHeader) {
+                          bool emitHeader, bool pretty = true) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
 
   // Check if this level has direct (non-object) keys
@@ -240,6 +240,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   }
 
   for (const auto& [key, val] : *obj->obj) {
+    std::string dottedKey = prefix.empty() ? key : prefix + "." + key;
     if (val->type == asvJSONValue::OBJECT) {
       std::string escKey = iniEscapeSectionKey(key);
       std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
@@ -249,7 +250,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           if (sv->type != asvJSONValue::OBJECT) { subHasDirect = true; break; }
         }
       }
-      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty());
+      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool allObjects = true;
       for (const auto& elem : *val->arr) {
@@ -262,18 +263,18 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           if (!out.empty() && out.back() != '\n') out += '\n';
           out += "[[" + newPrefix + "]]\n";
           if (elem->type == asvJSONValue::OBJECT) {
-            iniEmitObject(elem.get(), out, newPrefix, false);
+            iniEmitObject(elem.get(), out, newPrefix, false, pretty);
           }
         }
       } else {
         for (const auto& elem : *val->arr) {
-          out += key + " = ";
+          out += (pretty ? key : dottedKey) + " = ";
           iniFormatVal(elem.get(), out);
           out += '\n';
         }
       }
     } else {
-      out += key + " = ";
+      out += (pretty ? key : dottedKey) + " = ";
       iniFormatVal(val.get(), out);
       out += '\n';
     }
@@ -282,47 +283,78 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 
 // -- Encoder ----------------------------------------------------------------
 
-inline void asvJSONValue::toINI(std::string& out) const {
+inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
   using T = asvJSONValue::Type;
   if (type == T::OBJECT) {
     if (obj) {
-      // First pass: non-object, non-array keys
-      for (const auto& [key, val] : *obj) {
-        if (val->type != T::OBJECT && val->type != T::ARRAY) {
-          out += key + " = ";
-          iniFormatVal(val.get(), out);
-          out += '\n';
-        }
-      }
-      // Second pass: object/array keys
-      for (const auto& [key, val] : *obj) {
-        if (val->type == T::OBJECT) {
-          bool hasDirect = false;
-          if (val->obj) {
-            for (const auto& [sk, sv] : *val->obj) {
-              if (sv->type != T::OBJECT) { hasDirect = true; break; }
-            }
-          }
-          iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty());
-        } else if (val->type == T::ARRAY && val->arr) {
-          bool allObjects = true;
-          for (const auto& elem : *val->arr) {
-            if (elem->type != T::OBJECT) { allObjects = false; break; }
-          }
-          if (allObjects && !val->arr->empty()) {
-            std::string escKey = iniEscapeSectionKey(key);
-            for (const auto& elem : *val->arr) {
-              if (!out.empty() && out.back() != '\n') out += '\n';
-              out += "[[" + escKey + "]]\n";
-              if (elem->type == T::OBJECT) {
-                iniEmitObject(elem.get(), out, key, false);
+      if (!pretty) {
+        // Compact: flat dotted keys, no section headers
+        for (const auto& [key, val] : *obj) {
+          std::string dottedKey = key;
+          if (val->type == T::OBJECT) {
+            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), false, false);
+          } else if (val->type == T::ARRAY && val->arr) {
+            bool allObjects = true;
+            for (const auto& elem : *val->arr)
+              if (elem->type != T::OBJECT) { allObjects = false; break; }
+            if (allObjects && !val->arr->empty()) {
+              for (const auto& elem : *val->arr) {
+                std::string dk = iniEscapeSectionKey(key);
+                if (elem->type == T::OBJECT)
+                  iniEmitObject(elem.get(), out, dk, false, false);
+              }
+            } else {
+              for (const auto& elem : *val->arr) {
+                out += key + " = ";
+                iniFormatVal(elem.get(), out);
+                out += '\n';
               }
             }
           } else {
+            out += key + " = ";
+            iniFormatVal(val.get(), out);
+            out += '\n';
+          }
+        }
+      } else {
+        // First pass: non-object, non-array keys
+        for (const auto& [key, val] : *obj) {
+          if (val->type != T::OBJECT && val->type != T::ARRAY) {
+            out += key + " = ";
+            iniFormatVal(val.get(), out);
+            out += '\n';
+          }
+        }
+        // Second pass: object/array keys
+        for (const auto& [key, val] : *obj) {
+          if (val->type == T::OBJECT) {
+            bool hasDirect = false;
+            if (val->obj) {
+              for (const auto& [sk, sv] : *val->obj) {
+                if (sv->type != T::OBJECT) { hasDirect = true; break; }
+              }
+            }
+            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty(), true);
+          } else if (val->type == T::ARRAY && val->arr) {
+            bool allObjects = true;
             for (const auto& elem : *val->arr) {
-              out += key + " = ";
-              iniFormatVal(elem.get(), out);
-              out += '\n';
+              if (elem->type != T::OBJECT) { allObjects = false; break; }
+            }
+            if (allObjects && !val->arr->empty()) {
+              std::string escKey = iniEscapeSectionKey(key);
+              for (const auto& elem : *val->arr) {
+                if (!out.empty() && out.back() != '\n') out += '\n';
+                out += "[[" + escKey + "]]\n";
+                if (elem->type == T::OBJECT) {
+                  iniEmitObject(elem.get(), out, key, false, true);
+                }
+              }
+            } else {
+              for (const auto& elem : *val->arr) {
+                out += key + " = ";
+                iniFormatVal(elem.get(), out);
+                out += '\n';
+              }
             }
           }
         }

@@ -95,6 +95,8 @@ public:
 	explicit asvJSONError(const char* msg) : std::runtime_error(msg) {}
 };
 
+struct JsonProxy; // forward declaration for operator[] chaining
+
 struct asvJSONValue {
 	static constexpr size_t MAX_NESTING_DEPTH = 48;
 	static constexpr size_t MAX_STRING_LEN = 10 * 1024 * 1024;
@@ -401,12 +403,101 @@ struct asvJSONValue {
 	void toBSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
 	void toXML(std::string& out, const std::string& name, int indent) const;
-	void toYAML(std::string& out) const;
-	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const;
+	void toYAML(std::string& out, bool pretty = true) const;
+	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem, bool pretty) const;
 	void toCSV(std::string& out) const;
-	void toTOML(std::string& out) const;
-	void toINI(std::string& out) const;
+	void toTOML(std::string& out, bool pretty = true) const;
+	void toINI(std::string& out, bool pretty = true) const;
+
+	[[nodiscard]] JsonProxy operator[](std::string_view key) noexcept;
+	[[nodiscard]] JsonProxy operator[](size_t idx) noexcept;
+
+	// Object iteration: for (auto& [key, val] : *value)
+	[[nodiscard]] ObjectMap::iterator begin() noexcept { return obj ? obj->begin() : ObjectMap::iterator{}; }
+	[[nodiscard]] ObjectMap::iterator end() noexcept { return obj ? obj->end() : ObjectMap::iterator{}; }
+	[[nodiscard]] ObjectMap::const_iterator begin() const noexcept { return obj ? obj->begin() : ObjectMap::const_iterator{}; }
+	[[nodiscard]] ObjectMap::const_iterator end() const noexcept { return obj ? obj->end() : ObjectMap::const_iterator{}; }
+
+	// Array range adapter: for (auto& val : value.values())
+	struct ArrayRange {
+		using iterator = std::vector<std::unique_ptr<asvJSONValue>>::iterator;
+		iterator b, e;
+		[[nodiscard]] iterator begin() noexcept { return b; }
+		[[nodiscard]] iterator end() noexcept { return e; }
+	};
+	[[nodiscard]] ArrayRange values() noexcept {
+		if (type != ARRAY || !arr) return {{}, {}};
+		return {arr->begin(), arr->end()};
+	}
+
+	// Mutation: insert or replace a key in an object
+	bool emplace(std::string_view key, std::unique_ptr<asvJSONValue> val) {
+		if (!val) return false;
+		if (type != OBJECT) {
+			type = OBJECT;
+			if (!obj) { try { obj.reset(new ObjectMap()); } catch (...) { return false; } }
+		}
+		auto it = mapFind(*obj, key);
+		if (it != obj->end()) { it->second = std::move(val); }
+		else { obj->emplace(std::string(key), std::move(val)); }
+		return true;
+	}
+
+	// Mutation: append a value to an array
+	bool push(std::unique_ptr<asvJSONValue> val) {
+		if (!val) return false;
+		if (type != ARRAY) {
+			type = ARRAY;
+			if (!arr) { try { arr.reset(new std::vector<std::unique_ptr<asvJSONValue>>()); } catch (...) { return false; } }
+		}
+		arr->push_back(std::move(val));
+		return true;
+	}
+
+	// Structural equality
+	[[nodiscard]] friend bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept;
+	[[nodiscard]] friend bool operator!=(const asvJSONValue& a, const asvJSONValue& b) noexcept;
 };
+
+// Lightweight proxy for operator[] chaining (j["a"]["b"]["c"])
+struct JsonProxy {
+	asvJSONValue* ptr;
+	explicit JsonProxy(asvJSONValue* p) noexcept : ptr(p) {}
+	explicit JsonProxy(std::nullptr_t) noexcept : ptr(nullptr) {}
+
+	[[nodiscard]] explicit operator bool() const noexcept { return ptr != nullptr; }
+	[[nodiscard]] operator asvJSONValue*() const noexcept { return ptr; }
+
+	[[nodiscard]] JsonProxy operator[](std::string_view key) const noexcept {
+		return ptr ? JsonProxy(ptr->get(key)) : JsonProxy(nullptr);
+	}
+	[[nodiscard]] JsonProxy operator[](size_t idx) const noexcept {
+		return ptr ? JsonProxy(ptr->get(idx)) : JsonProxy(nullptr);
+	}
+
+	[[nodiscard]] const char* getString() const noexcept { return ptr ? ptr->getString() : ""; }
+	[[nodiscard]] std::string_view getStringView() const noexcept { return ptr ? ptr->getStringView() : std::string_view{}; }
+	[[nodiscard]] int64_t getInt() const noexcept { return ptr ? ptr->getInt() : 0; }
+	[[nodiscard]] double getDouble() const noexcept { return ptr ? ptr->getDouble() : 0.0; }
+	[[nodiscard]] bool getBool() const noexcept { return ptr ? ptr->getBool() : false; }
+	[[nodiscard]] bool isNull() const noexcept { return !ptr || ptr->type == asvJSONValue::NULL_VAL; }
+	[[nodiscard]] asvJSONValue::Type type() const noexcept { return ptr ? ptr->type : asvJSONValue::NULL_VAL; }
+	[[nodiscard]] size_t size() const noexcept { return ptr ? ptr->size() : 0; }
+	[[nodiscard]] bool hasKey(std::string_view key) const noexcept { return ptr && ptr->hasKey(key); }
+
+	// Object iteration: for (auto& [key, val] : doc["key"])
+	[[nodiscard]] auto begin() noexcept { return ptr ? ptr->begin() : asvJSONValue::ObjectMap::iterator{}; }
+	[[nodiscard]] auto end() noexcept { return ptr ? ptr->end() : asvJSONValue::ObjectMap::iterator{}; }
+	[[nodiscard]] auto begin() const noexcept { return ptr ? ptr->begin() : asvJSONValue::ObjectMap::const_iterator{}; }
+	[[nodiscard]] auto end() const noexcept { return ptr ? ptr->end() : asvJSONValue::ObjectMap::const_iterator{}; }
+
+	// Array iteration: for (auto& val : doc["arr"].values())
+	[[nodiscard]] auto values() noexcept { return ptr ? ptr->values() : asvJSONValue::ArrayRange{{}, {}}; }
+};
+
+// asvJSONValue operator[] (defined after JsonProxy is complete)
+[[nodiscard]] inline JsonProxy asvJSONValue::operator[](std::string_view key) noexcept { return JsonProxy(get(key)); }
+[[nodiscard]] inline JsonProxy asvJSONValue::operator[](size_t idx) noexcept { return JsonProxy(get(idx)); }
 
 // JSON formatting helpers
 
@@ -587,6 +678,9 @@ enum class FormatType {
 
 struct JsonSaxHandler; // forward declaration for parseSax()
 
+// forward declarations for diff
+inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch);
+
 class asvJSON {
 public:
 	mutable std::string lastError;
@@ -606,6 +700,7 @@ private:
 	size_t pos = 0;
 	int parseDepth = 0;
 	FormatType formatType = FormatType::Unknown;
+	mutable std::vector<std::unique_ptr<asvJSONValue>> pathOwned;
 
 	inline void skip() {
 		while (pos < json.size()) {
@@ -1350,12 +1445,61 @@ public:
 	[[nodiscard]] asvJSONValue* getRoot() noexcept { return root.get(); }
 	[[nodiscard]] const asvJSONValue* getRoot() const noexcept { return root.get(); }
 
+	[[nodiscard]] JsonProxy operator[](std::string_view key) noexcept {
+		return root ? JsonProxy(root->get(key)) : JsonProxy(static_cast<asvJSONValue*>(nullptr));
+	}
+	[[nodiscard]] JsonProxy operator[](size_t idx) noexcept {
+		return root ? JsonProxy(root->get(idx)) : JsonProxy(static_cast<asvJSONValue*>(nullptr));
+	}
+
 	[[nodiscard]] asvJSONValue* get(std::string_view key) {
 		return root ? root->get(key) : nullptr;
 	}
 
 	[[nodiscard]] const asvJSONValue* get(std::string_view key) const {
 		return root ? root->get(key) : nullptr;
+	}
+
+	// Iterator API: for (auto& [key, val] : doc) { ... }
+	[[nodiscard]] auto begin() noexcept {
+		return root ? root->begin() : asvJSONValue::ObjectMap::iterator{};
+	}
+	[[nodiscard]] auto end() noexcept {
+		return root ? root->end() : asvJSONValue::ObjectMap::iterator{};
+	}
+	[[nodiscard]] auto begin() const noexcept {
+		return root ? root->begin() : asvJSONValue::ObjectMap::const_iterator{};
+	}
+	[[nodiscard]] auto end() const noexcept {
+		return root ? root->end() : asvJSONValue::ObjectMap::const_iterator{};
+	}
+
+	// Array iteration: for (auto& val : doc.values()) { ... }
+	[[nodiscard]] auto values() noexcept {
+		return root ? root->values() : asvJSONValue::ArrayRange{{}, {}};
+	}
+
+	// Diff: returns a JSON array of change objects describing how to transform 'this' into 'other'
+	// Each element: {"op":"add|remove|replace","path":"a.b.c","value":...} or {"op":"remove","path":"a.b.c"}
+	[[nodiscard]] asvJSON diff(const asvJSON& other) const {
+		asvJSON result;
+		auto patch = asvJSONValue::makeArray();
+		if (root && other.root) {
+			diffImpl(*root, *other.root, "", *patch);
+		} else if (!root && other.root) {
+			auto op = asvJSONValue::makeObject();
+			op->emplace("op", asvJSONValue::makeStringView("add"));
+			op->emplace("path", asvJSONValue::makeStringView(""));
+			op->emplace("value", cloneValue(other.root.get()));
+			patch->push(std::move(op));
+		} else if (root && !other.root) {
+			auto op = asvJSONValue::makeObject();
+			op->emplace("op", asvJSONValue::makeStringView("remove"));
+			op->emplace("path", asvJSONValue::makeStringView(""));
+			patch->push(std::move(op));
+		}
+		result.root = std::move(patch);
+		return result;
 	}
 
 	[[nodiscard]] const asvJSONValue* getNested(std::string_view path) const {
@@ -1681,15 +1825,15 @@ public:
 	bool fromProtobufText(const std::string& text);
 	std::string toXML() const;
 	bool fromXML(std::string_view input);
-	std::string toYAML() const;
+	std::string toYAML(bool pretty = true) const;
 	bool fromYAML(std::string_view input);
 	std::string toCSV() const;
 	bool fromCSV(std::string_view input);
-	std::string toTOML() const;
+	std::string toTOML(bool pretty = true) const;
 	bool fromTOML(std::string_view input);
 	std::string toJSONLines() const;
 	bool fromJSONLines(std::string_view input);
-	std::string toINI() const;
+	std::string toINI(bool pretty = true) const;
 	bool fromINI(std::string_view input);
 	bool fromAny(std::string_view input);
 	/// @brief Parse JSON using SAX callbacks (no DOM allocation).
@@ -1975,6 +2119,132 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 	return cloneValueImpl(v, depth, nodes);
 }
 
+// Structural equality for asvJSONValue
+
+inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
+	if (a.type != b.type) return false;
+	switch (a.type) {
+		case asvJSONValue::NULL_VAL: return true;
+		case asvJSONValue::BOOL_VAL: return a.flag == b.flag;
+		case asvJSONValue::INT: return a.num == b.num;
+		case asvJSONValue::DOUBLE: return a.dbl == b.dbl;
+		case asvJSONValue::STRING: return a.str_data == b.str_data;
+		case asvJSONValue::DATETIME: return a.timestamp == b.timestamp && a.datetime_ms == b.datetime_ms;
+		case asvJSONValue::BINARY: return a.bin_data == b.bin_data;
+		case asvJSONValue::OBJECTID: return a.str_data == b.str_data;
+		case asvJSONValue::REGEX: return a.str_data == b.str_data;
+		case asvJSONValue::TIMESTAMP: return a.num == b.num;
+		case asvJSONValue::EXTENSION: return a.ext_type == b.ext_type && a.bin_data == b.bin_data;
+		case asvJSONValue::CUSTOM_TAG: return a.str_data == b.str_data && a.custom_value && b.custom_value && *a.custom_value == *b.custom_value;
+		case asvJSONValue::ARRAY: {
+			if (!a.arr || !b.arr) return a.arr == b.arr;
+			if (a.arr->size() != b.arr->size()) return false;
+			for (size_t i = 0; i < a.arr->size(); i++) {
+				if (!(*a.arr)[i] || !(*b.arr)[i]) { if ((*a.arr)[i] != (*b.arr)[i]) return false; continue; }
+				if (*(*a.arr)[i] != *(*b.arr)[i]) return false;
+			}
+			return true;
+		}
+		case asvJSONValue::OBJECT: {
+			if (!a.obj || !b.obj) return a.obj == b.obj;
+			if (a.obj->size() != b.obj->size()) return false;
+			for (const auto& [k, v] : *a.obj) {
+				auto it = mapFind(*b.obj, k);
+				if (it == b.obj->end()) return false;
+				if (!v || !it->second) { if (v != it->second) return false; continue; }
+				if (*v != *it->second) return false;
+			}
+			return true;
+		}
+		default: return false;
+	}
+}
+
+inline bool operator!=(const asvJSONValue& a, const asvJSONValue& b) noexcept {
+	return !(a == b);
+}
+
+// Diff implementation: records operations needed to transform 'a' into 'b'
+inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch) {
+	if (a == b) return;
+
+	// If both are objects, recurse into shared keys
+	if (a.type == asvJSONValue::OBJECT && b.type == asvJSONValue::OBJECT && a.obj && b.obj) {
+		// Keys in a but not in b → remove
+		for (const auto& [k, v] : *a.obj) {
+			auto it = mapFind(*b.obj, k);
+			if (it == b.obj->end()) {
+				std::string removePath = path.empty() ? k : path + "." + k;
+				auto op = asvJSONValue::makeObject();
+				op->emplace("op", asvJSONValue::makeStringView("remove"));
+				op->emplace("path", asvJSONValue::makeString(removePath.data(), removePath.size()));
+				patch.push(std::move(op));
+			}
+		}
+		// Keys in b — add or replace or recurse
+		for (const auto& [k, v] : *b.obj) {
+			if (!v) continue;
+			auto it = mapFind(*a.obj, k);
+			std::string childPath = path.empty() ? k : path + "." + k;
+			if (it == a.obj->end() || !it->second) {
+				auto op = asvJSONValue::makeObject();
+				op->emplace("op", asvJSONValue::makeStringView("add"));
+				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
+				op->emplace("value", cloneValue(v.get()));
+				patch.push(std::move(op));
+			} else if (it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
+				diffImpl(*it->second, *v, childPath, patch);
+			} else if (*it->second != *v) {
+				auto op = asvJSONValue::makeObject();
+				op->emplace("op", asvJSONValue::makeStringView("replace"));
+				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
+				op->emplace("value", cloneValue(v.get()));
+				patch.push(std::move(op));
+			}
+		}
+		return;
+	}
+	// Both arrays — recurse by index
+	if (a.type == asvJSONValue::ARRAY && b.type == asvJSONValue::ARRAY && a.arr && b.arr) {
+		size_t maxLen = a.arr->size() > b.arr->size() ? a.arr->size() : b.arr->size();
+		for (size_t i = 0; i < maxLen; i++) {
+			std::string idxPath = path + "/" + std::to_string(i);
+			bool aHas = i < a.arr->size();
+			bool bHas = i < b.arr->size();
+			if (aHas && bHas && (*a.arr)[i] && (*b.arr)[i]) {
+				if ((*a.arr)[i]->type == asvJSONValue::OBJECT && (*b.arr)[i]->type == asvJSONValue::OBJECT) {
+					diffImpl(*(*a.arr)[i], *(*b.arr)[i], idxPath, patch);
+				} else if (*(*a.arr)[i] != *(*b.arr)[i]) {
+					auto op = asvJSONValue::makeObject();
+					op->emplace("op", asvJSONValue::makeStringView("replace"));
+					op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
+					op->emplace("value", cloneValue((*b.arr)[i].get()));
+					patch.push(std::move(op));
+				}
+			} else if (!aHas && bHas) {
+				auto op = asvJSONValue::makeObject();
+				op->emplace("op", asvJSONValue::makeStringView("add"));
+				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
+				op->emplace("value", cloneValue((*b.arr)[i].get()));
+				patch.push(std::move(op));
+			} else if (aHas && !bHas) {
+				auto op = asvJSONValue::makeObject();
+				op->emplace("op", asvJSONValue::makeStringView("remove"));
+				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
+				patch.push(std::move(op));
+			}
+		}
+		return;
+	}
+	// Different types or scalars → replace
+	{
+		auto op = asvJSONValue::makeObject();
+		op->emplace("op", asvJSONValue::makeStringView("replace"));
+		op->emplace("path", asvJSONValue::makeString(path.data(), path.size()));
+		op->emplace("value", cloneValue(&b));
+		patch.push(std::move(op));
+	}
+}
 
 // JSON Pointer, Merge, Patch
 
@@ -2175,6 +2445,10 @@ inline void asvJSON::merge(const asvJSON& other) {
 		return;
 	}
 	for (const auto& [k, v] : *patch->obj) {
+		if (v->type == asvJSONValue::NULL_VAL) {
+			root->obj->erase(k);
+			continue;
+		}
 		auto it = mapFind(*root->obj, k);
 		if (it != root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
 			mergePatchRecursive(it->second.get(), v.get(), 0);
@@ -2412,13 +2686,13 @@ inline std::string asvJSON::toXML() const {
 	return out;
 }
 
-inline std::string asvJSON::toYAML() const {
+inline std::string asvJSON::toYAML(bool pretty) const {
 	std::string out;
 	if (root) {
-		if (root->type != asvJSONValue::ARRAY) {
+		if (pretty && root->type != asvJSONValue::ARRAY) {
 			out += "---\n";
 		}
-		root->toYAML(out);
+		root->toYAML(out, pretty);
 	}
 	return out;
 }
@@ -2429,15 +2703,15 @@ inline std::string asvJSON::toCSV() const {
 	return out;
 }
 
-inline std::string asvJSON::toTOML() const {
+inline std::string asvJSON::toTOML(bool pretty) const {
 	std::string out;
-	if (root) root->toTOML(out);
+	if (root) root->toTOML(out, pretty);
 	return out;
 }
 
-inline std::string asvJSON::toINI() const {
+inline std::string asvJSON::toINI(bool pretty) const {
 	std::string out;
-	if (root) root->toINI(out);
+	if (root) root->toINI(out, pretty);
 	return out;
 }
 

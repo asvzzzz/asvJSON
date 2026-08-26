@@ -607,7 +607,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
 }
 
 // --- Encoder ---
-inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool needHeader, std::string& out) {
+inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool needHeader, std::string& out, bool pretty = true) {
   using T = asvJSONValue::Type;
   if (!v) return;
 
@@ -620,55 +620,74 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
   };
 
   if (v->type == T::OBJECT && v->obj) {
-    if (needHeader && !prefix.empty()) {
-      emitHeader(prefix, false);
-    }
-    for (const auto& [k, val] : *v->obj) {
-      std::string qk = tomlQuoteKey(k);
-      std::string fullKey = prefix.empty() ? qk : prefix + "." + qk;
-      if (val->type == T::OBJECT) {
-        tomlEmitVal(val.get(), fullKey, true, out);
-      } else if (val->type == T::ARRAY && val->arr) {
-        bool allObjects = true;
-        for (const auto& elem : *val->arr)
-          if (elem->type != T::OBJECT) { allObjects = false; break; }
-        if (allObjects && !val->arr->empty()) {
-          for (const auto& elem : *val->arr) {
-            emitHeader(fullKey, true);
-            tomlEmitVal(elem.get(), fullKey, false, out);
+    if (!pretty) {
+      // Compact: inline all nested objects as {key = val} tables
+      for (const auto& [k, val] : *v->obj) {
+        std::string qk = tomlQuoteKey(k);
+        if (val->type == T::OBJECT || (val->type == T::ARRAY && val->arr)) {
+          std::string vs = tomlVal(val.get());
+          if (!vs.empty()) out += qk + " = " + vs + "\n";
+        } else {
+          std::string vs = tomlVal(val.get());
+          if (!vs.empty()) out += qk + " = " + vs + "\n";
+        }
+      }
+    } else {
+      // Expanded: use [section] headers for nested objects
+      if (needHeader && !prefix.empty()) {
+        emitHeader(prefix, false);
+      }
+      for (const auto& [k, val] : *v->obj) {
+        std::string qk = tomlQuoteKey(k);
+        std::string fullKey = prefix.empty() ? qk : prefix + "." + qk;
+        if (val->type == T::OBJECT) {
+          tomlEmitVal(val.get(), fullKey, true, out, true);
+        } else if (val->type == T::ARRAY && val->arr) {
+          bool allObjects = true;
+          for (const auto& elem : *val->arr)
+            if (elem->type != T::OBJECT) { allObjects = false; break; }
+          if (allObjects && !val->arr->empty()) {
+            for (const auto& elem : *val->arr) {
+              emitHeader(fullKey, true);
+              tomlEmitVal(elem.get(), fullKey, false, out, true);
+            }
+          } else {
+            std::string vs = tomlVal(val.get());
+            out += qk + " = " + vs + "\n";
           }
         } else {
           std::string vs = tomlVal(val.get());
-          out += qk + " = " + vs + "\n";
-        }
-      } else {
-        std::string vs = tomlVal(val.get());
-        if (!vs.empty()) {
-          out += qk + " = " + vs + "\n";
+          if (!vs.empty()) {
+            out += qk + " = " + vs + "\n";
+          }
         }
       }
     }
   } else if (v->type == T::ARRAY && v->arr) {
     for (const auto& elem : *v->arr)
-      tomlEmitVal(elem.get(), prefix, needHeader, out);
+      tomlEmitVal(elem.get(), prefix, needHeader, out, pretty);
   }
 }
 
-inline void asvJSONValue::toTOML(std::string& out) const {
+inline void asvJSONValue::toTOML(std::string& out, bool pretty) const {
   using T = asvJSONValue::Type;
   if (type == T::OBJECT) {
-    tomlEmitVal(this, "", false, out);
+    tomlEmitVal(this, "", false, out, pretty);
   } else if (type == T::ARRAY && arr) {
-    bool allObjects = true;
-    for (const auto& elem : *arr)
-      if (elem->type != T::OBJECT) { allObjects = false; break; }
-    if (allObjects && !arr->empty()) {
-      for (const auto& elem : *arr) {
-        out += "[[item]]\n";
-        tomlEmitVal(elem.get(), "item", false, out);
-      }
+    if (!pretty) {
+      out += "value = " + tomlVal(this) + "\n";
     } else {
-      out += "items = " + tomlVal(this) + "\n";
+      bool allObjects = true;
+      for (const auto& elem : *arr)
+        if (elem->type != T::OBJECT) { allObjects = false; break; }
+      if (allObjects && !arr->empty()) {
+        for (const auto& elem : *arr) {
+          out += "[[item]]\n";
+          tomlEmitVal(elem.get(), "item", false, out, true);
+        }
+      } else {
+        out += "items = " + tomlVal(this) + "\n";
+      }
     }
   } else {
     out += "value = " + tomlVal(this) + "\n";

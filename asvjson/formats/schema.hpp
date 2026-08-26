@@ -64,19 +64,6 @@ private:
     path_ += "/" + std::to_string(idx);
   }
 
-  void popPath(const std::string& seg) {
-    size_t len = seg.size();
-    if (seg.find('/') != std::string::npos || seg.find('\"') != std::string::npos) {
-      len = seg.size() + 3;
-    }
-    if (path_.size() >= len + 1) path_.resize(path_.size() - len - 1);
-  }
-
-  void popIndexPath() {
-    std::string idxStr = std::to_string(0);
-    size_t len = idxStr.size();
-    if (path_.size() >= len + 1) path_.resize(path_.size() - len - 1);
-  }
 
   static const asvJSONValue* schemaGet(const asvJSONValue* s, const std::string& key) {
     if (!s || s->type != asvJSONValue::OBJECT || !s->obj) return nullptr;
@@ -111,7 +98,18 @@ private:
       auto slash = ref.find('/');
       std::string_view seg = (slash == std::string_view::npos) ? ref : ref.substr(0, slash);
       if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
-      std::string key(seg);
+      // Decode JSON Pointer segment (~0 -> ~, ~1 -> /)
+      std::string key;
+      key.reserve(seg.size());
+      for (size_t i = 0; i < seg.size(); i++) {
+        if (seg[i] == '~' && i + 1 < seg.size()) {
+          if (seg[i + 1] == '0') { key += '~'; i++; }
+          else if (seg[i + 1] == '1') { key += '/'; i++; }
+          else key += seg[i];
+        } else {
+          key += seg[i];
+        }
+      }
       auto it = cur->obj->find(key);
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
@@ -608,15 +606,29 @@ private:
       std::set<std::string> matchedByPattern;
 
       if (patternPropsSchema && patternPropsSchema->type == asvJSONValue::OBJECT && patternPropsSchema->obj) {
+        struct CompiledPattern {
+          std::regex re;
+          const asvJSONValue* schema;
+        };
+        std::vector<CompiledPattern> compiledPatterns;
+        compiledPatterns.reserve(patternPropsSchema->obj->size());
+        for (auto& patKV : *patternPropsSchema->obj) {
+          try {
+            compiledPatterns.push_back({std::regex(patKV.first), patKV.second.get()});
+          } catch (const std::regex_error&) {
+            setError("Invalid regex pattern in patternProperties: '" + patKV.first + "'");
+            return false;
+          }
+        }
         for (auto& kv : *obj) {
-          for (auto& patKV : *patternPropsSchema->obj) {
-            try {
-              std::regex re(patKV.first);
-              if (std::regex_search(kv.first, re)) {
-                matchedByPattern.insert(kv.first);
-                if (!validateNode(kv.second.get(), patKV.second.get())) return false;
-              }
-            } catch (const std::regex_error&) {}
+          for (const auto& cp : compiledPatterns) {
+            if (std::regex_search(kv.first, cp.re)) {
+              matchedByPattern.insert(kv.first);
+              std::string oldPath = path_;
+              pushPath(kv.first);
+              if (!validateNode(kv.second.get(), cp.schema)) { path_ = oldPath; return false; }
+              path_ = oldPath;
+            }
           }
         }
       }

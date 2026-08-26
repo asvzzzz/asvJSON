@@ -6,12 +6,109 @@
 namespace asvJSONInternal {
 
 inline constexpr size_t MAX_YAML_ANCHORS = 100000;
+inline constexpr size_t YAML_FLOW_MAX_LEN = 80;
 
-inline void asvJSONValue::toYAML(std::string& out) const {
-	toYAML(out, 0, "", false);
+// Forward declarations for block/flow encoders
+inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
+                         const std::string& key, bool isArrayItem);
+inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
+                        const std::string& key, bool isArrayItem);
+
+inline void asvJSONValue::toYAML(std::string& out, bool pretty) const {
+	toYAML(out, 0, "", false, pretty);
 }
 
-inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem) const {
+inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem, bool pretty) const {
+	if (pretty) yamlBlockVal(this, out, indent, key, isArrayItem);
+	else yamlFlowVal(this, out, indent, key, isArrayItem);
+}
+
+// Try to emit value inline (for flow mode). Returns true if successful.
+inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out) {
+	using T = asvJSONValue::Type;
+	switch (v->type) {
+		case T::NULL_VAL: out += "~"; return true;
+		case T::BOOL_VAL: out += (v->flag ? "true" : "false"); return true;
+		case T::INT: {
+			char buf[32];
+			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+			if (ec == std::errc()) { out.append(buf, ptr); return true; }
+			return false;
+		}
+		case T::DOUBLE: {
+			if (std::isnan(v->dbl)) { out += ".nan"; return true; }
+			if (std::isinf(v->dbl)) { out += (v->dbl > 0 ? ".inf" : "-.inf"); return true; }
+			std::string val; fmtDoubleVal(v->dbl, val);
+			out += val; return true;
+		}
+		case T::STRING: {
+			if (v->str_data.find('\n') != std::string_view::npos) return false;
+			if (yamlNeedsQuotes(v->str_data)) out += yamlQuote(v->str_data);
+			else out += v->str_data;
+			return true;
+		}
+		case T::DATETIME: {
+			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+			out += dt; return true;
+		}
+		case T::BINARY: {
+			out += "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size());
+			return true;
+		}
+		case T::OBJECTID: {
+			std::string hex; fmtObjectIdHexVal(v->str_data, hex);
+			out += "!objectid " + hex; return true;
+		}
+		case T::REGEX: {
+			std::string r; fmtRegexVal(v->str_data, r);
+			out += "!regex " + r; return true;
+		}
+		case T::TIMESTAMP: {
+			char buf[32];
+			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+			if (ec == std::errc()) { out.append(buf, ptr); return true; }
+			return false;
+		}
+		case T::EXTENSION:
+			out += "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size()));
+			return true;
+		case T::OBJECT: {
+			if (!v->obj || v->obj->empty()) { out += "{}"; return true; }
+			std::string inner = "{";
+			bool first = true;
+			for (const auto& [k, val] : *v->obj) {
+				std::string childOut;
+				if (!yamlTryFlowVal(val.get(), childOut)) return false;
+				if (!first) inner += ", ";
+				first = false;
+				inner += yamlQuoteKey(k) + ": " + childOut;
+			}
+			inner += "}";
+			if (inner.size() > YAML_FLOW_MAX_LEN) return false;
+			out += inner; return true;
+		}
+		case T::ARRAY: {
+			if (!v->arr || v->arr->empty()) { out += "[]"; return true; }
+			std::string inner = "[";
+			bool first = true;
+			for (const auto& item : *v->arr) {
+				std::string childOut;
+				if (!yamlTryFlowVal(item.get(), childOut)) return false;
+				if (!first) inner += ", ";
+				first = false;
+				inner += childOut;
+			}
+			inner += "]";
+			if (inner.size() > YAML_FLOW_MAX_LEN) return false;
+			out += inner; return true;
+		}
+		default: out += "~"; return true;
+	}
+}
+
+// Emit a value in block style at the given indent (existing behavior).
+inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
+                         const std::string& key, bool isArrayItem) {
 	using T = asvJSONValue::Type;
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * 2, ' ') + "- ";
@@ -19,105 +116,132 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 		return "";
 	};
 
-	switch (type) {
+	switch (v->type) {
 		case T::NULL_VAL:
-			out += prefix() + "~\n";
-			break;
+			out += prefix() + "~\n"; break;
 		case T::BOOL_VAL:
-			out += prefix() + (flag ? "true" : "false") + "\n";
-			break;
+			out += prefix() + (v->flag ? "true" : "false") + "\n"; break;
 		case T::INT: {
 			char buf[32];
-			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), num);
-			if (ec == std::errc()) { out += prefix() + std::string(buf, ptr) + "\n"; }
+			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + "\n";
 			break;
 		}
 		case T::DOUBLE: {
-			if (std::isnan(dbl)) { out += prefix() + ".nan\n"; break; }
-			if (std::isinf(dbl)) { out += prefix() + (dbl > 0 ? ".inf\n" : "-.inf\n"); break; }
-			std::string val; fmtDoubleVal(dbl, val);
-			out += prefix() + val + "\n";
-			break;
+			if (std::isnan(v->dbl)) { out += prefix() + ".nan\n"; break; }
+			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf\n" : "-.inf\n"); break; }
+			std::string val; fmtDoubleVal(v->dbl, val);
+			out += prefix() + val + "\n"; break;
 		}
 		case T::STRING: {
-			// Multi-line strings are emitted as literal block scalars with an
-			// explicit chomp indicator so round-trips preserve trailing line breaks.
-			if (str_data.find('\n') != std::string_view::npos && !str_data.empty() && str_data[0] != '\n') {
+			if (v->str_data.find('\n') != std::string_view::npos && !v->str_data.empty() && v->str_data[0] != '\n') {
 				size_t trailing = 0;
-				while (trailing < str_data.size() && str_data[str_data.size() - 1 - trailing] == '\n') trailing++;
+				while (trailing < v->str_data.size() && v->str_data[v->str_data.size() - 1 - trailing] == '\n') trailing++;
 				std::string ind;
 				if (trailing == 0) ind = "|-";
 				else if (trailing == 1) ind = "|";
 				else ind = "|+";
 				out += prefix() + ind + "\n";
-				for (size_t i = 0; i < str_data.size(); ) {
-					size_t eol = str_data.find('\n', i);
-					if (eol == std::string_view::npos) eol = str_data.size();
-					out += std::string((indent + 1) * 2, ' ') + std::string(str_data.data() + i, eol - i) + "\n";
+				for (size_t i = 0; i < v->str_data.size(); ) {
+					size_t eol = v->str_data.find('\n', i);
+					if (eol == std::string_view::npos) eol = v->str_data.size();
+					out += std::string((indent + 1) * 2, ' ') + std::string(v->str_data.data() + i, eol - i) + "\n";
 					i = eol + 1;
 				}
-			} else if (str_data.find('\n') != std::string_view::npos) {
-				// Leading (or only) blank lines cannot be represented by a literal
-				// block -- fall back to a double-quoted string with escapes.
-				out += prefix() + yamlDQuote(str_data) + "\n";
-			} else if (yamlNeedsQuotes(str_data)) {
-				out += prefix() + yamlQuote(str_data) + "\n";
+			} else if (v->str_data.find('\n') != std::string_view::npos) {
+				out += prefix() + yamlDQuote(v->str_data) + "\n";
+			} else if (yamlNeedsQuotes(v->str_data)) {
+				out += prefix() + yamlQuote(v->str_data) + "\n";
 			} else {
-				out += prefix() + str_data + "\n";
+				out += prefix() + v->str_data + "\n";
 			}
 			break;
 		}
 		case T::DATETIME: {
-			std::string dt; fmtDateTimeVal(timestamp, datetime_ms, dt);
-			out += prefix() + dt + "\n";
-			break;
+			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+			out += prefix() + dt + "\n"; break;
 		}
 		case T::BINARY:
-			out += prefix() + "!!binary " + encodeBase64(bin_data.data(), bin_data.size()) + "\n";
-			break;
+			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\n"; break;
 		case T::OBJECTID: {
-			std::string hex; fmtObjectIdHexVal(str_data, hex);
-			out += prefix() + "!objectid " + hex + "\n";
-			break;
+			std::string hex; fmtObjectIdHexVal(v->str_data, hex);
+			out += prefix() + "!objectid " + hex + "\n"; break;
 		}
 		case T::REGEX: {
-			std::string r; fmtRegexVal(str_data, r);
-			out += prefix() + "!regex " + r + "\n";
-			break;
+			std::string r; fmtRegexVal(v->str_data, r);
+			out += prefix() + "!regex " + r + "\n"; break;
 		}
 		case T::TIMESTAMP: {
 			char buf[32];
-			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), num);
-			if (ec == std::errc()) { out += prefix() + std::string(buf, ptr) + "\n"; }
+			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + "\n";
 			break;
 		}
 		case T::EXTENSION:
-			out += prefix() + "!ext " + std::to_string(ext_type) + " " + yamlQuote(encodeBase64(bin_data.data(), bin_data.size())) + "\n";
+			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + "\n";
 			break;
 		case T::OBJECT: {
-			if (!obj || obj->empty()) { out += prefix() + "{}\n"; break; }
+			if (!v->obj || v->obj->empty()) { out += prefix() + "{}\n"; break; }
 			if (key.empty() && !isArrayItem) {
-				for (const auto& [k, v] : *obj) v->toYAML(out, indent, k, false);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false);
 			} else {
 				out += prefix() + "\n";
-				for (const auto& [k, v] : *obj) v->toYAML(out, indent + 1, k, false);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false);
 			}
 			break;
 		}
 		case T::ARRAY: {
-			if (!arr || arr->empty()) { out += prefix() + "[]\n"; break; }
+			if (!v->arr || v->arr->empty()) { out += prefix() + "[]\n"; break; }
 			if (!isArrayItem && key.empty()) {
 				out += "---\n";
-				for (const auto& item : *arr) item->toYAML(out, 0, "", true);
+				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true);
 				break;
 			}
 			out += prefix() + "\n";
-			for (const auto& item : *arr) item->toYAML(out, indent, "", true);
+			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, indent, "", true);
 			break;
 		}
 		default:
-			out += prefix() + "~\n";
-			break;
+			out += prefix() + "~\n"; break;
+	}
+}
+
+// Try flow mode: emit objects/arrays inline when they fit, fall back to block.
+inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
+                        const std::string& key, bool isArrayItem) {
+	using T = asvJSONValue::Type;
+	auto prefix = [&]() -> std::string {
+		if (isArrayItem && key.empty()) return std::string(indent * 2, ' ') + "- ";
+		if (!key.empty()) return std::string(indent * 2, ' ') + yamlQuoteKey(key) + ": ";
+		return "";
+	};
+
+	if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
+		std::string trial = prefix();
+		std::string inner;
+		if (yamlTryFlowVal(v, inner)) {
+			if (key.empty() && !isArrayItem) out += inner + "\n";
+			else out += trial + inner + "\n";
+		} else {
+			if (key.empty() && !isArrayItem) {
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false);
+			} else {
+				out += prefix() + "\n";
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false);
+			}
+		}
+	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
+		std::string trial = prefix();
+		std::string inner;
+		if (yamlTryFlowVal(v, inner)) {
+			if (key.empty() && !isArrayItem) out += inner + "\n";
+			else out += trial + inner + "\n";
+		} else {
+			out += prefix() + "\n";
+			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true);
+		}
+	} else {
+		yamlBlockVal(v, out, indent, key, isArrayItem);
 	}
 }
 
@@ -227,11 +351,22 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	if (s == "NaN" || s == ".NaN" || s == ".nan" || s == ".NAN") return "NaN";
 	if (s == "Infinity" || s == ".Inf" || s == ".inf" || s == ".INF") return "Infinity";
 	if (s == "-Infinity" || s == "-.Inf" || s == "-.inf" || s == "-.INF") return "-Infinity";
-	// Use from_chars instead of strtod -- safe with non-null-terminated string_view
+	// Validate that the string is a valid number (not a YAML plain scalar that looks like a number)
 	{
+		bool validNumber = false;
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 		double d;
 		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), d);
-		if (ec == std::errc() && ptr == s.data() + s.size() && s.size() > 0) return std::string(s);
+		validNumber = (ec == std::errc() && ptr == s.data() + s.size() && s.size() > 0);
+	#else
+		if (s.size() > 0) {
+			char* end = nullptr;
+			std::string tmp(s);
+			std::strtod(tmp.c_str(), &end);
+			validNumber = (end == tmp.c_str() + tmp.size());
+		}
+	#endif
+		if (validNumber) return std::string(s);
 	}
 	std::string out = "\"";
 	for (auto c : s) {
@@ -425,20 +560,21 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 	if (tag == "!!str") return yamlForceStringVal(val);
 	if (tag == "!!int") {
 		if (val.empty()) return "0";
+		std::string valStr(val);
 		// Handle YAML Core Schema integer prefixes: 0x (hex), 0o (octal), 0b (binary)
 		if (val.size() >= 3 && val[0] == '0') {
 			if (val[1] == 'x' || val[1] == 'X') {
 				char* e = nullptr;
 				errno = 0;
-				long long n = std::strtoll(val.data() + 2, &e, 16);
+				long long n = std::strtoll(valStr.c_str() + 2, &e, 16);
 				if (errno == ERANGE) throw asvJSONError("YAML: !!int overflow");
-				if (e == val.data() + val.size()) return std::to_string(n);
+				if (e == valStr.c_str() + valStr.size()) return std::to_string(n);
 			} else if (val[1] == 'o' || val[1] == 'O') {
 				char* e = nullptr;
 				errno = 0;
-				long long n = std::strtoll(val.data() + 2, &e, 8);
+				long long n = std::strtoll(valStr.c_str() + 2, &e, 8);
 				if (errno == ERANGE) throw asvJSONError("YAML: !!int overflow");
-				if (e == val.data() + val.size()) return std::to_string(n);
+				if (e == valStr.c_str() + valStr.size()) return std::to_string(n);
 			} else if ((val[0] == '0' && (val[1] == 'b' || val[1] == 'B')) ||
 			           ((val[0] == '-' || val[0] == '+') && val.size() >= 4 && val[1] == '0' && (val[2] == 'b' || val[2] == 'B'))) {
 				size_t start = (val[0] == '0') ? 2 : 3;
@@ -457,7 +593,6 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		}
 		// Plain decimal integer (including negative)
 		{
-			std::string valStr(val);
 			char* e = nullptr;
 			errno = 0;
 			long long n = std::strtoll(valStr.c_str(), &e, 10);
@@ -498,9 +633,15 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(valStr.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == valStr.c_str() + valStr.size() && valStr.size() > 0) {
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);
+			#else
+				char buf[64];
+				int n = snprintf(buf, sizeof(buf), "%.16g", d);
+				if (n > 0) return std::string(buf, static_cast<size_t>(n));
+			#endif
 			}
 		}
 		std::string parsed = yamlParseInlineValue(val);
@@ -511,9 +652,15 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(inner.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == inner.c_str() + inner.size()) {
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);
+			#else
+				char buf[64];
+				int n = snprintf(buf, sizeof(buf), "%.16g", d);
+				if (n > 0) return std::string(buf, static_cast<size_t>(n));
+			#endif
 			}
 			throw asvJSONError("YAML: invalid !!float value");
 		}
@@ -524,9 +671,15 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(parsed.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == parsed.c_str() + parsed.size()) {
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);
+			#else
+				char buf[64];
+				int n = snprintf(buf, sizeof(buf), "%.16g", d);
+				if (n > 0) return std::string(buf, static_cast<size_t>(n));
+			#endif
 			}
 		}
 		throw asvJSONError("YAML: invalid !!float value");
