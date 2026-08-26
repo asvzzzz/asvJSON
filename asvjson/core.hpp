@@ -1047,6 +1047,9 @@ public:
 		return parse(content);
 	}
 
+	bool readFromFileAny(const std::string& filename);
+	bool writeToFileAny(const std::string& filename, bool pretty = false) const;
+
 	[[nodiscard]] std::string getString(std::string_view key) const {
 		if (!root) return "";
 		auto* v = getNested(key);

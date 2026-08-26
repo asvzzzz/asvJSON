@@ -1491,6 +1491,69 @@ void example_json_sax() {
 	std::cout << std::endl;
 }
 
+void example_read_write_file_any() {
+	std::cout << "=== readFromFileAny / writeToFileAny ===" << std::endl;
+
+	// Write the same data in multiple formats
+	asvJSON json;
+	json.parse(R"({"language":"C++","version":17,"features":["fast","portable"]})");
+
+	json.writeToFileAny("example_output.json");
+	std::cout << "  Wrote example_output.json" << std::endl;
+
+	json.writeToFileAny("example_output.yaml");
+	std::cout << "  Wrote example_output.yaml" << std::endl;
+
+	json.writeToFileAny("example_output.xml");
+	std::cout << "  Wrote example_output.xml" << std::endl;
+
+	json.writeToFileAny("example_output.bson", false);
+	std::cout << "  Wrote example_output.bson (binary)" << std::endl;
+
+	json.writeToFileAny("example_output.cbor", false);
+	std::cout << "  Wrote example_output.cbor (binary)" << std::endl;
+
+	// Read back any format by extension
+	asvJSON loaded;
+	if (loaded.readFromFileAny("example_output.json")) {
+		std::cout << "  Read JSON:   language=" << loaded.getString("language") << std::endl;
+	}
+
+	if (loaded.readFromFileAny("example_output.yaml")) {
+		std::cout << "  Read YAML:   language=" << loaded.getString("language") << std::endl;
+	}
+
+	if (loaded.readFromFileAny("example_output.xml")) {
+		std::cout << "  Read XML:    language=" << loaded.getString("language") << std::endl;
+	}
+
+	if (loaded.readFromFileAny("example_output.bson")) {
+		std::cout << "  Read BSON:   language=" << loaded.getString("language") << std::endl;
+	}
+
+	if (loaded.readFromFileAny("example_output.cbor")) {
+		std::cout << "  Read CBOR:   language=" << loaded.getString("language") << std::endl;
+	}
+
+	// Unknown extension falls back to content auto-detection
+	{
+		std::ofstream f("example_output.unknown");
+		f << R"({"auto":"detected"})";
+	}
+	if (loaded.readFromFileAny("example_output.unknown")) {
+		std::cout << "  Read .unknown (auto-detected): auto=" << loaded.getString("auto") << std::endl;
+	}
+
+	// Cleanup
+	const char* files[] = {
+		"example_output.json", "example_output.yaml", "example_output.xml",
+		"example_output.bson", "example_output.cbor", "example_output.unknown"
+	};
+	for (auto f : files) std::remove(f);
+
+	std::cout << std::endl;
+}
+
 int main() {
 	std::cout << "========================================" << std::endl;
 	std::cout << "   asvJSON++ C++17 Examples" << std::endl;
@@ -1571,6 +1634,7 @@ int main() {
 	example_json_schema();
 	example_jsonpath();
 	example_json_sax();
+	example_read_write_file_any();
 	
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;

@@ -235,6 +235,117 @@ inline bool asvJSON::fromAny(std::string_view input) {
   return false;
 }
 
+static inline std::string asvjsonExtLower(const std::string& s) {
+  std::string r = s;
+  for (auto& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return r;
+}
+
+static inline std::string asvjsonExtractExt(const std::string& filename) {
+  auto pos = filename.rfind('.');
+  if (pos == std::string::npos || pos == 0) return "";
+  auto ext = filename.substr(pos + 1);
+  // also strip .gz / .bz2 / .xz suffix
+  if (ext == "gz" || ext == "bz2" || ext == "xz") {
+    auto pos2 = filename.rfind('.', pos - 1);
+    if (pos2 != std::string::npos && pos2 > 0) ext = filename.substr(pos2 + 1, pos - pos2 - 1);
+  }
+  return asvjsonExtLower(ext);
+}
+
+inline bool asvJSON::readFromFileAny(const std::string& filename) {
+  std::ifstream in(filename, std::ios::binary);
+  if (!in.is_open()) { lastError = "Failed to open file: " + filename; return false; }
+  std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
+
+  auto ext = asvjsonExtractExt(filename);
+
+  // Binary formats — pass raw bytes
+  if (ext == "bson") { formatType = FormatType::BSON; return fromBSON(content); }
+  if (ext == "mp" || ext == "msgpack" || ext == "msg") { formatType = FormatType::MessagePack; return fromMessagePack(content); }
+  if (ext == "cbor") { formatType = FormatType::CBOR; return fromCBOR(content); }
+  if (ext == "pb" || ext == "protobuf" || ext == "proto") { formatType = FormatType::Protobuf; return fromProtobuf(content); }
+
+  // Text formats — use string_view dispatch
+  if (ext == "json")  { formatType = FormatType::JSON;     return parse(content); }
+  if (ext == "json5" || ext == "jsonc") { formatType = FormatType::JSON5;     return fromJSON5(content); }
+  if (ext == "jsonl" || ext == "ndjson") { formatType = FormatType::JSONLines; return fromJSONLines(content); }
+  if (ext == "yaml" || ext == "yml") { formatType = FormatType::YAML;     return fromYAML(content); }
+  if (ext == "xml")  { formatType = FormatType::XML;      return fromXML(content); }
+  if (ext == "csv")  { formatType = FormatType::CSV;      return fromCSV(content); }
+  if (ext == "tsv")  { formatType = FormatType::CSV;      return fromCSV(content); }
+  if (ext == "toml") { formatType = FormatType::TOML;     return fromTOML(content); }
+  if (ext == "ini" || ext == "cfg" || ext == "conf") { formatType = FormatType::INI; return fromINI(content); }
+  if (ext == "sexp" || ext == "sexpr" || ext == "scm") { formatType = FormatType::SExpr; return fromSexpr(content); }
+  if (ext == "toon") { formatType = FormatType::TOON;     return fromTOON(content); }
+  if (ext == "tron") { formatType = FormatType::TRON;     return fromTRON(content); }
+  if (ext == "goon") { formatType = FormatType::GOON;     return fromGOON(content); }
+  if (ext == "ude")  { formatType = FormatType::UDE;      return fromUDE(content); }
+  if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
+
+  // Unknown extension — auto-detect from content
+  return fromAny(content);
+}
+
+inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) const {
+  auto ext = asvjsonExtractExt(filename);
+
+  // Binary formats — write raw bytes
+  if (ext == "bson") {
+    auto data = toBSON();
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+  }
+  if (ext == "mp" || ext == "msgpack" || ext == "msg") {
+    auto data = toMessagePack();
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+  }
+  if (ext == "cbor") {
+    auto data = toCBOR();
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+  }
+  if (ext == "pb" || ext == "protobuf" || ext == "proto") {
+    auto data = toProtobuf();
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+  }
+
+  // Text formats
+  std::string content;
+  if (ext == "json")  content = serialize(pretty);
+  else if (ext == "json5" || ext == "jsonc") content = toJSON5(pretty);
+  else if (ext == "jsonl" || ext == "ndjson") content = toJSONLines();
+  else if (ext == "yaml" || ext == "yml") content = toYAML();
+  else if (ext == "xml")  content = toXML();
+  else if (ext == "csv")  content = toCSV();
+  else if (ext == "tsv")  content = toCSV();
+  else if (ext == "toml") content = toTOML();
+  else if (ext == "ini" || ext == "cfg" || ext == "conf") content = toINI();
+  else if (ext == "sexp" || ext == "sexpr" || ext == "scm") content = toSexpr();
+  else if (ext == "toon") content = toTOON();
+  else if (ext == "tron") content = toTRON();
+  else if (ext == "goon") content = toGOON();
+  else if (ext == "ude")  content = toUDE();
+  else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
+  else content = serialize(pretty);
+
+  std::ofstream out(filename);
+  if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+  out << content;
+  return out.good();
+}
+
 #ifndef ASVJSON_DISABLE_JSONSAX
 inline bool asvJSON::parseSax(std::string_view input, JsonSaxHandler& handler) {
   JsonSaxParser parser;

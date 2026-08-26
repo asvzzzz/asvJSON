@@ -8445,6 +8445,334 @@ TEST(testSaxToDom) {
 	}
 }
 
+TEST(testReadWriteFileAny) {
+	// Helper: write a temp file, read it back, verify, clean up
+	auto tmpFile = [](const std::string& ext) -> std::string {
+		return "test_tmp_" + ext + "." + ext;
+	};
+	auto cleanup = [](const std::string& path) { std::remove(path.c_str()); };
+
+	// --- JSON round-trip ---
+	{
+		std::string path = tmpFile("json");
+		{
+			asvJSON w;
+			w.parse(R"({"x":1,"y":"hello"})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("x"), 1);
+			ASSERT_EQ(r.getString("y"), "hello");
+		}
+		cleanup(path);
+	}
+
+	// --- YAML round-trip ---
+	{
+		std::string path = tmpFile("yaml");
+		{
+			asvJSON w;
+			w.parse(R"({"a":10,"b":"world"})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("a"), 10);
+			ASSERT_EQ(r.getString("b"), "world");
+		}
+		cleanup(path);
+	}
+
+	// --- .yml extension ---
+	{
+		std::string path = tmpFile("yml");
+		{
+			asvJSON w;
+			w.parse(R"({"k":"v"})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getString("k"), "v");
+		}
+		cleanup(path);
+	}
+
+	// --- XML round-trip ---
+	{
+		std::string path = tmpFile("xml");
+		{
+			asvJSON w;
+			w.parse(R"({"tag":"val"})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getString("tag"), "val");
+		}
+		cleanup(path);
+	}
+
+	// --- CSV round-trip ---
+	{
+		std::string path = tmpFile("csv");
+		{
+			asvJSON w;
+			w.parse(R"([{"a":1,"b":2},{"a":3,"b":4}])");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getRoot()->type, asvJSONValue::ARRAY);
+			auto& arr = *r.getRoot()->arr;
+			ASSERT_EQ(arr[0]->obj->find("a")->second->getInt(), 1);
+			ASSERT_EQ(arr[1]->obj->find("b")->second->getInt(), 4);
+		}
+		cleanup(path);
+	}
+
+	// --- JSON5 round-trip ---
+	{
+		std::string path = tmpFile("json5");
+		{
+			asvJSON w;
+			w.parse(R"({"m":42})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("m"), 42);
+		}
+		cleanup(path);
+	}
+
+	// --- JSON Lines round-trip ---
+	{
+		std::string path = tmpFile("jsonl");
+		{
+			asvJSON w;
+			w.parse(R"({"a":1})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			// JSONLines wraps into an array
+			ASSERT_EQ(r.getRoot()->type, asvJSONValue::ARRAY);
+			ASSERT_EQ((*r.getRoot()->arr)[0]->obj->find("a")->second->getInt(), 1);
+		}
+		cleanup(path);
+	}
+
+	// --- TOML round-trip ---
+	{
+		std::string path = tmpFile("toml");
+		{
+			asvJSON w;
+			w.parse(R"({"title":"test","value":99})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			// TOML may wrap in a table structure, check via pointer
+			ASSERT(r.getInt("value") == 99 || r.getInt("title.value") == 99);
+		}
+		cleanup(path);
+	}
+
+	// --- INI round-trip ---
+	{
+		std::string path = tmpFile("ini");
+		{
+			asvJSON w;
+			w.parse(R"({"key":"val","num":7})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getString("key"), "val");
+			ASSERT_EQ(r.getInt("num"), 7);
+		}
+		cleanup(path);
+	}
+
+	// --- S-Expression round-trip ---
+	{
+		std::string path = tmpFile("sexp");
+		{
+			asvJSON w;
+			w.parse(R"({"x":1})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("x"), 1);
+		}
+		cleanup(path);
+	}
+
+	// --- TOON round-trip ---
+	{
+		std::string path = tmpFile("toon");
+		{
+			asvJSON w;
+			w.parse(R"({"p":"q","n":5})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getString("p"), "q");
+			ASSERT_EQ(r.getInt("n"), 5);
+		}
+		cleanup(path);
+	}
+
+	// --- UDE round-trip ---
+	{
+		std::string path = tmpFile("ude");
+		{
+			asvJSON w;
+			w.parse(R"({"u":true})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT(r.getBool("u"));
+		}
+		cleanup(path);
+	}
+
+	// --- BSON round-trip (binary) ---
+	{
+		std::string path = tmpFile("bson");
+		{
+			asvJSON w;
+			w.parse(R"({"b":42,"s":"ok"})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("b"), 42);
+			ASSERT_EQ(r.getString("s"), "ok");
+		}
+		cleanup(path);
+	}
+
+	// --- MessagePack round-trip (binary) ---
+	{
+		std::string path = tmpFile("msgpack");
+		{
+			asvJSON w;
+			w.parse(R"({"m":"data","v":7})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getString("m"), "data");
+			ASSERT_EQ(r.getInt("v"), 7);
+		}
+		cleanup(path);
+	}
+
+	// --- CBOR round-trip (binary) ---
+	{
+		std::string path = tmpFile("cbor");
+		{
+			asvJSON w;
+			w.parse(R"({"c":true})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT(r.getBool("c"));
+		}
+		cleanup(path);
+	}
+
+	// --- Unknown extension falls back to fromAny ---
+	{
+		std::string path = "test_tmp_fallback.xyz";
+		{
+			std::ofstream out(path);
+			out << R"({"z":99})";
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("z"), 99);
+		}
+		cleanup(path);
+	}
+
+	// --- .gz suffix strips to .json ---
+	{
+		std::string path = "test_tmp_strip.json.gz";
+		{
+			std::ofstream out(path);
+			out << R"({"g":1})";
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("g"), 1);
+		}
+		cleanup(path);
+	}
+
+	// --- writeToFileAny unknown ext defaults to JSON ---
+	{
+		std::string path = "test_tmp_unknown.xyz";
+		{
+			asvJSON w;
+			w.parse(R"({"w":5})");
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT_EQ(r.getInt("w"), 5);
+		}
+		cleanup(path);
+	}
+
+	// --- nonexistent file returns false ---
+	{
+		asvJSON r;
+		ASSERT(!r.readFromFileAny("nonexistent_file_12345.json"));
+	}
+
+	// --- pretty flag works for JSON writeToFileAny ---
+	{
+		std::string path = tmpFile("json");
+		{
+			asvJSON w;
+			w.parse(R"({"p":1})");
+			ASSERT(w.writeToFileAny(path, true));
+		}
+		{
+			std::ifstream in(path);
+			std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			ASSERT(content.find('\n') != std::string::npos); // pretty = newlines
+		}
+		cleanup(path);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -8796,6 +9124,9 @@ int main() {
 	RUN(testJsonSax);
 	RUN(testJsonStream);
 	RUN(testSaxToDom);
+
+	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
+	RUN(testReadWriteFileAny);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
