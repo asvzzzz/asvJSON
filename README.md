@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), and S-Expression serialization.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), S-Expressions, JSON Schema validation, JSONPath (RFC 9535), and JSON SAX/streaming parsing.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -20,12 +20,20 @@ MIT license - see the `LICENSE` file for details.
 - Custom Base64 charset for encryption/obfuscation
 - DateTime ISO-8601 with milliseconds
 - File I/O operations
+- Auto-format file I/O: `readFromFileAny()` / `writeToFileAny()` with heuristic format detection
 - Type-safe accessors with `opt*` defaults
 - `std::string_view` support for all key and string operations (zero-copy where possible)
 - `noexcept` on all accessors (`getInt`, `getDouble`, `getBool`) for performance
 - Transparent `unordered_map` lookup - avoids temporary `std::string` allocation on modern compilers (GCC 9, Clang, MSVC)
 - `std::from_chars` for fast double parsing on C++23 compilers
 - `allowNaNInfinity` flag - parse/serialize NaN and Infinity values
+- `operator[]` for chained navigation (`json["a"]["b"]["c"]`)
+- Iterator API: `begin()`/`end()` for objects and arrays, `values()` range helper
+- `emplace(key, val)` and `push(val)` for in-place value construction
+- `operator==` / `operator!=` for deep structural equality
+- `merge(other)` for RFC 7396 deep merge with null-deletion
+- `diff(other)` for generating JSON Patch arrays
+- Format detection: `getFormatType()` and `fromAny()` with heuristic content detection
 
 ### Comments
 - `//`, `/* */`, `#` style comments
@@ -57,6 +65,76 @@ MIT license - see the `LICENSE` file for details.
 - JSON Pointer (RFC 6901)
 - JSON Merge Patch (RFC 7396)
 - JSON Patch (RFC 6902)
+- JSON Schema validation (draft-07)
+- JSONPath (RFC 9535)
+
+### JSON Schema Validation
+
+```cpp
+asvJSON doc;
+doc.parse(R"({"name":"Alice","age":30})");
+
+asvJSON schema;
+schema.parse(R"({
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": {"type": "string"},
+    "age": {"type": "integer", "minimum": 0}
+  }
+})");
+
+std::string error;
+bool valid = doc.validate(schema, error); // true
+```
+
+Supports: `type`, `const`, `enum`, `allOf`/`anyOf`/`oneOf`/`not`, `if`/`then`/`else`, `$ref` (local), `minLength`/`maxLength`/`pattern`, `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`, `minItems`/`maxItems`/`uniqueItems`/`items`/`contains`, `required`/`properties`/`patternProperties`/`additionalProperties`/`minProperties`/`maxProperties`/`propertyNames`/`dependentRequired`/`dependencies`.
+
+Disable with `#define ASVJSON_DISABLE_SCHEMA`.
+
+### JSONPath (RFC 9535)
+
+```cpp
+asvJSON doc;
+doc.parse(R"({"users":[{"name":"Alice","age":30},{"name":"Bob","age":25}]})");
+
+auto results = doc.query("$.users[?(@.age >= 30)].name");
+// results[0] points to "Alice"
+
+const asvJSONValue* first = doc.queryFirst("$.users[0].name");
+// first points to "Alice"
+
+bool valid = asvJSON::isValidPath("$.users[*].name"); // true
+```
+
+Supports: `$`, `.member`, `['member']`, `[index]`, `[start:end:step]` slices, `..` recursive descent, `[*]` wildcard, `?(filter)` with `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`, `!` operators, and functions: `length()`, `count()`, `min()`, `max()`, `sum()`, `avg()`, `match()`, `search()`, `value()`.
+
+Disable with `#define ASVJSON_DISABLE_JSONPATH`.
+
+### JSON SAX / Streaming Parser
+
+```cpp
+// Full-input SAX parsing
+struct Handler : public JsonSaxHandler {
+  void onKeyValue(const std::string& key, const asvJSONValue* val) override { ... }
+  void onArrayBegin() override { ... }
+  // ... other callbacks
+};
+
+asvJSON doc;
+Handler h;
+doc.parseSax(jsonString, h);
+
+// Chunked streaming (for large files)
+JsonStreamParser stream;
+stream.setHandler(h);
+while (auto chunk = readNextChunk()) {
+  if (!stream.feed(chunk)) break;
+}
+stream.finish();
+```
+
+Disable with `#define ASVJSON_DISABLE_SAX`.
 
 ### Special Data Types
 - Binary data (automatic Base64 in JSON, raw in BSON/MessagePack)
@@ -765,6 +843,33 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.15.0 (2026-08-26)
+
+- **New - JSON Schema validation:** Added `validate()` method and `SchemaValidator` class supporting draft-07 keywords: `type`, `const`, `enum`, `allOf`/`anyOf`/`oneOf`/`not`, `if`/`then`/`else`, `$ref` (local with JSON Pointer decoding), string (`minLength`/`maxLength`/`pattern`), number (`minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`), array (`minItems`/`maxItems`/`uniqueItems`/`items`/`contains`), object (`required`/`properties`/`patternProperties`/`additionalProperties`/`minProperties`/`maxProperties`/`propertyNames`/`dependentRequired`/`dependencies`). Disable with `ASVJSON_DISABLE_SCHEMA`.
+- **New - JSONPath (RFC 9535):** Added `query()`, `queryFirst()`, `isValidPath()` methods. Supports `$`, `.member`, `['member']`, `[index]`, `[start:end:step]` slices, `..member` recursive descent, `[*]` wildcard, `?(filter)` expressions with comparison/logic operators, and functions (`length`, `count`, `min`, `max`, `sum`, `avg`, `match`, `search`, `value`). Disable with `ASVJSON_DISABLE_JSONPATH`.
+- **New - JSON SAX/Streaming parser:** Added `parseSax()` method with `JsonSaxHandler` (callback-based), `JsonSaxParser` (full-input), `JsonStreamParser` (chunked), and `JsonSaxToDom` adapter. Supports comments. Disable with `ASVJSON_DISABLE_SAX`.
+- **New - Auto-format file I/O:** Added `readFromFileAny(filename)` and `writeToFileAny(filename, pretty)` with heuristic format detection from content/file extension, supporting `.gz`/`.bz2`/`.xz` suffix stripping.
+- **New - Format detection:** Added `FormatType` enum, `getFormatType()` accessor, and `fromAny(string_view)` method with heuristic content-based format detection across all 19 formats.
+- **New - Pretty-print for YAML/TOML/INI:** `toYAML(pretty)`, `toTOML(pretty)`, `toINI(pretty)` now accept a `bool pretty` parameter for indented output.
+- **New - `operator[]` chaining:** Added `JsonProxy` for chained navigation (`json["a"]["b"]["c"]`) on both objects and arrays.
+- **New - Iterator API:** Added `begin()`/`end()` on `asvJSONValue` (iterates object keys or array elements), `asvJSON`, and `JsonProxy`. Added `values()` range helper for arrays.
+- **New - Emplace/push/equality/merge/diff:** Added `emplace(key, val)` and `push(val)` on `asvJSONValue` for constructing values in-place; `operator==`/`operator!=` for deep structural equality; `merge(other)` for RFC 7396 deep merge with null-deletion; `diff(other)` returning JSON Patch array.
+- **Fix - `toBSON()` consistency:** Changed return type from `std::string` to `std::vector<uint8_t>` to match `toCBOR()`/`toMessagePack()`.
+- **Fix - UB across formats (strtod/strtoll on string_view):** Replaced all `std::strtod(s.data(), ...)` and `std::strtoll(val.data(), ...)` calls on `string_view` parameters with local `std::string` copies in `yaml.hpp`, `xml.hpp`, `csv.hpp`, `jsonsax.hpp` (both parsers).
+- **Fix - JSONPath thread_local aliasing:** Replaced `static thread_local asvJSONValue` with owned `unique_ptr` via `hold()` method and `PathResult::owned` to fix incorrect filter comparisons when both sides are literals.
+- **Fix - JSONPath OOB slice:** Added bounds checking in `jpSlice` for `step > 0` (previously could read past array end for large slice bounds).
+- **Fix - Schema regex pre-compilation:** `patternProperties` regexes now compiled once before the object property loop instead of O(N*M) times.
+- **Fix - Schema $ref JSON Pointer decoding:** `$ref` path segments now decode `~0` → `~` and `~1` → `/` per RFC 6901.
+- **Fix - Unicode cleanup:** Replaced em dashes and non-ASCII characters with ASCII equivalents in source comments.
+- **Version bump:** 1.14.0 → 1.15.0
+
+### 1.14.0 (2026-08-20)
+
+- **UDE format additions:** Custom tags with canonical name/value split, namespaces (`!ns:tag`) and verbatim (`!<uri>`), Extended JSON representation, YAML-style `---`/`...` document separators, versioned header, merge keys (`<<: *default`), digit separators (`1_000_000`), lossless big-integer literals, `!datetime` with timezone offsets, non-finite float literals (`.nan`/`/.inf`), type-coercion tags (`!int`/`!float`/`!string`/`!bool`/`!null`), `!schema`, bare `!null`, folded block scalar (`>`), single-quoted strings, full string escapes.
+- **UDE spec conformance:** Documented resource limits (alias depth 100, anchors 1M), YAML-style tab prohibition in block scalar indentation.
+- **Parser hardening:** Fixed OOB, UB and malformed input across YAML, S-Expression, TOML, XML, Base64, BSON, CSV, JSON5. Integer overflow detection, binary parser bounds checks, `cloneValue` node count limit (100M), YAML tag map RAII safety, `splitLines` phantom EOF removal.
+- **Version bump:** 1.13.0 → 1.14.0
 
 ### 1.13.0 (2026-08-04)
 
