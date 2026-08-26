@@ -1670,7 +1670,7 @@ public:
 	bool fromMessagePack(const void* data, size_t size);
 	std::vector<uint8_t> toCBOR() const;
 	bool fromCBOR(const void* data, size_t size);
-	std::string toBSON() const;
+	std::vector<uint8_t> toBSON() const;
 	bool fromBSON(const void* data, size_t size);
 	std::vector<uint8_t> toProtobuf(const std::string& schemaJson = "") const;
 	bool fromProtobuf(const void* data, size_t size, const std::string& schemaJson = "");
@@ -2342,7 +2342,7 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
 }
 
-inline std::string asvJSON::toBSON() const {
+inline std::vector<uint8_t> asvJSON::toBSON() const {
 	std::vector<uint8_t> out;
 	if (!root) return {};
 	auto writeLE32 = [](std::vector<uint8_t>& buf, uint32_t v) {
@@ -2392,7 +2392,7 @@ inline std::string asvJSON::toBSON() const {
 	sub[subSizePos + 2] = static_cast<uint8_t>(totalSize >> 16);
 	sub[subSizePos + 3] = static_cast<uint8_t>(totalSize >> 24);
 	out = std::move(sub);
-	return std::string(out.begin(), out.end());
+	return out;
 }
 
 inline std::string asvJSON::toXML() const {

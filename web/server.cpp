@@ -251,16 +251,11 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
 
     if (outBinary) {
       std::vector<uint8_t> binOut;
-      std::string strOut;
       if (toFmt == "MessagePack") binOut = j.toMessagePack();
       else if (toFmt == "CBOR") binOut = j.toCBOR();
-      else if (toFmt == "BSON") strOut = j.toBSON();
+      else if (toFmt == "BSON") binOut = j.toBSON();
       else if (toFmt == "Protobuf") binOut = j.toProtobuf();
 
-      if (toFmt == "BSON") {
-        std::vector<uint8_t> vec(strOut.begin(), strOut.end());
-        return jsonMsg(true, base64Encode(vec), true, "");
-      }
       return jsonMsg(true, base64Encode(binOut), true, "");
     }
 

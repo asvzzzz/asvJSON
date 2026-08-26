@@ -185,18 +185,12 @@ int main(int argc, char** argv) {
 
     if (binaryOutput) {
       std::vector<uint8_t> binOut;
-      std::string strOut;
       if (toFmt == "MessagePack") binOut = j.toMessagePack();
       else if (toFmt == "CBOR") binOut = j.toCBOR();
-      else if (toFmt == "BSON") strOut = j.toBSON();
+      else if (toFmt == "BSON") binOut = j.toBSON();
       else if (toFmt == "Protobuf") binOut = j.toProtobuf();
 
-      if (toFmt == "BSON") {
-        std::vector<uint8_t> vec(strOut.begin(), strOut.end());
-        std::cout << jsonSuccess(base64Encode(vec), true);
-      } else {
-        std::cout << jsonSuccess(base64Encode(binOut), true);
-      }
+      std::cout << jsonSuccess(base64Encode(binOut), true);
     } else {
       std::string result;
       if (toFmt.empty() || toFmt == "JSON") result = req.optBool("pretty", true) ? j.serialize(true) : j.serialize();
