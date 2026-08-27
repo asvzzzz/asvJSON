@@ -3124,6 +3124,34 @@ TEST(testToYAML) {
 		ASSERT(yml.find("  b:") != std::string::npos);
 		ASSERT(yml.find("    c: 42") != std::string::npos);
 	}
+	// Object inside array: emitted as empty dash + indented keys
+	{
+		asvJSON json;
+		json.parse(std::string("[{\"name\":\"a\",\"age\":30},{\"name\":\"b\",\"age\":40}]"));
+		std::string yml = json.toYAML();
+		ASSERT(yml.find("- ") != std::string::npos);
+		ASSERT(yml.find("name: a") != std::string::npos || yml.find("'name': a") != std::string::npos);
+		ASSERT(yml.find("age: 30") != std::string::npos);
+	}
+	// Array nested in array: empty dash + indented dash items
+	{
+		asvJSON json;
+		json.parse(std::string("{\"m\":[[1],[2]]}"));
+		std::string yml = json.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT_EQ(j2.getRoot()->get("m")->arr->at(0)->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(j2.getRoot()->get("m")->arr->at(1)->arr->at(0)->getInt(), 2);
+	}
+	// Numeric-looking strings are quoted on encode
+	{
+		asvJSON json;
+		json.putString("a", "001");
+		json.putString("b", "1.2");
+		std::string yml = json.toYAML();
+		ASSERT(yml.find("'001'") != std::string::npos || yml.find("\"001\"") != std::string::npos);
+		ASSERT(yml.find("'1.2'") != std::string::npos || yml.find("\"1.2\"") != std::string::npos);
+	}
 	// asvJSONValue::toYAML (direct)
 	{
 		auto v = asvJSONValue::makeString("test", 4);
@@ -3273,6 +3301,128 @@ TEST(testFromYAML) {
 		ASSERT(inner != nullptr && inner->type == asvJSONValue::ARRAY);
 		ASSERT_EQ(inner->arr->size(), size_t(2));
 		ASSERT_EQ(std::string(inner->arr->at(0)->getString()), "x");
+	}
+	// Objects as sequence items (YAML block style)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- name: a\n  age: 30\n- name: b\n  age: 40"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		auto* o0 = root->arr->at(0).get();
+		ASSERT(o0 && o0->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(o0->get("name")->getString()), "a");
+		ASSERT_EQ(o0->get("age")->getInt(), 30);
+		auto* o1 = root->arr->at(1).get();
+		ASSERT_EQ(std::string(o1->get("name")->getString()), "b");
+		ASSERT_EQ(o1->get("age")->getInt(), 40);
+	}
+	// Sequence nested as object value at same indent
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("base:\n- name: a\n  age: 30"));
+		auto* base = json.getRoot()->get("base");
+		ASSERT(base != nullptr && base->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(base->arr->size(), size_t(1));
+		ASSERT_EQ(std::string(base->arr->at(0)->get("name")->getString()), "a");
+		ASSERT_EQ(base->arr->at(0)->get("age")->getInt(), 30);
+	}
+	// Empty dash + indented keys (encoder emission form)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- \n  age: 30\n  'n': a\n- \n  age: 40"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(root->arr->at(0)->get("n")->getString()), "a");
+		ASSERT_EQ(root->arr->at(0)->get("age")->getInt(), 30);
+		ASSERT_EQ(root->arr->at(1)->get("age")->getInt(), 40);
+	}
+	// Nested sequences
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- - 1\n- - 2\n- - 3"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(3));
+		ASSERT_EQ(root->arr->at(0)->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->at(0)->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(root->arr->at(2)->arr->at(0)->getInt(), 3);
+	}
+	// Deep object value inside sequence item
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- a:\n    x: 1\n  b: 2"));
+		auto* o0 = json.getRoot()->arr->at(0).get();
+		ASSERT_EQ(o0->get("a")->get("x")->getInt(), 1);
+		ASSERT_EQ(o0->get("b")->getInt(), 2);
+	}
+	// Leading-zero numeric scalars normalize to valid JSON numbers
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 007\nb: 001"));
+		ASSERT_EQ(json.getInt("a"), 7);
+		ASSERT_EQ(json.getInt("b"), 1);
+	}
+	// Quoted key containing colon inside object-in-sequence
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- 'a:b': 1\n  'c': d"));
+		auto* o0 = json.getRoot()->arr->at(0).get();
+		ASSERT_EQ(o0->get("a:b")->getInt(), 1);
+		ASSERT_EQ(std::string(o0->get("c")->getString()), "d");
+	}
+	// Block scalar body must not be normalized (dash-looking lines preserved)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |\n  - a: 1\n  - b: 2"));
+		ASSERT_EQ(std::string(json.getString("text")), "- a: 1\n- b: 2\n");
+	}
+	// Empty value in sequence object followed by nested mapping
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- name: a\n  extra:\n    x: 1"));
+		auto* o0 = json.getRoot()->arr->at(0).get();
+		ASSERT_EQ(std::string(o0->get("name")->getString()), "a");
+		ASSERT_EQ(o0->get("extra")->get("x")->getInt(), 1);
+	}
+	// Encoder round-trip: arrays nested in arrays (m: [[1],[2]])
+	{
+		asvJSON json;
+		json.parse(std::string("{\"m\":[[1],[2]]}"));
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		auto* m = j2.getRoot()->get("m");
+		ASSERT(m != nullptr && m->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(m->arr->size(), size_t(2));
+		ASSERT_EQ(m->arr->at(0)->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(m->arr->at(1)->arr->at(0)->getInt(), 2);
+	}
+	// Encoder round-trip: objects in arrays
+	{
+		asvJSON json;
+		json.parse(std::string("{\"users\":[{\"name\":\"a\",\"age\":30},{\"name\":\"b\",\"age\":40}]}"));
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		auto* us = j2.getRoot()->get("users");
+		ASSERT(us != nullptr && us->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(us->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(us->arr->at(0)->get("name")->getString()), "a");
+		ASSERT_EQ(us->arr->at(0)->get("age")->getInt(), 30);
+		ASSERT_EQ(std::string(us->arr->at(1)->get("name")->getString()), "b");
+		ASSERT_EQ(us->arr->at(1)->get("age")->getInt(), 40);
+	}
+	// Encoder round-trip: numeric-looking strings stay strings
+	{
+		asvJSON json;
+		json.putString("a", "001");
+		json.putString("b", "1.2");
+		json.putString("c", "-42");
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		ASSERT_EQ(std::string(j2.getRoot()->get("a")->getString()), "001");
+		ASSERT_EQ(std::string(j2.getRoot()->get("b")->getString()), "1.2");
+		ASSERT_EQ(std::string(j2.getRoot()->get("c")->getString()), "-42");
 	}
 	// Round-trip special types (OBJECTID, REGEX, BINARY, EXTENSION)
 	{

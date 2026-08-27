@@ -198,7 +198,11 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 				break;
 			}
 			out += prefix() + "\n";
-			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, indent, "", true);
+			// A nested sequence used as a sequence item must indent its own
+			// items one level deeper than its dash, otherwise the block parser
+			// cannot tell parent items from child items ("m: [[1],[2]]").
+			int childIndent = isArrayItem ? indent + 1 : indent;
+			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true);
 			break;
 		}
 		default:
@@ -366,7 +370,45 @@ inline std::string yamlScalarToJson(std::string_view s) {
 			validNumber = (end == tmp.c_str() + tmp.size());
 		}
 	#endif
-		if (validNumber) return std::string(s);
+		if (validNumber) {
+			// JSON rejects leading-zero integers ("007", "01e2") even though
+			// the YAML 1.2 spec allows them as plain scalars. Re-emit a
+			// normalized JSON-compatible number instead of a raw token.
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			size_t sign = 0;
+			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
+			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
+			    s[sign + 1] >= '0' && s[sign + 1] <= '9') {
+				long long iv = 0;
+				auto [ip, ie] = std::from_chars(s.data(), s.data() + s.size(), iv);
+				if (ie == std::errc() && ip == s.data() + s.size()) return std::to_string(iv);
+				double dv = 0.0;
+				auto [dp2, de2] = std::from_chars(s.data(), s.data() + s.size(), dv);
+				if (de2 == std::errc() && dp2 == s.data() + s.size()) {
+					std::string norm;
+					fmtDoubleVal(dv, norm);
+					return norm;
+				}
+			}
+	#else
+			size_t sign = 0;
+			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
+			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
+			    s[sign + 1] >= '0' && s[sign + 1] <= '9') {
+				std::string tmp(s);
+				char* end = nullptr;
+				long long iv = std::strtoll(tmp.c_str(), &end, 10);
+				if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
+				double dv = std::strtod(tmp.c_str(), &end);
+				if (end == tmp.c_str() + tmp.size()) {
+					std::string norm;
+					fmtDoubleVal(dv, norm);
+					return norm;
+				}
+			}
+	#endif
+			return std::string(s);
+		}
 	}
 	std::string out = "\"";
 	for (auto c : s) {
@@ -1299,6 +1341,131 @@ inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 	}
 }
 
+// True when a line opens (`- ` or bare `-`) a block sequence entry.
+inline bool yamlIsDashStart(std::string_view s) {
+	if (s.empty() || s[0] != '-') return false;
+	if (s.size() == 1) return true;
+	return s[1] == ' ';
+}
+
+// Find the first top-level ':' on a line, ignoring colons inside quotes and
+// flow brackets. Used for both key:value detection and block-mapping lookahead.
+inline std::string_view::size_type yamlFindKeyColon(std::string_view s) {
+	bool dq = false, sq = false;
+	int depth = 0;
+	for (size_t i = 0; i < s.size(); i++) {
+		char c = s[i];
+		if (dq) { if (c == '\\' && i + 1 < s.size()) i++; else if (c == '"') dq = false; continue; }
+		if (sq) { if (c == '\'' && i + 1 < s.size() && s[i + 1] == '\'') i++; else if (c == '\'') sq = false; continue; }
+		if (c == '"') { dq = true; continue; }
+		if (c == '\'') { sq = true; continue; }
+		if (c == '[' || c == '{') { depth++; continue; }
+		if (c == ']' || c == '}') { depth--; continue; }
+		if (c == ':' && depth == 0) return i;
+	}
+	return std::string_view::npos;
+}
+
+// True when `s` begins a block mapping entry ("key: value" with a space after
+// the colon, or a quoted key). Excludes URLs ("http://x"), times ("10:30"),
+// flow collections and block-scalar headers.
+inline bool yamlIsBlockMappingStart(std::string_view s) {
+	if (s.empty() || s[0] == '|' || s[0] == '>') return false;
+	auto colon = yamlFindKeyColon(s);
+	if (colon == std::string_view::npos || colon == 0) return false;
+	if (colon + 1 < s.size() && s[colon + 1] != ' ' && s[colon + 1] != '\t') return false;
+	return true;
+}
+
+// True when a line starts a block scalar ("|", ">", or a value that begins
+// with one), i.e. the lines below it are scalar BODY text, not structure.
+inline bool yamlIsBlockScalarHeader(std::string_view content) {
+	if (content.size() >= 1 && (content[0] == '|' || content[0] == '>')) return true;
+	if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
+		std::string_view rest = content.substr(2);
+		while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
+		return !rest.empty() && (rest[0] == '|' || rest[0] == '>');
+	}
+	auto colon = yamlFindKeyColon(content);
+	if (colon != std::string_view::npos && colon + 1 < content.size()) {
+		size_t v = colon + 1;
+		while (v < content.size() && (content[v] == ' ' || content[v] == '\t')) v++;
+		return v < content.size() && (content[v] == '|' || content[v] == '>');
+	}
+	return false;
+}
+
+// Rewrite block-sequence items whose child node starts inline on the dash line
+// ("- a: 1", "- a: [1, 2]", "- - x") into the canonical two-line form:
+//   -
+//     a: 1
+// This lets the main parser treat objects and nested sequences as sequence
+// items uniformly via the empty-dash lookahead. Block-scalar bodies and the
+// inside of multi-line flow collections are left untouched.
+inline void yamlNormalizeSeqItems(std::vector<std::string>& lines) {
+	int bsHeaderIndent = -1; // >= 0 while inside a block-scalar body
+	int flowDepth = 0;       // > 0 while inside a multi-line flow collection
+	auto scanFlow = [&](std::string_view s) {
+		bool dq = false, sq = false;
+		for (char c : s) {
+			if (dq) { if (c == '\\') continue; if (c == '"') dq = false; continue; }
+			if (sq) { if (c == '\'') sq = false; continue; }
+			if (c == '"') { dq = true; continue; }
+			if (c == '\'') { sq = true; continue; }
+			if (c == '{' || c == '[') flowDepth++;
+			else if (c == '}' || c == ']') flowDepth--;
+		}
+	};
+	size_t i = 0;
+	while (i < lines.size()) {
+		std::string& line = lines[i];
+		int indent = countIndent(line);
+		std::string_view content = stripIndent(line);
+		if (bsHeaderIndent >= 0) {
+			// Skip the body of a block scalar; body text is not structure.
+			if (content.empty() || content[0] == '#') { i++; continue; }
+			if (indent > bsHeaderIndent) { i++; continue; }
+			bsHeaderIndent = -1; // scalar ended; process this line normally
+		}
+		if (content.empty() || content[0] == '#') { i++; continue; }
+
+		if (flowDepth > 0) {
+			// Inside a multi-line flow collection: no block sequence here.
+			scanFlow(content);
+			i++;
+			continue;
+		}
+		scanFlow(content);
+		if (flowDepth > 0) { i++; continue; }
+
+		if (content[0] == '-' && content.size() >= 2 && content[1] == ' ') {
+			std::string_view rest = content.substr(2);
+			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
+			if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
+				bsHeaderIndent = indent;
+				i++;
+				continue;
+			}
+			if (!rest.empty()) {
+				bool nested = yamlIsDashStart(rest);
+				bool mapping = !nested && yamlIsBlockMappingStart(rest);
+				if (nested || mapping) {
+					std::string restCopy(rest);
+					line = std::string(indent, ' ') + "-";
+					lines.insert(lines.begin() + (std::ptrdiff_t)(i + 1),
+					             std::string(indent + 2, ' ') + restCopy);
+					continue; // reprocess the inserted line in place
+				}
+			}
+			i++;
+			continue;
+		}
+
+		if (yamlIsBlockScalarHeader(content)) { bsHeaderIndent = indent; i++; continue; }
+		i++;
+	}
+}
+
 // Parse a single YAML document (no multi-doc handling)
 inline std::string yamlParseDoc(std::string_view input, int depth) {
 	// Restore the previous tag-map state on exit (even on exception).
@@ -1340,6 +1507,11 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 	// Strip directive lines so they don't reach the main parser
 	if (dirEnd > 0) lines.erase(lines.begin(), lines.begin() + (std::ptrdiff_t)dirEnd);
 
+	// Normalize block-sequence items that inline their child node ("- a: 1",
+	// "- - x") into the canonical "dash alone" form so objects and nested
+	// sequences parse correctly as sequence items.
+	yamlNormalizeSeqItems(lines);
+
 	// Pre-scan for anchors (each document has independent anchor namespace)
 	std::unordered_map<std::string, std::string> anchors;
 	std::unordered_set<std::string> resolving;
@@ -1374,7 +1546,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 	bool rootIsArr = false;
 	{
 		std::string_view fc = stripIndent(lines[firstLine]);
-		if (fc.size() >= 2 && fc[0] == '-' && fc[1] == ' ') rootIsArr = true;
+		if (yamlIsDashStart(fc)) rootIsArr = true;
 	}
 
 	int rootIndent = countIndent(lines[firstLine]);
@@ -1445,7 +1617,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			continue;
 		}
 
-		if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
+		if (yamlIsDashStart(content)) {
 			// --- Array item ---
 			while (!stack.empty()) {
 				auto& top = stack.back();
@@ -1467,11 +1639,39 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			addComma(stack, out);
 			if (!stack.empty()) stack.back().first = false;
 
-			std::string rest = content.substr(2);
+			std::string rest;
+			if (content.size() >= 2) rest = content.substr(2);
 			while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
 
 			if (rest.empty()) {
-				out += "null";
+				// Bare dash: the item may be an object or nested sequence whose
+				// children start on the following deeper-indented lines. Both
+				// shapes are produced by the block encoder ("- \n  key: val"
+				// and the normalized "- \n  - x" form).
+				size_t sc = li + 1;
+				while (sc < lines.size()) {
+					std::string_view scv = stripIndent(lines[sc]);
+					if (scv.empty() || scv[0] == '#') { sc++; continue; }
+					break;
+				}
+				bool opened = false;
+				if (sc < lines.size() && countIndent(lines[sc]) > indent) {
+					std::string_view scv = stripIndent(lines[sc]);
+					if (yamlIsBlockMappingStart(scv)) {
+						if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+						out += '{';
+						FormatFrame f; f.type = 'O'; f.align = indent + 1; f.first = true; f.hasVal = true; f.isRoot = false;
+						stack.push_back(f);
+						opened = true;
+					} else if (yamlIsDashStart(scv)) {
+						if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+						out += '[';
+						FormatFrame f; f.type = 'A'; f.align = indent + 1; f.first = true; f.hasVal = true; f.isRoot = false;
+						stack.push_back(f);
+						opened = true;
+					}
+				}
+				if (!opened) out += "null";
 			} else if (rest.size() > 1 && rest[0] == '*') {
 				out += yamlResolveAlias(rest.substr(1), anchors, resolving);
 			} else if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
@@ -1523,7 +1723,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 		}
 
 		// --- Key-value pair ---
-		size_t colonPos = content.find(':');
+		size_t colonPos = yamlFindKeyColon(content);
 		if (colonPos != std::string::npos) {
 			closeFrames(stack, out, indent);
 
@@ -1595,16 +1795,16 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				while (scan < lines.size()) {
 					std::string_view sc = stripIndent(lines[scan]);
 					if (sc.empty() || sc[0] == '#') { scan++; continue; }
-					int scIndent = countIndent(lines[scan]);
-					if (scIndent < indent) break;
-					if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) { isFlowValue = true; break; }
-					if (scIndent == indent) {
-						if (sc.size() >= 2 && sc[0] == '-' && sc[1] == ' ') { isArrayValue = true; break; }
-						break;
-					}
-					if (sc.size() >= 2 && sc[0] == '-' && sc[1] == ' ') { isArrayValue = true; break; }
-					if (sc.find(':') != std::string_view::npos) break;
+int scIndent = countIndent(lines[scan]);
+				if (scIndent < indent) break;
+				if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) { isFlowValue = true; break; }
+				if (scIndent == indent) {
+					if (yamlIsDashStart(sc)) { isArrayValue = true; break; }
 					break;
+				}
+				if (yamlIsDashStart(sc)) { isArrayValue = true; break; }
+				if (yamlFindKeyColon(sc) != std::string_view::npos) break;
+				break;
 				}
 
 				if (isFlowValue) {
