@@ -3804,6 +3804,40 @@ TEST(testFromYAML) {
 		ASSERT_EQ(json.getInt("a"), 42);
 		ASSERT_EQ(json.getInt("b"), 42);
 	}
+	// Flow mapping at root level: {a: 1, b: 2}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{a: 1, b: 2}"));
+		ASSERT(json.getRoot()->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(json.getInt("a"), 1);
+		ASSERT_EQ(json.getInt("b"), 2);
+	}
+	// Flow sequence at root level: [1, 2, 3]
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("[1, 2, 3]"));
+		auto* arr = json.getRoot();
+		ASSERT(arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->size(), size_t(3));
+		ASSERT_EQ(arr->get(static_cast<size_t>(0))->getInt(), 1);
+		ASSERT_EQ(arr->get(static_cast<size_t>(2))->getInt(), 3);
+	}
+	// Flow mapping with nested values
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{name: test, tags: [a, b]}"));
+		ASSERT_EQ(std::string(json.getString("name")), "test");
+		auto* tags = json.getRoot()->get("tags");
+		ASSERT(tags != nullptr && tags->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(tags->size(), size_t(2));
+	}
+	// Multi-line flow mapping at root
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{a: 1,\n b: 2}"));
+		ASSERT_EQ(json.getInt("a"), 1);
+		ASSERT_EQ(json.getInt("b"), 2);
+	}
 }
 
 TEST(testToTOON) {
@@ -6225,6 +6259,27 @@ TEST(testFromINI) {
     asvJSON j;
     ASSERT(j.fromINI(std::string("[a\\[b\\]]\nc[d] = v\n")));
     ASSERT_EQ(std::string(j.getString("a[b].c[d]")), "v");
+  }
+  // Dotted keys at root level split into nested objects
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("general.name = asvJSON++\ngeneral.version = 1.15.0\ngeneral.active = true\nmetadata.author = asv\nmetadata.license = MIT\n")));
+    ASSERT_EQ(std::string(j.getString("general.name")), "asvJSON++");
+    ASSERT_EQ(std::string(j.getString("general.version")), "1.15.0");
+    ASSERT_EQ(j.getBool("general.active"), true);
+    ASSERT_EQ(std::string(j.getString("metadata.author")), "asv");
+    ASSERT_EQ(std::string(j.getString("metadata.license")), "MIT");
+    auto* g = j.get("general");
+    ASSERT(g != nullptr && g->type == asvJSONValue::OBJECT);
+    auto* m = j.get("metadata");
+    ASSERT(m != nullptr && m->type == asvJSONValue::OBJECT);
+  }
+  // Dotted keys inside a section
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[server]\nhost.name = example.com\nhost.port = 8080\n")));
+    ASSERT_EQ(std::string(j.getString("server.host.name")), "example.com");
+    ASSERT_EQ(j.getInt("server.host.port"), int64_t(8080));
   }
 }
 

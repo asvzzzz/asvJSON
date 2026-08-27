@@ -575,7 +575,26 @@ inline bool asvJSON::fromINI(std::string_view input) {
       }
 
       if (target) {
-        iniSetValue(target, key, iniParseVal(valueStr, quoted));
+        // Split dotted keys into nested objects (e.g. "general.name" -> {"general":{"name":...}})
+        size_t dotPos = key.find('.');
+        if (dotPos != std::string::npos) {
+          std::vector<std::string> keyPath;
+          size_t start = 0;
+          for (size_t i = 0; i <= key.size(); i++) {
+            if (i == key.size() || key[i] == '.') {
+              keyPath.push_back(key.substr(start, i - start));
+              start = i + 1;
+            }
+          }
+          std::string leafKey = keyPath.back();
+          keyPath.pop_back();
+          asvJSONValue* parent = iniNavigate(target, keyPath, true);
+          if (parent) {
+            iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted));
+          }
+        } else {
+          iniSetValue(target, key, iniParseVal(valueStr, quoted));
+        }
       }
     }
 

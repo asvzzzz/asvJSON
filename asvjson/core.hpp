@@ -1194,7 +1194,7 @@ public:
 
 	[[nodiscard]] bool getBool(std::string_view key) const noexcept {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::BOOL_VAL ? v->flag : false;
 	}
 

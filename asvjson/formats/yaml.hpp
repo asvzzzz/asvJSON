@@ -1362,6 +1362,13 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 		std::string_view fc = stripIndent(lines[firstLine]);
 		if (fc == "{}") return "{}";
 		if (fc == "[]") return "[]";
+		// Non-empty flow collection at root level: parse directly
+		if (!fc.empty() && (fc[0] == '{' || fc[0] == '[')) {
+			size_t flowLi = firstLine;
+			std::string flowText = yamlGatherFlow(lines, fc, flowLi);
+			size_t fp = 0;
+			return yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+		}
 	}
 
 	bool rootIsArr = false;
