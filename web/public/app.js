@@ -3,9 +3,12 @@ const SAMPLES = {
   JSON5: '{ // single-line comment\n  name: "asvJSON++",\n  version: 1.15,\n  active: true,\n  /* block comment */\n  tags: ["json5", "c++"],\n}',
   XML: '<root>\n  <name>asvJSON++</name>\n  <version>1.15.0</version>\n  <active>true</active>\n  <tags>\n    <item>json</item>\n    <item>c++</item>\n  </tags>\n</root>',
   YAML: 'name: asvJSON++\nversion: "1.15.0"\nactive: true\ntags:\n  - json\n  - c++\n  - header-only\n',
+  YAML_minify: '{name: asvJSON++, version: "1.15.0", active: true, tags: [json, c++, header-only]}',
   CSV: 'name,version,active\nasvJSON++,1.15.0,true\n',
   TOML: 'name = "asvJSON++"\nversion = "1.15.0"\nactive = true\n\n[metadata]\nauthor = "asv"\nlicense = "MIT"\n',
+  TOML_minify: 'name = "asvJSON++"\nversion = "1.15.0"\nactive = true\nmetadata = {author = "asv", license = "MIT"}\n',
   INI: '[general]\nname = asvJSON++\nversion = 1.15.0\nactive = true\n\n[metadata]\nauthor = asv\nlicense = MIT\n',
+  INI_minify: 'general.name = asvJSON++\ngeneral.version = 1.15.0\ngeneral.active = true\nmetadata.author = asv\nmetadata.license = MIT\n',
   UDE: '# UDE v1.0\nname: "asvJSON++"\nversion: 1.15.0\nactive: true\nformats: 18\ntags: [json, c++, header-only]\n',
   JSONLines: '{"name": "asvJSON++", "version": "1.15.0"}\n{"name": "sample2", "version": "2.0.0"}\n',
   Sexpr: '(root\n  (name "asvJSON++")\n  (version "1.15.0")\n  (active true)\n  (tags "json" "c++"))\n',
@@ -66,8 +69,8 @@ async function loadSample(target) {
   const fmt = opt.name;
   const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'];
 
-  if (SAMPLES[fmt]) {
-    let sample = SAMPLES[fmt];
+  if (SAMPLES[opt.pretty ? fmt : fmt + '_minify'] || SAMPLES[fmt]) {
+    let sample = SAMPLES[opt.pretty ? fmt : fmt + '_minify'] || SAMPLES[fmt];
     if (!opt.pretty) sample = minifySample(sample, fmt);
     inputArea.value = sample;
     inputStatus.textContent = `Sample loaded: ${fmt}`;
