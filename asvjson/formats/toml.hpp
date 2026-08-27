@@ -725,6 +725,7 @@ inline void tomlObjSet(asvJSONValue* obj, const std::string& key, std::unique_pt
 }
 
 inline bool asvJSON::fromTOML(std::string_view input) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     if (input.empty()) {

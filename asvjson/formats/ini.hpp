@@ -374,6 +374,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
 // -- Decoder ----------------------------------------------------------------
 
 inline bool asvJSON::fromINI(std::string_view input) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     if (input.empty()) {

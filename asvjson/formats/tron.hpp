@@ -514,6 +514,7 @@ asvJSONValue* TronParseState::parseValue() {
 }
 
 inline bool asvJSON::fromTRON(std::string_view input) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     auto toks = tronTokenize(input, allowNaNInfinity);

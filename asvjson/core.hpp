@@ -693,6 +693,9 @@ public:
 	size_t size() const {
 		return root ? root->size() : 0;
 	}
+	/// Returns true if the document has been modified since the last parse/from*/clear.
+	/// @note Direct mutations via raw pointers (getRoot()->obj->emplace(...)) bypass tracking.
+	[[nodiscard]] bool isChanged() const { return dirty_; }
 private:
 	std::unique_ptr<asvJSONValue> root;
 	std::string jsonBuf;
@@ -700,6 +703,7 @@ private:
 	size_t pos = 0;
 	int parseDepth = 0;
 	FormatType formatType = FormatType::Unknown;
+	bool dirty_ = false;
 	mutable std::vector<std::unique_ptr<asvJSONValue>> pathOwned;
 
 	inline void skip() {
@@ -1026,10 +1030,11 @@ public:
 
 	asvJSON(const asvJSON& other) {
 		root = cloneValue(other.root.get());
+		dirty_ = false;
 	}
 
 	asvJSON& operator=(const asvJSON& other) {
-		if (this != &other) { root = cloneValue(other.root.get()); }
+		if (this != &other) { root = cloneValue(other.root.get()); dirty_ = false; }
 		return *this;
 	}
 
@@ -1041,10 +1046,12 @@ public:
 		  jsonBuf(std::move(other.jsonBuf)),
 		  json(jsonBuf),
 		  pos(other.pos),
-		  parseDepth(other.parseDepth) {
+		  parseDepth(other.parseDepth),
+		  dirty_(other.dirty_) {
 		other.pos = 0;
 		other.parseDepth = 0;
 		other.json = std::string_view();
+		other.dirty_ = false;
 	}
 
 	asvJSON& operator=(asvJSON&& other) noexcept {
@@ -1057,15 +1064,18 @@ public:
 			lastError = std::move(other.lastError);
 			allowNaNInfinity = other.allowNaNInfinity;
 			validateUTF8 = other.validateUTF8;
+			dirty_ = other.dirty_;
 			other.pos = 0;
 			other.parseDepth = 0;
 			other.json = std::string_view();
+			other.dirty_ = false;
 		}
 		return *this;
 	}
 
 	bool parse(std::string_view s) {
 		root = nullptr;
+		dirty_ = false;
 		formatType = FormatType::Unknown;
 		// Strip UTF-8 BOM (EF BB BF) if present
 		if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s.remove_prefix(3);
@@ -1214,6 +1224,7 @@ public:
 		auto it = mapFind(*root->obj, key);
 		if (it != root->obj->end()) { it->second = std::move(v); }
 		else { root->obj->emplace(std::string(key), std::move(v)); }
+		dirty_ = true;
 	}
 
 	void setValue(std::string_view key, std::unique_ptr<asvJSONValue> val) {
@@ -1297,6 +1308,7 @@ public:
 			arr->arr->emplace_back(std::move(v));
 		}
 		root->obj->emplace(std::string(key), std::move(arr));
+		dirty_ = true;
 		return true;
 	}
 
@@ -1551,10 +1563,10 @@ public:
 	void remove(std::string_view key) {
 		if (!root || root->type != asvJSONValue::OBJECT || !root->obj) return;
 		auto it = mapFind(*root->obj, key);
-		if (it != root->obj->end()) root->obj->erase(it);
+		if (it != root->obj->end()) { root->obj->erase(it); dirty_ = true; }
 	}
 
-	void clear() { root = nullptr; }
+	void clear() { root = nullptr; dirty_ = false; }
 
 	std::vector<std::string> getKeys() const {
 		std::vector<std::string> keys;
@@ -1739,6 +1751,7 @@ public:
 		}
 		if (!asvJSONValue::checkArraySize(root->arr->size() + 1)) return nullptr;
 		root->arr->push_back(std::move(val));
+		dirty_ = true;
 		return root->arr->back().get();
 	}
 
@@ -1783,6 +1796,7 @@ public:
 		if (!asvJSONValue::checkArraySize(arrPtr->arr->size() + 1)) return nullptr;
 
 		arrPtr->arr->push_back(std::move(val));
+		dirty_ = true;
 		return arrPtr->arr->back().get();
 	}
 
@@ -1844,7 +1858,7 @@ public:
 	/// @brief Transfer ownership of the root value to the caller.
 	/// @return Unique pointer to the root value (may be null).
 	/// @note After calling, the document becomes empty; it can be reused via parse().
-	[[nodiscard]] std::unique_ptr<asvJSONValue> releaseRoot() noexcept { return std::move(root); }
+	[[nodiscard]] std::unique_ptr<asvJSONValue> releaseRoot() noexcept { dirty_ = false; return std::move(root); }
 
 private:
 	static bool isArrayIndex(std::string_view s) {
@@ -2296,7 +2310,7 @@ inline const asvJSONValue* asvJSON::getByPointer(std::string_view ptr) const {
 }
 
 inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value) {
-	if (ptr.empty() || ptr == "/") { root = std::move(value); return true; }
+	if (ptr.empty() || ptr == "/") { root = std::move(value); dirty_ = true; return true; }
 	if (ptr[0] != '/') return false;
 	if (!root) {
 		size_t nextSlash = ptr.find('/', 1);
@@ -2318,6 +2332,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			std::string key = decodeJSONPointerKey(seg);
 			if (isLast) {
 				cur->obj->insert_or_assign(std::move(key), std::move(value));
+				dirty_ = true;
 				return true;
 			}
 			auto it = mapFind(*cur->obj, key);
@@ -2346,6 +2361,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			if (seg == "-") {
 				if (!isLast) return false;
 				cur->arr->push_back(std::move(value));
+				dirty_ = true;
 				return true;
 			}
 			if (!isArrayIndex(seg)) return false;
@@ -2355,6 +2371,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			if (isLast) {
 				if (idx >= cur->arr->size()) cur->arr->resize(idx + 1);
 				(*cur->arr)[idx] = std::move(value);
+				dirty_ = true;
 				return true;
 			}
 			if (idx >= cur->arr->size()) return false;
@@ -2386,6 +2403,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 				auto it = mapFind(*cur->obj, key);
 				if (it == cur->obj->end()) return false;
 				cur->obj->erase(it);
+				dirty_ = true;
 				return true;
 			}
 			auto it = mapFind(*cur->obj, key);
@@ -2398,6 +2416,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 			if (ec != std::errc() || idx >= cur->arr->size()) return false;
 			if (isLast) {
 				cur->arr->erase(cur->arr->begin() + static_cast<ptrdiff_t>(idx));
+				dirty_ = true;
 				return true;
 			}
 			parent = cur; cur = (*cur->arr)[idx].get(); lastIdx = idx; lastIsArray = true;
@@ -2437,11 +2456,13 @@ inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
 	if (!root || root->type != asvJSONValue::OBJECT) {
 		root = cloneValue(other.root.get());
+		dirty_ = true;
 		return;
 	}
 	const asvJSONValue* patch = other.root.get();
 	if (!patch || patch->type != asvJSONValue::OBJECT || !patch->obj) {
 		root = cloneValue(patch);
+		dirty_ = true;
 		return;
 	}
 	for (const auto& [k, v] : *patch->obj) {
@@ -2456,6 +2477,7 @@ inline void asvJSON::merge(const asvJSON& other) {
 			root->obj->insert_or_assign(k, cloneValue(v.get()));
 		}
 	}
+	dirty_ = true;
 }
 
 inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
@@ -2593,6 +2615,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
 
 inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	root = nullptr;
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	if (!data || size < 1) return false;
 	const uint8_t* u = static_cast<const uint8_t*>(data);
@@ -2607,6 +2630,7 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 
 inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 	root = nullptr;
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	if (!data || size < 1) return false;
 	const uint8_t* u = static_cast<const uint8_t*>(data);
@@ -2731,6 +2755,7 @@ inline std::string asvJSON::toJSONLines() const {
 }
 
 inline bool asvJSON::fromJSONLines(std::string_view input) {
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
 		auto arr = asvJSONValue::makeArray();
@@ -2764,6 +2789,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 
 inline bool asvJSON::fromBSON(const void* data, size_t size) {
 	root = nullptr;
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	if (!data || size < 5) return false;
 	try {

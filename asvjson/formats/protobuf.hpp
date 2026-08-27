@@ -910,6 +910,7 @@ inline std::vector<uint8_t> asvJSON::toProtobuf(const std::string& schemaJson) c
 
 inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::string& schemaJson) {
   root = nullptr;
+  dirty_ = false;
   formatType = FormatType::Unknown;
   if (!data || size < 1) return false;
   try {
@@ -932,6 +933,7 @@ inline std::string asvJSON::toProtobufText() const {
 
 inline bool asvJSON::fromProtobufText(const std::string& text) {
   root = nullptr;
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     size_t pos = 0;

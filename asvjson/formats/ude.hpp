@@ -1671,6 +1671,7 @@ inline std::string asvJSON::toUDE(bool strict) const {
 }
 
 inline bool asvJSON::fromUDE(std::string_view input, bool strict) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     root = nullptr;

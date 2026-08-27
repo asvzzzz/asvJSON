@@ -614,6 +614,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 }
 
 inline bool asvJSON::fromXML(std::string_view input) {
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");

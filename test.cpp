@@ -7150,7 +7150,7 @@ TEST(testUDERoundTrip) {
     // Cloning (copy constructor) preserves the custom tag
     asvJSON jc(j);
     ASSERT(jc.get("note") != nullptr && jc.get("note")->type == asvJSONValue::CUSTOM_TAG);
-    ASSERT_EQ(j.serialize(), jc.serialize());
+    ASSERT(*j.getRoot() == *jc.getRoot());
     // JSON serialization marks the tagged value instead of silently dropping it
     ASSERT(j.serialize().find("$customTag") != std::string::npos);
   }
@@ -9390,6 +9390,251 @@ TEST(testPrettyPrint) {
 	}
 }
 
+TEST(testIsChanged) {
+	// After parse - not changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		ASSERT(!j.isChanged());
+	}
+	// putString - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "hello");
+		ASSERT(j.isChanged());
+	}
+	// putInt - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putInt("c", 42);
+		ASSERT(j.isChanged());
+	}
+	// putDouble - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putDouble("d", 3.14);
+		ASSERT(j.isChanged());
+	}
+	// putBool - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putBool("b", true);
+		ASSERT(j.isChanged());
+	}
+	// putNull - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putNull("n");
+		ASSERT(j.isChanged());
+	}
+	// putBinary - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		uint8_t data[] = {0x01, 0x02};
+		j.putBinary("bin", data, 2);
+		ASSERT(j.isChanged());
+	}
+	// remove - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1,"b":2})");
+		j.remove("a");
+		ASSERT(j.isChanged());
+	}
+	// remove non-existent key - NOT changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.remove("nonexistent");
+		ASSERT(!j.isChanged());
+	}
+	// clear - resets changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		j.clear();
+		ASSERT(!j.isChanged());
+	}
+	// parse after mutation - resets changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		j.parse(R"({"z":true})");
+		ASSERT(!j.isChanged());
+	}
+	// clone - clean
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		asvJSON j2(j);
+		ASSERT(!j2.isChanged());
+	}
+	// copy assignment - clean
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		asvJSON j2;
+		j2 = j;
+		ASSERT(!j2.isChanged());
+	}
+	// move - transfers dirty
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		asvJSON j2(std::move(j));
+		ASSERT(j2.isChanged());
+	}
+	// arrayAdd* - changed
+	{
+		asvJSON j;
+		j.parse(R"([])");
+		j.arrayAddInt(10);
+		ASSERT(j.isChanged());
+	}
+	// setByPointer - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.setByPointer("/new", asvJSONValue::makeInt(99));
+		ASSERT(j.isChanged());
+	}
+	// removeByPointer - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1,"b":2})");
+		j.removeByPointer("/a");
+		ASSERT(j.isChanged());
+	}
+	// merge - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		asvJSON patch;
+		patch.parse(R"({"b":2})");
+		j.merge(patch);
+		ASSERT(j.isChanged());
+	}
+	// applyPatch - changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		asvJSON patch;
+		patch.parse(R"([{"op":"add","path":"/b","value":2}])");
+		j.applyPatch(patch);
+		ASSERT(j.isChanged());
+	}
+	// writeToFile - does not change dirty
+	{
+		asvJSON j;
+		j.parse(R"({"k":"v"})");
+		ASSERT(!j.isChanged());
+		j.writeToFile("_test_ischanged.json");
+		ASSERT(!j.isChanged());
+		std::remove("_test_ischanged.json");
+	}
+	// readFromFile - resets changed
+	{
+		asvJSON j;
+		j.parse(R"({"k":"v"})");
+		j.writeToFile("_test_ischanged.json");
+		j.putString("x", "y");
+		ASSERT(j.isChanged());
+		j.readFromFile("_test_ischanged.json");
+		ASSERT(!j.isChanged());
+		std::remove("_test_ischanged.json");
+	}
+	// putFloat32 - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.putFloat32("f", 1.0f);
+		ASSERT(j.isChanged());
+	}
+	// putTimestamp - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.putTimestamp("ts", 12345);
+		ASSERT(j.isChanged());
+	}
+	// putObjectId - changed (must be exactly 12 raw bytes)
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.putObjectId("oid", "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c");
+		ASSERT(j.isChanged());
+	}
+	// putRegex - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.putRegex("rx", "^test$", "i");
+		ASSERT(j.isChanged());
+	}
+	// putDateTime - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.putDateTime("dt", 1234567890);
+		ASSERT(j.isChanged());
+	}
+	// fromYAML - resets changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		j.fromYAML("---\nkey: value\n");
+		ASSERT(!j.isChanged());
+	}
+	// fromJSON5 - resets changed
+	{
+		asvJSON j;
+		j.parse(R"({"a":1})");
+		j.putString("b", "x");
+		ASSERT(j.isChanged());
+		j.fromJSON5(R"({key: "value"})");
+		ASSERT(!j.isChanged());
+	}
+	// arrayAddValue (root level) - changed
+	{
+		asvJSON j;
+		j.arrayAddString("hello", 5);
+		ASSERT(j.isChanged());
+	}
+	// arrayAddValue (key-based) - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		j.arrayAddInt("items", 42);
+		ASSERT(j.isChanged());
+	}
+	// putBinChunked - changed
+	{
+		asvJSON j;
+		j.parse(R"({})");
+		uint8_t data[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+		j.putBinChunked("data", data, 5);
+		ASSERT(j.isChanged());
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -9765,6 +10010,9 @@ int main() {
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
 	RUN(testPrettyPrint);
+
+	std::cout << "\n--- IsChanged Tests ---\n";
+	RUN(testIsChanged);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

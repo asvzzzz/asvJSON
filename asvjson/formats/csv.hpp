@@ -79,6 +79,7 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 }
 
 inline bool asvJSON::fromCSV(std::string_view input) {
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
