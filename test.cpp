@@ -1187,6 +1187,37 @@ TEST(testGetConstOverloads) {
 	if (result != "hello") throw std::runtime_error("const getString failed");
 }
 
+TEST(testNestedAccessors) {
+	// Build a nested document covering all value types
+	asvJSON j;
+	j.parse(std::string(R"({"user":{"name":"Alice","age":30,"score":9.5,"active":true,"nothing":null},"list":{"vals":[1,2,3]}})"));
+	// Basic getters
+	ASSERT_EQ(std::string(j.getString("user.name")), "Alice");
+	ASSERT_EQ(j.getInt("user.age"), int64_t(30));
+	ASSERT(j.getDouble("user.score") > 9.4 && j.getDouble("user.score") < 9.6);
+	ASSERT_EQ(j.getBool("user.active"), true);
+	// Optional getters (dotted path)
+	ASSERT_EQ(std::string(j.optString("user.name")), "Alice");
+	ASSERT_EQ(std::string(j.optString("user.missing", "dflt")), "dflt");
+	ASSERT_EQ(j.optInt("user.age"), int64_t(30));
+	ASSERT_EQ(j.optInt("user.missing", 7), int64_t(7));
+	ASSERT(j.optDouble("user.score") > 9.4 && j.optDouble("user.score") < 9.6);
+	ASSERT_EQ(j.optBool("user.active"), true);
+	ASSERT_EQ(j.optBool("user.missing", true), true);
+	// Type checks (dotted path)
+	ASSERT(j.isNull("user.nothing"));
+	ASSERT(j.isString("user.name"));
+	ASSERT(j.isInt("user.age"));
+	ASSERT(j.isDouble("user.score"));
+	ASSERT(j.isNumeric("user.age"));
+	ASSERT(j.isNumeric("user.score"));
+	ASSERT(j.isBool("user.active"));
+	ASSERT(!j.isObject("user.name"));
+	ASSERT(j.isObject("user"));
+	ASSERT(j.isArray("list.vals"));
+	ASSERT(j.getNested("list.vals")->size() == size_t(3));
+}
+
 TEST(testBase64Encode) {
 	uint8_t data[] = {0x01, 0x02, 0x03};
 	std::string encoded = encodeBase64(data, 3);
@@ -9874,6 +9905,7 @@ int main() {
 	
 	std::cout << "\n--- GetConst Overloads ---\n";
 	RUN(testGetConstOverloads);
+	RUN(testNestedAccessors);
 	
 	std::cout << "\n--- Unicode Tests ---\n";
 	RUN(testUnicode);

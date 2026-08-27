@@ -1200,13 +1200,13 @@ public:
 
 	[[nodiscard]] time_t getDateTime(std::string_view key) const {
 		if (!root) return 0;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::DATETIME ? v->timestamp : 0;
 	}
 
 	[[nodiscard]] std::vector<uint8_t> getBinary(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || !(v->type == asvJSONValue::BINARY || v->type == asvJSONValue::EXTENSION || v->type == asvJSONValue::OBJECTID)) return {};
 		if (v->type == asvJSONValue::OBJECTID) {
 			if (v->str_data.size() != 12) return {};
@@ -1314,7 +1314,7 @@ public:
 
 	std::vector<uint8_t> getBinChunked(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::ARRAY || !v->arr) return {};
 		std::vector<uint8_t> result;
 		for (const auto& chunk : *v->arr) {
@@ -1365,19 +1365,19 @@ public:
 	// Special type getters
 	[[nodiscard]] std::string_view getObjectId(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::OBJECTID) ? std::string_view(v->str_data) : std::string_view();
 	}
 
 	[[nodiscard]] int64_t getTimestamp(std::string_view key) const {
 		if (!root) return 0;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::TIMESTAMP) ? v->num : 0;
 	}
 
 	[[nodiscard]] std::string_view getRegexPattern(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
 		size_t sep = v->str_data.rfind('\0');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
@@ -1385,7 +1385,7 @@ public:
 
 	[[nodiscard]] std::string_view getRegexOptions(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
 		size_t sep = v->str_data.rfind('\0');
 		return (sep != std::string_view::npos) ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1) : std::string_view();
@@ -1393,7 +1393,7 @@ public:
 
 	[[nodiscard]] std::pair<std::string_view, std::string_view> getRegex(std::string_view key) const {
 		if (!root) return {};
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::REGEX) return {};
 		size_t sep = v->str_data.rfind('\0');
 		if (sep == std::string_view::npos) return {std::string_view(v->str_data), std::string_view()};
@@ -1402,7 +1402,7 @@ public:
 
 	bool getRegex(std::string_view key, std::string& pattern, std::string& options) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::REGEX) return false;
 		size_t sep = v->str_data.rfind('\0');
 		if (sep == std::string_view::npos) { pattern = v->str_data; options.clear(); }
@@ -1411,25 +1411,25 @@ public:
 	}
 
 	// Type checks
-	bool isObjectId(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && v->type == asvJSONValue::OBJECTID; }
-	bool isTimestamp(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && v->type == asvJSONValue::TIMESTAMP; }
-	bool isRegex(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && v->type == asvJSONValue::REGEX; }
-	bool isBinary(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && (v->type == asvJSONValue::BINARY || v->type == asvJSONValue::EXTENSION); }
-	bool isDateTime(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && v->type == asvJSONValue::DATETIME; }
+	bool isObjectId(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && v->type == asvJSONValue::OBJECTID; }
+	bool isTimestamp(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && v->type == asvJSONValue::TIMESTAMP; }
+	bool isRegex(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && v->type == asvJSONValue::REGEX; }
+	bool isBinary(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && (v->type == asvJSONValue::BINARY || v->type == asvJSONValue::EXTENSION); }
+	bool isDateTime(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && v->type == asvJSONValue::DATETIME; }
 	[[nodiscard]] std::string_view getObjectIdView(std::string_view key) const {
-		auto* v = get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::OBJECTID) ? std::string_view(v->str_data.data(), v->str_data.size()) : std::string_view();
 	}
 
 	[[nodiscard]] std::pair<int8_t, std::vector<uint8_t>> getExtension(std::string_view key) const {
-		auto* v = get(key);
+		auto* v = getNested(key);
 		if (v && v->type == asvJSONValue::EXTENSION) {
 			return std::make_pair(v->ext_type, v->getBinary());
 		}
 		return std::make_pair<int8_t, std::vector<uint8_t>>(0, std::vector<uint8_t>());
 	}
 
-	bool isExtension(std::string_view key) const { if (!root) return false; auto* v = root->get(key); return v && v->type == asvJSONValue::EXTENSION; }
+	bool isExtension(std::string_view key) const { if (!root) return false; auto* v = getNested(key); return v && v->type == asvJSONValue::EXTENSION; }
 
 	// Nested special type getters
 	std::string_view getNestedObjectId(std::string_view path) const {
@@ -1609,20 +1609,20 @@ public:
 	// Optional getters
 	[[nodiscard]] std::string optString(std::string_view key, std::string_view def = "") const {
 		if (!root) return std::string(def);
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::STRING) return std::string(def);
 		return std::string(v->str_data.data(), v->str_data.size());
 	}
 
 	[[nodiscard]] int64_t optInt(std::string_view key, int64_t def = 0) const {
 		if (!root) return def;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::INT) ? v->num : def;
 	}
 
 	[[nodiscard]] double optDouble(std::string_view key, double def = 0.0) const {
 		if (!root) return def;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v) return def;
 		if (v->type == asvJSONValue::DOUBLE) return v->dbl;
 		if (v->type == asvJSONValue::INT) return static_cast<double>(v->num);
@@ -1631,61 +1631,61 @@ public:
 
 	[[nodiscard]] bool optBool(std::string_view key, bool def = false) const {
 		if (!root) return def;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::BOOL_VAL) ? v->flag : def;
 	}
 
 	[[nodiscard]] bool isNull(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::NULL_VAL;
 	}
 
 	[[nodiscard]] bool isString(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::STRING;
 	}
 
 	[[nodiscard]] bool isInt(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::INT;
 	}
 
 	[[nodiscard]] bool isDouble(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::DOUBLE;
 	}
 
 	[[nodiscard]] bool isNumeric(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && (v->type == asvJSONValue::DOUBLE || v->type == asvJSONValue::INT);
 	}
 
 	[[nodiscard]] bool isBool(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::BOOL_VAL;
 	}
 
 	[[nodiscard]] bool isObject(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::OBJECT;
 	}
 
 	[[nodiscard]] bool isArray(std::string_view key) const {
 		if (!root) return false;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return v && v->type == asvJSONValue::ARRAY;
 	}
 
 	std::string getDateTimeString(std::string_view key) const {
 		if (!root) return "";
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::DATETIME) return "";
 		// Dates gmtimeSafe cannot convert (e.g. before 1970) return "".
 		char buf[32];
@@ -1706,20 +1706,20 @@ public:
 
 	int getDateTimeMs(std::string_view key) const {
 		if (!root) return 0;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::DATETIME) ? v->datetime_ms : 0;
 	}
 
 	time_t optDateTime(std::string_view key, time_t def = 0) const {
 		if (!root) return def;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		return (v && v->type == asvJSONValue::DATETIME) ? v->timestamp : def;
 	}
 
 	std::tm optDateTimeTM(std::string_view key, std::tm def = {}) const {
 		std::tm tm = {};
 		if (!root) return def;
-		auto* v = root->get(key);
+		auto* v = getNested(key);
 		if (v && v->type == asvJSONValue::DATETIME) {
 			time_t t = v->timestamp;
 			gmtimeSafe(&tm, &t);
