@@ -263,10 +263,10 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     if (toFmt.empty() || toFmt == "JSON") result = pretty ? j.serialize(true) : j.serialize();
     else if (toFmt == "JSON5") result = pretty ? j.toJSON5(true) : j.toJSON5(false);
     else if (toFmt == "XML") result = j.toXML();
-    else if (toFmt == "YAML") result = j.toYAML();
+    else if (toFmt == "YAML") result = j.toYAML(pretty);
     else if (toFmt == "CSV") result = j.toCSV();
-    else if (toFmt == "TOML") result = j.toTOML();
-    else if (toFmt == "INI") result = j.toINI();
+    else if (toFmt == "TOML") result = j.toTOML(pretty);
+    else if (toFmt == "INI") result = j.toINI(pretty);
     else if (toFmt == "UDE") result = j.toUDE();
     else if (toFmt == "JSONLines") result = j.toJSONLines();
     else if (toFmt == "Sexpr") result = j.toSexpr();
