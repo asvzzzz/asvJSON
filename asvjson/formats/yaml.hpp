@@ -482,6 +482,42 @@ inline std::string yamlParseInlineValue(std::string_view s, int depth = 0);
 // Forward declaration for embedded "!!yaml ..." documents (nested parse)
 inline std::string yamlToJson(std::string_view input);
 
+// Forward declaration (definition is later in this file)
+inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s);
+
+// True when `raw` is a whole YAML document made of a single plain/quoted
+// scalar (no mapping, sequence, or flow structure). Such a document has no
+// object/array at top level, so "!!yaml" reinterprets it as a value rather
+// than letting the JSON layer reject top-level scalars.
+inline bool yamlIsScalarDoc(std::string_view raw) {
+	size_t contentLines = 0;
+	std::string_view scalar;
+	size_t start = 0;
+	while (start < raw.size()) {
+		size_t nl = raw.find('\n', start);
+		size_t linEnd = (nl == std::string_view::npos) ? raw.size() : nl;
+		std::string_view line = raw.substr(start, linEnd - start);
+		start = (nl == std::string_view::npos) ? raw.size() : nl + 1;
+		size_t b = 0;
+		while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) b++;
+		size_t e = line.size();
+		while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) e--;
+		std::string_view t = line.substr(b, e - b);
+		if (t.empty() || t[0] == '#') continue; // blank / comment-only line
+		contentLines++;
+		scalar = t;
+		if (contentLines > 1) return false; // multi-line scalars stay unsupported
+	}
+	if (contentLines != 1) return false; // empty / comment-only document
+	char f = scalar[0];
+	if (f == '{' || f == '[' || f == '|' || f == '>' || f == '!' || f == '&' || f == '*')
+		return false;
+	if (scalar.size() == 1 && (f == '-' || f == '?')) return false;
+	if (scalar.size() >= 2 && (f == '-' || f == '?') && (scalar[1] == ' ' || scalar[1] == '\t')) return false;
+	if (yamlFindKeyColonSep(scalar) != std::string_view::npos) return false; // mapping
+	return true;
+}
+
 // Convert unescaped regex "pattern|opts" to internal pattern|opts
 inline std::string yamlRegexToInternal(std::string_view s) {
 	return std::string(s);
@@ -808,6 +844,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			resolved = resolved.substr(1, resolved.size() - 2);
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
+		// An embedded document that is a single scalar (e.g. "!!yaml \"42\"")
+		// has no top-level object/array; reinterpret it as a value.
+		if (yamlIsScalarDoc(raw)) return yamlParseInlineValue(raw);
 		static thread_local int yamlYamlDepth = 0;
 		if (yamlYamlDepth >= MAX_YAML_DEPTH)
 			throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");

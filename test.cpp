@@ -3907,10 +3907,32 @@ TEST(testFromYAML) {
 			ASSERT(false);
 		}
 	}
-	// !!yaml embedding a top-level scalar has no JSON representation
+	// !!yaml embedding a top-level scalar is reinterpreted as a value
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("x: !!yaml \"42\""));
+		ASSERT(json.fromYAML("x: !!yaml \"42\""));
+		ASSERT_EQ(json.getInt("x"), 42);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml hello"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml true"));
+		ASSERT_EQ(json.getBool("x"), true);
+	}
+	// "a:b" (no space after ':') is a plain scalar, not a mapping
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"a:b\""));
+		ASSERT_EQ(std::string(json.getString("x")), "a:b");
+	}
+	// Malformed embedded structure is still an error, never a silent string
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("x: !!yaml \"{broken\""));
 	}
 	// Three-! tag (!!!int) treated as unknown -> value parsed normally
 	{
