@@ -3372,6 +3372,70 @@ TEST(testFromYAML) {
 		ASSERT_EQ(o0->get("a:b")->getInt(), 1);
 		ASSERT_EQ(std::string(o0->get("c")->getString()), "d");
 	}
+	// Non-string keys in flow mappings stringify to JSON string keys
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{1: x}"));
+		ASSERT_EQ(std::string(json.getString("1")), "x");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{true: x, null: y, 2.5: z}"));
+		ASSERT_EQ(std::string(json.getRoot()->get("true")->getString()), "x");
+		ASSERT_EQ(std::string(json.getRoot()->get("null")->getString()), "y");
+		ASSERT_EQ(std::string(json.getRoot()->get("2.5")->getString()), "z");
+	}
+	// Complex (flow collection) keys rejected with a descriptive error
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("{[a, b]: v}"));
+		ASSERT(std::string(json.lastError).find("complex mapping key") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("? [a, b]: v"));
+		ASSERT(std::string(json.lastError).find("complex mapping key") != std::string::npos);
+	}
+	// Explicit keys: two-line "? key\n: value"
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? a\n: b"));
+		ASSERT_EQ(std::string(json.getString("a")), "b");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? 1\n: x"));
+		ASSERT_EQ(std::string(json.getString("1")), "x");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? 'q k'\n: v"));
+		ASSERT_EQ(std::string(json.getString("q k")), "v");
+	}
+	// Explicit keys with inline value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? a: b"));
+		ASSERT_EQ(std::string(json.getString("a")), "b");
+	}
+	// Explicit key with a nested mapping value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? k\n:\n  x: 1"));
+		ASSERT_EQ(json.getInt("k.x"), 1);
+	}
+	// Explicit key mixed into a regular mapping
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n? x\n: 2"));
+		ASSERT_EQ(json.getInt("a"), 1);
+		ASSERT_EQ(json.getInt("x"), 2);
+	}
+	// Explicit key that is never followed by ": value" is an error
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("? a\nb: c"));
+	}
 	// Block scalar body must not be normalized (dash-looking lines preserved)
 	{
 		asvJSON json;
@@ -3423,6 +3487,18 @@ TEST(testFromYAML) {
 		ASSERT_EQ(std::string(j2.getRoot()->get("a")->getString()), "001");
 		ASSERT_EQ(std::string(j2.getRoot()->get("b")->getString()), "1.2");
 		ASSERT_EQ(std::string(j2.getRoot()->get("c")->getString()), "-42");
+	}
+	// Encoder round-trip: numeric/boolean-looking string keys round-trip
+	{
+		asvJSON json;
+		json.putString("1", "one");
+		json.putString("true", "yes");
+		json.putString("a b", "spaced");
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		ASSERT_EQ(std::string(j2.getRoot()->get("1")->getString()), "one");
+		ASSERT_EQ(std::string(j2.getRoot()->get("true")->getString()), "yes");
+		ASSERT_EQ(std::string(j2.getRoot()->get("a b")->getString()), "spaced");
 	}
 	// Round-trip special types (OBJECTID, REGEX, BINARY, EXTENSION)
 	{
