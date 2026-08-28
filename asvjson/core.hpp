@@ -914,6 +914,23 @@ private:
 					return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
 				}
 			}
+			{
+				// Custom tag annotation: {"$customTag":{"name":...,"value":...}}
+				auto ctIt = obj->obj->find("$customTag");
+				if (ctIt != obj->obj->end() && ctIt->second->type == asvJSONValue::OBJECT &&
+				    ctIt->second->obj && obj->obj->size() == 1) {
+					auto nIt = ctIt->second->obj->find("name");
+					auto vIt = ctIt->second->obj->find("value");
+					if (nIt != ctIt->second->obj->end() && nIt->second->type == asvJSONValue::STRING &&
+					    vIt != ctIt->second->obj->end()) {
+						auto custom = std::make_unique<asvJSONValue>();
+						custom->type = asvJSONValue::CUSTOM_TAG;
+						custom->str_data = nIt->second->str_data;
+						custom->custom_value = std::move(vIt->second);
+						return custom;
+					}
+				}
+			}
 		}
 		return obj;
 	}

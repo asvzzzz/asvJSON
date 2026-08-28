@@ -121,6 +121,18 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 		case T::EXTENSION:
 			out += "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size()));
 			return true;
+		case T::CUSTOM_TAG: {
+			// "!name <value>"; the value is kept inline (force-flow) so the
+			// single-line tagged form reparses through yamlParseTaggedValue.
+			std::string childOut;
+			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
+				std::string nm(v->str_data);
+				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
+				out += "!" + nm + " " + childOut;
+				return true;
+			}
+			return false;
+		}
 		case T::OBJECT: {
 			if (!v->obj || v->obj->empty()) { out += "{}"; return true; }
 			std::string inner = "{";
@@ -230,6 +242,21 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 		case T::EXTENSION:
 			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + "\n";
 			break;
+		case T::CUSTOM_TAG: {
+			// "key: !name <value>"; the value stays inline (force-flow) so the
+			// tagged form returns to a single line.
+			std::string childOut;
+			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
+				std::string nm(v->str_data);
+				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
+				out += prefix() + "!" + nm + " " + childOut + "\n";
+			} else {
+				std::string nm(v->str_data);
+				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
+				out += prefix() + "!" + nm + "\n";
+			}
+			break;
+		}
 		case T::OBJECT: {
 			if (!v->obj || v->obj->empty()) { out += prefix() + "{}\n"; break; }
 			if (key.empty() && !isArrayItem) {
@@ -962,9 +989,29 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		return (tag == "!!seq") ? "[]" : "{}";
 	}
 
-	// Unknown tag -- parse value normally
-	if (!val.empty()) return yamlParseInlineValue(val);
-	return "null";
+	// Unknown tag -- preserve the annotation as a CUSTOM_TAG. The tag name is
+	// stored separately from its value (the resolved full name for %TAG-relative
+	// and verbatim !<...> tags), so "!name value" round-trips through YAML and
+	// JSON ({"$customTag":{"name":...,"value":...}}).
+	{
+		std::string parsedVal = val.empty() ? "null" : yamlParseInlineValue(val);
+		std::string name;
+		if (tagStr.size() >= 2 && tagStr[0] == '!' && tagStr[1] == '<' && tagStr.back() == '>')
+			name = tagStr.substr(2, tagStr.size() - 3); // verbatim URI: strip !< >
+		else if (!tagStr.empty() && tagStr[0] == '!')
+			name = tagStr.substr(1);                    // strip leading '!'
+		else
+			name = tagStr;
+		std::string out = "{\"$customTag\":{\"name\":\"";
+		for (auto c : name) {
+			if (c == '"' || c == '\\') out += '\\';
+			out += c;
+		}
+		out += "\",\"value\":";
+		out += parsedVal;
+		out += "}}";
+		return out;
+	}
 }
 
 inline bool yamlIsAnchorChar(char c) {
@@ -1889,7 +1936,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		std::string_view c = stripIndent(lines[dirEnd]);
 		if (c.empty() || c[0] == '#') { dirEnd++; continue; }
 		if (countIndent(lines[dirEnd]) > 0 || c[0] != '%') break;
-		if (c.size() >= 6 && c.substr(0, 6) == "%TAG ") {
+		if (c.size() >= 5 && c.substr(0, 5) == "%TAG ") {
 			// %TAG handle prefix
 			std::string_view rest = c.substr(5);
 			size_t pos = 0;

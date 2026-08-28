@@ -4033,11 +4033,19 @@ TEST(testFromYAML) {
 			ASSERT(false);
 		}
 	}
-	// Three-! tag (!!!int) treated as unknown -> value parsed normally
+	// Three-! tag (!!!int) is a local tag ("!!int") -- preserved as CUSTOM_TAG
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("n: !!!int 42"));
-		ASSERT_EQ(json.getInt("n"), 42);
+		auto* n = json.getRoot()->get("n");
+		ASSERT(n != nullptr && n->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(n->str_data), "!!int");
+		if (n->custom_value) {
+			ASSERT(n->custom_value->type == asvJSONValue::INT);
+			ASSERT_EQ(n->custom_value->getInt(), 42);
+		} else {
+			ASSERT(false);
+		}
 	}
 	// Explicit tags in array items
 	{
@@ -4056,35 +4064,151 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("%YAML 1.2\nkey: val"));
 		ASSERT_EQ(std::string(json.getString("key")), "val");
 	}
-	// %TAG !handle! prefix -- custom tag resolves via handle
+	// %TAG !handle! prefix -- custom tag resolves the full name via the handle and
+	// is preserved as a CUSTOM_TAG
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("%TAG !x! tag:example.com,2000:app/\nx: !x!foo hello"));
-		ASSERT_EQ(std::string(json.getString("x")), "hello");
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/foo");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(x->custom_value->str_data), "hello");
+		} else {
+			ASSERT(false);
+		}
 	}
-	// %TAG with !! override -- still parses value normally (unknown resolved tag)
+	// %TAG !! override -- !!str resolves to a local tag, not the core schema
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("%TAG !! tag:example.com,2000:app/\nx: !!str 42"));
-		ASSERT_EQ(std::string(json.getString("x")), "42"); // !!str still works
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/str");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::INT);
+			ASSERT_EQ(x->custom_value->getInt(), 42);
+		} else {
+			ASSERT(false);
+		}
 	}
 	// Directives before ---
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("%TAG !x! tag:example.com,2000:app/\n---\nx: !x!foo hello"));
-		ASSERT_EQ(std::string(json.getString("x")), "hello");
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/foo");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(x->custom_value->str_data), "hello");
+		} else {
+			ASSERT(false);
+		}
 	}
 	// Directives after ---
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("---\n%TAG !x! tag:example.com,2000:app/\nx: !x!foo hello"));
-		ASSERT_EQ(std::string(json.getString("x")), "hello");
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/foo");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(x->custom_value->str_data), "hello");
+		} else {
+			ASSERT(false);
+		}
 	}
 	// Multiple directives
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("%YAML 1.2\n%TAG !x! tag:example.com,2000:app/\nkey: !x!test val"));
-		ASSERT_EQ(std::string(json.getString("key")), "val");
+		auto* k = json.getRoot()->get("key");
+		ASSERT(k != nullptr && k->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(k->str_data), "tag:example.com,2000:app/test");
+		if (k->custom_value) {
+			ASSERT(k->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(k->custom_value->str_data), "val");
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Unknown tags are preserved as CUSTOM_TAG (name + value)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: !schema \"urn:example:person\"\nx: !mytag 42\ny: !custom [1, 2]"));
+		auto* s = json.getRoot()->get("s");
+		ASSERT(s != nullptr && s->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(s->str_data), "schema");
+		if (s->custom_value) {
+			ASSERT(s->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(s->custom_value->str_data), "urn:example:person");
+		} else {
+			ASSERT(false);
+		}
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "mytag");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::INT);
+			ASSERT_EQ(x->custom_value->getInt(), 42);
+		} else {
+			ASSERT(false);
+		}
+		auto* y = json.getRoot()->get("y");
+		ASSERT(y != nullptr && y->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(y->str_data), "custom");
+		if (y->custom_value) {
+			ASSERT(y->custom_value->type == asvJSONValue::ARRAY);
+			ASSERT_EQ(y->custom_value->arr->size(), size_t(2));
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Custom tags round-trip through toYAML
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: !schema \"urn:example:person\"\nx: !mytag 42"));
+		ASSERT(json.toYAML().find("!schema") != std::string::npos);
+		ASSERT(json.toYAML().find("!mytag 42") != std::string::npos);
+		asvJSON back;
+		ASSERT(back.fromYAML(json.toYAML()));
+		auto* s = back.getRoot()->get("s");
+		ASSERT(s != nullptr && s->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(s->str_data), "schema");
+	}
+	// Custom tags round-trip through the JSON $customTag convention
+	{
+		asvJSON json;
+		ASSERT(json.parse("{\"s\":{\"$customTag\":{\"name\":\"schema\",\"value\":\"urn:x\"}}}"));
+		auto* s = json.getRoot()->get("s");
+		ASSERT(s != nullptr && s->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(s->str_data), "schema");
+		if (s->custom_value) {
+			ASSERT(s->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(s->custom_value->str_data), "urn:x");
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Bare unknown tag -> CUSTOM_TAG with a null value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: !mytag"));
+		auto* a = json.getRoot()->get("a");
+		ASSERT(a != nullptr && a->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(a->str_data), "mytag");
+		ASSERT(a->custom_value != nullptr && a->custom_value->type == asvJSONValue::NULL_VAL);
+	}
+	// Verbatim tag URI keeps the full name
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !<tag:example.com,2024:type> hello"));
+		auto* k = json.getRoot()->get("k");
+		ASSERT(k != nullptr && k->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(k->str_data), "tag:example.com,2024:type");
 	}
 	// Inline flow mapping
 	{
@@ -4332,7 +4456,15 @@ TEST(testFromYAML) {
 		auto* root = json.getRoot();
 		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
 		ASSERT_EQ(root->arr->size(), size_t(2));
-		ASSERT(root->arr->at(1)->get("x")->getString() == std::string("hello"));
+		auto* x = root->arr->at(1)->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/foo");
+		if (x->custom_value) {
+			ASSERT(x->custom_value->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(x->custom_value->str_data), "hello");
+		} else {
+			ASSERT(false);
+		}
 	}
 	// Core Schema: !!set with flow [a,b,c]
 	{
