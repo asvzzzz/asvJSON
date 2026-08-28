@@ -65,6 +65,7 @@ struct FormatFrame {
 	bool first = true;
 	bool isRoot = false;
 	std::string prefix;
+	int childIndent = -1; // indentation of the first entry; -1 = unset
 };
 
 inline std::vector<std::string> splitLines(std::string_view input) {

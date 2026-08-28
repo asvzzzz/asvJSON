@@ -3436,6 +3436,112 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(!json.fromYAML("? a\nb: c"));
 	}
+	// --- Syntax-error strictness ---
+	// "key:" with nothing following is an implicit null (was "{}")
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("key:"));
+		ASSERT(json.isNull("key"));
+	}
+	// "key:" whose value is a bare scalar on a deeper line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("key:\n  hello"));
+		ASSERT_EQ(std::string(json.getString("key")), "hello");
+	}
+	// Empty value with a deeper mapping / sequence / flow value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k:\n  x: 1"));
+		ASSERT_EQ(json.getInt("k.x"), 1);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k:\n- 1\n- 2"));
+		auto* arr = json.getArray("k");
+		ASSERT(arr && (*arr).size() == 2);
+		ASSERT_EQ((*arr)[0].getInt(), 1);
+		ASSERT_EQ((*arr)[1].getInt(), 2);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k:\n  {a: 1}"));
+		ASSERT_EQ(json.getInt("k.a"), 1);
+	}
+	// Colon without space is a plain scalar, not a mapping: "a:b" is not "a: b"
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a:b"));
+		ASSERT(std::string(json.lastError).find("Expected ':'") != std::string::npos);
+	}
+	// ": value" with no key
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML(": value"));
+		ASSERT(std::string(json.lastError).find("mapping key expected before ':'") != std::string::npos);
+	}
+	// "a: : b" -- colon indicator where a value is required
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a: : b"));
+		ASSERT(std::string(json.lastError).find("expected value after ':'") != std::string::npos);
+	}
+	// Unterminated flow collections
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a: {b: 1"));
+		ASSERT(std::string(json.lastError).find("unterminated flow collection") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a: [1, 2"));
+		ASSERT(std::string(json.lastError).find("unterminated flow collection") != std::string::npos);
+	}
+	// Trailing garbage after a flow value / quoted string
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a: [1, 2] extra"));
+		ASSERT(std::string(json.lastError).find("trailing content after flow value") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("key: \"abc\" extra"));
+		ASSERT(std::string(json.lastError).find("trailing content after quoted string") != std::string::npos);
+	}
+	// Unterminated quoted strings
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("key: \"abc"));
+		ASSERT(std::string(json.lastError).find("unterminated double-quoted string") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("key: 'abc"));
+		ASSERT(std::string(json.lastError).find("unterminated single-quoted string") != std::string::npos);
+	}
+	// Inconsistent indentation inside one sequence / mixed seq-mapping
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("- a\n - b"));
+		ASSERT(std::string(json.lastError).find("inconsistent indentation") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("a: 1\n- b"));
+		ASSERT(std::string(json.lastError).find("sequence and mapping mixed") != std::string::npos);
+	}
+	// Garbage after a block scalar header ("| foo")
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("key: | foo\n  bar"));
+		ASSERT(std::string(json.lastError).find("block scalar header") != std::string::npos);
+	}
+	// Dash with an empty key: "- : x"
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("- : x"));
+		ASSERT(std::string(json.lastError).find("mapping key expected before ':'") != std::string::npos);
+	}
 	// Block scalar body must not be normalized (dash-looking lines preserved)
 	{
 		asvJSON json;

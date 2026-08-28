@@ -914,46 +914,57 @@ inline std::string yamlParseInlineValue(std::string_view s, int depth) {
 				if (s[i] == '"') break;
 				inner += s[i];
 			}
-			if (i < s.size()) {
-				std::string unesc = yamlUnescapeDouble(inner);
-				std::string out = "\"";
-				for (auto c : unesc) {
-					switch (c) {
-						case '"': out += "\\\""; break;
-						case '\\': out += "\\\\"; break;
-						case '\n': out += "\\n"; break;
-						case '\t': out += "\\t"; break;
-						case '\r': out += "\\r"; break;
-						default: if (static_cast<unsigned char>(c) < 0x20) { char buf[8]; std::snprintf(buf, sizeof(buf), "\\u%04x", c); out += buf; }
-						         else out += c;
-					}
+			if (i >= s.size())
+				throw asvJSONError("YAML: unterminated double-quoted string");
+			size_t after = i + 1;
+			while (after < s.size() && (s[after] == ' ' || s[after] == '\t')) after++;
+			if (after < s.size())
+				throw asvJSONError("YAML: trailing content after quoted string");
+			std::string unesc = yamlUnescapeDouble(inner);
+			std::string out = "\"";
+			for (auto c : unesc) {
+				switch (c) {
+					case '"': out += "\\\""; break;
+					case '\\': out += "\\\\"; break;
+					case '\n': out += "\\n"; break;
+					case '\t': out += "\\t"; break;
+					case '\r': out += "\\r"; break;
+					default: if (static_cast<unsigned char>(c) < 0x20) { char buf[8]; std::snprintf(buf, sizeof(buf), "\\u%04x", c); out += buf; }
+					         else out += c;
 				}
-				out += "\"";
-				return out;
 			}
+			out += "\"";
+			return out;
 		} else if (s[0] == '\'') {
 			size_t end = 1;
 			for (; end < s.size(); end++) {
 				if (s[end] == '\'' && end + 1 < s.size() && s[end + 1] == '\'') end++;
 				else if (s[end] == '\'') break;
 			}
-			if (end < s.size()) {
-				std::string inner(s.substr(1, end - 1));
-				std::string unesc = yamlUnescapeSingle(inner);
-				std::string out = "\"";
-				for (auto c : unesc) {
-					if (c == '"') out += "\\\"";
-					else if (c == '\\') out += "\\\\";
-					else out += c;
-				}
-				out += "\"";
-				return out;
+			if (end >= s.size())
+				throw asvJSONError("YAML: unterminated single-quoted string");
+			size_t after = end + 1;
+			while (after < s.size() && (s[after] == ' ' || s[after] == '\t')) after++;
+			if (after < s.size())
+				throw asvJSONError("YAML: trailing content after quoted string");
+			std::string inner(s.substr(1, end - 1));
+			std::string unesc = yamlUnescapeSingle(inner);
+			std::string out = "\"";
+			for (auto c : unesc) {
+				if (c == '"') out += "\\\"";
+				else if (c == '\\') out += "\\\\";
+				else out += c;
 			}
+			out += "\"";
+			return out;
 		}
 		if (s[0] == '{' || s[0] == '[') {
 			std::string tmp(s);
 			size_t fp = 0;
-			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, depth);
+			std::string got = yamlParseFlowValue(tmp, fp, nullptr, nullptr, depth);
+			while (fp < tmp.size() && (tmp[fp] == ' ' || tmp[fp] == '\t')) fp++;
+			if (fp < tmp.size()) throw asvJSONError("YAML: trailing content after flow value");
+			return got;
 		}
 	}
 	return yamlScalarToJson(s);
@@ -1013,7 +1024,10 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 			else if (c == openCh) depth++; else if (c == closeCh) depth--;
 		}
 	}
-	if (depth <= 0) return result;
+	if (depth <= 0) {
+		while (!result.empty() && (result.back() == ' ' || result.back() == '\t' || result.back() == '\n')) result.pop_back();
+		return result;
+	}
 	// Read more lines until depth closes
 	while (li + 1 < lines.size() && depth > 0) {
 		li++;
@@ -1039,6 +1053,10 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 		if (!result.empty() && !clean.empty()) result += ' ';
 		result += clean;
 	}
+	if (depth > 0)
+		throw asvJSONError("YAML: unterminated flow collection");
+	// Trim trailing whitespace so "fp != size" reliably detects trailing content
+	while (!result.empty() && (result.back() == ' ' || result.back() == '\t' || result.back() == '\n')) result.pop_back();
 	return result;
 }
 
@@ -1104,10 +1122,14 @@ inline std::string yamlParseFlowMap(const std::string& s, size_t& pos,
 			while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n')) pos++;
 			out += key + ":" + yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
 		} else {
+			// "{a}" -- implicit entry with no value: valid YAML (sets, null
+			// values). Emits the key with an implicit null, e.g. !!set {a, b}.
 			out += key + ":null";
 		}
 	}
-	if (pos < s.size() && s[pos] == '}') pos++;
+	if (pos >= s.size())
+		throw asvJSONError("YAML: unterminated flow collection");
+	if (s[pos] == '}') pos++;
 	out += "}";
 	return out;
 }
@@ -1129,7 +1151,9 @@ inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
 		first = false;
 		out += yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
 	}
-	if (pos < s.size() && s[pos] == ']') pos++;
+	if (pos >= s.size())
+		throw asvJSONError("YAML: unterminated flow collection");
+	if (s[pos] == ']') pos++;
 	out += "]";
 	return out;
 }
@@ -1167,13 +1191,17 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 	if (s[pos] == '"') {
 		size_t start = pos; pos++;
 		while (pos < s.size()) { if (s[pos] == '\\') pos += 2; else if (s[pos] == '"') break; else pos++; }
-		if (pos < s.size()) pos++;
+		if (pos >= s.size())
+			throw asvJSONError("YAML: unterminated double-quoted string in flow");
+		pos++;
 		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start), depth);
 	}
 	if (s[pos] == '\'') {
 		size_t start = pos; pos++;
 		while (pos < s.size()) { if (s[pos] == '\'' && pos + 1 < s.size() && s[pos + 1] == '\'') pos += 2; else if (s[pos] == '\'') break; else pos++; }
-		if (pos < s.size()) pos++;
+		if (pos >= s.size())
+			throw asvJSONError("YAML: unterminated single-quoted string in flow");
+		pos++;
 		return yamlParseInlineValue(std::string_view(s.data() + start, pos - start), depth);
 	}
 	if (s[pos] == '!' && pos + 1 < s.size()) {
@@ -1331,13 +1359,19 @@ inline void yamlRejectTabIndent(const std::string& line, int lineNum);
 inline std::string yamlParseBlockScalar(const std::string& header, const std::vector<std::string>& lines, size_t& li, bool isFolded, int parentIndent) {
 	char chomp = 0; // 0 = clip, '+' = keep, '-' = strip
 	int explicitIndent = 0;
-	for (size_t h = 1; h < header.size(); h++) {
+	size_t h = 1;
+	for (; h < header.size(); h++) {
 		char ch = header[h];
 		if (ch == ' ' || ch == '\t') continue;
 		if (ch >= '1' && ch <= '9') { explicitIndent = ch - '0'; continue; }
 		if (ch == '+' || ch == '-') { chomp = ch; continue; }
-		break; // comment or trailing text
+		break; // '#' comment or invalid content
 	}
+	// After the indicators only a '#' comment (or end of header) may follow;
+	// anything else ("| foo", "|2x") is a syntax error.
+	while (h < header.size() && (header[h] == ' ' || header[h] == '\t')) h++;
+	if (h < header.size() && header[h] != '#')
+		throw asvJSONError("YAML: unexpected content after block scalar header");
 
 	std::string text;
 	int contentIndent = explicitIndent > 0 ? explicitIndent : -1;
@@ -1399,6 +1433,17 @@ inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 	}
 }
 
+// YAML requires the entries of one mapping/sequence (a single frame) to sit at
+// a consistent indentation. The frame records the indent of its first entry;
+// any later entry that breaks alignment is a structural error ("bad indent").
+inline void yamlCheckFrameIndent(std::vector<FormatFrame>& stack, int indent) {
+	if (stack.empty()) return;
+	auto& top = stack.back();
+	if (top.childIndent < 0) top.childIndent = indent;
+	else if (indent != top.childIndent)
+		throw asvJSONError("YAML: inconsistent indentation");
+}
+
 // True when a line opens (`- ` or bare `-`) a block sequence entry.
 inline bool yamlIsDashStart(std::string_view s) {
 	if (s.empty() || s[0] != '-') return false;
@@ -1422,6 +1467,16 @@ inline std::string_view::size_type yamlFindKeyColon(std::string_view s) {
 		if (c == ':' && depth == 0) return i;
 	}
 	return std::string_view::npos;
+}
+
+// A top-level ':' is a mapping separator only when followed by space, tab, or
+// end-of-line (YAML plain-scalar rule). "a:b", "10:30", "http://x:y" contain a
+// colon but are plain scalars, so this returns npos for them.
+inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s) {
+	size_t c = yamlFindKeyColon(s);
+	if (c == std::string_view::npos) return std::string_view::npos;
+	if (c + 1 < s.size() && s[c + 1] != ' ' && s[c + 1] != '\t') return std::string_view::npos;
+	return c;
 }
 
 // True when `s` begins a block mapping entry ("key: value" with a space after
@@ -1598,7 +1653,9 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			size_t flowLi = firstLine;
 			std::string flowText = yamlGatherFlow(lines, fc, flowLi);
 			size_t fp = 0;
-			return yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+			std::string got = yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+			if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
+			return got;
 		}
 	}
 
@@ -1741,6 +1798,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
 			}
+			yamlCheckFrameIndent(stack, indent);
 
 			std::string jsonKey = "\"" + yamlEscKey(rawKey) + "\"";
 			if (!inlineVal.empty() && inlineVal[0] != '#') {
@@ -1754,7 +1812,9 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				} else if (inlineVal[0] == '{' || inlineVal[0] == '[') {
 					std::string flowText = yamlGatherFlow(lines, inlineVal, li);
 					size_t fp = 0;
-					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					std::string got = yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
+					out += got;
 				} else if (inlineVal[0] == '!' && inlineVal.size() > 1) {
 					out += yamlParseTaggedValue(inlineVal);
 				} else if (inlineVal.size() > 1 && inlineVal[0] == '*') {
@@ -1778,6 +1838,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				stack.pop_back();
 			}
 
+			bool pushedA = false;
 			if (stack.empty() || stack.back().type != 'A') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
@@ -1785,6 +1846,16 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				out += '[';
 				FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
+				pushedA = true;
+			}
+			if (pushedA) {
+				// A block sequence opened inside an open mapping level mixes
+				// structures: "a: 1\n- b". (A sequence as a mapping value is
+				// always opened by the empty-value lookahead, not here.)
+				if (stack.size() >= 2 && stack[stack.size() - 2].type == 'O')
+					throw asvJSONError("YAML: sequence and mapping mixed at the same level");
+			} else {
+				yamlCheckFrameIndent(stack, indent);
 			}
 
 			addComma(stack, out);
@@ -1793,6 +1864,11 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			std::string rest;
 			if (content.size() >= 2) rest = content.substr(2);
 			while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+
+			if (!rest.empty() && rest[0] == ':' &&
+			    (rest.size() == 1 || rest[1] == ' ' || rest[1] == '\t')) {
+				throw asvJSONError("YAML: mapping key expected before ':'");
+			}
 
 			if (rest.empty()) {
 				// Bare dash: the item may be an object or nested sequence whose
@@ -1874,7 +1950,10 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 		}
 
 		// --- Key-value pair ---
-		size_t colonPos = yamlFindKeyColon(content);
+		// A ':' is a key separator only when followed by space, tab, or EOL
+		// (YAML plain-scalar rule): "a:b", "10:30", "http://x:y" are plain
+		// scalars, not mappings.
+		size_t colonPos = yamlFindKeyColonSep(content);
 		if (colonPos != std::string::npos) {
 			closeFrames(stack, out, indent);
 
@@ -1890,6 +1969,8 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			if (colonPos == 0 && !pendingKey.empty()) {
 				pendingMerged = true;
 				keyPart.clear();
+			} else if (colonPos == 0) {
+				throw asvJSONError("YAML: mapping key expected before ':'");
 			}
 
 			std::string rawKey;
@@ -1901,6 +1982,7 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				rawKey = std::string(keyPart);
 			}
 
+			bool pushedO = false;
 			if (stack.empty() || stack.back().type != 'O') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
@@ -1908,11 +1990,27 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				out += '{';
 				FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
+				pushedO = true;
+			}
+			if (pushedO) {
+				// A mapping started directly inside an open block sequence mixes
+				// structures at one level, which YAML forbids: "a: 1\n- b" etc.
+				if (stack.size() >= 2 && stack[stack.size() - 2].type == 'A')
+					throw asvJSONError("YAML: sequence and mapping mixed at the same level");
+			} else {
+				yamlCheckFrameIndent(stack, indent);
 			}
 
 			std::string jsonKey;
 			if (pendingMerged) { jsonKey = pendingKey; pendingKey.clear(); }
 			else jsonKey = yamlEscKey(rawKey);
+
+			// A plain-scalar value must not start with the ':' indicator
+			// ("a: : b", "a: :"): it would be an empty-keyed nested pair.
+			if (!valPart.empty() && valPart[0] == ':' &&
+			    (valPart.size() == 1 || valPart[1] == ' ' || valPart[1] == '\t')) {
+				throw asvJSONError("YAML: expected value after ':'");
+			}
 
 			if (!valPart.empty() && valPart[0] != '#') {
 				addComma(stack, out);
@@ -1936,7 +2034,9 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				} else if (valPart[0] == '{' || valPart[0] == '[') {
 					std::string flowText = yamlGatherFlow(lines, valPart, li);
 					size_t fp = 0;
-					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					std::string got = yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
+					out += got;
 				} else if (valPart[0] == '!' && valPart.size() > 1) {
 					out += yamlParseTaggedValue(valPart);
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
@@ -1951,40 +2051,70 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 
 				bool isArrayValue = false;
 				bool isFlowValue = false;
+				bool deeperScalar = false;
+				bool deeperBlock = false; // deeper line is a "|"/">" block-scalar header
+				bool deeperMapping = false; // deeper line is a "key: value" pair
 				size_t scan = li + 1;
 				while (scan < lines.size()) {
 					std::string_view sc = stripIndent(lines[scan]);
 					if (sc.empty() || sc[0] == '#') { scan++; continue; }
-int scIndent = countIndent(lines[scan]);
-				if (scIndent < indent) break;
-				if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) { isFlowValue = true; break; }
-				if (scIndent == indent) {
+					int scIndent = countIndent(lines[scan]);
+					if (scIndent < indent) break;
+					if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) { isFlowValue = true; break; }
+					if (scIndent == indent) {
+						if (yamlIsDashStart(sc)) isArrayValue = true;
+						break;
+					}
 					if (yamlIsDashStart(sc)) { isArrayValue = true; break; }
+					if (yamlFindKeyColonSep(sc) != std::string_view::npos) { deeperMapping = true; break; } // deeper mapping
+					deeperScalar = true;
+					deeperBlock = yamlIsBlockScalarHeader(sc);
 					break;
-				}
-				if (yamlIsDashStart(sc)) { isArrayValue = true; break; }
-				if (yamlFindKeyColon(sc) != std::string_view::npos) break;
-				break;
 				}
 
 				if (isFlowValue) {
 					// Output flow value directly as value for this key
 					std::string flowText = yamlGatherFlow(lines, std::string(stripIndent(lines[scan])), scan);
 					size_t fp = 0;
-					out += yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					std::string got = yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
+					if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
+					out += got;
 					li = scan; // skip flow lines
 					stack.back().hasVal = true;
-				} else {
+				} else if (isArrayValue) {
 					if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
-					if (isArrayValue) {
-						out += '[';
-						FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
-						stack.push_back(f);
+					out += '[';
+					FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
+					stack.push_back(f);
+				} else if (deeperScalar) {
+					// The value is a bare scalar / tagged value / alias /
+					// block scalar written on the following deeper line:
+					//   key:
+					//     some scalar
+					if (deeperBlock) {
+						bool isFolded = (stripIndent(lines[scan])[0] == '>');
+						std::string text = yamlParseBlockScalar(std::string(stripIndent(lines[scan])), lines, scan, isFolded, indent);
+						out += yamlQuoteJsonScalar(text);
 					} else {
-						out += '{';
-						FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
-						stack.push_back(f);
+						std::string dc(stripIndent(lines[scan]));
+						if (dc.size() > 1 && dc[0] == '*') out += yamlResolveAlias(std::string_view(dc).substr(1), anchors, resolving);
+						else if (dc.size() > 1 && dc[0] == '!') out += yamlParseTaggedValue(dc);
+						else out += yamlParseInlineValue(dc);
 					}
+					li = scan; // consume the value line
+					stack.back().hasVal = true;
+				} else if (deeperMapping) {
+					// The value is a mapping whose entries follow on deeper lines:
+					//   key:
+					//     sub: value
+					if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+					out += '{';
+					FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
+					stack.push_back(f);
+				} else {
+					// Nothing follows "key:" -- YAML implicit null
+					out += "null";
+					stack.back().hasVal = true;
 				}
 			}
 			continue;
