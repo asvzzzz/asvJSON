@@ -1354,6 +1354,9 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 
 inline std::string yamlToJson(std::string_view input);
 inline std::string yamlParseDoc(std::string_view input, int depth = 0);
+// Parse a document whose lines are already split (used by anchors to avoid
+// re-splitting the collected subtree). Owns its own scoped tag-map snapshot.
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
 
 // Pre-scan lines for &anchor definitions, building name->JSON map.
 // For block anchors, extracts child lines and recursively calls yamlToJson.
@@ -1365,6 +1368,8 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 	if (depth > 64) throw asvJSONError("YAML: maximum anchor recursion depth exceeded");
 	bool found = false;
 	for (size_t li = 0; li < lines.size(); li++) {
+		// Cheap pre-filter: lines without the '&' character cannot define anchors.
+		if (lines[li].find('&') == std::string_view::npos) continue;
 		int indent = countIndent(lines[li]);
 		std::string_view content = stripIndent(lines[li]);
 		if (content.empty() || content[0] == '#') continue;
@@ -1388,50 +1393,39 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 		while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
 
 		if (!rest.empty() && rest[0] != '#') {
-			// Scalar anchor -- value follows on same line
-			anchors[name] = yamlParseInlineValue(rest);
+			// Scalar anchor -- value follows on same line. Strip a trailing
+			// comment exactly like the main pass does, so aliases agree with
+			// the anchored line's own value.
+			std::string_view rv = yamlStripComment(rest);
+			while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
+			anchors[name] = yamlParseInlineValue(rv);
 		} else {
-			// Block anchor -- collect child lines
-			std::string childYaml;
+			// Block anchor -- collect child lines (content only, like before)
+			std::vector<std::string> childLines;
 			size_t ci = li + 1;
+			size_t minIndent = SIZE_MAX;
 			while (ci < lines.size()) {
 				int si = countIndent(lines[ci]);
 				std::string_view sc = stripIndent(lines[ci]);
-				if (sc.empty()) { ci++; continue; }
-				if (sc[0] == '#') { ci++; continue; }
+				if (sc.empty() || sc[0] == '#') { ci++; continue; }
 				if (si > indent) {
-					if (!childYaml.empty()) childYaml += '\n';
-					childYaml += lines[ci];
+					if (static_cast<size_t>(si) < minIndent) minIndent = static_cast<size_t>(si);
+					childLines.push_back(lines[ci]);
 					ci++;
 				} else {
 					break;
 				}
 			}
-			if (!childYaml.empty()) {
-				// Normalize indentation: find minimum indent and strip it
-				auto chLines = splitLines(childYaml);
-				size_t minIndent = SIZE_MAX;
-				for (auto& cl : chLines) {
-					std::string_view cs = stripIndent(cl);
-					if (cs.empty() || cs[0] == '#') continue;
-					size_t ci2 = static_cast<size_t>(countIndent(cl));
-					if (ci2 < minIndent) minIndent = ci2;
-				}
-				if (minIndent > 0 && minIndent != SIZE_MAX) {
-					std::string normalized;
-					for (auto& cl : chLines) {
-						if (!normalized.empty()) normalized += '\n';
+			if (!childLines.empty()) {
+				// Normalize indentation: strip the minimum indent in place
+				if (minIndent != SIZE_MAX && minIndent > 0) {
+					for (auto& cl : childLines) {
 						std::string_view cs = stripIndent(cl);
-						if (cs.empty() || cs[0] == '#') {
-							// Keep empty/comment lines as-is
-							normalized += std::string(cl);
-						} else {
-							normalized += cl.substr(minIndent);
-						}
+						if (cs.empty() || cs[0] == '#') continue;
+						if (static_cast<size_t>(countIndent(cl)) >= minIndent) cl.erase(0, minIndent);
 					}
-					childYaml = normalized;
 				}
-				anchors[name] = yamlParseDoc(childYaml, depth + 1);
+				anchors[name] = yamlParseDocImpl(childLines, depth + 1);
 			} else {
 				anchors[name] = "null";
 			}
@@ -1696,10 +1690,14 @@ inline void yamlNormalizeSeqItems(std::vector<std::string>& lines) {
 
 // Parse a single YAML document (no multi-doc handling)
 inline std::string yamlParseDoc(std::string_view input, int depth) {
-	// Restore the previous tag-map state on exit (even on exception).
-	YamlDocTagMapGuard tagGuard;
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
+	return yamlParseDocImpl(lines, depth);
+}
+
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) {
+	// Restore the previous tag-map state on exit (even on exception).
+	YamlDocTagMapGuard tagGuard;
 
 	// Scan for directives (%YAML, %TAG) at the beginning of the document
 	// Directives are at indent 0 and precede any content
@@ -1740,10 +1738,17 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 	// sequences parse correctly as sequence items.
 	yamlNormalizeSeqItems(lines);
 
-	// Pre-scan for anchors (each document has independent anchor namespace)
+	// Pre-scan for anchors (each document has independent anchor namespace).
+	// Skip the scan entirely when no '&' appears anywhere: aliases then have
+	// nothing to resolve to and fail later exactly as they would with an empty
+	// map, and block/flow anchors are impossible without the character.
 	std::unordered_map<std::string, std::string> anchors;
 	std::unordered_set<std::string> resolving;
-	yamlBuildAnchorMap(lines, anchors, depth);
+	bool hasAmp = false;
+	for (const auto& ln : lines) {
+		if (ln.find('&') != std::string::npos) { hasAmp = true; break; }
+	}
+	if (hasAmp) yamlBuildAnchorMap(lines, anchors, depth);
 
 	std::string out;
 	std::vector<FormatFrame> stack;

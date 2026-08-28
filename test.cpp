@@ -4006,6 +4006,40 @@ TEST(testFromYAML) {
 		ASSERT_EQ(arr->arr->at(2)->getInt(), 10);
 		ASSERT_EQ(json.getInt("other"), 10);
 	}
+	// Block anchor: object value defined on its own lines, aliased below
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("defaults: &base\n  host: h\n  port: 1\nu: *base\nv: *base"));
+		auto* def = json.getRoot()->get("defaults");
+		ASSERT(def != nullptr && def->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(def->get("host")->getString(), std::string("h"));
+		ASSERT_EQ(def->get("port")->getInt(), 1);
+		auto* u = json.getRoot()->get("u");
+		ASSERT(u != nullptr && u->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(u->get("port")->getInt(), 1);
+		ASSERT_EQ(json.getRoot()->get("v")->get("host")->getString(), std::string("h"));
+	}
+	// Block anchor with sequence value and a forward reference
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("first: *back\nback: &back\n  - 1\n  - 2"));
+		auto* arr = json.getRoot()->get("first");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT_EQ(arr->arr->at(0)->getInt(), 1);
+		ASSERT_EQ(arr->arr->at(1)->getInt(), 2);
+	}
+	// Scalar anchor: comment after the value must not leak into the alias
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: &x 5\nu: *x\n"));
+		ASSERT_EQ(json.getInt("u"), 5);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: &x 5 # trailing\nu: *x\n"));
+		ASSERT_EQ(json.getInt("u"), 5);
+	}
 	// Core Schema: !!set with flow [a,b,c]
 	{
 		asvJSON json;
