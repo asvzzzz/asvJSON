@@ -4040,6 +4040,90 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("x: &x 5 # trailing\nu: *x\n"));
 		ASSERT_EQ(json.getInt("u"), 5);
 	}
+	// Multiple documents separated by "---" -> array of documents
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n---\nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT_EQ(root->arr->at(0)->get("a")->getInt(), int64_t(1));
+		ASSERT_EQ(root->arr->at(1)->get("b")->getInt(), int64_t(2));
+	}
+	// Single implicit document has no array wrapper
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n"));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::OBJECT);
+	}
+	// "..." ends the current document; trailing content starts a new implicit one
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n...\nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT_EQ(root->arr->at(0)->get("a")->getInt(), int64_t(1));
+		ASSERT_EQ(root->arr->at(1)->get("b")->getInt(), int64_t(2));
+	}
+	// "..." followed by whitespace or a comment is still a boundary marker
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n... \nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n... # done\nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+	}
+	// Trailing "---" with no content -> empty explicit document (null)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n---\n"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT(root->arr->at(0)->type == asvJSONValue::OBJECT);
+		ASSERT(root->arr->at(1)->type == asvJSONValue::NULL_VAL);
+	}
+	// Empty documents between "---" separators become null elements
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n---\n---\nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(3));
+		ASSERT(root->arr->at(0)->type == asvJSONValue::OBJECT);
+		ASSERT(root->arr->at(1)->type == asvJSONValue::NULL_VAL);
+		ASSERT(root->arr->at(2)->type == asvJSONValue::OBJECT);
+	}
+	// "---" followed by "..." yields a single null document
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("---\n...\n"));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::NULL_VAL);
+	}
+	// A leading "---" opens the (single) document, never an empty first one
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("---\na: 1"));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(json.getInt("a"), int64_t(1));
+	}
+	// %-directives still attach to the document that follows "---" after "..."
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\n...\n%TAG !x! tag:example.com,2000:app/\n---\nx: !x!foo hello"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT(root->arr->at(1)->get("x")->getString() == std::string("hello"));
+	}
 	// Core Schema: !!set with flow [a,b,c]
 	{
 		asvJSON json;

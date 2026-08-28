@@ -2293,65 +2293,85 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 	return out;
 }
 
+// Detect a "---" (isStart) / "..." (isEnd) document marker at column 0.
+// Only trailing whitespace and an optional "#" comment may follow the marker;
+// "--- foo" stays a content line.
+inline bool yamlIsBoundaryMarker(std::string_view s, bool isStart) {
+	if (s.size() < 3) return false;
+	std::string_view m = isStart ? "---" : "...";
+	if (s.compare(0, 3, m) != 0) return false;
+	s = s.substr(3);
+	while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+	return s.empty() || s.front() == '#';
+}
+
 // Main YAML -> JSON entry point -- handles multi-document streams
 inline std::string yamlToJson(std::string_view input) {
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 
-	// Find document boundaries: "---" or "..." at indent 0
-	std::vector<std::pair<size_t, size_t>> docs; // [firstLine, pastEnd)
+	// Find document boundaries. Each document is a half-open line range [start, end)
+// plus flags for explicit start ("---" seen) and real content. "---" at column 0
+// begins an explicit document (which may be empty => null); "..." at column 0
+// ends the current document. Content without a preceding "---" forms an implicit
+// document, which is never empty -- an implicit document with no content is no
+// document at all.
+std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explicit, hasContent}
 	size_t docStart = 0;
 	bool inDoc = false;
+	bool isExplicit = false;
+	bool hasContent = false;
 	size_t pendingDirStart = SIZE_MAX; // first %-directive line before next doc
 
 	for (size_t i = 0; i < lines.size(); i++) {
 		std::string_view stripped = stripIndent(lines[i]);
 		if (stripped.empty() || stripped[0] == '#') continue;
+		const bool atIndent0 = countIndent(lines[i]) == 0;
 
-		if (stripped == "---" && countIndent(lines[i]) == 0) {
-			if (inDoc) {
-				docs.back().second = i; // end at separator
-				inDoc = false;
-			}
+		if (atIndent0 && yamlIsBoundaryMarker(stripped, true)) { // "---"
+			if (inDoc) docs.emplace_back(docStart, i, isExplicit, hasContent);
+			inDoc = true;
+			isExplicit = true;
+			hasContent = false;
 			docStart = i + 1;
-			if (pendingDirStart != SIZE_MAX) {
-				docStart = pendingDirStart; // include directives before ---
+			if (pendingDirStart != SIZE_MAX) { // include directives before ---
+				docStart = pendingDirStart;
 				pendingDirStart = SIZE_MAX;
 			}
 			continue;
 		}
-		if (stripped == "..." && countIndent(lines[i]) == 0) {
-			if (inDoc) {
-				docs.back().second = i; // end at document-end marker
-				inDoc = false;
-			}
+		if (atIndent0 && yamlIsBoundaryMarker(stripped, false)) { // "..."
+			if (inDoc) docs.emplace_back(docStart, i, isExplicit, hasContent);
+			inDoc = false;
+			isExplicit = false;
+			hasContent = false;
 			continue;
 		}
-
 		// %-directives at indent 0 are not content -- they belong to the next doc
-		if (stripped[0] == '%' && countIndent(lines[i]) == 0) {
+		if (atIndent0 && stripped[0] == '%') {
 			if (pendingDirStart == SIZE_MAX) pendingDirStart = i;
 			continue;
 		}
 
-		if (!inDoc) {
+		if (!inDoc) { // first content line of an implicit document
 			inDoc = true;
-			docs.push_back({docStart, lines.size()}); // tentative end
+			isExplicit = false;
+			hasContent = false;
+			docStart = (pendingDirStart == SIZE_MAX) ? i : pendingDirStart;
 		}
+		hasContent = true;
+	}
+	// EOF closes the current document
+	if (inDoc) docs.emplace_back(docStart, lines.size(), isExplicit, hasContent);
+
+	// Keep content documents as-is; an empty document yields null only when it
+	// was explicitly opened with "---". Otherwise it is absent.
+	std::vector<std::tuple<size_t, size_t, bool, bool>> keep;
+	for (const auto& d : docs) {
+		if (std::get<3>(d) || std::get<2>(d)) keep.push_back(d);
 	}
 
-	// Filter out documents with no real content (directives-only, etc.)
-	std::vector<std::pair<size_t, size_t>> validDocs;
-	for (auto& d : docs) {
-		bool hasContent = false;
-		for (size_t i = d.first; i < d.second && !hasContent; i++) {
-			std::string_view c = stripIndent(lines[i]);
-			if (!c.empty() && c[0] != '#' && c[0] != '%' && c != "---" && c != "...") hasContent = true;
-		}
-		if (hasContent) validDocs.push_back(d);
-	}
-
-	if (validDocs.empty()) return "{}";
+	if (keep.empty()) return "{}";
 
 	auto buildDocInput = [&](size_t start, size_t end) -> std::string {
 		std::string sub;
@@ -2371,14 +2391,18 @@ inline std::string yamlToJson(std::string_view input) {
 		return sub;
 	};
 
-	if (validDocs.size() == 1) {
-		return yamlParseDoc(buildDocInput(validDocs[0].first, validDocs[0].second));
+	if (keep.size() == 1) {
+		if (std::get<3>(keep[0]))
+			return yamlParseDoc(buildDocInput(std::get<0>(keep[0]), std::get<1>(keep[0])));
+		return "null";
 	}
 
 	std::string result = "[";
-	for (size_t d = 0; d < validDocs.size(); d++) {
+	for (size_t d = 0; d < keep.size(); d++) {
 		if (d > 0) result += ",";
-		result += yamlParseDoc(buildDocInput(validDocs[d].first, validDocs[d].second));
+		result += std::get<3>(keep[d])
+			? yamlParseDoc(buildDocInput(std::get<0>(keep[d]), std::get<1>(keep[d])))
+			: "null";
 	}
 	result += "]";
 	return result;
