@@ -4030,6 +4030,86 @@ TEST(testFromYAML) {
 		ASSERT(obj->hasKey("c"));
 		ASSERT(obj->get("a")->type == asvJSONValue::NULL_VAL);
 	}
+	// Core Schema: !!set with block "- key" items as a mapping value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set\n  - a\n  - b"));
+		if (json.lastError.empty()) {
+			auto* obj = json.getRoot()->get("val");
+			ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+			ASSERT(obj->hasKey("a") && obj->get("a")->type == asvJSONValue::NULL_VAL);
+			ASSERT(obj->hasKey("b") && obj->get("b")->type == asvJSONValue::NULL_VAL);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Core Schema: !!set block items at document root
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n- a\n- b"));
+		if (json.lastError.empty()) {
+			auto* obj = json.getRoot();
+			ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+			ASSERT(obj->hasKey("a"));
+			ASSERT(obj->hasKey("b"));
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Core Schema: !!set with explicit "? key" block items (canonical set form)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n? a\n? b"));
+		if (json.lastError.empty()) {
+			auto* obj = json.getRoot();
+			ASSERT(obj->hasKey("a"));
+			ASSERT(obj->hasKey("b"));
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Core Schema: !!set as a block-sequence item
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!set\n  - a\n  - b"));
+		if (json.lastError.empty()) {
+			auto* arr = json.getRootArray();
+			ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+			asvJSONValue* obj = (*arr->arr)[0].get();
+			ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+			ASSERT(obj->hasKey("a"));
+			ASSERT(obj->hasKey("b"));
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Empty block set
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("e: !!set\nx: 1"));
+		ASSERT(json.getRoot()->hasKey("e"));
+		ASSERT(json.getRoot()->get("e")->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(json.getInt("x"), 1);
+	}
+	// Quoted block-set keys are unescaped; scalar keys stringify
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set\n  - \"q k\"\n  - 1\n  - true"));
+		if (json.lastError.empty()) {
+			auto* obj = json.getRoot()->get("val");
+			ASSERT(obj->hasKey("q k"));
+			ASSERT(obj->hasKey("1"));
+			ASSERT(obj->hasKey("true"));
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Trailing content after a root block set is rejected (not silently dropped)
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("!!set\n- a\nx: 1"));
+		ASSERT(std::string(json.lastError).find("after block set") != std::string::npos);
+	}
 	// Core Schema: !!omap [{a:1},{b:2}]
 	{
 		asvJSON json;

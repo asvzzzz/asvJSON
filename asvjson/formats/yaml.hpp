@@ -985,6 +985,71 @@ inline std::string yamlEscKey(std::string_view s) {
 	return out;
 }
 
+// True when `s` is exactly a set tag (after %TAG resolution) with no trailing
+// value -- the only shape that can introduce a block-style set ("k: !!set").
+inline bool yamlIsSetBlockHeader(std::string_view s) {
+	if (s.empty() || s[0] != '!') return false;
+	// The tag must occupy the whole string; a trailing value ("!!set {a, b}")
+	// routes the normal tagged-value path instead.
+	if (s.find_first_of(" \t") != std::string_view::npos) return false;
+	return yamlResolveTag(s) == "!!set";
+}
+
+inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s);
+
+// Parse a block-style !!set: the header line plus the following "- key" /
+// "? key" item lines (single-line scalar keys). Works at document root or as a
+// mapping/sequence value. Emits "key": null pairs, fixes the item indentation
+// from the first item (a later mis-indented item is an error), and advances
+// `li` past the last consumed line. Non-item lines, or items that are not plain
+// scalar keys ("- x: v", "- {a}"), end the set and are left for the main loop.
+inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size_t& li) {
+	std::string out = "{";
+	bool first = true;
+	int itemIndent = -1;
+	size_t j = li + 1;
+	while (j < lines.size()) {
+		std::string_view sc = stripIndent(lines[j]);
+		if (sc.empty() || sc[0] == '#') { j++; continue; }
+		int ind = countIndent(lines[j]);
+		if (itemIndent < 0) itemIndent = ind;
+		else if (ind != itemIndent) throw asvJSONError("YAML: inconsistent indentation");
+
+		std::string_view body;
+		if (sc.size() >= 2 && sc[0] == '-') {
+			if (sc[1] != ' ') break; // bare "-" owns a child node -- not a scalar key
+			body = sc.substr(2);
+		} else if (sc.size() >= 2 && sc[0] == '?' && sc[1] == ' ') {
+			body = sc.substr(2);
+		} else {
+			break; // mapping entry / flow / scalar -- ends the set
+		}
+		while (!body.empty() && (body[0] == ' ' || body[0] == '\t')) body.remove_prefix(1);
+		body = yamlStripComment(body);
+		while (!body.empty() && (body.back() == ' ' || body.back() == '\t')) body.remove_suffix(1);
+		if (body.empty()) break;
+		// Item keys are scalar nodes only; flow collections are not scalar keys.
+		if (yamlFindKeyColonSep(body) != std::string_view::npos) break; // "- x: v" is a mapping item
+		if (body[0] == '{' || body[0] == '[') break;
+		// Quoted keys are unescaped; plain keys stringify as-is.
+		std::string rawKey;
+		if (body.size() >= 2 && body[0] == '"' && body.back() == '"')
+			rawKey = yamlUnescapeDouble(body.substr(1, body.size() - 2));
+		else if (body.size() >= 2 && body[0] == '\'' && body.back() == '\'')
+			rawKey = yamlUnescapeSingle(body.substr(1, body.size() - 2));
+		else
+			rawKey = std::string(body);
+		if (!first) out += ",";
+		first = false;
+		out += "\"" + yamlEscKey(rawKey) + "\":null";
+		li = j;
+		j++;
+	}
+	if (first) return "{}";
+	out += "}";
+	return out;
+}
+
 // Emit a raw scalar value as a quoted, JSON-escaped string (used when a value
 // must remain a string, e.g. block-scalar bodies).
 inline std::string yamlQuoteJsonScalar(std::string_view s) {
@@ -1657,6 +1722,19 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 			if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
 			return got;
 		}
+		// Block-style !!set at document root ("!!set\n- a\n- b")
+		if (yamlIsSetBlockHeader(fc)) {
+			size_t sLi = firstLine;
+			std::string sgot = yamlParseBlockSet(lines, sLi);
+			// The set is the whole document: trailing content would be dropped
+			// silently, so reject it.
+			for (size_t t = sLi + 1; t < lines.size(); t++) {
+				std::string_view tc = stripIndent(lines[t]);
+				if (tc.empty() || tc[0] == '#') continue;
+				throw asvJSONError("YAML: unexpected content after block set");
+			}
+			return sgot;
+		}
 	}
 
 	bool rootIsArr = false;
@@ -1816,7 +1894,13 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 					if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
 					out += got;
 				} else if (inlineVal[0] == '!' && inlineVal.size() > 1) {
-					out += yamlParseTaggedValue(inlineVal);
+					if (yamlIsSetBlockHeader(inlineVal)) {
+						size_t sLi = li;
+						out += yamlParseBlockSet(lines, sLi);
+						li = sLi;
+					} else {
+						out += yamlParseTaggedValue(inlineVal);
+					}
 				} else if (inlineVal.size() > 1 && inlineVal[0] == '*') {
 					out += yamlResolveAlias(std::string_view(inlineVal).substr(1), anchors, resolving);
 				} else {
@@ -1901,6 +1985,10 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 				if (!opened) out += "null";
 			} else if (rest.size() > 1 && rest[0] == '*') {
 				out += yamlResolveAlias(rest.substr(1), anchors, resolving);
+			} else if (rest.size() > 1 && rest[0] == '!' && yamlIsSetBlockHeader(rest)) {
+				size_t sLi = li;
+				out += yamlParseBlockSet(lines, sLi);
+				li = sLi;
 			} else if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
 				bool isFolded = (rest[0] == '>');
 				std::string text = yamlParseBlockScalar(rest, lines, li, isFolded, indent);
@@ -2038,7 +2126,13 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 					if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
 					out += got;
 				} else if (valPart[0] == '!' && valPart.size() > 1) {
-					out += yamlParseTaggedValue(valPart);
+					if (yamlIsSetBlockHeader(valPart)) {
+						size_t sLi = li;
+						out += yamlParseBlockSet(lines, sLi);
+						li = sLi;
+					} else {
+						out += yamlParseTaggedValue(valPart);
+					}
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
 					out += yamlResolveAlias(std::string_view(valPart).substr(1), anchors, resolving);
 				} else {
