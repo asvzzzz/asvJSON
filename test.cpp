@@ -10758,6 +10758,74 @@ TEST(testIsChanged) {
 	}
 }
 
+TEST(testKeyOrder) {
+	// Object keys keep insertion order by default -> parse/serialize round-trips
+	// preserve key order (JSON, YAML, INI).
+	auto orderOk = [](const std::string& s, const char* first, const char* second, const char* third) {
+		size_t a = s.find(first), b = s.find(second), c = s.find(third);
+		return a != std::string::npos && b != std::string::npos && c != std::string::npos && a < b && b < c;
+	};
+	// JSON parse -> serialize
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"b":1,"a":2,"k":3})"));
+		ASSERT(orderOk(j.serialize(), "\"b\"", "\"a\"", "\"k\""));
+	}
+	// YAML round-trip (z, a, m stay in order)
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("z: 1\na: 2\nm: 3\n"));
+		ASSERT(orderOk(j.toYAML(), "z:", "a:", "m:"));
+		ASSERT(orderOk(j.serialize(), "\"z\"", "\"a\"", "\"m\""));
+	}
+	// Nested object order + update-in-place keeps position
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"c":{"x":1,"y":2},"d":4})"));
+		std::string s = j.serialize();
+		ASSERT(s.find("\"c\"") < s.find("\"d\""));
+		ASSERT(j.putInt("c.y", 99));
+		s = j.serialize();
+		ASSERT(s.find("\"c\"") < s.find("\"d\""));
+		ASSERT(s.find("99") != std::string::npos);
+	}
+	// Duplicate key: last wins, keeps original position
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"a":1,"b":2,"a":3})"));
+		ASSERT(j.getRoot()->obj->size() == 2);
+		std::string s = j.serialize();
+		ASSERT(s.find("\"a\"") < s.find("\"b\""));
+		ASSERT(s.find(":3") != std::string::npos);
+		ASSERT(s.find(":1") == std::string::npos);
+	}
+	// Merge updates existing keys in place, appends new ones
+	{
+		asvJSON a, b;
+		ASSERT(a.parse(R"({"x":1,"y":2})"));
+		ASSERT(b.parse(R"({"y":9,"z":3})"));
+		a.merge(b);
+		std::string s = a.serialize();
+		ASSERT(orderOk(s, "\"x\"", "\"y\"", "\"z\""));
+	}
+	// User iteration order == insertion order
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"first":1,"second":2})"));
+		std::vector<std::string> keys;
+		for (const auto& [k, v] : *j.getRoot()->obj) keys.push_back(k);
+		ASSERT(keys.size() == 2);
+		ASSERT(keys[0] == "first" && keys[1] == "second");
+	}
+	// INI global keys keep insertion order
+	{
+		asvJSON j;
+		ASSERT(j.fromINI("b = 1\na = 2\n"));
+		std::string s = j.serialize();
+		ASSERT(s.find("\"b\"") < s.find("\"a\""));
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -11140,6 +11208,9 @@ int main() {
 
 	std::cout << "\n--- IsChanged Tests ---\n";
 	RUN(testIsChanged);
+
+	std::cout << "\n--- Key Order Tests ---\n";
+	RUN(testKeyOrder);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

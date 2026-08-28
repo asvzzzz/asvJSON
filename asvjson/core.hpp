@@ -2,10 +2,12 @@
 // asvJSON++ v1.6.0 - C++17 JSON library - Core Module
 // 
 // Configuration:
-//   - Define ASVJSON_USE_ORDERED_MAP before including header for:
-//     * Deterministic key order in serialized output (std::map)
+//   - Default (undefined): insertion-ordered object map (ObjectMapT).
+//     Object keys keep their insertion order, so parse -> serialize round-trips
+//     (JSON, YAML, INI, ...) preserve the original key order.
+//   - Define ASVJSON_USE_ORDERED_MAP before including header instead for:
+//     * Sorted key order in serialized output (std::map)
 //     * Transparent lookup with std::string_view, const char*, std::string
-//   - Default (undefined): std::unordered_map for O(1) lookups
 // 
 // Features:
 //   - JSON parsing/serialization with comments support
@@ -85,8 +87,184 @@ inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_ca
 #include "detail/datetime.hpp"
 namespace asvJSONInternal {
 
-// Object map type - default uses unordered_map for O(1) lookups
-// Define ASVJSON_USE_ORDERED_MAP before including header for std::map (deterministic output)
+// Object map type - default keeps key insertion order so parse->serialize round-trips
+// preserve the original key order. Define ASVJSON_USE_ORDERED_MAP before including the
+// header to use std::map instead (sorted, deterministic output).
+
+// Insertion-ordered associative map for object children (default backing store).
+// Keys are indexed by string_view into stable heap nodes; iteration follows insertion
+// order. Update-in-place (operator[], insert_or_assign, it->second = ...) never moves
+// an entry's position.
+template <typename Value>
+class ObjectMapT {
+public:
+	using key_type = std::string;
+	using mapped_type = std::unique_ptr<Value>;
+	using value_type = std::pair<const std::string, mapped_type>;
+	using size_type = std::size_t;
+
+private:
+	struct Node {
+		value_type kv;
+		explicit Node(const std::string& k, mapped_type&& v) : kv(k, std::move(v)) {}
+		Node(std::string&& k, mapped_type&& v) : kv(std::move(k), std::move(v)) {}
+		Node(const Node&) = delete;
+		Node& operator=(const Node&) = delete;
+	};
+
+	std::vector<std::unique_ptr<Node>> order_;
+	std::unordered_map<std::string_view, std::size_t, SafeHash, std::equal_to<>> index_;
+
+public:
+	class iterator {
+	public:
+		using VecIt = typename std::vector<std::unique_ptr<Node>>::iterator;
+		using iterator_category = std::forward_iterator_tag;
+		using value_type = typename ObjectMapT::value_type;
+		using difference_type = std::ptrdiff_t;
+		using pointer = value_type*;
+		using reference = value_type&;
+
+		iterator() = default;
+		explicit iterator(VecIt it) : it_(it) {}
+
+		reference operator*() const { return (**it_).kv; }
+		pointer operator->() const { return &(**it_).kv; }
+		iterator& operator++() { ++it_; return *this; }
+		iterator operator++(int) { iterator t(*this); ++it_; return t; }
+		bool operator==(const iterator& o) const { return it_ == o.it_; }
+		bool operator!=(const iterator& o) const { return it_ != o.it_; }
+
+		friend class ObjectMapT;
+		friend class const_iterator;
+	private:
+		VecIt it_;
+	};
+
+	class const_iterator {
+	public:
+		using VecIt = typename std::vector<std::unique_ptr<Node>>::const_iterator;
+		using iterator_category = std::forward_iterator_tag;
+		using value_type = const typename ObjectMapT::value_type;
+		using difference_type = std::ptrdiff_t;
+		using pointer = const value_type*;
+		using reference = const value_type&;
+
+		const_iterator() = default;
+		explicit const_iterator(VecIt it) : it_(it) {}
+		const_iterator(const iterator& it) : it_(it.it_) {}
+
+		reference operator*() const { return (**it_).kv; }
+		pointer operator->() const { return &(**it_).kv; }
+		const_iterator& operator++() { ++it_; return *this; }
+		const_iterator operator++(int) { const_iterator t(*this); ++it_; return t; }
+		bool operator==(const const_iterator& o) const { return it_ == o.it_; }
+		bool operator!=(const const_iterator& o) const { return it_ != o.it_; }
+
+		friend class ObjectMapT;
+	private:
+		VecIt it_;
+	};
+
+	ObjectMapT() = default;
+	ObjectMapT(ObjectMapT&&) = default;
+	ObjectMapT& operator=(ObjectMapT&&) = default;
+	ObjectMapT(const ObjectMapT&) = delete;
+	ObjectMapT& operator=(const ObjectMapT&) = delete;
+
+	iterator begin() noexcept { return iterator(order_.begin()); }
+	iterator end() noexcept { return iterator(order_.end()); }
+	const_iterator begin() const noexcept { return const_iterator(order_.begin()); }
+	const_iterator end() const noexcept { return const_iterator(order_.end()); }
+
+	size_type size() const noexcept { return order_.size(); }
+	bool empty() const noexcept { return order_.empty(); }
+	void reserve(size_type n) { order_.reserve(n); index_.reserve(n); }
+	void clear() { order_.clear(); index_.clear(); }
+
+	iterator find(const std::string& k) { return findImpl(std::string_view(k)); }
+	iterator find(std::string_view k) { return findImpl(k); }
+	iterator find(const char* k) { return findImpl(std::string_view(k)); }
+	const_iterator find(const std::string& k) const { return findImpl(std::string_view(k)); }
+	const_iterator find(std::string_view k) const { return findImpl(k); }
+	const_iterator find(const char* k) const { return findImpl(std::string_view(k)); }
+
+	mapped_type& operator[](const std::string& k) { return atImpl(k); }
+	mapped_type& operator[](std::string_view k) { return atImpl(k); }
+	mapped_type& operator[](const char* k) { return atImpl(std::string_view(k)); }
+
+	void emplace(const std::string& k, mapped_type&& v) { insertNew(k, std::move(v)); }
+	void emplace(std::string&& k, mapped_type&& v) { insertNew(std::move(k), std::move(v)); }
+
+	void insert_or_assign(const std::string& k, mapped_type&& v) {
+		auto it = index_.find(k);
+		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return; }
+		insertNew(k, std::move(v));
+	}
+	void insert_or_assign(std::string_view k, mapped_type&& v) {
+		auto it = index_.find(k);
+		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return; }
+		insertNew(std::string(k), std::move(v));
+	}
+
+	size_type count(const std::string& k) const { return index_.count(k); }
+	size_type count(std::string_view k) const { return index_.count(k); }
+	size_type count(const char* k) const { return index_.count(k); }
+
+	iterator erase(iterator pos) {
+		std::ptrdiff_t p = pos.it_ - order_.begin();
+		eraseAt(static_cast<std::size_t>(p));
+		return iterator(order_.begin() + p);
+	}
+	size_type erase(const std::string& k) {
+		auto it = index_.find(k);
+		if (it == index_.end()) return 0;
+		eraseAt(it->second);
+		return 1;
+	}
+
+private:
+	iterator findImpl(std::string_view k) {
+		auto it = index_.find(k);
+		if (it == index_.end()) return end();
+		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(it->second));
+	}
+	const_iterator findImpl(std::string_view k) const {
+		auto it = index_.find(k);
+		if (it == index_.end()) return end();
+		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(it->second));
+	}
+
+	template <typename K>
+	void insertNew(K&& k, mapped_type&& v) {
+		std::string_view look(std::forward<K>(k));
+		if (index_.find(look) != index_.end()) return; // duplicate key: keep existing (std semantics)
+		auto node = std::make_unique<Node>(std::forward<K>(k), std::move(v));
+		const std::size_t pos = order_.size();
+		order_.push_back(std::move(node));
+		try {
+			index_.emplace(order_.back()->kv.first, pos);
+		} catch (...) {
+			order_.pop_back();
+			throw;
+		}
+	}
+
+	mapped_type& atImpl(std::string_view k) {
+		auto it = index_.find(k);
+		if (it != index_.end()) return order_[it->second]->kv.second;
+		insertNew(std::string(k), nullptr);
+		return order_.back()->kv.second;
+	}
+
+	void eraseAt(std::size_t pos) {
+		index_.erase(std::string_view(order_[pos]->kv.first));
+		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
+		for (std::size_t i = pos; i < order_.size(); i++) {
+			index_[std::string_view(order_[i]->kv.first)] = i;
+		}
+	}
+};
 
 // asvJSONError class
 class asvJSONError : public std::runtime_error {
@@ -118,7 +296,7 @@ struct asvJSONValue {
 #ifdef ASVJSON_USE_ORDERED_MAP
 	using ObjectMap = std::map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::StringViewLess>;
 #else
-	using ObjectMap = std::unordered_map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::SafeHash, std::equal_to<>>;
+	using ObjectMap = asvJSONInternal::ObjectMapT<asvJSONValue>;
 #endif
 	std::unique_ptr<ObjectMap> obj;
 	std::unique_ptr<std::vector<std::unique_ptr<asvJSONValue>>> arr;

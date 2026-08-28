@@ -24,7 +24,7 @@ MIT license - see the `LICENSE` file for details.
 - Type-safe accessors with `opt*` defaults
 - `std::string_view` support for all key and string operations (zero-copy where possible)
 - `noexcept` on all accessors (`getInt`, `getDouble`, `getBool`) for performance
-- Transparent `unordered_map` lookup - avoids temporary `std::string` allocation on modern compilers (GCC 9, Clang, MSVC)
+- Object keys keep their insertion order (round-trip friendly): parse -> serialize preserves key order in JSON, YAML, INI and all formats; opt-in `ASVJSON_USE_ORDERED_MAP` switches to sorted `std::map`
 - `std::from_chars` for fast double parsing on C++23 compilers
 - `allowNaNInfinity` flag - parse/serialize NaN and Infinity values
 - `operator[]` for chained navigation (`json["a"]["b"]["c"]`)
@@ -148,7 +148,7 @@ Disable with `#define ASVJSON_DISABLE_SAX`.
 - Move semantics
 - `std::string_view` for keys and strings
 - Structured bindings
-- Transparent hash/comparator (`std::equal_to<>`, `SafeHash::is_transparent`) for allocation-free `unordered_map` lookup on modern compilers
+- Insertion-ordered object map (default backing store) - object keys keep their insertion order; heterogeneous `string_view`/`const char*`/`string` lookups via `SafeHash`/`std::equal_to<>`, `std::map` available via `ASVJSON_USE_ORDERED_MAP`
 - Heterogeneous lookup helpers (`map_find`/`map_count`) with GCC < 9 fallback
 
 ### Thread Safety

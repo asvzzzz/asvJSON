@@ -396,10 +396,10 @@ inline void protoApplyNameMap(asvJSONValue* obj) {
   for (const auto& [oldNum, newName] : renames) {
     auto eit = obj->obj->find(oldNum);
     if (eit != obj->obj->end() && eit->first != nmKey) {
-      auto node = obj->obj->extract(eit);
-      node.key() = newName;
+      auto val = std::move(eit->second);
+      obj->obj->erase(eit);
       obj->obj->erase(newName);
-      obj->obj->insert(std::move(node));
+      obj->obj->emplace(newName, std::move(val));
     }
   }
   obj->obj->erase(nmKey);
