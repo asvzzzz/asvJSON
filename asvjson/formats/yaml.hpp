@@ -6,25 +6,69 @@
 namespace asvJSONInternal {
 
 inline constexpr size_t MAX_YAML_ANCHORS = 100000;
-inline constexpr size_t YAML_FLOW_MAX_LEN = 80;
 
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem);
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o);
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
-                        const std::string& key, bool isArrayItem);
+                        const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow);
+
+// Options-aware quoting helpers
+inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
+	if (o.doubleQuotes) return yamlDQuote(s);
+	return yamlQuote(s);
+}
+
+inline bool yamlNeedQuoteOpt(std::string_view s, const YamlWriteOptions& o) {
+	if (o.alwaysQuoteStrings) return true;
+	return yamlNeedsQuotes(s);
+}
+
+inline std::string yamlKeyOpt(const std::string& k, const YamlWriteOptions& o) {
+	if (o.alwaysQuoteKeys) return yamlQuoteStr(k, o);
+	if (o.doubleQuotes && yamlNeedsQuotes(k)) return yamlDQuote(k);
+	return yamlQuoteKey(k);
+}
+
+inline int yamlIndentWidth(const YamlWriteOptions& o) {
+	return o.indentWidth >= 1 ? o.indentWidth : 1;
+}
 
 inline void asvJSONValue::toYAML(std::string& out, bool pretty) const {
 	toYAML(out, 0, "", false, pretty);
 }
 
+inline void asvJSONValue::toYAML(std::string& out, const YamlWriteOptions& opts) const {
+	switch (opts.style) {
+		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, 0, "", false, opts, false); break;
+		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, 0, "", false, opts, true); break;
+		default: yamlBlockVal(this, out, 0, "", false, opts);
+	}
+}
+
 inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem, bool pretty) const {
-	if (pretty) yamlBlockVal(this, out, indent, key, isArrayItem);
-	else yamlFlowVal(this, out, indent, key, isArrayItem);
+	YamlWriteOptions o;
+	if (!pretty) o.style = YamlWriteOptions::Style::Auto;
+	switch (o.style) {
+		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, indent, key, isArrayItem, o, false); break;
+		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, indent, key, isArrayItem, o, true); break;
+		default: yamlBlockVal(this, out, indent, key, isArrayItem, o);
+	}
+}
+
+inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
+	std::string out;
+	if (root) {
+		if (opts.style == YamlWriteOptions::Style::Block && root->type != asvJSONValue::ARRAY) {
+			out += "---\n";
+		}
+		root->toYAML(out, opts);
+	}
+	return out;
 }
 
 // Try to emit value inline (for flow mode). Returns true if successful.
-inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out) {
+inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWriteOptions& o, bool forceFlow) {
 	using T = asvJSONValue::Type;
 	switch (v->type) {
 		case T::NULL_VAL: out += "~"; return true;
@@ -42,8 +86,12 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out) {
 			out += val; return true;
 		}
 		case T::STRING: {
-			if (v->str_data.find('\n') != std::string_view::npos) return false;
-			if (yamlNeedsQuotes(v->str_data)) out += yamlQuote(v->str_data);
+			if (v->str_data.find('\n') != std::string_view::npos) {
+				if (!forceFlow) return false;
+				out += yamlDQuote(v->str_data);
+				return true;
+			}
+			if (yamlNeedQuoteOpt(v->str_data, o)) out += yamlQuoteStr(v->str_data, o);
 			else out += v->str_data;
 			return true;
 		}
@@ -78,13 +126,13 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out) {
 			bool first = true;
 			for (const auto& [k, val] : *v->obj) {
 				std::string childOut;
-				if (!yamlTryFlowVal(val.get(), childOut)) return false;
+				if (!yamlTryFlowVal(val.get(), childOut, o, forceFlow)) return false;
 				if (!first) inner += ", ";
 				first = false;
-				inner += yamlQuoteKey(k) + ": " + childOut;
+				inner += yamlKeyOpt(k, o) + ": " + childOut;
 			}
 			inner += "}";
-			if (inner.size() > YAML_FLOW_MAX_LEN) return false;
+			if (!forceFlow && inner.size() > static_cast<size_t>(o.flowMaxLen)) return false;
 			out += inner; return true;
 		}
 		case T::ARRAY: {
@@ -93,26 +141,27 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out) {
 			bool first = true;
 			for (const auto& item : *v->arr) {
 				std::string childOut;
-				if (!yamlTryFlowVal(item.get(), childOut)) return false;
+				if (!yamlTryFlowVal(item.get(), childOut, o, forceFlow)) return false;
 				if (!first) inner += ", ";
 				first = false;
 				inner += childOut;
 			}
 			inner += "]";
-			if (inner.size() > YAML_FLOW_MAX_LEN) return false;
+			if (!forceFlow && inner.size() > static_cast<size_t>(o.flowMaxLen)) return false;
 			out += inner; return true;
 		}
 		default: out += "~"; return true;
 	}
 }
 
-// Emit a value in block style at the given indent (existing behavior).
+// Emit a value in block style at the given indent.
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem) {
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o) {
 	using T = asvJSONValue::Type;
+	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
-		if (isArrayItem && key.empty()) return std::string(indent * 2, ' ') + "- ";
-		if (!key.empty()) return std::string(indent * 2, ' ') + yamlQuoteKey(key) + ": ";
+		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
+		if (!key.empty()) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
 		return "";
 	};
 
@@ -145,13 +194,13 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 				for (size_t i = 0; i < v->str_data.size(); ) {
 					size_t eol = v->str_data.find('\n', i);
 					if (eol == std::string_view::npos) eol = v->str_data.size();
-					out += std::string((indent + 1) * 2, ' ') + std::string(v->str_data.data() + i, eol - i) + "\n";
+					out += std::string((indent + 1) * iw, ' ') + std::string(v->str_data.data() + i, eol - i) + "\n";
 					i = eol + 1;
 				}
 			} else if (v->str_data.find('\n') != std::string_view::npos) {
 				out += prefix() + yamlDQuote(v->str_data) + "\n";
-			} else if (yamlNeedsQuotes(v->str_data)) {
-				out += prefix() + yamlQuote(v->str_data) + "\n";
+			} else if (yamlNeedQuoteOpt(v->str_data, o)) {
+				out += prefix() + yamlQuoteStr(v->str_data, o) + "\n";
 			} else {
 				out += prefix() + v->str_data + "\n";
 			}
@@ -183,10 +232,10 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 		case T::OBJECT: {
 			if (!v->obj || v->obj->empty()) { out += prefix() + "{}\n"; break; }
 			if (key.empty() && !isArrayItem) {
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o);
 			} else {
 				out += prefix() + "\n";
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o);
 			}
 			break;
 		}
@@ -194,7 +243,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			if (!v->arr || v->arr->empty()) { out += prefix() + "[]\n"; break; }
 			if (!isArrayItem && key.empty()) {
 				out += "---\n";
-				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true);
+				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o);
 				break;
 			}
 			out += prefix() + "\n";
@@ -202,7 +251,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			// items one level deeper than its dash, otherwise the block parser
 			// cannot tell parent items from child items ("m: [[1],[2]]").
 			int childIndent = isArrayItem ? indent + 1 : indent;
-			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true);
+			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o);
 			break;
 		}
 		default:
@@ -212,40 +261,41 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 
 // Try flow mode: emit objects/arrays inline when they fit, fall back to block.
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
-                        const std::string& key, bool isArrayItem) {
+                        const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow) {
 	using T = asvJSONValue::Type;
+	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
-		if (isArrayItem && key.empty()) return std::string(indent * 2, ' ') + "- ";
-		if (!key.empty()) return std::string(indent * 2, ' ') + yamlQuoteKey(key) + ": ";
+		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
+		if (!key.empty()) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
 		return "";
 	};
 
 	if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow)) {
 			if (key.empty() && !isArrayItem) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {
 			if (key.empty() && !isArrayItem) {
-				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false);
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false, o, forceFlow);
 			} else {
 				out += prefix() + "\n";
-				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false);
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false, o, forceFlow);
 			}
 		}
 	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow)) {
 			if (key.empty() && !isArrayItem) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {
 			out += prefix() + "\n";
-			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true);
+			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow);
 		}
 	} else {
-		yamlBlockVal(v, out, indent, key, isArrayItem);
+		yamlBlockVal(v, out, indent, key, isArrayItem, o);
 	}
 }
 

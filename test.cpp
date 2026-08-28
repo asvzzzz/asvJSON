@@ -9888,6 +9888,116 @@ TEST(testPrettyPrint) {
 	}
 }
 
+TEST(testYamlWriteOptions) {
+	// YamlWriteOptions defaults must reproduce the classic block output.
+	YamlWriteOptions def;
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"Alice","age":30,"active":true})");
+		ASSERT_EQ(doc.toYAML(YamlWriteOptions{}), doc.toYAML(true));
+	}
+	// Style::Auto must reproduce toYAML(false).
+	{
+		asvJSON doc;
+		doc.parse(R"({"name":"Alice","age":30,"active":true})");
+		YamlWriteOptions o; o.style = YamlWriteOptions::Style::Auto;
+		ASSERT_EQ(doc.toYAML(o), doc.toYAML(false));
+	}
+	// Custom indent width.
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":{"b":{"c":42}}})");
+		YamlWriteOptions o; o.indentWidth = 4;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("    b:") != std::string::npos);
+		ASSERT(y.find("        c: 42") != std::string::npos);
+	}
+	// Style::Flow forces flow everywhere, even beyond flowMaxLen.
+	{
+		asvJSON doc;
+		doc.parse(R"({"items":[1,2,3,4,5,6,7,8],"s":"abc"})");
+		YamlWriteOptions o; o.style = YamlWriteOptions::Style::Flow;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("items: [1, 2, 3, 4, 5, 6, 7, 8]") != std::string::npos);
+		ASSERT(y.find("s: abc") != std::string::npos);
+		ASSERT(y.find("\n- ") == std::string::npos);
+	}
+	// Style::Flow inlines multiline strings as double-quoted scalars.
+	{
+		asvJSON doc;
+		doc.parse(R"({"note":"line one\nline two"})");
+		YamlWriteOptions o; o.style = YamlWriteOptions::Style::Flow;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("\"line one\\nline two\"") != std::string::npos);
+	}
+	// Auto flowMaxLen controls the block fallback threshold.
+	{
+		asvJSON doc;
+		doc.parse(R"({"longkey1":"value","longkey2":"value"})");
+		YamlWriteOptions o; o.style = YamlWriteOptions::Style::Auto;
+		YamlWriteOptions tiny = o; tiny.flowMaxLen = 12;
+		std::string wide = doc.toYAML(o);
+		std::string tight = doc.toYAML(tiny);
+		ASSERT(wide.find("{") != std::string::npos);      // fits in flow
+		ASSERT(tight.find("longkey1:") != std::string::npos); // too long -> block
+	}
+	// alwaysQuoteStrings quotes every string scalar.
+	{
+		asvJSON doc;
+		doc.parse(R"({"a":"plain","b":"has space"})");
+		YamlWriteOptions o; o.alwaysQuoteStrings = true;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("'plain'") != std::string::npos);
+		ASSERT(y.find("'has space'") != std::string::npos);
+	}
+	// doubleQuotes switches quoting to "...".
+	{
+		asvJSON doc;
+		doc.parse(R"({"a b":"plain","y":"kw"})");
+		YamlWriteOptions o; o.doubleQuotes = true;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("\"a b\":") != std::string::npos);
+		ASSERT(y.find("\"y\":") != std::string::npos);
+	}
+	// alwaysQuoteKeys quotes every mapping key.
+	{
+		asvJSON doc;
+		doc.parse(R"({"simple":{"x":1}})");
+		YamlWriteOptions o; o.alwaysQuoteKeys = true;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("'simple':") != std::string::npos);
+		ASSERT(y.find("'x': 1") != std::string::npos);
+	}
+	// Round-trips for every option combination.
+	{
+		std::vector<YamlWriteOptions> combos;
+		combos.push_back(YamlWriteOptions{});
+		YamlWriteOptions a; a.style = YamlWriteOptions::Style::Auto; combos.push_back(a);
+		YamlWriteOptions f; f.style = YamlWriteOptions::Style::Flow; combos.push_back(f);
+		YamlWriteOptions i; i.indentWidth = 4; combos.push_back(i);
+		YamlWriteOptions q; q.alwaysQuoteStrings = true; combos.push_back(q);
+		YamlWriteOptions d; d.doubleQuotes = true; combos.push_back(d);
+		YamlWriteOptions k; k.alwaysQuoteKeys = true; combos.push_back(k);
+		YamlWriteOptions mix; mix.style = YamlWriteOptions::Style::Auto; mix.indentWidth = 3;
+		mix.doubleQuotes = true; combos.push_back(mix);
+		for (auto& o : combos) {
+			asvJSON doc;
+			doc.parse(R"({"name":"Alice in wonderland","age":30,"note":"line one\nline two","tags":["cpp","json"],"n":{"x":1}})");
+			asvJSON back;
+			ASSERT(back.fromYAML(doc.toYAML(o)));
+			ASSERT(*back.getRoot() == *doc.getRoot());
+		}
+	}
+	// Root array in Flow mode.
+	{
+		asvJSON doc;
+		doc.parse(R"([{"a":"x"},2,3])");
+		YamlWriteOptions o; o.style = YamlWriteOptions::Style::Flow;
+		std::string y = doc.toYAML(o);
+		ASSERT(y.find("[{a: x}, 2, 3]") != std::string::npos);
+	}
+}
+
 TEST(testIsChanged) {
 	// After parse - not changed
 	{
@@ -10509,6 +10619,9 @@ int main() {
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
 	RUN(testPrettyPrint);
+
+	std::cout << "\n--- YAML Write Options Tests ---\n";
+	RUN(testYamlWriteOptions);
 
 	std::cout << "\n--- IsChanged Tests ---\n";
 	RUN(testIsChanged);

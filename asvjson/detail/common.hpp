@@ -58,6 +58,23 @@ inline auto mapCount(Map& m, std::string_view k) { return m.count(std::string(k)
 
 namespace asvJSONInternal {
 
+// YAML serialization options (passed to toYAML()).
+// Defaults reproduce the classic toYAML()/toYAML(true) block-style output.
+struct YamlWriteOptions {
+	enum class Style : int { Block = 0, Auto = 1, Flow = 2 };
+	// Block: pure indentation-based output (matches toYAML(true)).
+	// Auto:  flow-style with automatic block fallback when a value exceeds
+	//        flowMaxLen or cannot be represented inline (matches toYAML(false)).
+	// Flow:  flow-style everywhere, no length-based fallback; multiline
+	//        strings are inlined as double-quoted scalars.
+	Style style = Style::Block;
+	int indentWidth = 2;     // spaces per indentation level
+	int flowMaxLen = 80;     // Auto fallback threshold (characters)
+	bool alwaysQuoteStrings = false; // quote every string scalar
+	bool alwaysQuoteKeys = false;    // quote every mapping key
+	bool doubleQuotes = false;       // prefer "..." over '...' when quoting
+};
+
 struct FormatFrame {
 	char type = 'O';
 	bool hasVal = false;

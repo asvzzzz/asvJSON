@@ -47,7 +47,7 @@ MIT license - see the `LICENSE` file for details.
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
-- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`), block-style `!!set` (`- key` / `? key` items), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
+- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`), block-style `!!set` (`- key` / `? key` items), configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
 - XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension)
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
@@ -231,7 +231,8 @@ int main() {
 | `size_t byteSize() const` | Size in bytes of the serialized JSON document. **WARNING:** performs a full serialization (allocating the whole output string) just to count bytes. For very large documents, serialize once with `serialize()` and use the returned string's `.size()`. |
 | `std::string toXML() const` | Serialize to XML document. |
 | `bool fromXML(std::string_view input)` | Parse XML string (elements, attributes, type detection, CDATA). |
-| `std::string toYAML() const` | Serialize to YAML document. |
+| `std::string toYAML() const` | Serialize to YAML document (block style). |
+| `std::string toYAML(const YamlWriteOptions& opts) const` | Serialize to YAML with custom style/indent/quoting. |
 | `bool fromYAML(std::string_view input)` | Parse YAML string (tags, anchors/aliases, multi-doc, directives). |
 | `std::string toCSV() const` | Serialize to CSV (flattened, two-pass for arrays of objects). |
 | `std::string toTOON() const` | Serialize to TOON (token-oriented object notation). |
@@ -506,6 +507,21 @@ Output:
 `toYAML()` serializes to indentation-based YAML with block-style sequences, literal block scalars, and tagged values.
 
 `fromYAML()` parses YAML back into JSON, supporting the same features plus single/double-quoted strings, comments, and document markers.
+
+`toYAML()` also accepts a `YamlWriteOptions` struct for fine-grained control:
+```cpp
+YamlWriteOptions o;
+o.style = YamlWriteOptions::Style::Flow; // Block (default) | Auto | Flow
+o.indentWidth = 4;                       // spaces per indentation level
+o.flowMaxLen = 120;                      // Auto flow/block fallback threshold
+o.alwaysQuoteStrings = true;             // quote every string scalar
+o.alwaysQuoteKeys = true;                // quote every mapping key
+o.doubleQuotes = true;                   // prefer "..." over '...'
+std::string yaml = json.toYAML(o);
+```
+- `Style::Block` — pure indentation-based output (matches `toYAML(true)`, the default).
+- `Style::Auto` — flow style with automatic block fallback for values longer than `flowMaxLen` (matches `toYAML(false)`).
+- `Style::Flow` — flow style everywhere with no length limit; multiline strings are inlined as double-quoted scalars.
 
 Input:
 ```json

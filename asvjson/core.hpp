@@ -405,6 +405,7 @@ struct asvJSONValue {
 	void toXML(std::string& out, const std::string& name, int indent) const;
 	void toYAML(std::string& out, bool pretty = true) const;
 	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem, bool pretty) const;
+	void toYAML(std::string& out, const YamlWriteOptions& opts) const;
 	void toCSV(std::string& out) const;
 	void toTOML(std::string& out, bool pretty = true) const;
 	void toINI(std::string& out, bool pretty = true) const;
@@ -1840,6 +1841,7 @@ public:
 	std::string toXML() const;
 	bool fromXML(std::string_view input);
 	std::string toYAML(bool pretty = true) const;
+	std::string toYAML(const YamlWriteOptions& opts) const;
 	bool fromYAML(std::string_view input);
 	std::string toCSV() const;
 	bool fromCSV(std::string_view input);
@@ -2844,5 +2846,6 @@ inline bool asvJSON::fromCBOR(const std::string& data) {
 using asvJSONInternal::asvJSONValue;
 using asvJSONInternal::asvJSON;
 using asvJSONInternal::asvJSONError;
+using asvJSONInternal::YamlWriteOptions;
 
 #endif // ASVJSON_CORE_H

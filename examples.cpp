@@ -903,6 +903,29 @@ void example_to_yaml_multiline() {
 	std::cout << json.toYAML() << std::endl;
 }
 
+void example_to_yaml_options() {
+	std::cout << "=== toYAML with YamlWriteOptions ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"items":[1,2,3],"meta":{"nested":true,"pi":3.14}})"));
+	std::cout << "4-space indent:\n" << std::endl;
+	YamlWriteOptions indent4;
+	indent4.indentWidth = 4;
+	std::cout << json.toYAML(indent4) << std::endl;
+
+	std::cout << "Force flow style:" << std::endl;
+	YamlWriteOptions flow;
+	flow.style = YamlWriteOptions::Style::Flow;
+	std::cout << json.toYAML(flow) << std::endl;
+
+	std::cout << "Quote everything (double quotes):" << std::endl;
+	YamlWriteOptions quoted;
+	quoted.alwaysQuoteStrings = true;
+	quoted.alwaysQuoteKeys = true;
+	quoted.doubleQuotes = true;
+	std::cout << json.toYAML(quoted) << std::endl;
+}
+
 void example_from_yaml() {
 	std::cout << "=== fromYAML Parsing ===" << std::endl;
 
@@ -1611,6 +1634,7 @@ int main() {
 	example_xml_escaped_keys();
 	example_to_yaml();
 	example_to_yaml_multiline();
+	example_to_yaml_options();
 	example_from_yaml();
 	example_to_csv();
 	example_to_csv_array();
