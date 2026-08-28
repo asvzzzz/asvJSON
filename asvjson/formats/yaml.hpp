@@ -482,40 +482,73 @@ inline std::string yamlParseInlineValue(std::string_view s, int depth = 0);
 // Forward declaration for embedded "!!yaml ..." documents (nested parse)
 inline std::string yamlToJson(std::string_view input);
 
-// Forward declaration (definition is later in this file)
+// Forward declarations (definitions are later in this file)
 inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s);
+inline std::string yamlQuoteJsonScalar(std::string_view s);
+inline std::string yamlScalarDocValue(std::string_view raw, bool& isScalar);
+inline std::string yamlProcessYamlEmbed(std::string raw);
 
-// True when `raw` is a whole YAML document made of a single plain/quoted
-// scalar (no mapping, sequence, or flow structure). Such a document has no
-// object/array at top level, so "!!yaml" reinterprets it as a value rather
-// than letting the JSON layer reject top-level scalars.
-inline bool yamlIsScalarDoc(std::string_view raw) {
-	size_t contentLines = 0;
-	std::string_view scalar;
+// When `raw` is a whole YAML document consisting of plain/quoted scalar
+// content (no mapping, sequence, or flow structure), reinterpret it as a
+// single value -- a JSON fragment -- and report it via `isScalar`. A multi-line
+// scalar is folded per YAML plain-scalar rules: a single line break between
+// non-empty lines becomes a space, each blank line becomes a "\n". Otherwise
+// `isScalar` is false and the caller must parse `raw` as a YAML document.
+inline std::string yamlScalarDocValue(std::string_view raw, bool& isScalar) {
+	isScalar = false;
+	std::vector<std::string> lines; // trimmed content lines
+	std::vector<int> gaps;          // blank/comment lines between consecutive content lines
 	size_t start = 0;
 	while (start < raw.size()) {
 		size_t nl = raw.find('\n', start);
-		size_t linEnd = (nl == std::string_view::npos) ? raw.size() : nl;
-		std::string_view line = raw.substr(start, linEnd - start);
+		std::string_view line = raw.substr(start, (nl == std::string_view::npos) ? raw.size() - start : nl - start);
 		start = (nl == std::string_view::npos) ? raw.size() : nl + 1;
 		size_t b = 0;
 		while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) b++;
 		size_t e = line.size();
 		while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) e--;
 		std::string_view t = line.substr(b, e - b);
-		if (t.empty() || t[0] == '#') continue; // blank / comment-only line
-		contentLines++;
-		scalar = t;
-		if (contentLines > 1) return false; // multi-line scalars stay unsupported
+		if (t.empty() || t[0] == '#') { if (!lines.empty()) gaps.back()++; continue; } // blank / comment line
+		char f = t[0];
+		if (f == '{' || f == '[' || f == '|' || f == '>' || f == '!' || f == '&' || f == '*') return std::string();
+		if ((t.size() == 1 && (f == '-' || f == '?')) ||
+		    (t.size() >= 2 && (f == '-' || f == '?') && (t[1] == ' ' || t[1] == '\t'))) return std::string();
+		if (yamlFindKeyColonSep(t) != std::string_view::npos) return std::string(); // mapping
+		lines.emplace_back(t);
+		gaps.push_back(0);
 	}
-	if (contentLines != 1) return false; // empty / comment-only document
-	char f = scalar[0];
-	if (f == '{' || f == '[' || f == '|' || f == '>' || f == '!' || f == '&' || f == '*')
-		return false;
-	if (scalar.size() == 1 && (f == '-' || f == '?')) return false;
-	if (scalar.size() >= 2 && (f == '-' || f == '?') && (scalar[1] == ' ' || scalar[1] == '\t')) return false;
-	if (yamlFindKeyColonSep(scalar) != std::string_view::npos) return false; // mapping
-	return true;
+	if (lines.empty()) return std::string(); // empty / comment-only document
+	isScalar = true;
+	if (lines.size() == 1) return yamlParseInlineValue(lines[0]);
+	std::string text;
+	for (size_t i = 0; i < lines.size(); i++) {
+		if (i) {
+			int g = gaps[i - 1];
+			if (g == 0) text += ' ';
+			else text.append(static_cast<size_t>(g), '\n');
+		}
+		text += lines[i];
+	}
+	return yamlQuoteJsonScalar(text);
+}
+
+// Shared entry for "!!yaml" embeds: a whole-scalar document becomes a value;
+// anything else is parsed recursively as a YAML document, capped at
+// MAX_YAML_DEPTH by a thread_local counter (concurrent fromYAML calls on
+// other threads stay independent).
+inline std::string yamlProcessYamlEmbed(std::string raw) {
+	bool isScalar = false;
+	std::string sv = yamlScalarDocValue(raw, isScalar);
+	if (isScalar) return sv;
+	static thread_local int yamlYamlDepth = 0;
+	if (yamlYamlDepth >= MAX_YAML_DEPTH)
+		throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");
+	++yamlYamlDepth;
+	std::string nested;
+	try { nested = yamlToJson(raw); }
+	catch (...) { --yamlYamlDepth; throw; }
+	--yamlYamlDepth;
+	return nested;
 }
 
 // Convert unescaped regex "pattern|opts" to internal pattern|opts
@@ -837,25 +870,15 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 	}
 	if (tag == "!!yaml") {
 		// A YAML document embedded in a scalar ("!!yaml \"a: 1\"").
-		// Unquote/unescape the scalar, then recursively parse it as YAML.
+		// Unquote/unescape the scalar, then process it as an embedded document
+		// (a whole scalar becomes a value; otherwise it is parsed recursively).
 		if (val.empty()) return "null";
 		std::string resolved = yamlParseInlineValue(val);
 		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
 			resolved = resolved.substr(1, resolved.size() - 2);
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
-		// An embedded document that is a single scalar (e.g. "!!yaml \"42\"")
-		// has no top-level object/array; reinterpret it as a value.
-		if (yamlIsScalarDoc(raw)) return yamlParseInlineValue(raw);
-		static thread_local int yamlYamlDepth = 0;
-		if (yamlYamlDepth >= MAX_YAML_DEPTH)
-			throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");
-		++yamlYamlDepth;
-		std::string nested;
-		try { nested = yamlToJson(raw); }
-		catch (...) { --yamlYamlDepth; throw; }
-		--yamlYamlDepth;
-		return nested;
+		return yamlProcessYamlEmbed(std::move(raw));
 	}
 
 	// Special type tags (Extended JSON)
@@ -1621,6 +1644,77 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	return text;
 }
 
+// True when `s` is a "!!yaml" tagged value whose tail is either empty, a
+// trailing comment, or a valid block-scalar header ("|", ">", with optional
+// indent digit and chomp indicator). In those shapes the embedded YAML content
+// lives on the following lines and must be gathered by yamlGatherYamlEmbed.
+// Inline scalar tails ("!!yaml \"a: 1\"") return false and go through the
+// normal tagged-value path.
+inline bool yamlYamlTagNeedsGather(std::string_view s, std::string& tail) {
+	tail.clear();
+	size_t i = 0;
+	while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+	size_t tagEnd = i;
+	while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	if (s.substr(i, tagEnd - i) != "!!yaml") return false;
+	std::string rem(s.substr(tagEnd));
+	size_t p = 0;
+	while (p < rem.size() && (rem[p] == ' ' || rem[p] == '\t')) p++;
+	if (p >= rem.size() || rem[p] == '#') return true; // bare tag (or comment only)
+	if (rem[p] != '|' && rem[p] != '>') return false;   // inline scalar/collection tail
+	size_t q = p + 1;
+	while (q < rem.size() && rem[q] >= '0' && rem[q] <= '9') q++;
+	if (q < rem.size() && (rem[q] == '+' || rem[q] == '-')) q++;
+	while (q < rem.size() && (rem[q] == ' ' || rem[q] == '\t')) q++;
+	if (q < rem.size() && rem[q] == '#') { while (q < rem.size()) q++; }
+	if (q != rem.size()) return false; // junk after the header
+	tail = rem.substr(p, q - p);
+	return true;
+}
+
+// Gather and parse the YAML document carried by a "!!yaml" tagged value whose
+// content is on the following lines: a same-line block-scalar header (`tail`
+// non-empty), a deeper "|"/">" header, or an indented block collection. For a
+// bare tag with no deeper content the embed is null. Advances `li` past all
+// consumed lines. `parentIndent` is the indent of the current key/entry.
+inline std::string yamlGatherYamlEmbed(const std::string& tail,
+                                       const std::vector<std::string>& lines,
+                                       size_t& li, int parentIndent) {
+	if (!tail.empty()) {
+		bool isFolded = (tail[0] == '>');
+		std::string text = yamlParseBlockScalar(tail, lines, li, isFolded, parentIndent);
+		return yamlProcessYamlEmbed(std::move(text));
+	}
+	size_t sc = li + 1;
+	while (sc < lines.size()) {
+		std::string_view scv = stripIndent(lines[sc]);
+		if (scv.empty() || scv[0] == '#') { sc++; continue; }
+		break;
+	}
+	if (sc >= lines.size() || countIndent(lines[sc]) <= parentIndent) return "null";
+	std::string_view scv = stripIndent(lines[sc]);
+	if (scv[0] == '|' || scv[0] == '>') {
+		bool isFolded = (scv[0] == '>');
+		std::string text = yamlParseBlockScalar(std::string(scv), lines, sc, isFolded, parentIndent);
+		li = sc;
+		return yamlProcessYamlEmbed(std::move(text));
+	}
+	// Indented block collection: gather the whole region up to a dedent.
+	int childIndent = countIndent(lines[sc]);
+	size_t e = sc;
+	while (e < lines.size()) {
+		std::string_view t2 = stripIndent(lines[e]);
+		if (t2.empty() || t2[0] == '#') { e++; continue; }
+		if (countIndent(lines[e]) < childIndent) break;
+		e++;
+	}
+	std::string buf;
+	for (size_t i2 = sc; i2 < e; i2++) { buf += lines[i2]; buf += '\n'; }
+	while (!buf.empty() && buf.back() == '\n') buf.pop_back();
+	li = e - 1;
+	return yamlProcessYamlEmbed(std::move(buf));
+}
+
 // YAML forbids using tabs for indentation (Section 10). A tab appearing in the
 // leading whitespace of a line is a structural error; throw to match UDE behavior.
 inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
@@ -2128,10 +2222,18 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				if (!opened) out += "null";
 			} else if (rest.size() > 1 && rest[0] == '*') {
 				out += yamlResolveAlias(rest.substr(1), anchors, resolving);
-			} else if (rest.size() > 1 && rest[0] == '!' && yamlIsSetBlockHeader(rest)) {
-				size_t sLi = li;
-				out += yamlParseBlockSet(lines, sLi);
-				li = sLi;
+			} else if (rest.size() > 1 && rest[0] == '!') {
+				if (yamlIsSetBlockHeader(rest)) {
+					size_t sLi = li;
+					out += yamlParseBlockSet(lines, sLi);
+					li = sLi;
+				} else {
+					std::string ytail;
+					if (yamlYamlTagNeedsGather(rest, ytail))
+						out += yamlGatherYamlEmbed(ytail, lines, li, indent);
+					else
+						out += yamlParseInlineValue(rest);
+				}
 			} else if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
 				bool isFolded = (rest[0] == '>');
 				std::string text = yamlParseBlockScalar(rest, lines, li, isFolded, indent);
@@ -2274,7 +2376,11 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 						out += yamlParseBlockSet(lines, sLi);
 						li = sLi;
 					} else {
-						out += yamlParseTaggedValue(valPart);
+						std::string ytail;
+						if (yamlYamlTagNeedsGather(valPart, ytail))
+							out += yamlGatherYamlEmbed(ytail, lines, li, indent);
+						else
+							out += yamlParseTaggedValue(valPart);
 					}
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
 					out += yamlResolveAlias(std::string_view(valPart).substr(1), anchors, resolving);

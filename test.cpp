@@ -3934,6 +3934,105 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(!json.fromYAML("x: !!yaml \"{broken\""));
 	}
+	// Multi-line scalar embeds are folded per YAML plain-scalar rules
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"hello\\nworld\""));
+		ASSERT_EQ(std::string(json.getString("x")), "hello world");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"hello\\n\\nworld\""));
+		ASSERT_EQ(std::string(json.getString("x")), "hello\nworld");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"line1\\n  line2\\nline3\""));
+		ASSERT_EQ(std::string(json.getString("x")), "line1 line2 line3");
+	}
+	// Block scalar after the !!.yaml tag on the same line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml |\n  a: 1\n  b: 2"));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+			ASSERT_EQ(json.getInt("x.b"), 2);
+		} else {
+			ASSERT(false);
+		}
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml |\n  hello\n  world"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello world");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml |\n  - a\n  - b"));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*x->arr).size(), 2u);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Tag alone; the embedded document is the deeper block collection
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml\n  a: 1\n  b: 2\nc: 3"));
+		if (json.lastError.empty()) {
+			ASSERT_EQ(json.getInt("x.b"), 2);
+			ASSERT_EQ(json.getInt("c"), 3);
+		} else {
+			ASSERT(false);
+		}
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml\n  |\n  - a\n  - b"));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*x->arr).size(), 2u);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// !!yaml embed as a sequence item (bare tag and block scalar)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!yaml\n  a: 1\n- z"));
+		if (json.lastError.empty()) {
+			asvJSONValue* arr = json.getRoot();
+			ASSERT(arr->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*arr->arr).size(), 2u);
+			asvJSONValue* n0 = (*arr->arr)[0].get();
+			if (n0) {
+				asvJSONValue* a = n0->get("a");
+				ASSERT(a != nullptr && a->type == asvJSONValue::INT && a->getInt() == 1);
+			} else {
+				ASSERT(false);
+			}
+		} else {
+			ASSERT(false);
+		}
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!yaml |\n  - a\n  - b\n- z"));
+		if (json.lastError.empty()) {
+			asvJSONValue* arr = json.getRoot();
+			ASSERT(arr->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*arr->arr).size(), 2u);
+			asvJSONValue* inner = (*arr->arr)[0].get();
+			ASSERT(inner->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*inner->arr).size(), 2u);
+		} else {
+			ASSERT(false);
+		}
+	}
 	// Three-! tag (!!!int) treated as unknown -> value parsed normally
 	{
 		asvJSON json;
