@@ -3385,16 +3385,93 @@ TEST(testFromYAML) {
 		ASSERT_EQ(std::string(json.getRoot()->get("null")->getString()), "y");
 		ASSERT_EQ(std::string(json.getRoot()->get("2.5")->getString()), "z");
 	}
-	// Complex (flow collection) keys rejected with a descriptive error
+	// Complex (flow collection) keys stringify deterministically via their
+	// intermediate JSON text: "{[a, b]: v}" -> key ["a","b"], value "v".
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("{[a, b]: v}"));
-		ASSERT(std::string(json.lastError).find("complex mapping key") != std::string::npos);
+		ASSERT(json.fromYAML("{[a, b]: v}"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
 	}
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("? [a, b]: v"));
-		ASSERT(std::string(json.lastError).find("complex mapping key") != std::string::npos);
+		ASSERT(json.fromYAML("{[a, b]: v, k: 2}"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+		ASSERT_EQ(json.getInt("k"), 2);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? [a, b]: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? [a, b]\n: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? {x: 1}: v"));
+		ASSERT_EQ(std::string(json.getString("{\"x\":1}")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{[a, [b]]: v}"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",[\"b\"]]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{[{x: 1}, 2]: v}"));
+		ASSERT_EQ(std::string(json.getString("[{\"x\":1},2]")), "v");
+	}
+	// Complex keys in block mappings
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("[a, b]: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{x: 1}: v\nc: 2"));
+		ASSERT_EQ(std::string(json.getString("{\"x\":1}")), "v");
+		ASSERT_EQ(json.getInt("c"), 2);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k:\n  [a,b]: v"));
+		asvJSONValue* kk = json.get("k");
+		ASSERT(kk != nullptr);
+		ASSERT_EQ(std::string(kk->get("[\"a\",\"b\"]")->getString()), "v");
+	}
+	// Multi-line flow compound key
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? [a,\n  b]\n: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? {x: 1,\n  y: 2}\n: v"));
+		ASSERT_EQ(std::string(json.getString("{\"x\":1,\"y\":2}")), "v");
+	}
+	// Multi-line explicit scalar keys fold deeper lines
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? a\n  b\n: c"));
+		ASSERT_EQ(std::string(json.getString("a b")), "c");
+	}
+	// Round-trip: reserialize with quoted key, reparsing reproduces it
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{x: 1}: v"));
+		std::string y = json.toYAML();
+		asvJSON json2;
+		ASSERT(json2.fromYAML(y));
+		ASSERT_EQ(std::string(json2.getString("{\"x\":1}")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("{[a, b]: v}"));
+		ASSERT(std::string(json.serialize()).find("\"[\\\"a\\\",\\\"b\\\"]\"") != std::string::npos);
 	}
 	// Explicit keys: two-line "? key\n: value"
 	{

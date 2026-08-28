@@ -1334,10 +1334,59 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 	return result;
 }
 
+// Net open-flow-bracket depth of `s` (quote-aware and '\''-doubling aware):
+// >0 means an unterminated flow collection.
+inline int yamlFlowDepth(std::string_view s) {
+	bool inSq = false, inDq = false;
+	int depth = 0;
+	for (size_t i = 0; i < s.size(); i++) {
+		char c = s[i];
+		if (inSq) { if (c == '\'' && i + 1 < s.size() && s[i + 1] == '\'') i++; else if (c == '\'') inSq = false; }
+		else if (inDq) { if (c == '\\') i++; else if (c == '"') inDq = false; }
+		else {
+			if (c == '\'') inSq = true; else if (c == '"') inDq = true;
+			else if (c == '{' || c == '[') depth++;
+			else if (c == '}' || c == ']') depth--;
+		}
+	}
+	return depth;
+}
+
+// JSON-escape the intermediate JSON text of a flow node so it can be embedded
+// as the content of a JSON string key (the text itself is bare, no quotes).
+inline std::string yamlEscJsonText(std::string_view jsonText) {
+	std::string out;
+	for (char c : jsonText) {
+		switch (c) {
+			case '"': out += "\\\""; break;
+			case '\\': out += "\\\\"; break;
+			case '\n': out += "\\n"; break;
+			case '\t': out += "\\t"; break;
+			case '\r': out += "\\r"; break;
+			default: out += c;
+		}
+	}
+	return out;
+}
+
+// Parse a whole flow-collection node and deterministically represent it as the
+// ESCAPED content of a JSON string key: the intermediate JSON of the node
+// ("[\"a\",\"b\"]", "{\"x\":1}") becomes the key text itself. `flowText` must
+// be complete (a caller that gathered lines passes the full text).
+inline std::string yamlFlowJsonAsKey(const std::string& flowText,
+    std::unordered_map<std::string, std::string>* anchors,
+    std::unordered_set<std::string>* resolving, int depth) {
+	size_t fp = 0;
+	std::string got = yamlParseFlowValue(flowText, fp, anchors, resolving, depth);
+	if (fp < flowText.size())
+		throw asvJSONError("YAML: trailing content after compound key");
+	return yamlEscJsonText(got);
+}
+
 // Parse a flow mapping KEY and return it as a JSON string. JSON object keys
-// must be strings, so plain scalar keys are stringified from their raw text and
-// quoted keys pass through unchanged. Flow-collection (compound) keys are
-// consumed then rejected: they cannot be represented as a JSON string key.
+// must be strings, so plain scalar keys are stringified from their raw text,
+// quoted keys pass through unchanged, and flow-collection (compound) keys are
+// stringified deterministically via their intermediate JSON text.
 inline std::string yamlParseFlowKey(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
     std::unordered_set<std::string>* resolving,
@@ -1346,9 +1395,10 @@ inline std::string yamlParseFlowKey(const std::string& s, size_t& pos,
 	if (pos >= s.size() || s[pos] == '}' || s[pos] == ',' || s[pos] == ':')
 		throw asvJSONError("YAML: expected a mapping key");
 	if (s[pos] == '{' || s[pos] == '[') {
-		// Consume the compound key node, then reject it.
-		(void)yamlParseFlowValue(s, pos, anchors, resolving, depth);
-		throw asvJSONError("YAML: complex mapping key (flow collection) cannot be represented as a JSON string key");
+		// Compound key: parse the flow node and stringify its intermediate JSON
+		// as the JSON string key.
+		std::string keyJson = yamlParseFlowValue(s, pos, anchors, resolving, depth);
+		return "\"" + yamlEscJsonText(keyJson) + "\"";
 	}
 	if (s[pos] == '"' || s[pos] == '\'') return yamlParseFlowValue(s, pos, anchors, resolving, depth);
 	size_t start = pos;
@@ -1983,6 +2033,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 	std::string out;
 	std::vector<FormatFrame> stack;
 	std::string pendingKey; // explicit "? key" awaiting its ": value" line
+	int pendingIndent = -1; // indent of the "? key" line (for multi-line key folding)
 
 	// Find first meaningful line to establish root indent
 	size_t firstLine = 0;
@@ -1997,8 +2048,11 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		std::string_view fc = stripIndent(lines[firstLine]);
 		if (fc == "{}") return "{}";
 		if (fc == "[]") return "[]";
-		// Non-empty flow collection at root level: parse directly
-		if (!fc.empty() && (fc[0] == '{' || fc[0] == '[')) {
+		// Non-empty flow collection at root level: parse directly. A flow
+		// collection followed by a depth-0 ": " separator ("[a, b]: v") is NOT
+		// a flow document -- it is a block mapping with a compound (flow) key.
+		if (!fc.empty() && (fc[0] == '{' || fc[0] == '[') &&
+		    yamlFindKeyColonSep(fc) == std::string_view::npos) {
 			size_t flowLi = firstLine;
 			std::string flowText = yamlGatherFlow(lines, fc, flowLi);
 			size_t fp = 0;
@@ -2081,6 +2135,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 
 		// A pending explicit key ("? key") must be satisfied by a ": value" line.
 		if (!pendingKey.empty() && yamlFindKeyColon(content) != 0) {
+			// A deeper-indented line folds into a multi-line explicit key
+			// (YAML plain-scalar continuation). Any other non-": value" content
+			// is an error.
+			if (indent > pendingIndent) {
+				pendingKey += " " + yamlEscKey(content);
+				continue;
+			}
 			throw asvJSONError("YAML: explicit key must be followed by ': value'");
 		}
 
@@ -2103,16 +2164,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		if (content[0] == '?' && (content.size() == 1 || content[1] == ' ')) {
 			// --- Explicit key: "? key" (value inline after ':' or on a later
 			//     ": value" line). Scalar keys stringify to JSON; flow-collection
-			//     (compound) keys are unrepresentable in JSON and rejected. ---
+			//     (compound) keys are stringified deterministically via their
+			//     intermediate JSON text. ---
 			closeFrames(stack, out, indent);
 
 			std::string rest;
 			if (content.size() > 1) rest = content.substr(1);
 			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, 1);
-
-			if (!rest.empty() && (rest[0] == '[' || rest[0] == '{')) {
-				throw asvJSONError("YAML: complex mapping key (flow collection) cannot be represented as a JSON string key");
-			}
 
 			// Split "key" from an inline "key: value". Only a ':' followed by a
 			// space/end may terminate a plain scalar key (YAML plain-scalar rule).
@@ -2141,6 +2199,16 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				while (!inlineVal.empty() && (inlineVal[0] == ' ' || inlineVal[0] == '\t')) inlineVal.erase(0, 1);
 			}
 
+			// Compound (flow-collection) key. An unbalanced key body spans
+			// following lines; gather them, then stringify the whole node.
+			bool isCompoundKey = !keyBody.empty() && (keyBody[0] == '{' || keyBody[0] == '[');
+			std::string compoundKey;
+			if (isCompoundKey) {
+				if (yamlFlowDepth(keyBody) > 0)
+					keyBody = yamlGatherFlow(lines, keyBody, li);
+				compoundKey = yamlFlowJsonAsKey(keyBody, &anchors, &resolving, 0);
+			}
+
 			std::string rawKey;
 			if (keyBody.size() >= 2 && keyBody[0] == '"' && keyBody.back() == '"') {
 				rawKey = yamlUnescapeDouble(keyBody.substr(1, keyBody.size() - 2));
@@ -2162,7 +2230,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			}
 			yamlCheckFrameIndent(stack, indent);
 
-			std::string jsonKey = "\"" + yamlEscKey(rawKey) + "\"";
+			std::string jsonKey = isCompoundKey ? ("\"" + compoundKey + "\"") : ("\"" + yamlEscKey(rawKey) + "\"");
 			if (!inlineVal.empty() && inlineVal[0] != '#') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
@@ -2191,7 +2259,8 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					out += yamlParseInlineValue(inlineVal);
 				}
 			} else {
-				pendingKey = yamlEscKey(rawKey);
+				pendingKey = isCompoundKey ? compoundKey : yamlEscKey(rawKey);
+				pendingIndent = indent;
 			}
 			continue;
 		}
@@ -2353,6 +2422,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				throw asvJSONError("YAML: mapping key expected before ':'");
 			}
 
+			// Compound (flow-collection) key: stringify the flow node via its
+			// intermediate JSON text ("[a, b]" -> key ["a","b"]).
+			bool isCompoundKey = !keyPart.empty() && (keyPart[0] == '{' || keyPart[0] == '[');
+			std::string compoundKey;
+			if (isCompoundKey)
+				compoundKey = yamlFlowJsonAsKey(keyPart, &anchors, &resolving, 0);
+
 			std::string rawKey;
 			if (keyPart.size() >= 2 && keyPart[0] == '"' && keyPart.back() == '"') {
 				rawKey = yamlUnescapeDouble(keyPart.substr(1, keyPart.size() - 2));
@@ -2383,6 +2459,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 
 			std::string jsonKey;
 			if (pendingMerged) { jsonKey = pendingKey; pendingKey.clear(); }
+			else if (isCompoundKey) jsonKey = compoundKey;
 			else jsonKey = yamlEscKey(rawKey);
 
 			// A plain-scalar value must not start with the ':' indicator
@@ -2450,7 +2527,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					if (sc.empty() || sc[0] == '#') { scan++; continue; }
 					int scIndent = countIndent(lines[scan]);
 					if (scIndent < indent) break;
-					if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) { isFlowValue = true; break; }
+					if (sc.size() >= 1 && (sc[0] == '{' || sc[0] == '[')) {
+						// A deeper flow KEYED MAPPING ("[a,b]: v") is a mapping;
+						// any other flow node is the whole value itself.
+						if (yamlFindKeyColonSep(sc) != std::string_view::npos) deeperMapping = true;
+						else isFlowValue = true;
+						break;
+					}
 					if (scIndent == indent) {
 						if (yamlIsDashStart(sc)) isArrayValue = true;
 						break;
