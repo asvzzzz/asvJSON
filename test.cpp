@@ -3823,6 +3823,95 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(!json.fromYAML("n: !!float \"not-a-number\""));
 	}
+	// Explicit tag !!value -- scalar keeps its default interpretation
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!value 42"));
+		ASSERT_EQ(json.getInt("x"), 42);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!value true"));
+		ASSERT_EQ(json.getBool("x"), true);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!value \"abc\""));
+		ASSERT_EQ(std::string(json.getString("x")), "abc");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!value hello"));
+		ASSERT_EQ(std::string(json.getString("x")), "hello");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!value"));
+		ASSERT(json.isNull("x"));
+	}
+	// Explicit tag !!yaml -- scalar embeds a nested YAML document
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"a: 1\\nb: 2\""));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+			ASSERT_EQ(json.getInt("x.a"), 1);
+			ASSERT_EQ(json.getInt("x.b"), 2);
+		}
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"- 1\\n- 2\""));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*x->arr).size(), 2u);
+		}
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml \"{b: 2}\""));
+		if (json.lastError.empty()) {
+			asvJSONValue* x = json.getRoot()->get("x");
+			ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+			ASSERT_EQ(json.getInt("x.b"), 2);
+		}
+	}
+	// !!yaml nests recursively
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: !!yaml \"b: !!yaml \\\"c: 1\\\"\""));
+		if (json.lastError.empty()) {
+			ASSERT_EQ(json.getInt("a.b.c"), 1);
+		}
+	}
+	// !!yaml with no value -> null
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!yaml"));
+		ASSERT(json.isNull("x"));
+	}
+	// !!yaml inside a flow array -- still parsed as a nested document
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("[1, !!yaml \"a: 1\"]"));
+		if (json.lastError.empty()) {
+			asvJSONValue* arr = json.getRoot();
+			ASSERT(arr->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*arr->arr).size(), 2u);
+			asvJSONValue* inner = (*arr->arr)[1].get();
+			ASSERT(inner != nullptr && inner->type == asvJSONValue::OBJECT);
+			ASSERT(inner->get("a") != nullptr && inner->get("a")->type == asvJSONValue::INT);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// !!yaml embedding a top-level scalar has no JSON representation
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("x: !!yaml \"42\""));
+	}
 	// Three-! tag (!!!int) treated as unknown -> value parsed normally
 	{
 		asvJSON json;
@@ -4227,6 +4316,61 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(!json.fromYAML("!!set\n- a\nx: 1"));
 		ASSERT(std::string(json.lastError).find("after block set") != std::string::npos);
+	}
+	// A block set as a mapping value may be followed by sibling keys
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - b\no: 1"));
+		if (json.lastError.empty()) {
+			asvJSONValue* obj = json.getRoot()->get("k");
+			ASSERT(obj != nullptr && obj->type == asvJSONValue::OBJECT);
+			ASSERT(obj->hasKey("a") && obj->hasKey("b"));
+			ASSERT_EQ(json.getInt("o"), 1);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// A block set as a sequence item may be followed by sibling items
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!set\n  - a\n- b"));
+		if (json.lastError.empty()) {
+			asvJSONValue* arr = json.getRoot();
+			ASSERT(arr->type == asvJSONValue::ARRAY);
+			ASSERT_EQ((*arr->arr).size(), 2u);
+		} else {
+			ASSERT(false);
+		}
+	}
+	// Complex (non-scalar) block-set keys are rejected with a clear error
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - x: 1"));
+		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("!!set\n- a\n- b: 1"));
+		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - {x}"));
+		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+	}
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - - b"));
+		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+	}
+	// Quoted set keys keep colons (quote-aware: not treated as mapping keys)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set\n  - \"x: 1\""));
+		if (json.lastError.empty())
+			ASSERT(json.getRoot()->get("k")->hasKey("x: 1"));
+		else
+			ASSERT(false);
 	}
 	// Core Schema: !!omap [{a:1},{b:2}]
 	{

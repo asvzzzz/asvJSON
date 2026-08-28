@@ -6,6 +6,7 @@
 namespace asvJSONInternal {
 
 inline constexpr size_t MAX_YAML_ANCHORS = 100000;
+inline constexpr size_t MAX_YAML_DEPTH = 64;
 
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
@@ -478,6 +479,9 @@ inline std::string yamlScalarToJson(std::string_view s) {
 
 inline std::string yamlParseInlineValue(std::string_view s, int depth = 0);
 
+// Forward declaration for embedded "!!yaml ..." documents (nested parse)
+inline std::string yamlToJson(std::string_view input);
+
 // Convert unescaped regex "pattern|opts" to internal pattern|opts
 inline std::string yamlRegexToInternal(std::string_view s) {
 	return std::string(s);
@@ -788,6 +792,32 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		if (!val.empty()) return yamlParseInlineValue(val);
 		return "\"\"";
 	}
+	if (tag == "!!value") {
+		// YAML 1.1 "value": the scalar denoting a mapping's default value.
+		// The canonical form is the scalar's default (content-based)
+		// interpretation -- i.e. equivalent to no tag at all.
+		if (val.empty()) return "null";
+		return yamlParseInlineValue(val);
+	}
+	if (tag == "!!yaml") {
+		// A YAML document embedded in a scalar ("!!yaml \"a: 1\"").
+		// Unquote/unescape the scalar, then recursively parse it as YAML.
+		if (val.empty()) return "null";
+		std::string resolved = yamlParseInlineValue(val);
+		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
+			resolved = resolved.substr(1, resolved.size() - 2);
+		std::string raw;
+		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
+		static thread_local int yamlYamlDepth = 0;
+		if (yamlYamlDepth >= MAX_YAML_DEPTH)
+			throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");
+		++yamlYamlDepth;
+		std::string nested;
+		try { nested = yamlToJson(raw); }
+		catch (...) { --yamlYamlDepth; throw; }
+		--yamlYamlDepth;
+		return nested;
+	}
 
 	// Special type tags (Extended JSON)
 	if (tag == "!!binary") {
@@ -1050,9 +1080,10 @@ inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s);
 // Parse a block-style !!set: the header line plus the following "- key" /
 // "? key" item lines (single-line scalar keys). Works at document root or as a
 // mapping/sequence value. Emits "key": null pairs, fixes the item indentation
-// from the first item (a later mis-indented item is an error), and advances
-// `li` past the last consumed line. Non-item lines, or items that are not plain
-// scalar keys ("- x: v", "- {a}"), end the set and are left for the main loop.
+// from the first item, and advances `li` past the last consumed line. Content
+// at a different indentation ends the set and is left for the main loop;
+// compound item keys ("- x: v", "- {a}", a bare "-" with deeper content) have
+// no JSON string-key equivalent and are rejected with a clear error.
 inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size_t& li) {
 	std::string out = "{";
 	bool first = true;
@@ -1063,11 +1094,27 @@ inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size
 		if (sc.empty() || sc[0] == '#') { j++; continue; }
 		int ind = countIndent(lines[j]);
 		if (itemIndent < 0) itemIndent = ind;
-		else if (ind != itemIndent) throw asvJSONError("YAML: inconsistent indentation");
+		else if (ind != itemIndent) break; // sibling content at another level ends the set
 
 		std::string_view body;
-		if (sc.size() >= 2 && sc[0] == '-') {
-			if (sc[1] != ' ') break; // bare "-" owns a child node -- not a scalar key
+		if (!sc.empty() && sc[0] == '-') {
+			if (sc.size() == 1) {
+				// bare "-" owns a child node. A !!set element is a single scalar
+				// key, so a dash with deeper content is a compound key: the
+				// normalizer rewrites "- key: v" into "-\n  key: v", which
+				// arrives here. Reject it loudly instead of leaving a confusing
+				// "sequence and mapping mixed" error to the main loop.
+				size_t p = j + 1;
+				while (p < lines.size()) {
+					std::string_view scp2 = stripIndent(lines[p]);
+					if (scp2.empty() || scp2[0] == '#') { p++; continue; }
+					if (countIndent(lines[p]) > ind)
+						throw asvJSONError("YAML: complex key in block !!set cannot be represented as a JSON string key");
+					break;
+				}
+				break; // no deeper child -- the set simply ends here
+			}
+			if (sc[1] != ' ') break; // "-x": a plain scalar, ends the set
 			body = sc.substr(2);
 		} else if (sc.size() >= 2 && sc[0] == '?' && sc[1] == ' ') {
 			body = sc.substr(2);
@@ -1078,9 +1125,12 @@ inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size
 		body = yamlStripComment(body);
 		while (!body.empty() && (body.back() == ' ' || body.back() == '\t')) body.remove_suffix(1);
 		if (body.empty()) break;
-		// Item keys are scalar nodes only; flow collections are not scalar keys.
-		if (yamlFindKeyColonSep(body) != std::string_view::npos) break; // "- x: v" is a mapping item
-		if (body[0] == '{' || body[0] == '[') break;
+		// Item keys are scalar nodes only; a mapping ("- x: v") or flow
+		// collection ("- {a}") key has no JSON string-key equivalent.
+		if (yamlFindKeyColonSep(body) != std::string_view::npos)
+			throw asvJSONError("YAML: complex key in block !!set (mapping) cannot be represented as a JSON string key");
+		if (body[0] == '{' || body[0] == '[')
+			throw asvJSONError("YAML: complex key in block !!set (flow collection) cannot be represented as a JSON string key");
 		// Quoted keys are unescaped; plain keys stringify as-is.
 		std::string rawKey;
 		if (body.size() >= 2 && body[0] == '"' && body.back() == '"')
@@ -1753,7 +1803,6 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 	std::string out;
 	std::vector<FormatFrame> stack;
 	std::string pendingKey; // explicit "? key" awaiting its ": value" line
-	static constexpr size_t MAX_YAML_DEPTH = 64;
 
 	// Find first meaningful line to establish root indent
 	size_t firstLine = 0;
