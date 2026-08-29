@@ -3413,6 +3413,62 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("? {x: 1}: v"));
 		ASSERT_EQ(std::string(json.getString("{\"x\":1}")), "v");
 	}
+	// Multi-line block-style compound keys: the explicit key is a node on the
+	// following (deeper) block lines, stringified via its intermediate JSON
+	// just like flow compound keys.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  - a\n  - b\n: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  a: 1\n  b: 2\n: v"));
+		ASSERT_EQ(std::string(json.getString("{\"a\":1,\"b\":2}")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  [a, b]\n: v"));
+		ASSERT_EQ(std::string(json.getString("[\"a\",\"b\"]")), "v");
+	}
+	// Multi-line explicit keys that are plain/quoted scalars fold and stringify
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  foo\n: v"));
+		ASSERT_EQ(std::string(json.getString("foo")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  \"some key\"\n: v"));
+		ASSERT_EQ(std::string(json.getString("some key")), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("?\n  foo bar\n  baz\n: v"));
+		ASSERT_EQ(std::string(json.getString("foo bar baz")), "v");
+	}
+	// Explicit-key mapping as a sequence item ("- ? key") and a sequence item
+	// whose key is a deeper block node
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- ? key\n  : v"));
+		ASSERT_EQ(std::string(json.getRoot()->arr->at(0)->get("key")->getString()), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- ? [a, b]\n  : v"));
+		ASSERT_EQ(std::string(json.getRoot()->arr->at(0)->get("[\"a\",\"b\"]")->getString()), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- ?\n    - a\n    - b\n  : v"));
+		ASSERT_EQ(std::string(json.getRoot()->arr->at(0)->get("[\"a\",\"b\"]")->getString()), "v");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k:\n  ?\n    - a\n  : v"));
+		ASSERT_EQ(std::string(json.getRoot()->get("k")->get("[\"a\"]")->getString()), "v");
+	}
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("{[a, [b]]: v}"));

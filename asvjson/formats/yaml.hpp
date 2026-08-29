@@ -1955,6 +1955,8 @@ inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s) {
 // flow collections and block-scalar headers.
 inline bool yamlIsBlockMappingStart(std::string_view s) {
 	if (s.empty() || s[0] == '|' || s[0] == '>') return false;
+	// Explicit-key form "? key" (and a bare "?") starts a block mapping entry.
+	if (s[0] == '?' && (s.size() == 1 || s[1] == ' ' || s[1] == '\t')) return true;
 	auto colon = yamlFindKeyColon(s);
 	if (colon == std::string_view::npos || colon == 0) return false;
 	if (colon + 1 < s.size() && s[colon + 1] != ' ' && s[colon + 1] != '\t') return false;
@@ -2483,6 +2485,60 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			if (content.size() > 1) rest = content.substr(1);
 			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, 1);
 
+			// "?" with no inline key: the explicit key is a node on the
+			// following (deeper) block lines, e.g.
+			//   ?
+			//     - a
+			//     - b
+			//   : v
+			// Structure keys (block sequence/mapping, flow collection) are
+			// stringified via their intermediate JSON just like flow compound
+			// keys; scalar keys are folded per YAML plain-scalar rules.
+			if (rest.empty()) {
+				size_t keyStart = li + 1;
+				while (keyStart < lines.size()) {
+					std::string_view ksc = stripIndent(lines[keyStart]);
+					if (ksc.empty() || ksc[0] == '#') keyStart++;
+					else break;
+				}
+				if (keyStart < lines.size() && countIndent(lines[keyStart]) > indent) {
+					size_t keyEnd = keyStart;
+					while (keyEnd < lines.size()) {
+						std::string_view kec = stripIndent(lines[keyEnd]);
+						if (kec.empty() || kec[0] == '#') { keyEnd++; continue; }
+						if (countIndent(lines[keyEnd]) <= indent) break;
+						keyEnd++;
+					}
+					std::vector<std::string> keyLines;
+					for (size_t kl = keyStart; kl < keyEnd; kl++) keyLines.push_back(lines[kl]);
+					if (!keyLines.empty()) {
+						std::string scalarDoc;
+						for (const auto& kl : keyLines) {
+							if (!scalarDoc.empty()) scalarDoc += '\n';
+							scalarDoc += kl;
+						}
+						bool isScalarNode = false;
+						std::string scalarJson = yamlScalarDocValue(scalarDoc, isScalarNode);
+						if (isScalarNode) {
+							// Scalar key node: keep the escaped content of the
+							// JSON string fragment (strip its surrounding quotes);
+							// non-string scalars (numbers, booleans) pass through
+							// and are stringified on merge.
+							std::string keyText = scalarJson;
+							if (keyText.size() >= 2 && keyText.front() == '"' && keyText.back() == '"')
+								keyText = keyText.substr(1, keyText.size() - 2);
+							pendingKey = keyText;
+						} else {
+							std::string keyJson = yamlParseDocImpl(keyLines, depth + 1);
+							pendingKey = yamlEscJsonText(keyJson);
+						}
+						pendingIndent = indent;
+						li = keyEnd - 1;
+						continue;
+					}
+				}
+			}
+
 			// Split "key" from an inline "key: value". Only a ':' followed by a
 			// space/end may terminate a plain scalar key (YAML plain-scalar rule).
 			size_t kc = std::string::npos;
@@ -2859,6 +2915,8 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 						if (yamlIsDashStart(sc)) isArrayValue = true;
 						break;
 					}
+					if (sc.size() >= 1 && sc[0] == '?' &&
+					    (sc.size() == 1 || sc[1] == ' ' || sc[1] == '\t')) { deeperMapping = true; break; }
 					if (yamlIsDashStart(sc)) { isArrayValue = true; break; }
 					if (yamlFindKeyColonSep(sc) != std::string_view::npos) { deeperMapping = true; break; } // deeper mapping
 					deeperScalar = true;
