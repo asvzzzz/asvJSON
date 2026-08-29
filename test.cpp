@@ -4543,6 +4543,207 @@ TEST(testFromYAML) {
 			ASSERT(false);
 		}
 	}
+	// Explicit tags on block collection nodes: !!map at document root
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!map\na: 1\nb: 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(root->get("a")->getInt(), 1);
+		ASSERT_EQ(root->get("b")->getInt(), 2);
+	}
+	// Explicit tags on block collection nodes: !!seq at document root
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!seq\n- 1\n- 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT_EQ(root->arr->at(0)->getInt(), 1);
+	}
+	// !!map as a mapping value with a deeper block collection
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!map\n  a: 1\n  b: 2"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(x->get("a")->getInt(), 1);
+		ASSERT_EQ(x->get("b")->getInt(), 2);
+	}
+	// !!seq as a mapping value with a deeper block collection
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!seq\n  - 1\n  - 2"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(x->arr->size(), size_t(2));
+		ASSERT_EQ(x->arr->at(1)->getInt(), 2);
+	}
+	// !!seq with dict items that survive sequence normalization
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!seq\n  - a: 1\n  - b: 2"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(x->arr->size(), size_t(2));
+		ASSERT_EQ(x->arr->at(0)->get("a")->getInt(), 1);
+		ASSERT_EQ(x->arr->at(1)->get("b")->getInt(), 2);
+	}
+	// !!map as a block-sequence item
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!map\n  a: 1\n  b: 2\n- k: 3"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->arr->size(), size_t(2));
+		ASSERT_EQ(root->arr->at(0)->get("b")->getInt(), 2);
+		ASSERT_EQ(root->arr->at(1)->get("k")->getInt(), 3);
+	}
+	// !!binary with a deeper block literal scalar
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!binary\n  |\n    aGVsbG8="));
+		auto* b = json.getRoot()->get("x");
+		ASSERT(b != nullptr && b->type == asvJSONValue::BINARY);
+		ASSERT_EQ(b->bin_data.size(), size_t(5));
+		ASSERT_EQ(b->bin_data[0], 'h');
+		ASSERT_EQ(b->bin_data[4], 'o');
+	}
+	// !!binary with a deeper plain scalar
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!binary\n  aGVsbG8="));
+		auto* b = json.getRoot()->get("x");
+		ASSERT(b != nullptr && b->type == asvJSONValue::BINARY);
+		ASSERT_EQ(b->bin_data.size(), size_t(5));
+		ASSERT_EQ(b->bin_data[0], 'h');
+		ASSERT_EQ(b->bin_data[4], 'o');
+	}
+	// !!binary with a block-scalar header inlined after the tag
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!binary |\n  aGVsbG8="));
+		auto* b = json.getRoot()->get("x");
+		ASSERT(b != nullptr && b->type == asvJSONValue::BINARY);
+		ASSERT_EQ(b->bin_data.size(), size_t(5));
+		ASSERT_EQ(b->bin_data[0], 'h');
+	}
+	// !!str with a block-scalar header inlined after the tag keeps the text
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!str |\n  hello"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(x->str_data), "hello\n");
+	}
+	// Custom tag with a deeper block collection -> CUSTOM_TAG with nested value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !mytag\n  a: 1\n  b: 2"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "mytag");
+		ASSERT(x->custom_value != nullptr && x->custom_value->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(x->custom_value->get("b")->getInt(), 2);
+	}
+	// Verbatim custom tag with a deeper block collection
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !<tag:example.com,2024:type>\n  a: 1"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2024:type");
+		ASSERT(x->custom_value != nullptr && x->custom_value->type == asvJSONValue::OBJECT);
+	}
+	// Custom tag at document root annotating the whole node
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!type\n- 1\n- 2"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(root->str_data), "type");
+		ASSERT(root->custom_value != nullptr && root->custom_value->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(root->custom_value->arr->size(), size_t(2));
+	}
+	// Non-specific "!" tag: default content interpretation
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: ! hello"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(x->str_data), "hello");
+	}
+	// Non-specific "!" tag with an integer value resolves by content
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: ! 42"));
+		ASSERT_EQ(json.getRoot()->get("x")->getInt(), 42);
+	}
+	// Nested block-tagged collections
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: !!map\n  y: !!seq\n    - 1\n    - 2"));
+		auto* x = json.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+		auto* y = x->get("y");
+		ASSERT(y != nullptr && y->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(y->arr->size(), size_t(2));
+		ASSERT_EQ(y->arr->at(0)->getInt(), 1);
+	}
+	// A sibling key after a solo-tag value is not swallowed
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1\nb: !!map\nc: 3"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(root->get("a")->getInt(), 1);
+		ASSERT(root->get("b")->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(root->get("c")->getInt(), 3);
+	}
+	// Solo tag with no deeper child: empty container defaults
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!map"));
+		ASSERT(json.fromYAML("!!seq"));
+		ASSERT(json.fromYAML("x: !!map"));
+		ASSERT(json.fromYAML("x: !!seq"));
+		ASSERT(json.getRoot()->get("x")->type == asvJSONValue::ARRAY);
+	}
+	// Scalar tags on block nodes are representational errors
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("x: !!str\n  a: 1"));
+	}
+	// !!map applied to a non-mapping block child is an error
+	{
+		asvJSON json;
+		ASSERT(!json.fromYAML("x: !!map\n  - 1"));
+	}
+	// Anchor on a solo-tag line: aliases resolve to the tagged block value
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: &x !!map\n  k: 1\nb: *x"));
+		auto* b = json.getRoot()->get("b");
+		ASSERT(b != nullptr && b->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(b->get("k")->getInt(), 1);
+	}
+	// Anchor on a solo-tag !!seq line: aliases resolve to the tagged array
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: &x !!seq\n  - 1\n  - 2\nb: *x"));
+		auto* b = json.getRoot()->get("b");
+		ASSERT(b != nullptr && b->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(b->arr->size(), size_t(2));
+		ASSERT_EQ(b->arr->at(1)->getInt(), 2);
+	}
+	// Anchor on a dashed solo-tag item: aliases resolve to the tagged block
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- &x !!map\n  k: 1\n- *x"));
+		auto* it = json.getRoot()->arr->at(1).get();
+		ASSERT(it != nullptr && it->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(it->get("k")->getInt(), 1);
+	}
 	// Core Schema: !!set with flow [a,b,c]
 	{
 		asvJSON json;

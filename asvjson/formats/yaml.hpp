@@ -748,6 +748,10 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 	while (tagEnd < s.size() && s[tagEnd] == ' ') tagEnd++;
 	if (tagEnd < s.size()) val = s.substr(tagEnd);
 
+	// Non-specific tags ("!": user-defined, "?": non-specific) apply nothing:
+	// the value keeps its default (content/plain) interpretation.
+	if (tag == "!" || tag == "?") return yamlParseInlineValue(val);
+
 	// Standard YAML tags
 	if (tag == "!!str") return yamlForceStringVal(val);
 	if (tag == "!!int") {
@@ -1619,6 +1623,17 @@ inline std::string yamlParseDoc(std::string_view input, int depth = 0);
 // Parse a document whose lines are already split (used by anchors to avoid
 // re-splitting the collected subtree). Owns its own scoped tag-map snapshot.
 inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
+// A "!!yaml" tag whose content is on following lines (block-scalar header or
+// indented block collection) needs gathering; see yamlGatherYamlEmbed.
+inline bool yamlYamlTagNeedsGather(std::string_view s, std::string& tail);
+inline std::string yamlGatherYamlEmbed(const std::string& tail,
+    const std::vector<std::string>& lines, size_t& li, int parentIndent);
+// True when `s` is a tag token with no value content around it (only optional
+// whitespace / a trailing comment / a block-scalar header).
+inline bool yamlIsSoloTag(std::string_view s);
+// Parse the value of a solo tag that annotates a block node on deeper lines.
+inline std::string yamlTaggedBlockValue(std::string_view s,
+    const std::vector<std::string>& lines, size_t& li, int parentIndent, int depth);
 
 // Pre-scan lines for &anchor definitions, building name->JSON map.
 // For block anchors, extracts child lines and recursively calls yamlToJson.
@@ -1655,12 +1670,26 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 		while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
 
 		if (!rest.empty() && rest[0] != '#') {
-			// Scalar anchor -- value follows on same line. Strip a trailing
-			// comment exactly like the main pass does, so aliases agree with
-			// the anchored line's own value.
-			std::string_view rv = yamlStripComment(rest);
-			while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
-			anchors[name] = yamlParseInlineValue(rv);
+			if (yamlIsSoloTag(rest)) {
+				// Anchor on a solo-tag line: the anchored value is the block
+				// node on the following (deeper) lines, annotated by the tag.
+				// Capture it exactly like the main pass so aliases resolve to
+				// the tagged block value, not to an empty scalar.
+				std::string tRest(rest);
+				std::string ytail;
+				size_t aLi = li;
+				if (yamlYamlTagNeedsGather(tRest, ytail))
+					anchors[name] = yamlGatherYamlEmbed(ytail, lines, aLi, indent);
+				else
+					anchors[name] = yamlTaggedBlockValue(tRest, lines, aLi, indent, depth + 1);
+			} else {
+				// Scalar anchor -- value follows on same line. Strip a trailing
+				// comment exactly like the main pass does, so aliases agree with
+				// the anchored line's own value.
+				std::string_view rv = yamlStripComment(rest);
+				while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
+				anchors[name] = yamlParseInlineValue(rv);
+			}
 		} else {
 			// Block anchor -- collect child lines (content only, like before)
 			std::vector<std::string> childLines;
@@ -1950,6 +1979,211 @@ inline bool yamlIsBlockScalarHeader(std::string_view content) {
 	return false;
 }
 
+// True when `s` is a tag token with no value content around it (only optional
+// whitespace / a trailing comment / a block-scalar header). Such a solo tag
+// annotates the block node that starts on the following lines
+// ("x: !!map\n  a: 1", "x: !!binary |\n  aGVsbG8=").
+inline bool yamlIsSoloTag(std::string_view s) {
+	while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+	while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+	if (s.empty() || s[0] != '!') return false;
+	size_t tagEnd = 0;
+	if (s.size() >= 2 && s[1] == '!') {
+		tagEnd = 2;
+		while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	} else if (s.size() >= 2 && s[1] == '<') {
+		tagEnd = s.find('>', 2);
+		if (tagEnd == std::string_view::npos) tagEnd = s.size(); else tagEnd++;
+	} else {
+		tagEnd = 1;
+		while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	}
+	std::string_view rem = s.substr(tagEnd);
+	while (!rem.empty() && (rem[0] == ' ' || rem[0] == '\t')) rem.remove_prefix(1);
+	if (rem.empty() || rem[0] == '#') return true;
+	if (rem[0] != '|' && rem[0] != '>') return false;
+	// A valid block-scalar header may follow the tag
+	// ("!!binary |", "!!binary |2-", "!!str >+ # comment").
+	size_t q = 1;
+	while (q < rem.size() && rem[q] >= '0' && rem[q] <= '9') q++;
+	if (q < rem.size() && (rem[q] == '+' || rem[q] == '-')) q++;
+	while (q < rem.size() && (rem[q] == ' ' || rem[q] == '\t')) q++;
+	if (q == rem.size()) return true;
+	return rem[q] == '#';
+}
+
+// Parse the value of a solo tag that annotates a block node on deeper lines
+// ("x: !!map\n  a: 1", "- !!seq\n  - 1"). `parentIndent` is the indent of the
+// tag line (the block child must be strictly deeper; -1 at document root takes
+// the whole document as the child). Advances `li` to the last consumed line.
+// Known collection tags ("!!map"/"!!seq") pass their node through (validating
+// the kind); "!!binary" reads a block literal scalar child as base64; "!"/"?"
+// resolve by content (default interpretation); any other tag wraps the parsed
+// child in a CUSTOM_TAG. A tag with no deeper block child yields the defaults
+// matching the inline solo-tag forms ("{}"/"[]"/empty types).
+inline std::string yamlTaggedBlockValue(std::string_view s,
+    const std::vector<std::string>& lines, size_t& li, int parentIndent, int depth) {
+	size_t tagEnd = 0;
+	if (s.size() >= 2 && s[1] == '!') {
+		tagEnd = 2;
+		while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	} else if (s.size() >= 2 && s[1] == '<') {
+		tagEnd = s.find('>', 2);
+		if (tagEnd == std::string_view::npos) tagEnd = s.size(); else tagEnd++;
+	} else {
+		tagEnd = 1;
+		while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	}
+	std::string tagStr = yamlResolveTag(s.substr(0, tagEnd));
+
+	// A block-scalar header inlined after the tag ("!!binary |", "!!str >+").
+	std::string header;
+	{
+		size_t hstart = tagEnd;
+		while (hstart < s.size() && (s[hstart] == ' ' || s[hstart] == '\t')) hstart++;
+		if (hstart < s.size() && (s[hstart] == '|' || s[hstart] == '>')) {
+			size_t hend = hstart + 1;
+			while (hend < s.size() && s[hend] >= '0' && s[hend] <= '9') hend++;
+			if (hend < s.size() && (s[hend] == '+' || s[hend] == '-')) hend++;
+			while (hend < s.size() && (s[hend] == ' ' || s[hend] == '\t')) hend++;
+			if (hend == s.size() || s[hend] == '#')
+				header = std::string(s.substr(hstart, hend - hstart));
+		}
+	}
+
+	std::string name;
+	if (tagStr.size() >= 2 && tagStr[0] == '!' && tagStr[1] == '<' && tagStr.back() == '>')
+		name = tagStr.substr(2, tagStr.size() - 3); // verbatim URI: strip !< >
+	else if (!tagStr.empty() && tagStr[0] == '!')
+		name = tagStr.substr(1);
+	else
+		name = tagStr;
+
+	size_t p = li + 1;
+	while (p < lines.size()) {
+		std::string_view c = stripIndent(lines[p]);
+		if (c.empty() || c[0] == '#') { p++; continue; }
+		break;
+	}
+	if (p >= lines.size() || countIndent(lines[p]) <= parentIndent) {
+		// No deeper child: defaults matching the inline solo-tag forms.
+		if (tagStr == "!!map") return "{}";
+		if (tagStr == "!!seq") return "[]";
+		if (tagStr == "!!binary") return "{\"$binary\":{\"base64\":\"\",\"subType\":\"00\"}}";
+		if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!')
+			return yamlParseTaggedValue(tagStr); // scalar core tags: 0/0.0/false/""/null/...
+		if (tagStr == "!" || tagStr == "?") return "null";
+		{
+			// bare custom tag => CUSTOM_TAG with a null value
+			std::string out = "{\"$customTag\":{\"name\":\"";
+			for (auto c : name) {
+				if (c == '"' || c == '\\') out += '\\';
+				out += c;
+			}
+			out += "\",\"value\":null}}";
+			return out;
+		}
+	}
+
+	if (!header.empty()) {
+		// Block-scalar body on the lines below the tag line ("x: !!binary |").
+		// yamlParseBlockScalar reads content starting at li+1, so point it at
+		// the tag line itself (the header lives on it).
+		size_t sp = p - 1;
+		std::string text = yamlParseBlockScalar(header, lines, sp, header[0] == '>', parentIndent);
+		if (sp != p - 1) li = sp; // content consumed through line sp (else the tag line is last)
+		if (tagStr == "!!binary") {
+			while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\n')) text.pop_back();
+			std::string out = "{\"$binary\":{\"base64\":";
+			out += yamlQuoteJsonScalar(text);
+			out += ",\"subType\":\"00\"}}";
+			return out;
+		}
+		if (tagStr == "!!str") return yamlQuoteJsonScalar(text);
+		if (tagStr == "!" || tagStr == "?") return yamlParseInlineValue(text);
+		if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!') {
+			// Scalar core tag over a block scalar: feed the scalar text to the
+			// tagged-value parser (trailing line break trimmed for 1-line bodies).
+			std::string combined = tagStr + " " + text;
+			while (!combined.empty() && combined.back() == '\n') combined.pop_back();
+			return yamlParseTaggedValue(combined);
+		}
+		{
+			std::string out = "{\"$customTag\":{\"name\":\"";
+			for (auto c : name) {
+				if (c == '"' || c == '\\') out += '\\';
+				out += c;
+			}
+			out += "\",\"value\":";
+			out += yamlParseInlineValue(text);
+			out += "}}";
+			return out;
+		}
+	}
+
+	if (tagStr == "!!binary") {
+		std::string_view first = stripIndent(lines[p]);
+		std::string b64;
+		if (!first.empty() && (first[0] == '|' || first[0] == '>')) {
+			bool folded = (first[0] == '>');
+			b64 = yamlParseBlockScalar(std::string(first), lines, p, folded, parentIndent);
+			li = p; // yamlParseBlockScalar advanced p past the content lines
+		} else {
+			bool firstLine = true;
+			while (p < lines.size()) {
+				std::string_view c = stripIndent(lines[p]);
+				if (c.empty() || c[0] == '#') { p++; continue; }
+				if (countIndent(lines[p]) <= parentIndent) break;
+				std::string ln(c);
+				while (!ln.empty() && (ln.back() == ' ' || ln.back() == '\t')) ln.pop_back();
+				if (!firstLine) b64 += '\n';
+				firstLine = false;
+				b64 += ln;
+				p++;
+			}
+			li = p - 1;
+		}
+		while (!b64.empty() && (b64.back() == ' ' || b64.back() == '\t' || b64.back() == '\n')) b64.pop_back();
+		std::string out = "{\"$binary\":{\"base64\":";
+		out += yamlQuoteJsonScalar(b64);
+		out += ",\"subType\":\"00\"}}";
+		return out;
+	}
+
+	std::vector<std::string> childLines;
+	size_t q = p;
+	while (q < lines.size()) {
+		std::string_view c = stripIndent(lines[q]);
+		if (c.empty() || c[0] == '#') { childLines.push_back(lines[q]); q++; continue; }
+		if (countIndent(lines[q]) <= parentIndent) break;
+		childLines.push_back(lines[q]);
+		q++;
+	}
+	std::string childJson = yamlParseDocImpl(childLines, depth + 1);
+	li = q - 1;
+
+	if (tagStr == "!!map" || tagStr == "!!seq") {
+		char want = (tagStr == "!!map") ? '{' : '[';
+		if (childJson.empty() || childJson[0] != want)
+			throw asvJSONError(std::string("YAML: ") + tagStr + " tag applied to a non-" +
+			    ((tagStr == "!!map") ? "mapping" : "sequence") + " value");
+		return childJson;
+	}
+	if (tagStr == "!" || tagStr == "?") return childJson;
+	if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!')
+		throw asvJSONError(std::string("YAML: ") + tagStr + " tag applied to a non-scalar value");
+
+	std::string out = "{\"$customTag\":{\"name\":\"";
+	for (auto c : name) {
+		if (c == '"' || c == '\\') out += '\\';
+		out += c;
+	}
+	out += "\",\"value\":";
+	out += childJson;
+	out += "}}";
+	return out;
+}
+
 // Rewrite block-sequence items whose child node starts inline on the dash line
 // ("- a: 1", "- a: [1, 2]", "- - x") into the canonical two-line form:
 //   -
@@ -2125,6 +2359,30 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				throw asvJSONError("YAML: unexpected content after block set");
 			}
 			return sgot;
+		}
+		// Solo tag at document root annotates the whole document node
+		// ("!!map\n a: 1", "!!seq\n- 1", "!mytype\n k: v")
+		if (yamlIsSoloTag(fc)) {
+			std::string sfc(fc);
+			std::string ytail;
+			if (yamlYamlTagNeedsGather(sfc, ytail)) {
+				size_t yLi = firstLine;
+				std::string ygot = yamlGatherYamlEmbed(ytail, lines, yLi, -1);
+				for (size_t t = yLi + 1; t < lines.size(); t++) {
+					std::string_view tc = stripIndent(lines[t]);
+					if (tc.empty() || tc[0] == '#') continue;
+					throw asvJSONError("YAML: unexpected content after !!yaml value");
+				}
+				return ygot;
+			}
+			size_t tLi = firstLine;
+			std::string got = yamlTaggedBlockValue(sfc, lines, tLi, -1, depth);
+			for (size_t t = tLi + 1; t < lines.size(); t++) {
+				std::string_view tc = stripIndent(lines[t]);
+				if (tc.empty() || tc[0] == '#') continue;
+				throw asvJSONError("YAML: unexpected content after tagged value");
+			}
+			return got;
 		}
 	}
 
@@ -2304,7 +2562,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 						out += yamlParseBlockSet(lines, sLi, &anchors, &resolving, depth);
 						li = sLi;
 					} else {
-						out += yamlParseTaggedValue(inlineVal);
+						std::string yt;
+						if (yamlYamlTagNeedsGather(inlineVal, yt))
+							out += yamlGatherYamlEmbed(yt, lines, li, indent);
+						else if (yamlIsSoloTag(inlineVal))
+							out += yamlTaggedBlockValue(inlineVal, lines, li, indent, depth);
+						else
+							out += yamlParseTaggedValue(inlineVal);
 					}
 				} else if (inlineVal.size() > 1 && inlineVal[0] == '*') {
 					out += yamlResolveAlias(std::string_view(inlineVal).substr(1), anchors, resolving);
@@ -2400,6 +2664,8 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					std::string ytail;
 					if (yamlYamlTagNeedsGather(rest, ytail))
 						out += yamlGatherYamlEmbed(ytail, lines, li, indent);
+					else if (yamlIsSoloTag(rest))
+						out += yamlTaggedBlockValue(rest, lines, li, indent, depth);
 					else
 						out += yamlParseInlineValue(rest);
 				}
@@ -2556,6 +2822,8 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 						std::string ytail;
 						if (yamlYamlTagNeedsGather(valPart, ytail))
 							out += yamlGatherYamlEmbed(ytail, lines, li, indent);
+						else if (yamlIsSoloTag(valPart))
+							out += yamlTaggedBlockValue(valPart, lines, li, indent, depth);
 						else
 							out += yamlParseTaggedValue(valPart);
 					}
@@ -2624,7 +2892,12 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					} else {
 						std::string dc(stripIndent(lines[scan]));
 						if (dc.size() > 1 && dc[0] == '*') out += yamlResolveAlias(std::string_view(dc).substr(1), anchors, resolving);
-						else if (dc.size() > 1 && dc[0] == '!') out += yamlParseTaggedValue(dc);
+						else if (dc.size() > 1 && dc[0] == '!') {
+							if (yamlIsSoloTag(dc))
+								out += yamlTaggedBlockValue(dc, lines, scan, indent, depth);
+							else
+								out += yamlParseTaggedValue(dc);
+						}
 						else out += yamlParseInlineValue(dc);
 					}
 					li = scan; // consume the value line
