@@ -1186,14 +1186,26 @@ inline bool yamlIsSetBlockHeader(std::string_view s) {
 
 inline std::string_view::size_type yamlFindKeyColonSep(std::string_view s);
 
+inline int yamlFlowDepth(std::string_view s);
+inline std::string yamlEscJsonText(std::string_view jsonText);
+inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::string_view firstPart, size_t& li);
+inline std::string yamlFlowJsonAsKey(const std::string& flowText,
+    std::unordered_map<std::string, std::string>* anchors,
+    std::unordered_set<std::string>* resolving, int depth);
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
+
 // Parse a block-style !!set: the header line plus the following "- key" /
-// "? key" item lines (single-line scalar keys). Works at document root or as a
-// mapping/sequence value. Emits "key": null pairs, fixes the item indentation
-// from the first item, and advances `li` past the last consumed line. Content
-// at a different indentation ends the set and is left for the main loop;
-// compound item keys ("- x: v", "- {a}", a bare "-" with deeper content) have
-// no JSON string-key equivalent and are rejected with a clear error.
-inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size_t& li) {
+// "? key" item lines. Works at document root or as a mapping/sequence value.
+// Emits "key": null pairs, fixes the item indentation from the first item, and
+// advances `li` past the last consumed line. Content at a different indentation
+// ends the set and is left for the main loop. Keys stringify like mapping keys:
+// scalar / quoted keys pass through; flow-collection members ("- {a}",
+// "- [a,b]") become keys via their intermediate-JSON text; a bare "-" (or a
+// "? key: value" pair) owns a compound block child node which is parsed
+// recursively and its JSON text becomes the key string.
+inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size_t& li,
+    std::unordered_map<std::string, std::string>* anchors,
+    std::unordered_set<std::string>* resolving, int depth) {
 	std::string out = "{";
 	bool first = true;
 	int itemIndent = -1;
@@ -1205,52 +1217,93 @@ inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size
 		if (itemIndent < 0) itemIndent = ind;
 		else if (ind != itemIndent) break; // sibling content at another level ends the set
 
-		std::string_view body;
+		bool bareDash = false;
+		std::string body;
 		if (!sc.empty() && sc[0] == '-') {
-			if (sc.size() == 1) {
-				// bare "-" owns a child node. A !!set element is a single scalar
-				// key, so a dash with deeper content is a compound key: the
-				// normalizer rewrites "- key: v" into "-\n  key: v", which
-				// arrives here. Reject it loudly instead of leaving a confusing
-				// "sequence and mapping mixed" error to the main loop.
-				size_t p = j + 1;
-				while (p < lines.size()) {
-					std::string_view scp2 = stripIndent(lines[p]);
-					if (scp2.empty() || scp2[0] == '#') { p++; continue; }
-					if (countIndent(lines[p]) > ind)
-						throw asvJSONError("YAML: complex key in block !!set cannot be represented as a JSON string key");
-					break;
-				}
-				break; // no deeper child -- the set simply ends here
-			}
-			if (sc[1] != ' ') break; // "-x": a plain scalar, ends the set
-			body = sc.substr(2);
+			if (sc.size() == 1) bareDash = true;
+			else if (sc[1] == ' ') body = std::string(sc.substr(2));
+			else break; // "-x": a plain scalar, ends the set
 		} else if (sc.size() >= 2 && sc[0] == '?' && sc[1] == ' ') {
-			body = sc.substr(2);
+			body = std::string(sc.substr(2));
 		} else {
 			break; // mapping entry / flow / scalar -- ends the set
 		}
-		while (!body.empty() && (body[0] == ' ' || body[0] == '\t')) body.remove_prefix(1);
+		while (!body.empty() && (body[0] == ' ' || body[0] == '\t')) body.erase(0, 1);
 		body = yamlStripComment(body);
-		while (!body.empty() && (body.back() == ' ' || body.back() == '\t')) body.remove_suffix(1);
-		if (body.empty()) break;
-		// Item keys are scalar nodes only; a mapping ("- x: v") or flow
-		// collection ("- {a}") key has no JSON string-key equivalent.
-		if (yamlFindKeyColonSep(body) != std::string_view::npos)
-			throw asvJSONError("YAML: complex key in block !!set (mapping) cannot be represented as a JSON string key");
-		if (body[0] == '{' || body[0] == '[')
-			throw asvJSONError("YAML: complex key in block !!set (flow collection) cannot be represented as a JSON string key");
-		// Quoted keys are unescaped; plain keys stringify as-is.
-		std::string rawKey;
-		if (body.size() >= 2 && body[0] == '"' && body.back() == '"')
-			rawKey = yamlUnescapeDouble(body.substr(1, body.size() - 2));
-		else if (body.size() >= 2 && body[0] == '\'' && body.back() == '\'')
-			rawKey = yamlUnescapeSingle(body.substr(1, body.size() - 2));
-		else
-			rawKey = std::string(body);
+		while (!body.empty() && (body.back() == ' ' || body.back() == '\t')) body.pop_back();
+
+		std::string keyContent;
+		if (bareDash) {
+			// A bare "-" owns a compound child node on deeper lines. Collect the
+			// whole child (including blank/comment lines) up to the next line at
+			// the item indentation or shallower.
+			size_t p = j + 1;
+			std::vector<std::string> childLines;
+			bool hasChild = false;
+			while (p < lines.size()) {
+				std::string_view cs = stripIndent(lines[p]);
+				if (cs.empty() || cs[0] == '#') { childLines.push_back(lines[p]); p++; continue; }
+				if (countIndent(lines[p]) <= ind) break;
+				childLines.push_back(lines[p]);
+				hasChild = true;
+				p++;
+			}
+			if (!hasChild) break; // a trailing bare dash with no child ends the set
+
+			std::vector<std::string> meaningful;
+			for (const auto& cl : childLines) {
+				std::string_view cs = stripIndent(cl);
+				if (cs.empty() || cs[0] == '#') continue;
+				meaningful.push_back(cl);
+			}
+			// A single plain scalar child is just a scalar set key.
+			if (meaningful.size() == 1) {
+				std::string_view cs = stripIndent(meaningful[0]);
+				if (cs.size() >= 2 && cs[0] == '"' && cs.back() == '"') {
+					keyContent = yamlEscKey(yamlUnescapeDouble(cs.substr(1, cs.size() - 2)));
+				} else if (cs.size() >= 2 && cs[0] == '\'' && cs.back() == '\'') {
+					keyContent = yamlEscKey(yamlUnescapeSingle(cs.substr(1, cs.size() - 2)));
+				} else if (cs.empty() || cs[0] == '-' || cs[0] == '?' || cs[0] == '{' || cs[0] == '[' ||
+				    cs[0] == '!' || cs[0] == '|' || cs[0] == '>' ||
+				    yamlFindKeyColonSep(cs) != std::string_view::npos) {
+					std::string childJson = yamlParseDocImpl(childLines, depth + 1);
+					keyContent = yamlEscJsonText(childJson);
+				} else {
+					keyContent = yamlEscKey(cs);
+				}
+			} else {
+				std::string childJson = yamlParseDocImpl(childLines, depth + 1);
+				keyContent = yamlEscJsonText(childJson);
+			}
+			j = p - 1;
+		} else if (body.empty()) {
+			break;
+		} else if (body[0] == '{' || body[0] == '[') {
+			// Flow-collection member: stringify via its intermediate JSON text.
+			if (yamlFlowDepth(body) > 0)
+				body = yamlGatherFlow(lines, body, j);
+			keyContent = yamlFlowJsonAsKey(body, anchors, resolving, depth);
+		} else if (yamlFindKeyColonSep(body) != std::string_view::npos) {
+			// Single-line mapping pair ("? x: v", "? {a}: v"): parse it as a
+			// one-line document and use its JSON text as the key string.
+			std::vector<std::string> oneLine;
+			oneLine.push_back(std::string(static_cast<size_t>(ind), ' ') + body);
+			std::string pairJson = yamlParseDocImpl(oneLine, depth + 1);
+			keyContent = yamlEscJsonText(pairJson);
+		} else {
+			// Quoted keys are unescaped; plain keys stringify as-is.
+			std::string rawKey;
+			if (body.size() >= 2 && body[0] == '"' && body.back() == '"')
+				rawKey = yamlUnescapeDouble(body.substr(1, body.size() - 2));
+			else if (body.size() >= 2 && body[0] == '\'' && body.back() == '\'')
+				rawKey = yamlUnescapeSingle(body.substr(1, body.size() - 2));
+			else
+				rawKey = body;
+			keyContent = yamlEscKey(rawKey);
+		}
 		if (!first) out += ",";
 		first = false;
-		out += "\"" + yamlEscKey(rawKey) + "\":null";
+		out += "\"" + keyContent + "\":null";
 		li = j;
 		j++;
 	}
@@ -2063,7 +2116,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		// Block-style !!set at document root ("!!set\n- a\n- b")
 		if (yamlIsSetBlockHeader(fc)) {
 			size_t sLi = firstLine;
-			std::string sgot = yamlParseBlockSet(lines, sLi);
+			std::string sgot = yamlParseBlockSet(lines, sLi, &anchors, &resolving, depth);
 			// The set is the whole document: trailing content would be dropped
 			// silently, so reject it.
 			for (size_t t = sLi + 1; t < lines.size(); t++) {
@@ -2248,7 +2301,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				} else if (inlineVal[0] == '!' && inlineVal.size() > 1) {
 					if (yamlIsSetBlockHeader(inlineVal)) {
 						size_t sLi = li;
-						out += yamlParseBlockSet(lines, sLi);
+						out += yamlParseBlockSet(lines, sLi, &anchors, &resolving, depth);
 						li = sLi;
 					} else {
 						out += yamlParseTaggedValue(inlineVal);
@@ -2341,7 +2394,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			} else if (rest.size() > 1 && rest[0] == '!') {
 				if (yamlIsSetBlockHeader(rest)) {
 					size_t sLi = li;
-					out += yamlParseBlockSet(lines, sLi);
+					out += yamlParseBlockSet(lines, sLi, &anchors, &resolving, depth);
 					li = sLi;
 				} else {
 					std::string ytail;
@@ -2497,7 +2550,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				} else if (valPart[0] == '!' && valPart.size() > 1) {
 					if (yamlIsSetBlockHeader(valPart)) {
 						size_t sLi = li;
-						out += yamlParseBlockSet(lines, sLi);
+						out += yamlParseBlockSet(lines, sLi, &anchors, &resolving, depth);
 						li = sLi;
 					} else {
 						std::string ytail;

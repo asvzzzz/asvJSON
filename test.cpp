@@ -4672,26 +4672,73 @@ TEST(testFromYAML) {
 			ASSERT(false);
 		}
 	}
-	// Complex (non-scalar) block-set keys are rejected with a clear error
+	// Complex (non-scalar) block-set keys stringify like mapping keys
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - x: 1"));
-		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - x: 1"));
+		ASSERT(json.getRoot()->get("k")->hasKey("a"));
+		ASSERT(json.getRoot()->get("k")->hasKey("{\"x\":1}"));
 	}
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("!!set\n- a\n- b: 1"));
-		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+		ASSERT(json.fromYAML("!!set\n- a\n- b: 1"));
+		ASSERT(json.getRoot()->hasKey("a"));
+		ASSERT(json.getRoot()->hasKey("{\"b\":1}"));
 	}
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - {x}"));
-		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - {x}"));
+		ASSERT(json.getRoot()->get("k")->hasKey("a"));
+		ASSERT(json.getRoot()->get("k")->hasKey("{\"x\":null}"));
 	}
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("k: !!set\n  - a\n  - - b"));
-		ASSERT(std::string(json.lastError).find("complex key in block !!set") != std::string::npos);
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - - b"));
+		ASSERT(json.getRoot()->get("k")->hasKey("a"));
+		ASSERT(json.getRoot()->get("k")->hasKey("[\"b\"]"));
+	}
+	// Flow-collection set members on the item line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n- {a, b}\n- [x]"));
+		ASSERT(json.getRoot()->hasKey("{\"a\":null,\"b\":null}"));
+		ASSERT(json.getRoot()->hasKey("[\"x\"]"));
+	}
+	// Bare "-" with a multi-key block mapping child
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n-\n  x: 1\n  y: 2"));
+		ASSERT(json.getRoot()->hasKey("{\"x\":1,\"y\":2}"));
+	}
+	// Bare "-" with a block sequence child
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n-\n  - a\n  - b"));
+		ASSERT(json.getRoot()->hasKey("[\"a\",\"b\"]"));
+	}
+	// Bare "-" with a plain scalar child stringifies as a scalar key
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n-\n  hello"));
+		ASSERT(json.getRoot()->hasKey("hello"));
+	}
+	// Bare "-" with a quoted scalar child unescapes the key
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n-\n  \"q k\""));
+		ASSERT(json.getRoot()->hasKey("q k"));
+	}
+	// One-line "? key: value" pair becomes a mapping key
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n? x: 1"));
+		ASSERT(json.getRoot()->hasKey("{\"x\":1}"));
+	}
+	// Nested sets inside bare "-" children recurse correctly
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n-\n  k: !!set\n    - a"));
+		ASSERT(json.getRoot()->hasKey("{\"k\":{\"a\":null}}"));
 	}
 	// Quoted set keys keep colons (quote-aware: not treated as mapping keys)
 	{
