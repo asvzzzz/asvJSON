@@ -203,6 +203,31 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 				if (trailing == 0) ind = "|-";
 				else if (trailing == 1) ind = "|";
 				else ind = "|+";
+				// Content lines that begin (beyond the block indent) with white
+				// space cannot round-trip as plain block scalars: the block indent
+				// is taken from the first content line, so leading spaces are
+				// ambiguous. Use an explicit indent indicator when lines carry
+				// extra leading spaces; space-only or tab-leading lines (which
+				// would be misread as blank or rejected as indentation) fall back
+				// to a quoted string.
+				bool hasLeadSpace = false, needQuote = false;
+				for (size_t i = 0; i < v->str_data.size(); ) {
+					size_t eol = v->str_data.find('\n', i);
+					if (eol == std::string_view::npos) eol = v->str_data.size();
+					std::string_view frag(v->str_data.data() + i, eol - i);
+					size_t j = 0;
+					while (j < frag.size() && (frag[j] == ' ' || frag[j] == '\t')) j++;
+					if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
+					if (j > 0 && j == frag.size()) needQuote = true;          // space-only line
+					if (j > 0 && frag[0] == '\t') needQuote = true;           // tab in indent margin
+					i = eol + 1;
+				}
+				if (!needQuote && hasLeadSpace) {
+					int nb = (indent + 1) * iw;
+					if (nb < 1 || nb > 9) needQuote = true; // no single-digit explicit indent
+					else ind = ind.substr(0, 1) + char('0' + nb) + ind.substr(1);
+				}
+				if (needQuote) { out += prefix() + yamlDQuote(v->str_data) + "\n"; break; }
 				out += prefix() + ind + "\n";
 				for (size_t i = 0; i < v->str_data.size(); ) {
 					size_t eol = v->str_data.find('\n', i);
@@ -1776,6 +1801,13 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	std::string text;
 	int contentIndent = explicitIndent > 0 ? explicitIndent : -1;
 	size_t ci = li + 1;
+	// Collect content lines as structured entries so the folded path can apply
+	// the YAML folding rules (a line break is folded to a space only between
+	// two "neutral" lines; a line ending in white space or a more-indented
+	// line keeps its break literal) and both paths preserve excess leading
+	// spaces (indentation beyond the content indent is data, not indentation).
+	struct YBSLine { std::string content; int excess; bool isBlank; };
+	std::vector<YBSLine> entries;
 	// splitLines does not emit a phantom trailing empty line at EOF, so all
 	// remaining lines here are real content (a genuine trailing blank line is
 	// collected and keeps block-scalar chomp semantics correct).
@@ -1783,12 +1815,12 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 		int si = countIndent(lines[ci]);
 		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
 		std::string_view sc = stripIndent(lines[ci]);
-		if (sc.empty()) { if (contentIndent > 0) text += '\n'; ci++; continue; }
+		if (sc.empty()) { if (contentIndent > 0) entries.push_back({"", 0, true}); ci++; continue; }
 		if (sc[0] == '#') { ci++; continue; }
 		if (parentIndent >= 0 && si <= parentIndent) break;
 		if (contentIndent < 0) contentIndent = si;
 		if (si >= contentIndent) {
-			text += sc; text += '\n';
+			entries.push_back({std::string(sc), si - contentIndent, false});
 			ci++;
 			continue;
 		}
@@ -1798,18 +1830,37 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 
 	if (isFolded) {
 		std::string folded;
-		bool prevNewline = false;
-		for (size_t i = 0; i < text.size(); i++) {
-			if (text[i] == '\n') {
-				if (prevNewline) { folded += '\n'; }
-				prevNewline = true;
-			} else {
-				if (prevNewline && !folded.empty() && folded.back() != '\n') folded += ' ';
-				prevNewline = false;
-				folded += text[i];
+		bool prevEndsWs = false;
+		int brk = 0;
+		bool seen = false;
+		for (const auto& e : entries) {
+			if (e.isBlank) { brk++; continue; }
+			if (seen) {
+				int k = brk + 1; // line breaks between the previous content line and this one
+				if (!prevEndsWs && e.excess == 0) {
+					if (k == 1) folded += ' ';
+					else folded.append(static_cast<size_t>(k - 1), '\n');
+				} else {
+					// Fold does not join across a line ending in white space or a
+					// more-indented line: those line breaks are literal.
+					folded.append(static_cast<size_t>(k), '\n');
+				}
 			}
+			if (e.excess > 0) folded.append(static_cast<size_t>(e.excess), ' ');
+			folded += e.content;
+			prevEndsWs = !e.content.empty() && (e.content.back() == ' ' || e.content.back() == '\t');
+			brk = 0;
+			seen = true;
 		}
+		if (seen) folded.append(static_cast<size_t>(brk), '\n'); // trailing blanks stay literal
 		text = folded;
+	} else {
+		for (const auto& e : entries) {
+			if (e.isBlank) { text += '\n'; continue; }
+			if (e.excess > 0) text.append(static_cast<size_t>(e.excess), ' ');
+			text += e.content;
+			text += '\n';
+		}
 	}
 
 	size_t trailing = 0;

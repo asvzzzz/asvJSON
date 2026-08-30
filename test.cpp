@@ -3811,6 +3811,37 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("text: |2-\n  hello\n  world"));
 		ASSERT_EQ(std::string(json.getString("text")), "hello\nworld");
 	}
+	// Folded block scalar does not fold a line ending in white space
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >\n  hello   \n  world"));
+		ASSERT_EQ(std::string(json.getString("text")), "hello   \nworld\n");
+	}
+	// Folded block scalar keeps the break literal after a more-indented line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >\n  a\n    b\n  c"));
+		ASSERT_EQ(std::string(json.getString("text")), "a\n  b c\n");
+	}
+	// Folded block scalar: trailing space on a line keeps its break literal
+	// even across a blank line
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: >-\n  a  \n\n  b"));
+		ASSERT_EQ(std::string(json.getString("text")), "a  \n\nb");
+	}
+	// Literal block scalar preserves excess leading indentation as content
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |\n  a\n    b\n  c"));
+		ASSERT_EQ(std::string(json.getString("text")), "a\n  b\nc\n");
+	}
+	// Literal block scalar with explicit indent digit preserves excess spaces
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("text: |2\n    hello\n      world"));
+		ASSERT_EQ(std::string(json.getString("text")), "  hello\n    world\n");
+	}
 	// Round-trip: multi-line strings with and without trailing newline
 	{
 		asvJSON json;
@@ -3819,6 +3850,8 @@ TEST(testFromYAML) {
 		json.putString("c", "line1\n\nline2\n\n");
 		json.putString("d", "leading\n\n");
 		json.putString("e", "\nlead");
+		json.putString("f", "  lead\n  x\n");
+		json.putString("g", "no\n\tbolt\nx");
 		asvJSON j2;
 		ASSERT(j2.fromYAML(json.toYAML()));
 		ASSERT_EQ(std::string(j2.getString("a")), "line1\nline2");
@@ -3826,6 +3859,8 @@ TEST(testFromYAML) {
 		ASSERT_EQ(std::string(j2.getString("c")), "line1\n\nline2\n\n");
 		ASSERT_EQ(std::string(j2.getString("d")), "leading\n\n");
 		ASSERT_EQ(std::string(j2.getString("e")), "\nlead");
+		ASSERT_EQ(std::string(j2.getString("f")), "  lead\n  x\n");
+		ASSERT_EQ(std::string(j2.getString("g")), "no\n\tbolt\nx");
 	}
 	// Double-quoted YAML string with \n escape
 	{
