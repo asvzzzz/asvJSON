@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.6.0 - C++17 JSON library - Core Module
+// asvJSON++ v1.16.0 - C++17 JSON library - Core Module
 // 
 // Configuration:
 //   - Default (undefined): insertion-ordered object map (ObjectMapT).
@@ -48,6 +48,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <functional>
 #include <utility>
 #include <cstring>
 #include <cstdint>
@@ -903,6 +904,17 @@ public:
 	// sequences cause parse() to return false with lastError set. Off by default.
 	bool validateUTF8 = false;
 public:
+	// Optional user hook that transforms custom-tag annotations
+	// ({"$customTag":{"name":...,"value":...}}) into other value types at parse
+	// time. It is invoked whenever the parser recognizes such an annotation
+	// (YAML, GOON, UDE, and plain JSON all funnel through the same JSON object
+	// parser). The callback receives the resolved tag name and the tag's value
+	// (read-only); return a replacement value to substitute for the default
+	// CUSTOM_TAG node, or nullptr to keep the default CUSTOM_TAG.
+	using CustomTagTransform = std::function<std::unique_ptr<asvJSONValue>(const std::string& name,
+	    const asvJSONValue& value)>;
+	CustomTagTransform customTagTransform;
+public:
 	size_t size() const {
 		return root ? root->size() : 0;
 	}
@@ -1135,6 +1147,10 @@ private:
 					auto vIt = ctIt->second->obj->find("value");
 					if (nIt != ctIt->second->obj->end() && nIt->second->type == asvJSONValue::STRING &&
 					    vIt != ctIt->second->obj->end()) {
+						if (customTagTransform && vIt->second) {
+							auto replaced = customTagTransform(nIt->second->str_data, *vIt->second);
+							if (replaced) return replaced;
+						}
 						auto custom = std::make_unique<asvJSONValue>();
 						custom->type = asvJSONValue::CUSTOM_TAG;
 						custom->str_data = nIt->second->str_data;

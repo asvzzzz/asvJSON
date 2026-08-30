@@ -47,7 +47,7 @@ MIT license - see the `LICENSE` file for details.
 - BSON (binary)
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
-- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`/`!!value`/`!!yaml`), block-style `!!set` (`- key` / `? key` items), explicit tags on block nodes (`!!map`/`!!seq`/`!!binary`/custom at root, mapping values, sequence items, explicit keys), complex (flow-collection) mapping keys stringified to JSON string keys, user-defined tags preserved as `CUSTOM_TAG`, configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
+- YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`/`!!value`/`!!yaml`), block-style `!!set` (`- key` / `? key` items), explicit tags on block nodes (`!!map`/`!!seq`/`!!binary`/custom at root, mapping values, sequence items, explicit keys), complex (flow-collection) mapping keys stringified to JSON string keys, user-defined tags preserved as `CUSTOM_TAG` (with an optional `customTagTransform` hook to dispatch them to custom types at parse time), configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
 - XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension)
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
@@ -859,6 +859,11 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.16.0 (2026-08-30)
+
+- **New - Custom tag dispatch hook:** Added `asvJSON::customTagTransform`, an optional user callback invoked at parse time whenever a custom-tag annotation (`{"$customTag":{"name":...,"value":...}}`) is recognized. It applies uniformly across YAML, GOON, UDE, and plain JSON (all funnel through the JSON object parser). The callback receives the resolved tag name and the tag's value and returns a replacement `std::unique_ptr<asvJSONValue>` (or `nullptr` to keep the default `CUSTOM_TAG` node). This closes the last remaining YAML/GOON known-gap item.
+- **Version bump:** 1.15.0 -> 1.16.0
 
 ### 1.15.0 (2026-08-26)
 

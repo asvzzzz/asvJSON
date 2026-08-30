@@ -944,6 +944,32 @@ void example_from_yaml() {
 	}
 }
 
+void example_custom_tag_transform() {
+	std::cout << "=== Custom Tag Transform ===" << std::endl;
+
+	asvJSON json;
+	// Transform custom-tag annotations (!point, !uuid) into concrete values
+	// at parse time. Returning nullptr keeps the default CUSTOM_TAG node.
+	json.customTagTransform = [](const std::string& name, const asvJSONValue& value)
+	    -> std::unique_ptr<asvJSONValue> {
+		if (name == "point") {
+			int x = value.get("x") ? value.get("x")->getInt() : 0;
+			int y = value.get("y") ? value.get("y")->getInt() : 0;
+			return asvJSONValue::makeStringView("POINT(" + std::to_string(x) + "," + std::to_string(y) + ")");
+		}
+		if (name == "uuid")
+			return asvJSONValue::makeStringView(std::string("UUID:") + value.getString());
+		return nullptr;
+	};
+	if (json.fromYAML("origin: !point {x: 1, y: 2}\nid: !uuid abc-123\nother: !mytag keep")) {
+		std::cout << "  origin=" << json.getString("origin") << std::endl;
+		std::cout << "  id=" << json.getString("id") << std::endl;
+		std::cout << "  other (CUSTOM_TAG kept)=" << json.serialize() << std::endl;
+	} else {
+		std::cout << "  fromYAML failed" << std::endl;
+	}
+}
+
 void example_to_csv() {
 	std::cout << "=== toCSV Serialization ===" << std::endl;
 
@@ -1636,6 +1662,7 @@ int main() {
 	example_to_yaml_multiline();
 	example_to_yaml_options();
 	example_from_yaml();
+	example_custom_tag_transform();
 	example_to_csv();
 	example_to_csv_array();
 	example_from_csv();

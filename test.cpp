@@ -4435,6 +4435,44 @@ TEST(testFromYAML) {
 		ASSERT(k != nullptr && k->type == asvJSONValue::CUSTOM_TAG);
 		ASSERT_EQ(std::string(k->str_data), "tag:example.com,2024:type");
 	}
+	// Custom-tag transform hook: returning a replacement substitutes it for the
+	// default CUSTOM_TAG node (YAML path).
+	{
+		asvJSON json;
+		json.customTagTransform = [](const std::string& name, const asvJSONValue& v) -> std::unique_ptr<asvJSONValue> {
+			if (name == "point") {
+				std::string s = "POINT/" + std::to_string(v.get("x")->getInt()) + "/" + std::to_string(v.get("y")->getInt());
+				return asvJSONValue::makeStringView(s);
+			}
+			return nullptr; // keep default CUSTOM_TAG for other tags
+		};
+		ASSERT(json.fromYAML("p: !point {x: 1, y: 2}"));
+		auto* p = json.getRoot()->get("p");
+		ASSERT(p != nullptr && p->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(p->getString()), "POINT/1/2");
+	}
+	// Custom-tag transform hook: returning nullptr keeps the default CUSTOM_TAG.
+	{
+		asvJSON json;
+		json.customTagTransform = [](const std::string&, const asvJSONValue&) -> std::unique_ptr<asvJSONValue> {
+			return nullptr;
+		};
+		ASSERT(json.fromYAML("p: !point {x: 1}"));
+		auto* p = json.getRoot()->get("p");
+		ASSERT(p != nullptr && p->type == asvJSONValue::CUSTOM_TAG);
+	}
+	// Custom-tag transform hook applies to the plain JSON $customTag path too.
+	{
+		asvJSON json;
+		json.customTagTransform = [](const std::string& name, const asvJSONValue& v) -> std::unique_ptr<asvJSONValue> {
+			if (name == "uuid") return asvJSONValue::makeStringView(std::string("UUID:").append(v.getString()));
+			return nullptr;
+		};
+		ASSERT(json.parse("{\"id\":{\"$customTag\":{\"name\":\"uuid\",\"value\":\"abc\"}}}"));
+		auto* id = json.getRoot()->get("id");
+		ASSERT(id != nullptr && id->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(id->getString()), "UUID:abc");
+	}
 	// Inline flow mapping
 	{
 		asvJSON json;
