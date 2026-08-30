@@ -1097,10 +1097,21 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		}
 		return "[]";
 	}
-	// !!map, !!seq -- pass through value (handled by main loop for block, here for flow)
+	// !!map, !!seq -- the value is a flow collection; parse it to JSON so
+	// unquoted keys and YAML scalars become proper JSON (block context is
+	// handled by the main loop via yamlTaggedBlockValue). The wrong kind (e.g.
+	// "!!map [1]" or "!!seq {a:1}") is a representational error.
 	if (tag == "!!map" || tag == "!!seq") {
-		if (!val.empty()) return std::string(val);
-		return (tag == "!!seq") ? "[]" : "{}";
+		if (val.empty()) return (tag == "!!seq") ? "[]" : "{}";
+		if (val[0] == '{' || val[0] == '[') {
+			std::string tmp(val);
+			size_t fp = 0;
+			std::string flowJson = yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
+			if (tag == "!!seq" && (flowJson.empty() || flowJson[0] != '[')) throw asvJSONError("YAML: !!seq requires a sequence");
+			if (tag == "!!map" && (flowJson.empty() || flowJson[0] != '{')) throw asvJSONError("YAML: !!map requires a mapping");
+			return flowJson;
+		}
+		return std::string(val);
 	}
 
 	// Unknown tag -- preserve the annotation as a CUSTOM_TAG. The tag name is
@@ -2165,6 +2176,29 @@ inline bool yamlIsSoloTag(std::string_view s) {
 	return rem[q] == '#';
 }
 
+// Return the index in `s` of the first flow-collection brace ('{' or '[')
+// that follows a leading tag token, or npos when `s` is not a "tag <flow>"
+// form. Used to detect root-level tagged flow values like "!!set {a, b}",
+// "!!seq [1, 2]", "!!map {a:1}", or "!cust [x]".
+inline size_t yamlFlowAfterTag(std::string_view s) {
+	while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.remove_prefix(1);
+	while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.remove_suffix(1);
+	if (s.empty() || s[0] != '!') return std::string_view::npos;
+	size_t i = 1;
+	if (s.size() >= 2 && s[1] == '!') {
+		while (i < s.size() && s[i] != ' ' && s[i] != '\t') i++;
+	} else if (s.size() >= 2 && s[1] == '<') {
+		size_t c = s.find('>', 2);
+		if (c == std::string_view::npos) return std::string_view::npos;
+		i = c + 1;
+	} else {
+		while (i < s.size() && s[i] != ' ' && s[i] != '\t') i++;
+	}
+	while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
+	if (i < s.size() && (s[i] == '{' || s[i] == '[')) return i;
+	return std::string_view::npos;
+}
+
 // Parse the value of a solo tag that annotates a block node on deeper lines
 // ("x: !!map\n  a: 1", "- !!seq\n  - 1"). `parentIndent` is the indent of the
 // tag line (the block child must be strictly deeper; -1 at document root takes
@@ -2499,6 +2533,26 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			std::string got = yamlParseFlowValue(flowText, fp, &anchors, &resolving, 0);
 			if (fp < flowText.size()) throw asvJSONError("YAML: trailing content after flow value");
 			return got;
+		}
+		// Tagged flow value at document root ("!!set {a, b}", "!!seq [1, 2]",
+		// "!!map {a:1}", "!cust [x]"). Gather the flow collection, then apply
+		// the tag (which re-parses and dispatches: !!set -> $set marker,
+		// !!map/!!seq validate kind, custom tags wrap in CUSTOM_TAG, etc.).
+		{
+			size_t flowPos = yamlFlowAfterTag(fc);
+			if (flowPos != std::string_view::npos) {
+				std::string tagPart = std::string(fc.substr(0, flowPos));
+				while (!tagPart.empty() && (tagPart.back() == ' ' || tagPart.back() == '\t')) tagPart.pop_back();
+				size_t fLi = firstLine;
+				std::string flowText = yamlGatherFlow(lines, std::string(fc.substr(flowPos)), fLi);
+				std::string tagged = yamlParseTaggedValue(tagPart + " " + flowText);
+				for (size_t t = fLi + 1; t < lines.size(); t++) {
+					std::string_view tc = stripIndent(lines[t]);
+					if (tc.empty() || tc[0] == '#') continue;
+					throw asvJSONError("YAML: unexpected content after tagged value");
+				}
+				return tagged;
+			}
 		}
 		// Block-style !!set at document root ("!!set\n- a\n- b")
 		if (yamlIsSetBlockHeader(fc)) {

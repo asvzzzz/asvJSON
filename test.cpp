@@ -5221,6 +5221,53 @@ TEST(testFromYAML) {
 		ASSERT(c.fromYAML("!!set\n- a"));
 		ASSERT(*(a.getRoot()) == *(c.getRoot()));
 	}
+	// Root-level tagged flow values ("!!set {a, b}", "!!seq [1, 2]",
+	// "!!map {a:1}") parse as the tagged value and round-trip.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set {a, b}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"$set\":[\"a\",\"b\"]}");
+		asvJSON json2;
+		ASSERT(json2.parse(s.c_str()));
+		std::string s2;
+		json2.getRoot()->serialize(s2);
+		ASSERT(std::string(s2) == s);
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!seq [1, 2]"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "[1,2]");
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!map {a: 1}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"a\":1}");
+		// !!map with a non-mapping flow value is a representational error.
+		ASSERT(!json.fromYAML("!!map [1, 2]"));
+		// !!seq with a non-sequence flow value is a representational error.
+		ASSERT(!json.fromYAML("!!seq {a: 1}"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!cust {a: 1}"));
+		auto* root = json.getRoot();
+		ASSERT(root != nullptr && root->type == asvJSONValue::CUSTOM_TAG);
+	}
+	// Root-level tagged flow value on a mapping value ("v: !!map {a: 1}")
+	// also parses the flow into proper JSON (unquoted keys) and round-trips.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("v: !!map {a: 1}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"v\":{\"a\":1}}");
+	}
 	// Core Schema: !!omap [{a:1},{b:2}]
 	{
 		asvJSON json;
