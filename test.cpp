@@ -3862,6 +3862,63 @@ TEST(testFromYAML) {
 		ASSERT_EQ(std::string(j2.getString("f")), "  lead\n  x\n");
 		ASSERT_EQ(std::string(j2.getString("g")), "no\n\tbolt\nx");
 	}
+	// YAML comment round-trip: header, per-key trailing, nested leading,
+	// sequence-element comments, block-scalar-header trailing, footer
+	{
+		asvJSON json;
+		const char* in = "# header comment\n\ncity: Berlin # trailing on scalar\nnested:\n  # inner comment\n  value: 42 # after int\nlist:\n  # before item\n  - alpha\n  - beta # beta gets this\n  - gamma\nblock: | # block scalar header\n  line1\n\n# footer comment\n";
+		ASSERT(json.fromYAML(in));
+		std::string out = json.toYAML();
+		ASSERT(out.find("# header comment") != std::string::npos);
+		ASSERT(out.find("city: Berlin # trailing on scalar") != std::string::npos);
+		ASSERT(out.find("# inner comment") != std::string::npos);
+		ASSERT(out.find("value: 42 # after int") != std::string::npos);
+		ASSERT(out.find("# before item") != std::string::npos);
+		ASSERT(out.find("beta # beta gets this") != std::string::npos);
+		ASSERT(out.find("| # block scalar header") != std::string::npos);
+		ASSERT(out.find("# footer comment") != std::string::npos);
+		// idempotent: re-parsing the emitted document re-emits it verbatim
+		asvJSON j2;
+		ASSERT(j2.fromYAML(out));
+		ASSERT_EQ(out, j2.toYAML());
+	}
+	// Dashes at the same indent as the owning key ("list:\n- a\n- b")
+	// still collect comments and round-trip
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("list:\n- alpha\n- beta # t\nsib: 1\n# tail\n"));
+		std::string out = json.toYAML();
+		ASSERT(out.find("- beta # t") != std::string::npos);
+		ASSERT(out.find("# tail") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(out));
+		asvJSONValue* lst = j2.getRoot()->get("list");
+		ASSERT(lst != nullptr && lst->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(lst->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(lst->arr->at(1)->getString()), "beta");
+	}
+	// A comment-prefixed line inside a block-scalar body is treated as a
+	// comment by the decoder, so it is dropped from the content (and never
+	// collected as a node comment) -- the body round-trips the remainder
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: |\n  # data not comment\n  more\n"));
+		ASSERT_EQ(std::string(json.getString("s")), "more\n");
+		asvJSON j2;
+		ASSERT(j2.fromYAML(json.toYAML()));
+		ASSERT_EQ(std::string(j2.getString("s")), "more\n");
+	}
+	// Comments are YAML-only metadata: they do not leak into the JSON
+	// output, and a JSON round-trip yields a comment-free YAML document
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: 1 # trailing\n# lead\nb: 2\n"));
+		std::string js = json.serialize();
+		ASSERT(js.find('#') == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.parse(js));
+		ASSERT_EQ(j2.toYAML(), std::string("---\na: 1\nb: 2\n"));
+	}
 	// Double-quoted YAML string with \n escape
 	{
 		asvJSON json;

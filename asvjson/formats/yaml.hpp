@@ -10,7 +10,7 @@ inline constexpr size_t MAX_YAML_DEPTH = 64;
 
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o);
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc);
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow);
 
@@ -18,6 +18,13 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 	if (o.doubleQuotes) return yamlDQuote(s);
 	return yamlQuote(s);
+}
+
+// Trailing comment suffix for a value line ("" when the node carries none).
+inline std::string yamlTrail(const asvJSONValue* v) {
+	if (v->yaml_comments && !v->yaml_comments->trailing.empty())
+		return " " + v->yaml_comments->trailing;
+	return std::string();
 }
 
 inline bool yamlNeedQuoteOpt(std::string_view s, const YamlWriteOptions& o) {
@@ -43,7 +50,7 @@ inline void asvJSONValue::toYAML(std::string& out, const YamlWriteOptions& opts)
 	switch (opts.style) {
 		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, 0, "", false, opts, false); break;
 		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, 0, "", false, opts, true); break;
-		default: yamlBlockVal(this, out, 0, "", false, opts);
+		default: yamlBlockVal(this, out, 0, "", false, opts, true);
 	}
 }
 
@@ -53,7 +60,7 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 	switch (o.style) {
 		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, indent, key, isArrayItem, o, false); break;
 		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, indent, key, isArrayItem, o, true); break;
-		default: yamlBlockVal(this, out, indent, key, isArrayItem, o);
+		default: yamlBlockVal(this, out, indent, key, isArrayItem, o, true);
 	}
 }
 
@@ -64,6 +71,8 @@ inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
 			out += "---\n";
 		}
 		root->toYAML(out, opts);
+		if (opts.style == YamlWriteOptions::Style::Block && root->yaml_comments)
+			for (const auto& cl : root->yaml_comments->footing) out += cl + "\n";
 	}
 	return out;
 }
@@ -169,7 +178,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 
 // Emit a value in block style at the given indent.
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o) {
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc) {
 	using T = asvJSONValue::Type;
 	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
@@ -178,22 +187,27 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 		return "";
 	};
 
+	if (wc && v->yaml_comments && !v->yaml_comments->leading.empty()) {
+		for (const auto& cl : v->yaml_comments->leading)
+			out += std::string(indent * iw, ' ') + cl + "\n";
+	}
+
 	switch (v->type) {
 		case T::NULL_VAL:
-			out += prefix() + "~\n"; break;
+			out += prefix() + "~" + yamlTrail(v) + "\n"; break;
 		case T::BOOL_VAL:
-			out += prefix() + (v->flag ? "true" : "false") + "\n"; break;
+			out += prefix() + (v->flag ? "true" : "false") + yamlTrail(v) + "\n"; break;
 		case T::INT: {
 			char buf[32];
 			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + "\n";
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v) + "\n";
 			break;
 		}
 		case T::DOUBLE: {
-			if (std::isnan(v->dbl)) { out += prefix() + ".nan\n"; break; }
-			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf\n" : "-.inf\n"); break; }
+			if (std::isnan(v->dbl)) { out += prefix() + ".nan" + yamlTrail(v) + "\n"; break; }
+			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf" : "-.inf") + yamlTrail(v) + "\n"; break; }
 			std::string val; fmtDoubleVal(v->dbl, val);
-			out += prefix() + val + "\n"; break;
+			out += prefix() + val + yamlTrail(v) + "\n"; break;
 		}
 		case T::STRING: {
 			if (v->str_data.find('\n') != std::string_view::npos && !v->str_data.empty() && v->str_data[0] != '\n') {
@@ -227,8 +241,8 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					if (nb < 1 || nb > 9) needQuote = true; // no single-digit explicit indent
 					else ind = ind.substr(0, 1) + char('0' + nb) + ind.substr(1);
 				}
-				if (needQuote) { out += prefix() + yamlDQuote(v->str_data) + "\n"; break; }
-				out += prefix() + ind + "\n";
+				if (needQuote) { out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v) + "\n"; break; }
+				out += prefix() + ind + yamlTrail(v) + "\n";
 				for (size_t i = 0; i < v->str_data.size(); ) {
 					size_t eol = v->str_data.find('\n', i);
 					if (eol == std::string_view::npos) eol = v->str_data.size();
@@ -236,36 +250,36 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					i = eol + 1;
 				}
 			} else if (v->str_data.find('\n') != std::string_view::npos) {
-				out += prefix() + yamlDQuote(v->str_data) + "\n";
+				out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v) + "\n";
 			} else if (yamlNeedQuoteOpt(v->str_data, o)) {
-				out += prefix() + yamlQuoteStr(v->str_data, o) + "\n";
+				out += prefix() + yamlQuoteStr(v->str_data, o) + yamlTrail(v) + "\n";
 			} else {
-				out += prefix() + v->str_data + "\n";
+				out += prefix() + v->str_data + yamlTrail(v) + "\n";
 			}
 			break;
 		}
 		case T::DATETIME: {
 			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
-			out += prefix() + dt + "\n"; break;
+			out += prefix() + dt + yamlTrail(v) + "\n"; break;
 		}
 		case T::BINARY:
-			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\n"; break;
+			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + yamlTrail(v) + "\n"; break;
 		case T::OBJECTID: {
 			std::string hex; fmtObjectIdHexVal(v->str_data, hex);
-			out += prefix() + "!objectid " + hex + "\n"; break;
+			out += prefix() + "!objectid " + hex + yamlTrail(v) + "\n"; break;
 		}
 		case T::REGEX: {
 			std::string r; fmtRegexVal(v->str_data, r);
-			out += prefix() + "!regex " + r + "\n"; break;
+			out += prefix() + "!regex " + r + yamlTrail(v) + "\n"; break;
 		}
 		case T::TIMESTAMP: {
 			char buf[32];
 			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + "\n";
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v) + "\n";
 			break;
 		}
 		case T::EXTENSION:
-			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + "\n";
+			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + yamlTrail(v) + "\n";
 			break;
 		case T::CUSTOM_TAG: {
 			// "key: !name <value>"; the value stays inline (force-flow) so the
@@ -274,41 +288,41 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + " " + childOut + "\n";
+				out += prefix() + "!" + nm + " " + childOut + yamlTrail(v) + "\n";
 			} else {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + "\n";
+				out += prefix() + "!" + nm + yamlTrail(v) + "\n";
 			}
 			break;
 		}
 		case T::OBJECT: {
-			if (!v->obj || v->obj->empty()) { out += prefix() + "{}\n"; break; }
+			if (!v->obj || v->obj->empty()) { out += prefix() + "{}" + yamlTrail(v) + "\n"; break; }
 			if (key.empty() && !isArrayItem) {
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc);
 			} else {
-				out += prefix() + "\n";
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o);
+				out += prefix() + yamlTrail(v) + "\n";
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o, wc);
 			}
 			break;
 		}
 		case T::ARRAY: {
-			if (!v->arr || v->arr->empty()) { out += prefix() + "[]\n"; break; }
+			if (!v->arr || v->arr->empty()) { out += prefix() + "[]" + yamlTrail(v) + "\n"; break; }
 			if (!isArrayItem && key.empty()) {
 				out += "---\n";
-				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o);
+				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o, wc);
 				break;
 			}
-			out += prefix() + "\n";
+			out += prefix() + yamlTrail(v) + "\n";
 			// A nested sequence used as a sequence item must indent its own
 			// items one level deeper than its dash, otherwise the block parser
 			// cannot tell parent items from child items ("m: [[1],[2]]").
 			int childIndent = isArrayItem ? indent + 1 : indent;
-			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o);
+			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o, wc);
 			break;
 		}
 		default:
-			out += prefix() + "~\n"; break;
+			out += prefix() + "~" + yamlTrail(v) + "\n"; break;
 	}
 }
 
@@ -348,7 +362,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow);
 		}
 	} else {
-		yamlBlockVal(v, out, indent, key, isArrayItem, o);
+		yamlBlockVal(v, out, indent, key, isArrayItem, o, false);
 	}
 }
 
@@ -3064,6 +3078,250 @@ inline bool yamlIsBoundaryMarker(std::string_view s, bool isStart) {
 	return s.empty() || s.front() == '#';
 }
 
+// ==================== YAML comment round-trip ====================
+// A safety-first structural scanner that decides, for each full-line comment
+// and each trailing comment, the JSON path of the node it belongs to. It
+// mirrors the block parser's indentation/key/sequence heuristics but never
+// guesses: uncertain shapes (explicit "?" keys, compound/flow keys, block
+// scalar bodies, multi-document streams) simply drop the pending comments
+// rather than mis-place them. Comments attach to the parsed tree itself, so
+// they survive a YAML -> YAML round-trip but never leak into JSON or other
+// formats (equality and cloning ignore them).
+
+struct YamlCommentEntry {
+	std::string path;                    // "\x01" reserves the document footing
+	std::vector<std::string> leading;    // full-line comments ("# ...")
+	std::string trailing;                // comment at the end of the value line (incl. '#')
+};
+
+// The trailing "# ..." comment of a line (quote/escape aware), or empty.
+inline std::string yamlTrailingComment(std::string_view s) {
+	bool inSQ = false, inDQ = false;
+	for (size_t i = 0; i < s.size(); i++) {
+		if (inDQ) {
+			if (s[i] == '\\' && i + 1 < s.size()) { i++; continue; }
+			if (s[i] == '"') inDQ = false;
+		} else if (inSQ) {
+			if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') { i++; continue; }
+			if (s[i] == '\'') inSQ = false;
+		} else {
+			if (s[i] == '#') return std::string(s.substr(i));
+			if (s[i] == '"') inDQ = true;
+			if (s[i] == '\'') inSQ = true;
+		}
+	}
+	return std::string();
+}
+
+inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input) {
+	std::vector<YamlCommentEntry> out;
+	auto lines = splitLines(input);
+	// Each frame is a block container: the indent of its entries, its kind
+	// ('m' map / 's' sequence), the JSON path of the container itself, the
+	// sequence counter, and the path of the last recorded entry (the container
+	// opened by a deeper line).
+	struct YFrame { int indent; char kind; std::string path; int seqIdx; std::string lastEntry; std::string open; };
+	std::vector<YFrame> st;
+	std::vector<std::string> pending;
+	bool disabled = false;   // multi-document streams do not keep comments
+	int boundaryCount = 0;
+	int blockBody = -1;      // indent of a block-scalar header line; deeper lines are body text
+
+	for (size_t li = 0; li < lines.size(); li++) {
+		if (disabled) break;
+		const int indent = countIndent(lines[li]);
+		std::string_view c = stripIndent(lines[li]);
+
+		if (blockBody >= 0) {
+			if (indent > blockBody) continue;  // block-scalar body text is data
+			blockBody = -1;
+		}
+		if (!c.empty() && indent == 0 && yamlIsBoundaryMarker(c, true)) {
+			if (++boundaryCount > 1) { disabled = true; break; }
+			pending.clear();
+			continue;
+		}
+		if (!c.empty() && indent == 0 && yamlIsBoundaryMarker(c, false)) {
+			disabled = true;
+			break;
+		}
+		if (!c.empty() && c[0] == '%' && indent == 0) { pending.clear(); continue; }
+
+		if (c.empty() || c[0] == '#') {
+			if (!c.empty()) pending.push_back(std::string(c));
+			continue;
+		}
+
+		// -- content line --
+		std::string_view rest = c;
+		bool dash = false;
+		if (yamlIsDashStart(c)) {
+			dash = true;
+			rest = c.size() >= 2 ? c.substr(2) : std::string_view();
+			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
+		}
+
+		const char kind = dash ? 's' : 'm';
+		for (;;) {
+			while (!st.empty() && st.back().indent > indent) st.pop_back();
+			if (st.empty()) {
+				// Root container frame (map or sequence).
+				YFrame f; f.indent = indent; f.kind = kind; f.seqIdx = 0;
+				st.push_back(f);
+				break;
+			}
+			YFrame& top = st.back();
+			if (indent > top.indent) {
+				// Deeper line: the previous entry of the enclosing frame becomes
+				// the container that owns this new frame's entries.
+				YFrame f; f.indent = indent; f.kind = kind; f.seqIdx = 0;
+				f.path = top.lastEntry;
+				st.push_back(f);
+				break;
+			}
+			if (indent == top.indent) {
+				if (top.kind == 's' && !dash) {
+					// A non-dash line at the sequence's own indent ends the block
+					// sequence (the parser re-homes it as the parent's sibling).
+					st.pop_back();
+					continue;
+				}
+				if (top.kind == 'm' && dash && !top.open.empty()) {
+					// A dash at the same indent as an empty-looking key continues
+					// that key as a sequence value ("list:\n- a\n- b").
+					YFrame f; f.indent = indent; f.kind = 's'; f.seqIdx = 0;
+					f.path = top.open;
+					st.push_back(f);
+				}
+				break; // regular entry in the current frame
+			}
+			break;
+		}
+
+		bool bindable = true;
+		std::string entryPath;   // JSON path of the node this line names
+		std::string valuePart;
+
+		YFrame& top = st.back();
+		if (top.kind == 's') {
+			entryPath = top.path.empty() ? "[" + std::to_string(top.seqIdx) + "]"
+			                             : top.path + "\x1F" + "[" + std::to_string(top.seqIdx) + "]";
+			top.seqIdx++;
+			valuePart = std::string(rest);
+		} else {
+			// '?', ':', '{' and '[' at the value position are explicit-key or
+			// compound-key constructs without a single JSON key -- drop comments.
+			if (rest.empty() || rest[0] == '?' || rest[0] == ':' || rest[0] == '{' || rest[0] == '[') {
+				bindable = false;
+			} else {
+				size_t colon = yamlFindKeyColonSep(rest);
+				if (colon == std::string_view::npos || colon == 0) {
+					bindable = false;
+				} else {
+					std::string_view keyPart = rest.substr(0, colon);
+					while (!keyPart.empty() && (keyPart.back() == ' ' || keyPart.back() == '\t')) keyPart.remove_suffix(1);
+					if (!keyPart.empty() && (keyPart[0] == '{' || keyPart[0] == '[')) {
+						bindable = false;
+					} else {
+						const std::string sep = top.path.empty() ? std::string() : "\x1F";
+						if (keyPart.size() >= 2 && keyPart[0] == '"' && keyPart.back() == '"')
+							entryPath = top.path + sep + yamlUnescapeDouble(keyPart.substr(1, keyPart.size() - 2));
+						else if (keyPart.size() >= 2 && keyPart[0] == '\'' && keyPart.back() == '\'')
+							entryPath = top.path + sep + yamlUnescapeSingle(keyPart.substr(1, keyPart.size() - 2));
+						else
+							entryPath = top.path + sep + std::string(keyPart);
+					}
+					if (colon + 1 < rest.size()) valuePart = std::string(rest.substr(colon + 1));
+				}
+			}
+		}
+		top.lastEntry = bindable ? entryPath : std::string();
+		if (top.kind == 'm') {
+			// Track empty-valued keys ("key:" with no value): a dash on the same
+			// indent is their sequence value ("list:\n- a").
+			bool hasVal = false;
+			for (char ch : valuePart) {
+				if (ch != ' ' && ch != '\t') { hasVal = ch != '#'; break; }
+			}
+			top.open = (bindable && !hasVal) ? entryPath : std::string();
+		}
+
+		if (bindable) {
+			std::string trail = valuePart.empty() ? std::string() : yamlTrailingComment(valuePart);
+			if (!pending.empty()) {
+				YamlCommentEntry e; e.path = entryPath; e.leading = std::move(pending);
+				out.push_back(std::move(e));
+			}
+			if (!trail.empty()) {
+				// Merge with a just-created leading-only entry for the same node.
+				if (!out.empty() && out.back().path == entryPath && out.back().trailing.empty())
+					out.back().trailing = trail;
+				else {
+					YamlCommentEntry e; e.path = entryPath; e.trailing = trail;
+					out.push_back(std::move(e));
+				}
+			}
+		} else {
+			pending.clear();
+		}
+
+		if (yamlIsBlockScalarHeader(c)) blockBody = indent;
+	}
+	if (!disabled && !pending.empty()) {
+		YamlCommentEntry e; e.path = "\x01"; e.leading = std::move(pending);
+		out.push_back(std::move(e));
+	}
+	return out;
+}
+
+// Resolve a comment path ("a\x1Fb\x1F[2]") against the parsed tree.
+inline asvJSONValue* yamlFindPath(asvJSONValue* root, std::string_view path) {
+	if (path.empty()) return root;
+	asvJSONValue* cur = root;
+	size_t pos = 0;
+	while (pos <= path.size()) {
+		size_t sep = path.find_first_of("\x1F", pos);
+		std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
+		if (seg.empty()) return nullptr;
+		if (seg[0] == '[') {
+			if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+			size_t idx = 0;
+			for (size_t k = 1; k + 1 < seg.size(); k++) {
+				char d = seg[k];
+				if (d < '0' || d > '9') return nullptr;
+				idx = idx * 10 + static_cast<size_t>(d - '0');
+			}
+			if (idx >= cur->arr->size()) return nullptr;
+			cur = (*cur->arr)[idx].get();
+		} else {
+			if (cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
+			auto it = mapFind(*cur->obj, seg);
+			if (it == cur->obj->end()) return nullptr;
+			cur = it->second.get();
+		}
+		if (sep == std::string_view::npos) break;
+		pos = sep + 1;
+	}
+	return cur;
+}
+
+// Attach collected comments to the parsed tree (by resolved path).
+inline void yamlAttachComments(asvJSONValue* root, const std::vector<YamlCommentEntry>& entries) {
+	if (!root) return;
+	for (const auto& e : entries) {
+		if (e.path == "\x01") {
+			if (!root->yaml_comments) root->yaml_comments.reset(new YAMLComments());
+			for (const auto& cl : e.leading) root->yaml_comments->footing.push_back(cl);
+			continue;
+		}
+		asvJSONValue* node = yamlFindPath(root, e.path);
+		if (!node) continue;
+		if (!node->yaml_comments) node->yaml_comments.reset(new YAMLComments());
+		for (const auto& cl : e.leading) node->yaml_comments->leading.push_back(cl);
+		if (!e.trailing.empty()) node->yaml_comments->trailing = e.trailing;
+	}
+}
+
 // Main YAML -> JSON entry point -- handles multi-document streams
 inline std::string yamlToJson(std::string_view input) {
 	auto lines = splitLines(input);
@@ -3174,7 +3432,11 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 		std::string json = yamlToJson(input);
 		allowNaNInfinity = true;
 		bool ok = parse(std::string_view(json));
-		if (ok) formatType = FormatType::YAML;
+		if (ok) {
+			formatType = FormatType::YAML;
+			// Attach comments for round-trip fidelity (YAML -> YAML).
+			yamlAttachComments(root.get(), yamlCollectComments(input));
+		}
 		return ok;
 	} catch (const asvJSONError& e) {
 		lastError = e.what();

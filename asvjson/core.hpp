@@ -275,6 +275,15 @@ public:
 
 struct JsonProxy; // forward declaration for operator[] chaining
 
+// Optional comments attached to a node by the YAML decoder for round-trip
+// fidelity. Never consulted by value semantics (equality, cloning, JSON
+// serialization): comments are YAML-only metadata.
+struct YAMLComments {
+	std::vector<std::string> leading;   // whole-line comments (# ...) emitted before this node/entry
+	std::string trailing;               // comment (includes '#') at the end of the value line
+	std::vector<std::string> footing;   // trailing comments after the whole document (root only)
+};
+
 struct asvJSONValue {
 	static constexpr size_t MAX_NESTING_DEPTH = 48;
 	static constexpr size_t MAX_STRING_LEN = 10 * 1024 * 1024;
@@ -311,6 +320,7 @@ struct asvJSONValue {
 	int64_t timestamp = 0;
 	int datetime_ms = 0;
 	bool raw_number = false;  // true when value is a string holding an exact numeric literal
+	std::unique_ptr<YAMLComments> yaml_comments;  // YAML comment metadata (round-trip only)
 
 	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), raw_number(false) {}
 	~asvJSONValue() { destroy(); }
@@ -333,6 +343,7 @@ struct asvJSONValue {
 		is_float32 = other.is_float32;
 		ext_type = other.ext_type;
 		raw_number = other.raw_number;
+		yaml_comments = std::move(other.yaml_comments);
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
 		other.is_float32 = false;
@@ -357,6 +368,7 @@ struct asvJSONValue {
 			is_float32 = other.is_float32;
 			ext_type = other.ext_type;
 			raw_number = other.raw_number;
+			yaml_comments = std::move(other.yaml_comments);
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
 			other.is_float32 = false;
@@ -369,6 +381,7 @@ struct asvJSONValue {
 	void destroy() noexcept {
 		str_data.clear();
 		bin_data.clear();
+		yaml_comments.reset();
 		if (type == OBJECT) { obj.reset(); }
 		else if (type == ARRAY) { arr.reset(); }
 		else if (type == CUSTOM_TAG) { custom_value.reset(); }
@@ -2914,6 +2927,8 @@ inline std::string asvJSON::toYAML(bool pretty) const {
 			out += "---\n";
 		}
 		root->toYAML(out, pretty);
+		if (pretty && root->yaml_comments)
+			for (const auto& cl : root->yaml_comments->footing) out += cl + "\n";
 	}
 	return out;
 }
