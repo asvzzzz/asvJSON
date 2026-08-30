@@ -143,6 +143,21 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			return false;
 		}
 		case T::OBJECT: {
+			if (v->yaml_set) {
+				// Set flow form: "!!set {a, b, c}".
+				if (!v->obj || v->obj->empty()) { out += "!!set {}"; return true; }
+				std::string inner = "{";
+				bool sfirst = true;
+				for (const auto& [k, val] : *v->obj) {
+					if (!sfirst) inner += ", ";
+					sfirst = false;
+					inner += yamlKeyOpt(k, o);
+				}
+				inner += "}";
+				if (!forceFlow && inner.size() > static_cast<size_t>(o.flowMaxLen)) return false;
+				out += "!!set " + inner;
+				return true;
+			}
 			if (!v->obj || v->obj->empty()) { out += "{}"; return true; }
 			std::string inner = "{";
 			bool first = true;
@@ -297,6 +312,20 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			break;
 		}
 		case T::OBJECT: {
+			if (v->yaml_set) {
+				// Block form of a YAML !!set:
+				//   root / keyed:  key: !!set      seq item:  - !!set
+				//                  - a                        - a
+				if (!v->obj || v->obj->empty()) { out += prefix() + "!!set {}" + yamlTrail(v) + "\n"; break; }
+				if (key.empty() && !isArrayItem) {
+					out += "!!set\n";
+					for (const auto& [k, val] : *v->obj) out += std::string(indent * iw, ' ') + "- " + yamlQuoteKey(k) + "\n";
+				} else {
+					out += prefix() + "!!set" + yamlTrail(v) + "\n";
+					for (const auto& [k, val] : *v->obj) out += std::string((indent + 1) * iw, ' ') + "- " + yamlQuoteKey(k) + "\n";
+				}
+				break;
+			}
 			if (!v->obj || v->obj->empty()) { out += prefix() + "{}" + yamlTrail(v) + "\n"; break; }
 			if (key.empty() && !isArrayItem) {
 				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc);
@@ -337,6 +366,13 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 		return "";
 	};
 
+	if (v->type == T::OBJECT && v->yaml_set) {
+		std::string inner;
+		yamlTryFlowVal(v, inner, o, true);
+		if (key.empty() && !isArrayItem) out += inner + "\n";
+		else out += prefix() + inner + "\n";
+		return;
+	}
 	if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 		std::string trial = prefix();
 		std::string inner;
@@ -688,10 +724,12 @@ inline std::string yamlForceStringVal(std::string_view val) {
 	return out;
 }
 
-// Convert JSON array string ["a","b","c"] -> JSON object {"a":null,"b":null,"c":null} for !!set
+// Convert JSON array string ["a","b","c"] -> {"$set":["a","b","c"]} for !!set.
+// Elements keep the same key text the object form used: quoted elements stay
+// as-is (already JSON-escaped), unquoted elements are wrapped in quotes.
 inline std::string yamlArrayToSetObject(std::string_view arr) {
 	if (arr.size() < 2 || arr[0] != '[') return std::string(arr);
-	std::string out = "{";
+	std::string out = "{\"$set\":[";
 	size_t i = 1;
 	bool first = true;
 	while (i < arr.size() && arr[i] != ']') {
@@ -723,9 +761,41 @@ inline std::string yamlArrayToSetObject(std::string_view arr) {
 		}
 		if (start < i && arr[start] == '"') out.append(arr.data() + start, i - start);
 		else { out += '"'; out.append(arr.data() + start, i - start); out += '"'; }
-		out += ":null";
 	}
-	out += "}";
+	out += "]}";
+	return out;
+}
+
+// Convert a JSON object of {key:null} members into the "$set" marker form
+// {"$set":[...]}; return the input unchanged when any member has a non-null
+// value (such an object is not a YAML set and is kept verbatim).
+inline std::string yamlSetObjToMarked(std::string_view s) {
+	if (s.size() < 2 || s[0] != '{') return std::string(s);
+	std::string out = "{\"$set\":[";
+	size_t i = 1;
+	bool first = true;
+	while (i < s.size() && s[i] != '}') {
+		while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+		if (i >= s.size() || s[i] == '}') break;
+		if (s[i] != '"') return std::string(s); // not a plain key:null object
+		size_t keyStart = i;
+		i++;
+		while (i < s.size() && !(s[i] == '"' && s[i - 1] != '\\')) { if (s[i] == '\\') i++; i++; }
+		if (i >= s.size()) return std::string(s);
+		size_t keyEnd = i;
+		i++; // past the closing quote
+		while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+		if (i >= s.size() || s[i] != ':') return std::string(s);
+		i++;
+		while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+		if (i + 4 > s.size() || s.substr(i, 4) != "null") return std::string(s);
+		i += 4;
+		if (!first) out += ",";
+		first = false;
+		out.append(s.data() + keyStart, keyEnd - keyStart + 1);
+		while (i < s.size() && (s[i] == ',' || s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+	}
+	out += "]}";
 	return out;
 }
 
@@ -999,9 +1069,10 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		return "{\"$binary\":{\"base64\":\"" + raw + "\",\"subType\":\"" + hex + "\"}}";
 	}
 
-	// !!set -- convert to object-with-null-values for flow notation: [a,b,c] -> {"a":null,"b":null}
+	// !!set -- convert to the {"$set":[...]} marker; the JSON object parser
+	// turns it back into an OBJECT flagged as a YAML set.
 	if (tag == "!!set") {
-		if (val.empty()) return "{}";
+		if (val.empty()) return "{\"$set\":[]}";
 		if (val[0] == '[') {
 			std::string tmp(val);
 			size_t fp = 0;
@@ -1011,7 +1082,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		if (val[0] == '{') {
 			std::string tmp(val);
 			size_t fp = 0;
-			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
+			return yamlSetObjToMarked(yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0));
 		}
 		return std::string(val);
 	}
@@ -1249,7 +1320,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
 inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size_t& li,
     std::unordered_map<std::string, std::string>* anchors,
     std::unordered_set<std::string>* resolving, int depth) {
-	std::string out = "{";
+	std::string out = "{\"$set\":[";
 	bool first = true;
 	int itemIndent = -1;
 	size_t j = li + 1;
@@ -1346,12 +1417,12 @@ inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size
 		}
 		if (!first) out += ",";
 		first = false;
-		out += "\"" + keyContent + "\":null";
+		out += "\"" + keyContent + "\"";
 		li = j;
 		j++;
 	}
-	if (first) return "{}";
-	out += "}";
+	if (first) return "{\"$set\":[]}";
+	out += "]}";
 	return out;
 }
 
@@ -1639,7 +1710,22 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 			while (pos < s.size()) { if (s[pos] == '\'' && pos + 1 < s.size() && s[pos + 1] == '\'') pos += 2; else if (s[pos] == '\'') break; else pos++; }
 			if (pos < s.size()) pos++;
 		} else {
-			while (pos < s.size() && s[pos] != ',' && s[pos] != ']' && s[pos] != '}' && s[pos] != '\n') pos++;
+			if (pos < s.size() && (s[pos] == '{' || s[pos] == '[')) {
+				// Value is a flow collection: consume the full balanced node
+				// (handling nesting and quoted strings) so tags like
+				// "!!set {a, b}" / "!!seq [1, 2]" keep their closing delimiter.
+				char open = s[pos], close = (open == '{') ? '}' : ']';
+				int depthFlow = 0;
+				for (; pos < s.size(); pos++) {
+					char c = s[pos];
+					if (c == '"') { pos++; while (pos < s.size()) { if (s[pos] == '\\') pos += 2; else if (s[pos] == '"') break; else pos++; } }
+					else if (c == '\'') { pos++; while (pos < s.size()) { if (s[pos] == '\'' && pos + 1 < s.size() && s[pos + 1] == '\'') pos += 2; else if (s[pos] == '\'') break; else pos++; } }
+					else if (c == open) depthFlow++;
+					else if (c == close) { depthFlow--; if (depthFlow == 0) { pos++; break; } }
+				}
+			} else {
+				while (pos < s.size() && s[pos] != ',' && s[pos] != ']' && s[pos] != '}' && s[pos] != '\n') pos++;
+			}
 		}
 		std::string combined = tagStr + " " + std::string(s, valStart, pos - valStart);
 		while (!combined.empty() && (combined.back() == ' ' || combined.back() == '\t')) combined.pop_back();

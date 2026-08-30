@@ -320,9 +320,10 @@ struct asvJSONValue {
 	int64_t timestamp = 0;
 	int datetime_ms = 0;
 	bool raw_number = false;  // true when value is a string holding an exact numeric literal
+	bool yaml_set = false;    // YAML !!set marker for OBJECT values (round-trips as {"$set":[...]})
 	std::unique_ptr<YAMLComments> yaml_comments;  // YAML comment metadata (round-trip only)
 
-	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), raw_number(false) {}
+	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), raw_number(false), yaml_set(false) {}
 	~asvJSONValue() { destroy(); }
 
 	asvJSONValue(const asvJSONValue&) = delete;
@@ -343,12 +344,14 @@ struct asvJSONValue {
 		is_float32 = other.is_float32;
 		ext_type = other.ext_type;
 		raw_number = other.raw_number;
+		yaml_set = other.yaml_set;
 		yaml_comments = std::move(other.yaml_comments);
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
 		other.is_float32 = false;
 		other.ext_type = 0;
 		other.raw_number = false;
+		other.yaml_set = false;
 	}
 
 	asvJSONValue& operator=(asvJSONValue&& other) noexcept {
@@ -368,12 +371,14 @@ struct asvJSONValue {
 			is_float32 = other.is_float32;
 			ext_type = other.ext_type;
 			raw_number = other.raw_number;
+			yaml_set = other.yaml_set;
 			yaml_comments = std::move(other.yaml_comments);
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
 			other.is_float32 = false;
 			other.ext_type = 0;
 			other.raw_number = false;
+			other.yaml_set = false;
 		}
 		return *this;
 	}
@@ -743,6 +748,21 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 			appendJsonToken(out, this, allowNaNInfinity);
 			break;
 		case OBJECT: {
+			if (yaml_set) {
+				// YAML set marker form: {"$set":["a","b"]}. Member keys are the
+				// array strings; insertion order is the object order.
+				out += "{\"$set\":[";
+				bool sfirst = true;
+				if (obj) for (const auto& [key, val] : *obj) {
+					if (!sfirst) out.push_back(',');
+					out.push_back('"');
+					appendJsonEscaped(out, key);
+					out.push_back('"');
+					sfirst = false;
+				}
+				out += "]}";
+				break;
+			}
 			if (obj->size() < SIZE_MAX / 32) out.reserve(out.size() + obj->size() * 32);
 			out.push_back('{');
 			bool first = true;
@@ -796,6 +816,7 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 			appendJsonToken(out, this, allowNaNInfinity);
 			break;
 		case OBJECT: {
+			if (yaml_set) { serialize(out, allowNaNInfinity); break; }
 			out.push_back('{');
 			if (!obj->empty()) {
 				out.push_back('\n');
@@ -1119,6 +1140,34 @@ private:
 						custom->str_data = nIt->second->str_data;
 						custom->custom_value = std::move(vIt->second);
 						return custom;
+					}
+				}
+			}
+			{
+				// YAML set marker: {"$set":["a","b"]} -> object whose members are
+				// the array strings (each mapped to null). Recognized only when the
+				// key is the sole member and every array element is a string, so a
+				// plain JSON object with a "$set" key holding non-strings (e.g.
+				// MongoDB's update operator {"$set":[1,2]}) is left untouched.
+				auto stIt = obj->obj->find("$set");
+				if (stIt != obj->obj->end() && stIt->second->type == asvJSONValue::ARRAY &&
+				    stIt->second->arr && obj->obj->size() == 1) {
+					bool allStrings = true;
+					for (const auto& m : *stIt->second->arr) {
+						if (!m || m->type != asvJSONValue::STRING) { allStrings = false; break; }
+					}
+					if (allStrings) {
+						auto s = asvJSONValue::makeObject();
+						if (s) {
+							for (const auto& m : *stIt->second->arr) {
+								if (m && asvJSONValue::checkObjectSize(s->obj->size() + 1)) {
+									auto nullv = asvJSONValue::makeNull();
+									if (nullv) s->obj->emplace(m->str_data, std::move(nullv));
+								}
+							}
+							s->yaml_set = true;
+							return s;
+						}
 					}
 				}
 			}
@@ -2323,6 +2372,7 @@ inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int d
 		case asvJSONValue::OBJECT: {
 			auto o = asvJSONValue::makeObject();
 			if (!o) return nullptr;
+			o->yaml_set = v->yaml_set;
 			if (v->obj) {
 #ifndef ASVJSON_USE_ORDERED_MAP
 				o->obj->reserve(v->obj->size());
@@ -2370,6 +2420,7 @@ inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
 			return true;
 		}
 		case asvJSONValue::OBJECT: {
+			if (a.yaml_set != b.yaml_set) return false;
 			if (!a.obj || !b.obj) return a.obj == b.obj;
 			if (a.obj->size() != b.obj->size()) return false;
 			for (const auto& [k, v] : *a.obj) {

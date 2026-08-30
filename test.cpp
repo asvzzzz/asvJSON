@@ -5087,7 +5087,7 @@ TEST(testFromYAML) {
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("!!set\n-\n  k: !!set\n    - a"));
-		ASSERT(json.getRoot()->hasKey("{\"k\":{\"a\":null}}"));
+		ASSERT(json.getRoot()->hasKey("{\"k\":{\"$set\":[\"a\"]}}"));
 	}
 	// Quoted set keys keep colons (quote-aware: not treated as mapping keys)
 	{
@@ -5097,6 +5097,129 @@ TEST(testFromYAML) {
 			ASSERT(json.getRoot()->get("k")->hasKey("x: 1"));
 		else
 			ASSERT(false);
+	}
+	// !!set round-trips through JSON as {"$set":[...]}: serialize form,
+	// re-parse flags the object as a set again, and the JSON stays stable.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - b"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"k\":{\"$set\":[\"a\",\"b\"]}}");
+		asvJSON json2;
+		ASSERT(json2.parse(s.c_str()));
+		std::string s2;
+		json2.getRoot()->serialize(s2);
+		ASSERT(std::string(s2) == s);
+		// A JSON-round-tripped set still emits the block !!set form.
+		ASSERT(json2.toYAML().find("!!set") != std::string::npos);
+	}
+	// !!set YAML block round-trip is idempotent (block style).
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set\n  - a\n  - b"));
+		std::string y = json.toYAML();
+		ASSERT(y.find("!!set") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromYAML(y.c_str()));
+		ASSERT(json2.toYAML() == y);
+	}
+	// !!set as a mapping value in a flow object (tag + flow collection value).
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set {a, b}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"k\":{\"$set\":[\"a\",\"b\"]}}");
+	}
+	// !!set flow array form [a, b, c]
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set [a, b, c]"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"val\":{\"$set\":[\"a\",\"b\",\"c\"]}}");
+		// non-empty but no value members -> set marker
+		ASSERT(json.getRoot()->get("val")->yaml_set);
+	}
+	// !!set document root round-trip (block: "!!set\n- a\n- b").
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("!!set\n- a\n- b"));
+		std::string y = json.toYAML();
+		ASSERT(y.find("!!set") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromYAML(y.c_str()));
+		std::string s1, s2;
+		json.getRoot()->serialize(s1);
+		json2.getRoot()->serialize(s2);
+		ASSERT(std::string(s1) == "{\"$set\":[\"a\",\"b\"]}");
+		ASSERT(std::string(s2) == s1);
+	}
+	// !!set as a sequence item round-trips in block style.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- !!set\n  - a\n  - b"));
+		std::string y = json.toYAML();
+		ASSERT(y.find("!!set") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromYAML(y.c_str()));
+		std::string s1, s2;
+		json.getRoot()->serialize(s1);
+		json2.getRoot()->serialize(s2);
+		ASSERT(std::string(s1) == "[{\"$set\":[\"a\",\"b\"]}]");
+		ASSERT(std::string(s2) == s1);
+	}
+	// Nested !!set inside another mapping round-trips.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a:\n  b: !!set\n    - x\n    - y"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"a\":{\"b\":{\"$set\":[\"x\",\"y\"]}}}");
+	}
+	// Empty !!set round-trips as {"$set":[]}.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("k: !!set []"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"k\":{\"$set\":[]}}");
+		asvJSON json2;
+		ASSERT(json2.parse(s.c_str()));
+		std::string s2;
+		json2.getRoot()->serialize(s2);
+		ASSERT(std::string(s2) == s);
+	}
+	// A plain object with a "$set" key holding non-strings stays a plain
+	// object (MongoDB's update operator {"$set":[1,2]} is not a YAML set).
+	{
+		asvJSON json;
+		ASSERT(json.parse("{\"$set\":[1,2]}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"$set\":[1,2]}");
+		ASSERT(!json.getRoot()->yaml_set);
+	}
+	// A !!set carrying a non-null member value is NOT marked as a set.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("val: !!set {a: 1}"));
+		std::string s;
+		json.getRoot()->serialize(s);
+		ASSERT(std::string(s) == "{\"val\":{\"a\":1}}");
+		ASSERT(!json.getRoot()->get("val")->yaml_set);
+	}
+	// operator== distinguishes a set from an equivalent plain object.
+	{
+		asvJSON a;
+		ASSERT(a.fromYAML("!!set\n- a"));
+		asvJSON b;
+		ASSERT(b.parse("{\"a\":null}"));
+		ASSERT(*(a.getRoot()) != *(b.getRoot()));
+		asvJSON c;
+		ASSERT(c.fromYAML("!!set\n- a"));
+		ASSERT(*(a.getRoot()) == *(c.getRoot()));
 	}
 	// Core Schema: !!omap [{a:1},{b:2}]
 	{
