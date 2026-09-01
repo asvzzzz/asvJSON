@@ -320,11 +320,12 @@ struct asvJSONValue {
 	double dbl = 0;
 	int64_t timestamp = 0;
 	int datetime_ms = 0;
+	int tz_offset_min = 0;  // DATETIME display offset in minutes from UTC (0 = Z)
 	bool raw_number = false;  // true when value is a string holding an exact numeric literal
 	bool yaml_set = false;    // YAML !!set marker for OBJECT values (round-trips as {"$set":[...]})
 	std::unique_ptr<YAMLComments> yaml_comments;  // YAML comment metadata (round-trip only)
 
-	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), raw_number(false), yaml_set(false) {}
+	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), tz_offset_min(0), raw_number(false), yaml_set(false) {}
 	~asvJSONValue() { destroy(); }
 
 	asvJSONValue(const asvJSONValue&) = delete;
@@ -349,6 +350,7 @@ struct asvJSONValue {
 		yaml_comments = std::move(other.yaml_comments);
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
+		other.tz_offset_min = 0;
 		other.is_float32 = false;
 		other.ext_type = 0;
 		other.raw_number = false;
@@ -369,6 +371,7 @@ struct asvJSONValue {
 			timestamp = other.timestamp;
 			bin_data = std::move(other.bin_data);
 			datetime_ms = other.datetime_ms;
+			tz_offset_min = other.tz_offset_min;
 			is_float32 = other.is_float32;
 			ext_type = other.ext_type;
 			raw_number = other.raw_number;
@@ -376,6 +379,7 @@ struct asvJSONValue {
 			yaml_comments = std::move(other.yaml_comments);
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
+			other.tz_offset_min = 0;
 			other.is_float32 = false;
 			other.ext_type = 0;
 			other.raw_number = false;
@@ -460,13 +464,14 @@ struct asvJSONValue {
 		return v;
 	}
 
-	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeDateTime(time_t ts, int ms = 0) {
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeDateTime(time_t ts, int ms = 0, int tzOffsetMin = 0) {
 		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = DATETIME;
 		v->timestamp = ts + (ms / 1000);
 		v->datetime_ms = static_cast<int>(ms % 1000);
 		if (v->datetime_ms < 0) { v->datetime_ms += 1000; v->timestamp--; }
+		v->tz_offset_min = tzOffsetMin;
 		return v;
 	}
 
@@ -525,7 +530,7 @@ struct asvJSONValue {
 	}
 
 	[[nodiscard]] asvJSONValue* get(std::string_view key) const {
-		if (key.empty() || type != OBJECT || !obj) return nullptr;
+		if (type != OBJECT || !obj) return nullptr;
 		auto it = mapFind(*obj, key);
 		return (it != obj->end()) ? it->second.get() : nullptr;
 	}
@@ -536,7 +541,7 @@ struct asvJSONValue {
 	}
 
 	const asvJSONValue* getConst(std::string_view key) const {
-		if (key.empty() || type != OBJECT || !obj) return nullptr;
+		if (type != OBJECT || !obj) return nullptr;
 		auto it = mapFind(*obj, key);
 		return (it != obj->end()) ? it->second.get() : nullptr;
 	}
@@ -1046,8 +1051,9 @@ private:
 		if (raw.size() >= 20 && raw[4] == '-' && raw[7] == '-' && raw[10] == 'T') {
 			time_t ts;
 			int ms = 0;
-			if (tryParseDateTime(raw, ts, &ms)) {
-				return asvJSONValue::makeDateTime(ts, ms);
+			int tz = 0;
+			if (tryParseDateTime(raw, ts, &ms, &tz)) {
+				return asvJSONValue::makeDateTime(ts, ms, tz);
 			}
 		}
 		std::string unescaped;
@@ -1435,11 +1441,21 @@ public:
 		if (!v) return "";
 		if (v->type == asvJSONValue::STRING) return std::string(v->str_data.data(), v->str_data.size());
 		if (v->type == asvJSONValue::DATETIME) {
-			char buf[32];
 			std::tm tm{};
-			if (!gmtimeSafe(&tm, &v->timestamp)) return "";
-			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-			return std::string(buf);
+			time_t shifted = v->timestamp + static_cast<time_t>(v->tz_offset_min) * 60;
+			if (!gmtimeSafe(&tm, &shifted)) return "";
+			char buf[32];
+			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+			std::string out(buf);
+			if (v->tz_offset_min == 0) out += 'Z';
+			else {
+				int s = v->tz_offset_min < 0 ? -1 : 1;
+				int a = s * v->tz_offset_min;
+				char obuf[8];
+				snprintf(obuf, sizeof(obuf), "%c%02d:%02d", s > 0 ? '+' : '-', a / 60, a % 60);
+				out += obuf;
+			}
+			return out;
 		}
 		return "";
 	}
@@ -2200,22 +2216,29 @@ inline bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 	return false;
 }
 
-inline void fmtDateTimeVal(time_t ts, int ms, std::string& out) {
+inline void fmtDateTimeVal(time_t ts, int ms, std::string& out, int tzOffsetMin = 0) {
 	// Timestamps that gmtimeSafe cannot convert to UTC (e.g. before 1970 or
 	// beyond the platform's supported range) render as the literal text "null"
 	// (the serializer wraps this in quotes, producing the JSON string "null").
 	char buf[32];
 	std::tm tm{};
-	if (!gmtimeSafe(&tm, &ts)) { out += "null"; return; }
+	time_t shifted = ts + static_cast<time_t>(tzOffsetMin) * 60;
+	if (!gmtimeSafe(&tm, &shifted)) { out += "null"; return; }
+	std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+	out += buf;
 	if (ms > 0) {
-		std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
-		out += buf;
 		char msbuf[16];
-		snprintf(msbuf, sizeof(msbuf), ".%03dZ", ms);
+		snprintf(msbuf, sizeof(msbuf), ".%03d", ms);
 		out += msbuf;
+	}
+	if (tzOffsetMin == 0) {
+		out += 'Z';
 	} else {
-		std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-		out += buf;
+		int s = tzOffsetMin < 0 ? -1 : 1;
+		int a = s * tzOffsetMin;
+		char obuf[8];
+		snprintf(obuf, sizeof(obuf), "%c%02d:%02d", s > 0 ? '+' : '-', a / 60, a % 60);
+		out += obuf;
 	}
 }
 
@@ -2272,7 +2295,7 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 		}
 		case asvJSONValue::DATETIME: {
 			out.push_back('"');
-			fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+			fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
 			out.push_back('"');
 			break;
 		}
@@ -2351,7 +2374,7 @@ inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int d
 		case asvJSONValue::INT: return asvJSONValue::makeInt(v->num);
 		case asvJSONValue::DOUBLE: { auto c = asvJSONValue::makeDouble(v->dbl); if (c) c->is_float32 = v->is_float32; return c; }
 		case asvJSONValue::STRING: { auto c = asvJSONValue::makeString(v->str_data.data(), v->str_data.size()); if (c) c->raw_number = v->raw_number; return c; }
-		case asvJSONValue::DATETIME: return asvJSONValue::makeDateTime(v->timestamp, v->datetime_ms);
+		case asvJSONValue::DATETIME: return asvJSONValue::makeDateTime(v->timestamp, v->datetime_ms, v->tz_offset_min);
 		case asvJSONValue::BINARY: return asvJSONValue::makeBinary(v->bin_data.data(), v->bin_data.size());
 		case asvJSONValue::OBJECTID: return asvJSONValue::makeObjectId(v->str_data);
 		case asvJSONValue::REGEX: {
@@ -2419,7 +2442,7 @@ inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
 		case asvJSONValue::INT: return a.num == b.num;
 		case asvJSONValue::DOUBLE: return a.dbl == b.dbl;
 		case asvJSONValue::STRING: return a.str_data == b.str_data;
-		case asvJSONValue::DATETIME: return a.timestamp == b.timestamp && a.datetime_ms == b.datetime_ms;
+		case asvJSONValue::DATETIME: return a.timestamp == b.timestamp && a.datetime_ms == b.datetime_ms && a.tz_offset_min == b.tz_offset_min;
 		case asvJSONValue::BINARY: return a.bin_data == b.bin_data;
 		case asvJSONValue::OBJECTID: return a.str_data == b.str_data;
 		case asvJSONValue::REGEX: return a.str_data == b.str_data;
@@ -2795,7 +2818,7 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth 
 		case asvJSONValue::INT: return a->num == b->num;
 		case asvJSONValue::DOUBLE: return a->dbl == b->dbl;
 		case asvJSONValue::STRING: return a->str_data == b->str_data;
-		case asvJSONValue::DATETIME: return a->timestamp == b->timestamp && a->datetime_ms == b->datetime_ms;
+		case asvJSONValue::DATETIME: return a->timestamp == b->timestamp && a->datetime_ms == b->datetime_ms && a->tz_offset_min == b->tz_offset_min;
 		case asvJSONValue::BINARY: return a->bin_data == b->bin_data;
 		case asvJSONValue::OBJECTID: return a->str_data == b->str_data;
 		case asvJSONValue::TIMESTAMP: return a->num == b->num;

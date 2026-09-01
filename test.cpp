@@ -6844,6 +6844,169 @@ key = "value" # inline comment)")));
     ASSERT_EQ(j.getInt("point.x.y"), int64_t(1));
     ASSERT_EQ(j.getInt("point.x.z"), int64_t(2));
   }
+  // Local time HH:MM:SS (with optional fractional seconds)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("lt = 07:32:00")));
+    ASSERT_EQ(std::string(j.getString("lt")), "07:32:00");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("lt = 07:32:00.999")));
+    ASSERT_EQ(std::string(j.getString("lt")), "07:32:00.999");
+  }
+  // Local time in an inline array and an inline table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [07:32:00]")));
+    ASSERT_EQ(std::string(j.getRoot()->getConst("a")->get(static_cast<size_t>(0))->getString()), "07:32:00");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("it = {t = 07:32:00}")));
+    ASSERT_EQ(std::string(j.getString("it.t")), "07:32:00");
+  }
+  // Offset datetimes preserve their timezone offset (not normalized to UTC Z)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("d = 2024-01-15T10:30:00+03:00")));
+    ASSERT_EQ(std::string(j.getString("d")), "2024-01-15T10:30:00+03:00");
+    // UTC epoch stays correct despite the preserved display offset
+    ASSERT_EQ(j.getDateTime("d"), int64_t(1705303800));
+    ASSERT(j.serialize().find("2024-01-15T10:30:00+03:00") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("d = 1979-05-27T07:32:00-07:00")));
+    ASSERT_EQ(std::string(j.getString("d")), "1979-05-27T07:32:00-07:00");
+  }
+  // Offset datetime with fractional seconds
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("d = 1979-05-27T07:32:00.999-07:00")));
+    ASSERT(j.serialize().find(".999-07:00") != std::string::npos);
+  }
+  // Z offset remains Z (UTC)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("d = 1979-05-27T07:32:00Z")));
+    ASSERT_EQ(std::string(j.getString("d")), "1979-05-27T07:32:00Z");
+  }
+  // Trailing comma in inline arrays is a parse error (per TOML spec)
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = [1, 2,]")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1,]")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1, ]")));
+    ASSERT(!j.fromTOML(std::string_view("a = [[1,2],]")));
+  }
+  // Missing array element between commas is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = [1,,2]")));
+  }
+  // Trailing comma in inline tables is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = {x = 1,}")));
+    ASSERT(!j.fromTOML(std::string_view("a = {x = 1, }")));
+    ASSERT(!j.fromTOML(std::string_view("a = {b = {c = 1,}}")));
+  }
+  // Empty key segment in dotted key paths is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view(".a = 1")));
+    ASSERT(!j.fromTOML(std::string_view("a..b = 1")));
+    ASSERT(!j.fromTOML(std::string_view("a. = 1")));
+    ASSERT(!j.fromTOML(std::string_view("a.b. = 1")));
+    ASSERT(!j.fromTOML(std::string_view("[a.]\nx = 1")));
+  }
+  // Trailing content after a value is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = 5 hello")));
+    ASSERT(!j.fromTOML(std::string_view("a = true false")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"hi\" extra")));
+    ASSERT(!j.fromTOML(std::string_view("a = 0xFF zz")));
+    ASSERT(!j.fromTOML(std::string_view("a = 07:32:00 xx")));
+    ASSERT(!j.fromTOML(std::string_view("a = inf zz")));
+    // trailing content must not break valid space-separated date-time
+    {
+      asvJSON j2;
+      ASSERT(j2.fromTOML(std::string_view("a = 1979-05-27 07:32:00")));
+    }
+  }
+  // Leading zeros in numbers are a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = 07")));
+    ASSERT(!j.fromTOML(std::string_view("a = 007")));
+    ASSERT(!j.fromTOML(std::string_view("a = -007.5")));
+    ASSERT(j.fromTOML(std::string_view("a = 0")));
+    ASSERT(j.fromTOML(std::string_view("a = 0x0")));
+  }
+  // Numeric overflow is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = 1e99999")));
+    ASSERT(!j.fromTOML(std::string_view("a = -1e99999")));
+    ASSERT(!j.fromTOML(std::string_view("a = 99999999999999999999")));
+    ASSERT(j.fromTOML(std::string_view("a = 9223372036854775807")));
+  }
+  // Sign before hex/octal/binary is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = -0xFF")));
+    ASSERT(!j.fromTOML(std::string_view("a = +0xFF")));
+    ASSERT(!j.fromTOML(std::string_view("a = -0o17")));
+    ASSERT(!j.fromTOML(std::string_view("a = +0b101")));
+    ASSERT(j.fromTOML(std::string_view("a = 0xFF")));
+  }
+  // Invalid Unicode escapes in basic strings are a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\uZZZZ\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\U000G0000\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\u12\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\U0001F6\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\uD83D\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\uDE00\"")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\\U00110000\"")));
+    // valid escapes including an astral char and a surrogate pair
+    ASSERT(j.fromTOML(std::string_view("a = \"\\u0041\"")));
+    ASSERT(j.fromTOML(std::string_view("a = \"\\U0001F600\"")));
+    ASSERT(j.fromTOML(std::string_view("a = \"\\uD83D\\uDE00\"")));
+    {
+      asvJSON j2;
+      ASSERT(j2.fromTOML(std::string_view("a = \"\\uD83D\\uDE00\"")));
+      std::string val = j2.getString("a");
+      // U+1F600 encoded as UTF-8 (F0 9F 98 80)
+      ASSERT_EQ(val, std::string("\xF0\x9F\x98\x80"));
+    }
+  }
+  // Trailing content after a table header is a parse error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("[a.b] z [c]")));
+    ASSERT(!j.fromTOML(std::string_view("[a.b]z")));
+    ASSERT(!j.fromTOML(std::string_view("[[a]] x")));
+    ASSERT(!j.fromTOML(std::string_view("[a] x")));
+  }
+  // A ']' inside a quoted table key is not the header closer
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("[a.\"b]c\"]\nx = 1")));
+    ASSERT_EQ(j.getRoot()->get("a")->get("b]c")->get("x")->getInt(), int64_t(1));
+  }
+  // Empty quoted keys are preserved
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("\"\" = 1")));
+    ASSERT_EQ(j.getRoot()->get("")->getInt(), int64_t(1));
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view("a.\"\" = 2")));
+    ASSERT_EQ(j2.getRoot()->get("a")->get("")->getInt(), int64_t(2));
+  }
 }
 
 TEST(testToJSONLines) {

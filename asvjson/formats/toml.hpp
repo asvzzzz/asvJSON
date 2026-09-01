@@ -3,6 +3,7 @@
 
 #include "../core.hpp"
 
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -70,6 +71,50 @@ inline void appendCodepoint(unsigned long cp, std::string& out) {
   else if (cp < 0x110000) { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 }
 
+// Parse a Unicode escape: \uXXXX (hexDigits=4) or \UXXXXXXXX (hexDigits=8).
+// `s` is positioned just after the 'u'/'U'. Throws asvJSONError on malformed
+// input (bad/truncated hex digit, out-of-range, or an unpaired surrogate).
+inline void consumeUnicodeEscape(std::string_view& s, int hexDigits, std::string& out) {
+  auto readHex = [&]() -> int {
+    if (s.empty()) throw asvJSONError("truncated unicode escape in string");
+    char hc = s[0]; s.remove_prefix(1);
+    if (hc >= '0' && hc <= '9') return hc - '0';
+    if (hc >= 'a' && hc <= 'f') return hc - 'a' + 10;
+    if (hc >= 'A' && hc <= 'F') return hc - 'A' + 10;
+    throw asvJSONError("invalid hex digit in unicode escape");
+  };
+  unsigned long cp = 0;
+  for (int i = 0; i < hexDigits; i++)
+    cp = cp * 16 + static_cast<unsigned long>(readHex());
+  if (hexDigits == 4 && cp >= 0xD800 && cp <= 0xDBFF) {
+    // High surrogate: require a following \uDC00-\uDFFF low surrogate
+    if (s.size() >= 2 && s[0] == '\\' && s[1] == 'u') {
+      std::string_view ls = s; ls.remove_prefix(2);
+      unsigned long low = 0; bool lok = true;
+      for (int i = 0; i < 4 && lok; i++) {
+        if (ls.empty()) { lok = false; break; }
+        char hc = ls[0]; ls.remove_prefix(1);
+        if (hc >= '0' && hc <= '9') low = low * 16 + (hc - '0');
+        else if (hc >= 'a' && hc <= 'f') low = low * 16 + (hc - 'a' + 10);
+        else if (hc >= 'A' && hc <= 'F') low = low * 16 + (hc - 'A' + 10);
+        else lok = false;
+      }
+      if (lok && low >= 0xDC00 && low <= 0xDFFF) {
+        unsigned long combined = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+        appendCodepoint(combined, out);
+        s.remove_prefix(6); // \u + 4 hex digits of the low surrogate
+        return;
+      }
+    }
+    throw asvJSONError("unpaired high surrogate in unicode escape");
+  }
+  if (cp >= 0xD800 && cp <= 0xDFFF)
+    throw asvJSONError("unpaired surrogate in unicode escape");
+  if (cp > 0x10FFFF)
+    throw asvJSONError("unicode escape out of range");
+  appendCodepoint(cp, out);
+}
+
 // Quote a TOML key if not a valid bare key
 inline std::string tomlQuoteKey(const std::string& key) {
   if (key.empty()) return "\"\"";
@@ -108,7 +153,7 @@ inline std::string tomlVal(const asvJSONValue* v) {
     case T::STRING: return tomlEscapeStr(v->str_data);
     case T::DATETIME: {
       std::string s;
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, s);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
       return s;
     }
     case T::BINARY: return "\"" + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\"";
@@ -184,30 +229,8 @@ inline std::string parseTomlKey(std::string_view& s) {
         else if (c == '\\') key += '\\';
         else if (c == 'b') key += '\b';
         else if (c == 'f') key += '\f';
-        else if (c == 'u') {
-          int count = 4; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, key); else key += c;
-        }
-        else if (c == 'U') {
-          int count = 8; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, key); else key += c;
-        }
+        else if (c == 'u') { consumeUnicodeEscape(s, 4, key); }
+        else if (c == 'U') { consumeUnicodeEscape(s, 8, key); }
         else key += c;
         continue;
       }
@@ -237,10 +260,19 @@ inline std::vector<std::string> parseTomlKeyPath(std::string_view& s) {
   while (!s.empty()) {
     s = trimSV(s);
     if (s.empty()) break;
+    if (s[0] == '.') throw asvJSONError("empty key segment in dotted key path");
+    bool quotedStart = (!s.empty() && (s[0] == '"' || s[0] == '\''));
     std::string key = parseTomlKey(s);
-    if (!key.empty()) keys.push_back(std::move(key));
+    if (quotedStart || !key.empty()) keys.push_back(std::move(key));
     s = trimSV(s);
-    if (!s.empty() && s[0] == '.') { s.remove_prefix(1); continue; }
+    if (!s.empty() && s[0] == '.') {
+      s.remove_prefix(1);
+      s = trimSV(s);
+      // A dot must be followed by a non-empty key segment
+      if (s.empty() || s[0] == '.' || s[0] == ']' || s[0] == '=' || s[0] == ',')
+        throw asvJSONError("empty key segment in dotted key path");
+      continue;
+    }
     break;
   }
   return keys;
@@ -259,10 +291,18 @@ inline std::unique_ptr<asvJSONValue> tomlParseJsonValue(const std::string& jsonV
 // Parse a complete TOML value into JSON string
 constexpr int MAX_TOML_DEPTH = 64;
 
-inline std::string parseTomlValue(std::string_view s, int depth = 0) {
+inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strictTail = false) {
   s = trimSV(s);
   if (depth > MAX_TOML_DEPTH) throw asvJSONError("TOML value nesting too deep");
   if (s.empty()) return "null";
+  auto rejectTrailing = [&]() {
+    if (strictTail && !trimSV(s).empty())
+      throw asvJSONError("trailing content after value");
+  };
+  auto checkTailLen = [&](size_t n) {
+    if (strictTail && !trimSV(s.substr(n)).empty())
+      throw asvJSONError("trailing content after value");
+  };
 
   // Inline table
   if (s[0] == '{') {
@@ -277,6 +317,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
       if (!s.empty() && s[0] == '=') { s.remove_prefix(1); s = trimSV(s); }
       int bracketDepth = 0;
       std::string valStr;
+      bool commaBreak = false;
       bool inBasic = false, inLiteral = false, escape = false;
       while (!s.empty()) {
         char c = s[0]; s.remove_prefix(1);
@@ -288,7 +329,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
           if (c == '{' || c == '[') bracketDepth++;
           if (c == '}' || c == ']') bracketDepth--;
           if (bracketDepth < 0 && c == '}') break;
-          if (c == ',' && bracketDepth == 0) break;
+          if (c == ',' && bracketDepth == 0) { commaBreak = true; break; }
         }
         valStr += c;
       }
@@ -325,7 +366,8 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
         }
       }
       s = trimSV(s);
-      if (!s.empty() && s[0] == ',') s.remove_prefix(1);
+      if (commaBreak && (s.empty() || s[0] == '}'))
+        throw asvJSONError("trailing comma in inline table");
     }
     std::string json;
     obj->serialize(json, true);
@@ -351,30 +393,8 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
         else if (c == 'r') val += '\r'; else if (c == '"') val += '"';
         else if (c == '\\') val += '\\'; else if (c == 'b') val += '\b';
         else if (c == 'f') val += '\f';
-        else if (c == 'u') {
-          int count = 4; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
-        }
-        else if (c == 'U') {
-          int count = 8; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
-        }
+        else if (c == 'u') { consumeUnicodeEscape(s, 4, val); }
+        else if (c == 'U') { consumeUnicodeEscape(s, 8, val); }
         else val += c;
         continue;
       }
@@ -395,6 +415,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
       qc = 0;
       val += c;
     }
+    rejectTrailing();
     return "\"" + tomlJsonEscape(val) + "\"";
   }
 
@@ -415,6 +436,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
       qc = 0;
       val += c;
     }
+    rejectTrailing();
     return "\"" + tomlJsonEscape(val) + "\"";
   }
 
@@ -444,10 +466,22 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
       if (!inBasic && !inLiteral) {
         if (c == '[') { bracketDepth++; cur += c; continue; }
         if (c == ']') {
-          if (bracketDepth == 0) { flushVal(); break; }
+          if (bracketDepth == 0) {
+            // Empty element after a comma is a trailing comma (invalid per spec)
+            if (trimSV(std::string_view(cur)).empty() && !first)
+              throw asvJSONError("trailing comma in inline array");
+            flushVal();
+            break;
+          }
           bracketDepth--; cur += c; continue;
         }
-        if (c == ',' && bracketDepth == 0) { flushVal(); continue; }
+        if (c == ',' && bracketDepth == 0) {
+          // Consecutive / leading comma with no element is invalid
+          if (trimSV(std::string_view(cur)).empty() && !first)
+            throw asvJSONError("missing element in inline array");
+          flushVal();
+          continue;
+        }
         if (c == '{' || c == '}') { bracketDepth = (c == '{') ? bracketDepth + 1 : bracketDepth - 1; cur += c; continue; }
       }
       cur += c;
@@ -457,18 +491,44 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
   }
 
   // Boolean
-  if (s.substr(0, 4) == "true" && (s.size() == 4 || s[4] == ',' || s[4] == ']' || s[4] == '}' || s[4] == '#' || s[4] == ' ' || s[4] == '\t'))
+  if (s.substr(0, 4) == "true" && (s.size() == 4 || s[4] == ',' || s[4] == ']' || s[4] == '}' || s[4] == '#' || s[4] == ' ' || s[4] == '\t')) {
+    checkTailLen(4);
     return "true";
-  if (s.substr(0, 5) == "false" && (s.size() == 5 || s[5] == ',' || s[5] == ']' || s[5] == '}' || s[5] == '#' || s[5] == ' ' || s[5] == '\t'))
+  }
+  if (s.substr(0, 5) == "false" && (s.size() == 5 || s[5] == ',' || s[5] == ']' || s[5] == '}' || s[5] == '#' || s[5] == ' ' || s[5] == '\t')) {
+    checkTailLen(5);
     return "false";
+  }
 
-  // Date/time
+  // Date/time (optionally space-separated local datetime)
   if (s.size() >= 10 && std::isdigit(static_cast<unsigned char>(s[0])) &&
       s[4] == '-' && s[7] == '-') {
+    auto isDt = [&](char ch) {
+      return std::isdigit(static_cast<unsigned char>(ch)) || ch == 'T' || ch == ':' ||
+             ch == '.' || ch == 'Z' || ch == '+' || ch == '-';
+    };
     size_t end = 10;
-    while (end < s.size() && (std::isdigit(static_cast<unsigned char>(s[end])) ||
-           s[end] == 'T' || s[end] == ':' || s[end] == '.' || s[end] == 'Z' ||
-           s[end] == '+' || s[end] == '-')) end++;
+    while (end < s.size() && isDt(s[end])) end++;
+    if (end < s.size() && s[end] == ' ' && end + 1 < s.size() &&
+        std::isdigit(static_cast<unsigned char>(s[end + 1]))) {
+      end++;
+      while (end < s.size() && isDt(s[end])) end++;
+    }
+    checkTailLen(end);
+    return "\"" + std::string(s.substr(0, end)) + "\"";
+  }
+
+  // Local time: HH:MM:SS[.ffffff]
+  if (s.size() >= 8 && std::isdigit(static_cast<unsigned char>(s[0])) &&
+      std::isdigit(static_cast<unsigned char>(s[1])) && s[2] == ':' &&
+      std::isdigit(static_cast<unsigned char>(s[3])) && std::isdigit(static_cast<unsigned char>(s[4])) && s[5] == ':' &&
+      std::isdigit(static_cast<unsigned char>(s[6])) && std::isdigit(static_cast<unsigned char>(s[7]))) {
+    size_t end = 8;
+    while (end < s.size() && s[end] == '.') {
+      end++;
+      while (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end]))) end++;
+    }
+    checkTailLen(end);
     return "\"" + std::string(s.substr(0, end)) + "\"";
   }
 
@@ -485,37 +545,18 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
         else if (c == 'r') val += '\r'; else if (c == '"') val += '"';
         else if (c == '\\') val += '\\'; else if (c == 'b') val += '\b';
         else if (c == 'f') val += '\f';
-        else if (c == 'u') {
-          int count = 4; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
-        }
-        else if (c == 'U') {
-          int count = 8; unsigned long cp = 0; bool ok = true;
-          for (int i = 0; i < count && ok; i++) {
-            if (s.empty()) { ok = false; break; }
-            char hc = s[0]; s.remove_prefix(1);
-            if (hc >= '0' && hc <= '9') cp = cp * 16 + (hc - '0');
-            else if (hc >= 'a' && hc <= 'f') cp = cp * 16 + (hc - 'a' + 10);
-            else if (hc >= 'A' && hc <= 'F') cp = cp * 16 + (hc - 'A' + 10);
-            else ok = false;
-          }
-          if (ok && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) appendCodepoint(cp, val); else val += c;
-        }
+        else if (c == 'u') { consumeUnicodeEscape(s, 4, val); }
+        else if (c == 'U') { consumeUnicodeEscape(s, 8, val); }
         else val += c;
         continue;
       }
       if (c == '\\') { escape = true; continue; }
       if (c == '"') break;
+      if ((static_cast<unsigned char>(c) < 0x20 && c != '\t') || static_cast<unsigned char>(c) == 0x7F)
+        throw asvJSONError("raw control character in basic string");
       val += c;
     }
+    rejectTrailing();
     return "\"" + tomlJsonEscape(val) + "\"";
   }
 
@@ -527,41 +568,57 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
       if (s.empty()) break;
       char c = s[0]; s.remove_prefix(1);
       if (c == '\'') break;
+      if ((static_cast<unsigned char>(c) < 0x20 && c != '\t') || static_cast<unsigned char>(c) == 0x7F)
+        throw asvJSONError("raw control character in literal string");
       val += c;
     }
+    rejectTrailing();
     return "\"" + tomlJsonEscape(val) + "\"";
   }
 
   // Hex, octal, binary
   if (s.size() >= 2 && s[0] == '0') {
     if (s[1] == 'x' || s[1] == 'X') {
-      uint64_t hv = 0; size_t pos = 0;
-      for (auto c : s.substr(2)) {
-        if (c == '_') continue;
-        if (c >= '0' && c <= '9') { hv = hv * 16 + (c - '0'); pos++; }
-        else if (c >= 'a' && c <= 'f') { hv = hv * 16 + (c - 'a' + 10); pos++; }
-        else if (c >= 'A' && c <= 'F') { hv = hv * 16 + (c - 'A' + 10); pos++; }
-        else break;
+      uint64_t hv = 0; size_t pos = 0; size_t idx = 2;
+      while (idx < s.size() && (std::isxdigit(static_cast<unsigned char>(s[idx])) || s[idx] == '_')) {
+        char c = s[idx];
+        if (c != '_') { hv = hv * 16 + ((c <= '9') ? (c - '0') : (std::tolower(static_cast<unsigned char>(c)) - 'a' + 10)); pos++; }
+        idx++;
       }
-      if (pos > 0) return std::to_string(static_cast<long long>(hv));
+      if (pos > 0) {
+        checkTailLen(idx);
+        if (hv > static_cast<uint64_t>(INT64_MAX))
+          throw asvJSONError("hex integer out of range");
+        return std::to_string(static_cast<long long>(hv));
+      }
     }
     if (s[1] == 'o' || s[1] == 'O') {
-      uint64_t ov = 0; size_t pos = 0;
-      for (auto c : s.substr(2)) {
-        if (c == '_') continue;
-        if (c >= '0' && c <= '7') { ov = ov * 8 + (c - '0'); pos++; }
-        else break;
+      uint64_t ov = 0; size_t pos = 0; size_t idx = 2;
+      while (idx < s.size() && ((s[idx] >= '0' && s[idx] <= '7') || s[idx] == '_')) {
+        char c = s[idx];
+        if (c != '_') { ov = ov * 8 + (c - '0'); pos++; }
+        idx++;
       }
-      if (pos > 0) return std::to_string(static_cast<long long>(ov));
+      if (pos > 0) {
+        checkTailLen(idx);
+        if (ov > static_cast<uint64_t>(INT64_MAX))
+          throw asvJSONError("octal integer out of range");
+        return std::to_string(static_cast<long long>(ov));
+      }
     }
     if (s[1] == 'b' || s[1] == 'B') {
-      uint64_t bv = 0; size_t pos = 0;
-      for (auto c : s.substr(2)) {
-        if (c == '_') continue;
-        if (c == '0' || c == '1') { bv = bv * 2 + (c - '0'); pos++; }
-        else break;
+      uint64_t bv = 0; size_t pos = 0; size_t idx = 2;
+      while (idx < s.size() && (s[idx] == '0' || s[idx] == '1' || s[idx] == '_')) {
+        char c = s[idx];
+        if (c != '_') { bv = bv * 2 + (c - '0'); pos++; }
+        idx++;
       }
-      if (pos > 0) return std::to_string(static_cast<long long>(bv));
+      if (pos > 0) {
+        checkTailLen(idx);
+        if (bv > static_cast<uint64_t>(INT64_MAX))
+          throw asvJSONError("binary integer out of range");
+        return std::to_string(static_cast<long long>(bv));
+      }
     }
   }
 
@@ -577,14 +634,18 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
   if (pos < s.size() && std::tolower(static_cast<unsigned char>(s[pos])) == 'i') {
     if (pos + 2 < s.size() &&
         std::tolower(static_cast<unsigned char>(s[pos+1])) == 'n' &&
-        std::tolower(static_cast<unsigned char>(s[pos+2])) == 'f' && isDelim(pos + 3))
+        std::tolower(static_cast<unsigned char>(s[pos+2])) == 'f' && isDelim(pos + 3)) {
+      checkTailLen(pos + 3);
       return numStr + "Infinity";
+    }
   }
   if (pos < s.size() && std::tolower(static_cast<unsigned char>(s[pos])) == 'n') {
     if (pos + 2 < s.size() &&
         std::tolower(static_cast<unsigned char>(s[pos+1])) == 'a' &&
-        std::tolower(static_cast<unsigned char>(s[pos+2])) == 'n' && isDelim(pos + 3))
+        std::tolower(static_cast<unsigned char>(s[pos+2])) == 'n' && isDelim(pos + 3)) {
+      checkTailLen(pos + 3);
       return "NaN";
+    }
   }
   bool afterE = false;
   for (; pos < s.size(); pos++) {
@@ -600,9 +661,34 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0) {
     afterE = false;
   }
   if (numStr.empty() || numStr == "-" || numStr == "+") return "null";
+  // Reject leading zeros in decimal numbers (e.g. 07, 007.5)
+  {
+    std::string mag = numStr;
+    if (!mag.empty() && mag[0] == '-') mag.erase(0, 1);
+    if (mag.size() >= 2 && mag[0] == '0' && std::isdigit(static_cast<unsigned char>(mag[1])))
+      throw asvJSONError("leading zeros are not allowed in numbers");
+  }
+  // Reject numeric overflow (exponent / out-of-range integer)
+  {
+    bool isFloatNum = numStr.find_first_of(".eE") != std::string::npos;
+    errno = 0;
+    if (isFloatNum) {
+      char* endp = nullptr;
+      double dv = std::strtod(numStr.c_str(), &endp);
+      if (errno == ERANGE || std::isinf(dv))
+        throw asvJSONError("number out of range");
+    } else {
+      errno = 0;
+      char* endp = nullptr;
+      std::strtoll(numStr.c_str(), &endp, 10);
+      if (errno == ERANGE)
+        throw asvJSONError("integer out of range");
+    }
+  }
   // Check for trailing content after number
   if (pos < s.size() && !isDelim(pos))
     throw asvJSONError("invalid number: unexpected character after number");
+  checkTailLen(pos);
   return numStr;
 }
 
@@ -719,6 +805,8 @@ inline asvJSONValue* tomlNavigate(asvJSONValue* cur, const std::vector<std::stri
 
 // Helper: set a value on an object by key (insert or assign)
 inline void tomlObjSet(asvJSONValue* obj, const std::string& key, std::unique_ptr<asvJSONValue> val) {
+  if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj)
+    throw asvJSONError("duplicate key: " + key);
   auto it = obj->obj->find(key);
   if (it != obj->obj->end()) throw asvJSONError("duplicate key: " + key);
   obj->obj->emplace(key, std::move(val));
@@ -752,25 +840,46 @@ inline bool asvJSON::fromTOML(std::string_view input) {
 
       // Table header [table] or [[array]]
       if (line[0] == '[') {
-        size_t end = line.rfind(']');
-        if (end == std::string_view::npos) throw asvJSONError("unclosed table header");
         bool isArr = false;
         size_t start = 1;
         if (line.size() > 2 && line[1] == '[') {
-          if (end <= 2 || line[end-1] != ']') throw asvJSONError("malformed array table");
           isArr = true;
           start = 2;
-          end--;
+        }
+        // Find the ']' that actually closes the header: scan quote-aware so a
+        // ']' inside a quoted key is not mistaken for the closer (rfind would
+        // also swallow trailing content like `[a.b] z [c]`).
+        bool inBasic = false, inLiteral = false, escape = false;
+        size_t end = std::string_view::npos;
+        for (size_t i = start; i < line.size(); i++) {
+          char c = line[i];
+          if (escape) { escape = false; continue; }
+          if (c == '\\' && inBasic) { escape = true; continue; }
+          if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
+          if (c == '\'' && !inBasic) { inLiteral = !inLiteral; continue; }
+          if (!inBasic && !inLiteral && c == ']') { end = i; break; }
+        }
+        if (end == std::string_view::npos) throw asvJSONError("unclosed table header");
+        if (isArr) {
+          if (end + 1 >= line.size() || line[end + 1] != ']')
+            throw asvJSONError("malformed array table");
         }
         std::string_view headerPath = trimSV(line.substr(start, end - start));
         tablePath = parseTomlKeyPath(headerPath);
         isArrayTable = isArr;
+
+        // Nothing but whitespace may follow the closing bracket(s)
+        size_t afterClose = end + (isArr ? 2 : 1);
+        if (!trimSV(line.substr(afterClose)).empty())
+          throw asvJSONError("trailing content after table header");
 
         // For [[array]], ensure the array exists and add a new element
         if (isArrayTable && !tablePath.empty()) {
           std::string arrKey = tablePath.back();
           std::vector<std::string> parentPath(tablePath.begin(), tablePath.end() - 1);
           asvJSONValue* parent = tomlNavigate(root.get(), parentPath, true);
+          if (!parent || parent->type != asvJSONValue::OBJECT || !parent->obj)
+            throw asvJSONError("cannot define array table on non-object");
           auto it = parent->obj->find(arrKey);
           asvJSONValue* arrVal;
           if (it == parent->obj->end() || it->second->type != asvJSONValue::ARRAY) {
@@ -844,7 +953,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         valueStr = vtmp;
       }
 
-      std::string jsonVal = parseTomlValue(std::string_view(valueStr));
+      std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true);
 
       if (isArrayTable) {
         // Inside [[array]]: set on current (last) array element
@@ -852,7 +961,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         std::string arrKey = tablePath.back();
         std::vector<std::string> parentPath(tablePath.begin(), tablePath.end() - 1);
         asvJSONValue* parent = tomlNavigate(root.get(), parentPath, false);
-        if (!parent) continue;
+        if (!parent || parent->type != asvJSONValue::OBJECT || !parent->obj) continue;
         auto it = parent->obj->find(arrKey);
         if (it == parent->obj->end() || it->second->arr->empty()) continue;
         asvJSONValue* elem = it->second->arr->back().get();

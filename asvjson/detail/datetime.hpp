@@ -15,7 +15,7 @@ namespace asvJSONInternal {
  * @param ms_out Optional milliseconds output
  * @return true if parsed successfully
  */
-inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
+inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int* tz_offset_out = nullptr) {
 	if (sv.size() < 20) return false;
 	if (sv[4] != '-' || sv[7] != '-' || sv[10] != 'T') return false;
 
@@ -29,6 +29,7 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 	int year, month, day, hour, min, sec = 0;
 	char sign = '+';
 	int tzH = 0, tzM = 0;
+	int tzOffsetMin = 0;
 
 	if (!parse2(sv.data(), year)) return false;
 	year = year * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
@@ -71,6 +72,7 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 	// Timezone
 	if (sv[pos] == 'Z') {
 		pos++;
+		tzOffsetMin = 0;
 	} else if (sv[pos] == '+' || sv[pos] == '-') {
 		sign = sv[pos]; pos++;
 		if (pos + 1 >= sv.size()) return false;
@@ -84,6 +86,7 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 		}
 		tzH = tz_h;
 		tzM = tz_m;
+		tzOffsetMin = (tzH * 60 + tzM) * (sign == '-' ? -1 : 1);
 	} else {
 		return false;
 	}
@@ -104,6 +107,7 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
 	if (sign == '+') out -= tzH * 3600 + tzM * 60;
 	else if (sign == '-') out += tzH * 3600 + tzM * 60;
 
+	if (tz_offset_out) *tz_offset_out = tzOffsetMin;
 	return true;
 }
 
