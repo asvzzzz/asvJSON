@@ -7007,6 +7007,149 @@ key = "value" # inline comment)")));
     ASSERT(j2.fromTOML(std::string_view("a.\"\" = 2")));
     ASSERT_EQ(j2.getRoot()->get("a")->get("")->getInt(), int64_t(2));
   }
+  // Multiline arrays: comma-optional newlines, inline comments, trailing comma
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [\n1\n2\n]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->get("a")->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->get("a")->get(static_cast<size_t>(1))->getInt(), int64_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [1,\n2, # trailing\n3]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(3));
+  }
+  {
+    // Trailing comma is legal in a multiline array
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [1,\n2,\n]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+  }
+  // Unclosed multiline array is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = [1,\n2,3")));
+  }
+  // Separator comma between inline-table entries (was mis-rejected as
+  // 'invalid key: unexpected character')
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("point = {x = 1, y = 2}")));
+    ASSERT_EQ(j.getInt("point.x"), int64_t(1));
+    ASSERT_EQ(j.getInt("point.y"), int64_t(2));
+  }
+  // Nested inline table with a quoted brace stays balanced
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = \"x}y\", c = 1}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "x}y");
+    ASSERT_EQ(j.getInt("a.c"), int64_t(1));
+  }
+  // Missing comma between inline-table pairs is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = {x = 1 y = 2}")));
+  }
+  // Non-ASCII bare keys are accepted
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("ключ = \"значение\"")));
+    ASSERT_EQ(std::string(j.getString("ключ")), "значение");
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view("[раздел]\nключ = 1")));
+    ASSERT_EQ(j2.getInt("раздел.ключ"), int64_t(1));
+  }
+  // Strict floats: dot-leading, dot-trailing, empty exponent are errons
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = .5")));
+    ASSERT(!j.fromTOML(std::string_view("a = 5.")));
+    ASSERT(!j.fromTOML(std::string_view("a = 5.e20")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1e")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1e+")));
+  }
+  // Strict integers: leading zeros / underscores errors
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = 007")));
+    ASSERT(!j.fromTOML(std::string_view("a = _1")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1_")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1__0")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1_.5")));
+    ASSERT(!j.fromTOML(std::string_view("a = 1e2_2"))); // underscore banned in exponent
+    ASSERT(j.fromTOML(std::string_view("a = 1_000")));
+    ASSERT(j.fromTOML(std::string_view("a = 0xff_ff")));
+  }
+  // inf / nan are case-sensitive lowercase only
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = inf")));
+    ASSERT(std::isinf(j.getDouble("a")) && j.getDouble("a") > 0);
+    ASSERT(j.fromTOML(std::string_view("a = -inf")));
+    ASSERT(std::isinf(j.getDouble("a")) && j.getDouble("a") < 0);
+    ASSERT(j.fromTOML(std::string_view("a = nan")));
+    ASSERT(std::isnan(j.getDouble("a")));
+    ASSERT(!j.fromTOML(std::string_view("a = INF")));
+    ASSERT(!j.fromTOML(std::string_view("a = NAN")));
+    ASSERT(!j.fromTOML(std::string_view("a = infx")));
+  }
+  // Unterminated / unknown-escape strings throw
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = \"abc")));
+    ASSERT(!j.fromTOML(std::string_view("a = 'abc")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"abc\\")));
+    ASSERT(!j.fromTOML(std::string_view("a = \"x\\q\"") ));
+    ASSERT(!j.fromTOML(std::string_view("a = \"x\\/\"") ));
+    ASSERT(!j.fromTOML(std::string_view("a = \"\"\"abc")));
+    ASSERT(!j.fromTOML(std::string_view("a = '''abc")));
+    // Trailing content after a closed multiline string is an error
+    ASSERT(!j.fromTOML(std::string_view("a = \"\"\"x\"\"\" y")));
+  }
+  // Table redefinition guards
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("[a]\nb=1\n[a]\nc=2")));
+    // a plain header super-table may be reopened (implicit tables)
+    ASSERT(j.fromTOML(std::string_view("[a.b]\nc=1\n[a]\nd=2")));
+    // ... but a dotted-key super-table may not be redefined by a header
+    ASSERT(!j.fromTOML(std::string_view("[fruit]\napple.color = \"red\"\n[fruit.apple]\nsmooth = true")));
+    // a header may still add a sub-table inside a dotted-key table
+    ASSERT(j.fromTOML(std::string_view("[fruit]\napple.color = \"red\"\n[fruit.apple.texture]\nsmooth = true")));
+  }
+  // Array-of-tables: repeated headers, sub-tables, nested sub-arrays
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("[[a]]\nb=1\n[[a]]\nb=2")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("[[fruits]]\nname=\"apple\"\n[fruits.physical]\ncolor=\"red\"\n[[fruits.varieties]]\nname=\"red\"\n[[fruits.varieties]]\nname=\"granny\"\n[[fruits]]\nname=\"banana\"")));
+    auto arr = j.getRoot()->get("fruits");
+    ASSERT_EQ(arr->size(), size_t(2));
+    ASSERT_EQ(std::string(arr->get(static_cast<size_t>(0))->get("physical")->get("color")->getString()), "red");
+    ASSERT_EQ(arr->get(static_cast<size_t>(0))->get("varieties")->size(), size_t(2));
+    ASSERT_EQ(arr->get(static_cast<size_t>(1))->get("name")->getString(), std::string("banana"));
+  }
+  // Appending to a statically-defined array is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("fruits = []\n[[fruits]]\nx = 1")));
+  }
+  // A key/value pair must end at EOF/line: two pairs on one line is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = 1 b = 2")));
+    // ... and so is a colon-only pair (no '=')
+    ASSERT(!j.fromTOML(std::string_view("a: 1")));
+  }
+  // A key with no value is an error
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("x =")));
+  }
 }
 
 TEST(testToJSONLines) {
