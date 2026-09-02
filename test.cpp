@@ -2471,6 +2471,43 @@ TEST(testCBORUInt64Overflow) {
 	ASSERT(!json.getLastError().empty());
 }
 
+TEST(testCBORNegEpochDateTime) {
+	// Tag 1 with a negative float64 epoch (pre-1970) must split into
+	// second + millisecond the same way a date parser would (floor towards
+	// -inf, ms in [0,1000)). Truncation-toward-zero previously produced
+	// ts=0, ms=0 for -0.5s instead of ts=-1, ms=500.
+	{
+		// -0.5 s == 1969-12-31T23:59:59.500Z
+		std::vector<uint8_t> data = { 0xC1, 0xFB, 0xBF, 0xE0, 0, 0, 0, 0, 0, 0 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(data.data(), data.size()));
+		auto* v = json.getRoot();
+		ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(v->timestamp, static_cast<int64_t>(-1));
+		ASSERT_EQ(v->datetime_ms, 500);
+	}
+	{
+		// -1.5 s == 1969-12-31T23:59:58.500Z
+		std::vector<uint8_t> data = { 0xC1, 0xFB, 0xBF, 0xF8, 0, 0, 0, 0, 0, 0 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(data.data(), data.size()));
+		auto* v = json.getRoot();
+		ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(v->timestamp, static_cast<int64_t>(-2));
+		ASSERT_EQ(v->datetime_ms, 500);
+	}
+	{
+		// Positive epoch keeps working: 0.5 s == 1970-01-01T00:00:00.500Z
+		std::vector<uint8_t> data = { 0xC1, 0xFB, 0x3F, 0xE0, 0, 0, 0, 0, 0, 0 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(data.data(), data.size()));
+		auto* v = json.getRoot();
+		ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(v->timestamp, static_cast<int64_t>(0));
+		ASSERT_EQ(v->datetime_ms, 500);
+	}
+}
+
 TEST(testCBORNegInt64Overflow) {
 	// Negative int with magnitude 0xFFFFFFFFFFFFFFFF would map to INT64_MIN-1,
 	// out of range, and must be rejected.
@@ -12063,7 +12100,8 @@ int main() {
 	RUN(testCBORFromString);
 	RUN(testCBORIndefiniteArray);
 	RUN(testCBORIndefiniteMap);
-	RUN(testCBORFloat16);
+RUN(testCBORFloat16);                                                                      
+	RUN(testCBORNegEpochDateTime);                                                             
 	RUN(testCBORUInt64Overflow);
 	RUN(testCBORNegInt64Overflow);
 	RUN(testCBORIndefiniteArrayTruncated);

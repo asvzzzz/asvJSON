@@ -319,11 +319,14 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       auto val = parseCBOR(data, pos, dataLen, depth + 1);
       if (!val) throw asvJSONError("CBOR tag value failed");
       if (tag == 1) {
-        // Epoch-based date/time
+        // Epoch-based date/time: seconds since 1970-01-01T00:00Z, can be
+        // negative (pre-epoch). Split the fractional part the same way a
+        // date parser would: floor towards -inf, keep ms in [0, 1000).
         if (val->type == asvJSONValue::DOUBLE) {
           double sec = val->dbl;
-          time_t t = static_cast<time_t>(sec);
-          int ms = static_cast<int>((sec - static_cast<double>(t)) * 1000.0 + 0.5);
+          double fl = std::floor(sec);
+          time_t t = static_cast<time_t>(fl);
+          int ms = static_cast<int>(std::floor((sec - fl) * 1000.0 + 0.5));
           if (ms > 999) ms = 999;
           if (ms < 0) ms = 0;
           return asvJSONValue::makeDateTime(t, ms);
