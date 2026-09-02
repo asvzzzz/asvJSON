@@ -165,6 +165,18 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 
 // MessagePack Parser
 
+// ext type 2 payload is a regex in makeRegex form: "pattern\0options"
+inline std::unique_ptr<asvJSONValue> msgpackDecodeRegex(const uint8_t* data, size_t len) {
+	if (len == 0) return asvJSONValue::makeNull();
+	std::string s(reinterpret_cast<const char*>(data), len);
+	size_t sep = s.rfind('\0');
+	std::string pattern = (sep != std::string::npos) ? s.substr(0, sep) : s;
+	std::string opts = (sep != std::string::npos) ? s.substr(sep + 1) : std::string();
+	auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
+	if (!re) return asvJSONValue::makeNull();
+	return re;
+}
+
 inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
 	if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 	if (pos >= dataLen) throw asvJSONError("MsgPack unexpected end");
@@ -238,18 +250,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return val;
 			}
 			if (extType == 2) {
-				if (len > 0) {
-					std::string s(reinterpret_cast<const char*>(data + pos), len);
-					pos += len;
-					size_t sep = s.rfind('|');
-					std::string pattern = (sep != std::string::npos) ? s.substr(0, sep) : s;
-					std::string opts = (sep != std::string::npos) ? s.substr(sep + 1) : std::string();
-					auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-					if (!re) return asvJSONValue::makeNull();
-					return re;
-				}
+				auto re = msgpackDecodeRegex(data + pos, len);
 				pos += len;
-				return asvJSONValue::makeNull();
+				return re;
 			}
 			if (extType == 3) {
 				if (len < 8 || pos + 8 > dataLen) { pos += len; return asvJSONValue::makeNull(); }
@@ -276,18 +279,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return val;
 			}
 			if (extType == 2) {
-				if (len > 0) {
-					std::string s(reinterpret_cast<const char*>(data + pos), len);
-					pos += len;
-					size_t sep = s.rfind('|');
-					std::string pattern = (sep != std::string::npos) ? s.substr(0, sep) : s;
-					std::string opts = (sep != std::string::npos) ? s.substr(sep + 1) : std::string();
-					auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-					if (!re) return asvJSONValue::makeNull();
-					return re;
-				}
+				auto re = msgpackDecodeRegex(data + pos, len);
 				pos += len;
-				return asvJSONValue::makeNull();
+				return re;
 			}
 			if (extType == 3) {
 				if (len < 8 || pos + 8 > dataLen) { pos += len; return asvJSONValue::makeNull(); }
@@ -314,18 +308,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return val;
 			}
 			if (extType == 2) {
-				if (len > 0) {
-					std::string s(reinterpret_cast<const char*>(data + pos), len);
-					pos += len;
-					size_t sep = s.rfind('|');
-					std::string pattern = (sep != std::string::npos) ? s.substr(0, sep) : s;
-					std::string opts = (sep != std::string::npos) ? s.substr(sep + 1) : std::string();
-					auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-					if (!re) return asvJSONValue::makeNull();
-					return re;
-				}
+				auto re = msgpackDecodeRegex(data + pos, len);
 				pos += len;
-				return asvJSONValue::makeNull();
+				return re;
 			}
 			if (extType == 3) {
 				if (len < 8 || pos + 8 > dataLen) { pos += len; return asvJSONValue::makeNull(); }
@@ -363,8 +348,8 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		case 0xD1: { if (pos + 2 > dataLen) throw asvJSONError("MsgPack int16"); int16_t v = static_cast<int16_t>((static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1]); pos += 2; return asvJSONValue::makeInt(v); }
 		case 0xD2: { if (pos + 4 > dataLen) throw asvJSONError("MsgPack int32"); int32_t v = (static_cast<int32_t>(data[pos]) << 24) | (static_cast<int32_t>(data[pos + 1]) << 16) | (static_cast<int32_t>(data[pos + 2]) << 8) | data[pos + 3]; pos += 4; return asvJSONValue::makeInt(v); }
 		case 0xD3: { if (pos + 8 > dataLen) throw asvJSONError("MsgPack int64"); int64_t v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | data[pos + i]; pos += 8; return asvJSONValue::makeInt(v); }
-		case 0xD4: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext1"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos >= dataLen) throw asvJSONError("MsgPack fixext1 overflow"); auto v = asvJSONValue::makeExtension(et, data + pos, 1); pos += 1; return v; }
-		case 0xD5: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext2"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos + 2 > dataLen) throw asvJSONError("MsgPack fixext2 overflow"); auto v = asvJSONValue::makeExtension(et, data + pos, 2); pos += 2; return v; }
+		case 0xD4: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext1"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos >= dataLen) throw asvJSONError("MsgPack fixext1 overflow"); if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 1); pos += 1; return re; } auto v = asvJSONValue::makeExtension(et, data + pos, 1); pos += 1; return v; }
+		case 0xD5: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext2"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos + 2 > dataLen) throw asvJSONError("MsgPack fixext2 overflow"); if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 2); pos += 2; return re; } auto v = asvJSONValue::makeExtension(et, data + pos, 2); pos += 2; return v; }
 		case 0xD6: {
 			if (pos >= dataLen) throw asvJSONError("MsgPack fixext4"); int8_t et = static_cast<int8_t>(data[pos++]);
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack fixext4 overflow");
@@ -374,6 +359,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				pos += 4;
 				return asvJSONValue::makeDateTime(static_cast<time_t>(t), 0);
 			}
+			if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 4); pos += 4; return re; }
 			auto v = asvJSONValue::makeExtension(et, data + pos, 4);
 			pos += 4;
 			return v;
@@ -396,11 +382,12 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				if (ns >= 1000000000) throw asvJSONError("MsgPack fixext8 datetime ns overflow"); 
 				return asvJSONValue::makeDateTime(static_cast<time_t>(sec), ns / 1000000); 
 			} 
+			if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 8); pos += 8; return re; }
 			auto v = asvJSONValue::makeExtension(et, data + pos, 8); 
 			pos += 8; 
 			return v; 
 		}
-		case 0xD8: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext16"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos + 16 > dataLen) throw asvJSONError("MsgPack fixext16 overflow"); auto v = asvJSONValue::makeExtension(et, data + pos, 16); pos += 16; return v; }
+		case 0xD8: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext16"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos + 16 > dataLen) throw asvJSONError("MsgPack fixext16 overflow"); if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 16); pos += 16; return re; } auto v = asvJSONValue::makeExtension(et, data + pos, 16); pos += 16; return v; }
 		case 0xD9: {
 			if (pos >= dataLen) throw asvJSONError("MsgPack str8");
 			uint8_t slen = data[pos++];

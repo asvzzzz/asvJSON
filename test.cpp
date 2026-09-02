@@ -1645,23 +1645,23 @@ TEST(testMessagePackExt) {
 	{
 		uint8_t ext1[] = {0x01};
 		asvJSON json;
-		json.putExtension("a", 1, ext1, 1);
+		json.putExtension("a", 5, ext1, 1);
 		uint8_t ext2[] = {0x01, 0x02};
-		json.putExtension("b", 2, ext2, 2);
+		json.putExtension("b", 6, ext2, 2);
 		uint8_t ext4[] = {0x01, 0x02, 0x03, 0x04};
-		json.putExtension("c", 3, ext4, 4);
+		json.putExtension("c", 7, ext4, 4);
 		uint8_t ext8[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
-		json.putExtension("d", 4, ext8, 8);
+		json.putExtension("d", 8, ext8, 8);
 		auto mp = json.toMessagePack();
 		asvJSON json2;
 		json2.fromMessagePack(mp.data(), mp.size());
-		ASSERT_EQ(json2.getExtension("a").first, 1);
+		ASSERT_EQ(json2.getExtension("a").first, 5);
 		ASSERT_EQ(json2.getExtension("a").second.size(), static_cast<size_t>(1));
-		ASSERT_EQ(json2.getExtension("b").first, 2);
+		ASSERT_EQ(json2.getExtension("b").first, 6);
 		ASSERT_EQ(json2.getExtension("b").second.size(), static_cast<size_t>(2));
-		ASSERT_EQ(json2.getExtension("c").first, 3);
+		ASSERT_EQ(json2.getExtension("c").first, 7);
 		ASSERT_EQ(json2.getExtension("c").second.size(), static_cast<size_t>(4));
-		ASSERT_EQ(json2.getExtension("d").first, 4);
+		ASSERT_EQ(json2.getExtension("d").first, 8);
 		ASSERT_EQ(json2.getExtension("d").second.size(), static_cast<size_t>(8));
 	}
 	{
@@ -2152,6 +2152,42 @@ TEST(testMessagePackObjectIdRegexTimestamp) {
 	ASSERT(tsV != nullptr);
 	ASSERT_EQ(tsV->type, asvJSONValue::TIMESTAMP);
 	ASSERT_EQ(tsV->num, 1234567890);
+}
+
+TEST(testMsgPackRegexFidelity) {
+	// REGEX is stored as "pattern\0options" (NUL-separated, see makeRegex) and
+	// emitted as an ext of whichever size fits (fixext1/2/4/8/16 or ext8/16/32).
+	// Every codec branch must decode it back to a REGEX with intact pattern
+	// (a '|' inside the pattern must NOT be treated as a separator) and options.
+	for (int L = 1; L <= 20; L++) {
+		std::string p(L, 'a');
+		if (L == 5) p = "a|bcd";
+		asvJSON json;
+		json.putRegex("re", p.c_str(), "im");
+		auto mp = json.toMessagePack();
+		asvJSON json2;
+		ASSERT(json2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = json2.getRoot()->get("re");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->type, asvJSONValue::REGEX);
+		std::string pattern, opts;
+		ASSERT(json2.getRegex("re", pattern, opts));
+		if (pattern != p) throw std::runtime_error("MsgPack regex pattern corrupted (len " + std::to_string(L) + ")");
+		if (opts != "im") throw std::runtime_error("MsgPack regex options corrupted (len " + std::to_string(L) + ")");
+	}
+	// Empty options round-trip across the same size branches.
+	for (int L = 1; L <= 20; L++) {
+		std::string p(L, 'b');
+		asvJSON json;
+		json.putRegex("re", p.c_str(), "");
+		auto mp = json.toMessagePack();
+		asvJSON json2;
+		ASSERT(json2.fromMessagePack(mp.data(), mp.size()));
+		std::string pattern, opts;
+		ASSERT(json2.getRegex("re", pattern, opts));
+		if (pattern != p) throw std::runtime_error("MsgPack regex (no opts) pattern corrupted (len " + std::to_string(L) + ")");
+		if (!opts.empty()) throw std::runtime_error("MsgPack regex (no opts) options not empty (len " + std::to_string(L) + ")");
+	}
 }
 
 TEST(testCBOR) {
@@ -12080,6 +12116,7 @@ int main() {
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
 	RUN(testMessagePackObjectIdRegexTimestamp);
+	RUN(testMsgPackRegexFidelity);
 	
 	std::cout << "\n--- Object Key Escape Tests ---\n";
 	RUN(testObjectKeyEscapes);
