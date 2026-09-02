@@ -39,6 +39,8 @@ inline std::string json5ToJson(std::string_view input) {
     else { char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c)); out += buf; }
   };
 
+  bool radixJustEnded = false;
+
   for (size_t i = 0; i < input.size(); i++) {
     char c = input[i];
 
@@ -47,6 +49,9 @@ inline std::string json5ToJson(std::string_view input) {
         char n = input[i + 1];
         if (n == '\n') { i++; }
         else if (n == '\r') { i++; if (i + 1 < input.size() && input[i + 1] == '\n') i++; }
+        else if (static_cast<unsigned char>(n) == 0xE2 && i + 3 < input.size() &&
+                 static_cast<unsigned char>(input[i + 2]) == 0x80 &&
+                 (static_cast<unsigned char>(input[i + 3]) == 0xA8 || static_cast<unsigned char>(input[i + 3]) == 0xA9)) { i += 3; }
         else if (n == 'v') { out += "\\u000B"; i++; }
         else if (n == '0') {
           if (i + 2 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 2])))
@@ -84,7 +89,11 @@ inline std::string json5ToJson(std::string_view input) {
           }
         }
         else if (n == '\'') { out += '\''; i++; }
-        else { out += '\\'; out += n; i++; }
+        else {
+          if (n >= '1' && n <= '9') throw asvJSONError("octal escape not allowed in JSON5");
+          if (n == '"' || n == '\\') out += '\\';
+          out += n; i++;
+        }
       } else {
         if (static_cast<unsigned char>(c) < 0x20) escapeControl(c);
         else out += c;
@@ -98,6 +107,9 @@ inline std::string json5ToJson(std::string_view input) {
         char n = input[++i];
         if (n == '\n') { /* line continuation: skip */ }
         else if (n == '\r') { if (i + 1 < input.size() && input[i + 1] == '\n') i++; }
+        else if (static_cast<unsigned char>(n) == 0xE2 && i + 2 < input.size() &&
+                 static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+                 (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) { i += 2; }
         else if (n == 'v') { out += "\\u000B"; }
         else if (n == '0') {
           if (i + 1 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 1])))
@@ -137,7 +149,11 @@ inline std::string json5ToJson(std::string_view input) {
         }
         else if (n == '\'') { out += '\''; }
         else if (n == '"') { out += "\\\""; }
-        else { out += '\\'; out += n; }
+        else {
+          if (n >= '1' && n <= '9') throw asvJSONError("octal escape not allowed in JSON5");
+          if (n == '\\') out += '\\';
+          out += n;
+        }
       } else if (c == '\'') {
         out += '"';
         str = NONE;
@@ -151,8 +167,8 @@ inline std::string json5ToJson(std::string_view input) {
       continue;
     }
 
-    if (c == '"') { out += c; str = DOUBLE; continue; }
-    if (c == '\'') { out += '"'; str = SINGLE; continue; }
+    if (c == '"') { radixJustEnded = false; out += c; str = DOUBLE; continue; }
+    if (c == '\'') { radixJustEnded = false; out += '"'; str = SINGLE; continue; }
 
     // Control character check (outside strings)
     if (static_cast<unsigned char>(c) < 0x20 && c != '\n' && c != '\r' && c != '\t' && c != '\v' && c != '\f')
@@ -199,15 +215,38 @@ inline std::string json5ToJson(std::string_view input) {
         if (nc == '}' || nc == ']') isTrailing = true;
         break;
       }
-      if (isTrailing) { i = j - 1; continue; } // skip comma, let outer loop hit }
+      if (isTrailing) {
+        size_t k = out.size();
+        while (k > 0) { char pc = out[k - 1]; if (pc == ' ' || pc == '\t' || pc == '\n' || pc == '\r' || pc == '\v' || pc == '\f') { k--; continue; } break; }
+        if (k == 0 || out[k - 1] == ',' || out[k - 1] == '{' || out[k - 1] == '[' || out[k - 1] == ':')
+          throw asvJSONError("trailing comma requires a preceding value");
+        i = j - 1; continue; // skip comma, let outer loop hit }
+      }
       out += ',';
+      radixJustEnded = false;
       continue;
     }
 
     // Unquoted key (supports Unicode identifiers)
     if (isIdStart(c)) {
+      radixJustEnded = false;
       size_t start = i;
-      while (i < input.size() && isIdCont(input[i])) i++;
+      while (i < input.size() && isIdCont(input[i])) {
+        // Stop at multibyte whitespace (which the identifier continuation rule would otherwise swallow)
+        auto uc = static_cast<unsigned char>(input[i]);
+        if (uc == 0xC2 && i + 1 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xA0) break;
+        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+            (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) break;
+        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[i + 2]) >= 0x80 && static_cast<unsigned char>(input[i + 2]) <= 0x8A) break;
+        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x81 &&
+            static_cast<unsigned char>(input[i + 2]) == 0x9F) break;
+        if (uc == 0xE3 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[i + 2]) == 0x80) break;
+        if (uc == 0xEF && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
+            static_cast<unsigned char>(input[i + 2]) == 0xBF) break;
+        i++;
+      }
       std::string_view ident(input.data() + start, i - start);
       // Validate identifier characters
       for (size_t k = 0; k < ident.size(); k++) {
@@ -262,6 +301,7 @@ inline std::string json5ToJson(std::string_view input) {
         if (errno == ERANGE || end != digits.c_str() + digits.size())
           throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
+        radixJustEnded = true;
         continue;
       }
       if ((n == 'o' || n == 'O') && i + 2 < input.size() && input[i + 2] >= '0' && input[i + 2] <= '7') {
@@ -275,6 +315,7 @@ inline std::string json5ToJson(std::string_view input) {
         if (errno == ERANGE || end != digits.c_str() + digits.size())
           throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
+        radixJustEnded = true;
         continue;
       }
       if ((n == 'b' || n == 'B') && i + 2 < input.size() && (input[i + 2] == '0' || input[i + 2] == '1')) {
@@ -288,19 +329,24 @@ inline std::string json5ToJson(std::string_view input) {
         if (errno == ERANGE || end != digits.c_str() + digits.size())
           throw asvJSONError("number out of range in JSON5");
         out += std::to_string(val);
+        radixJustEnded = true;
         continue;
       }
     }
 
     // Leading decimal: .5 -> 0.5
-    if (c == '.' && (i == 0 || !std::isdigit(static_cast<unsigned char>(input[i - 1]))) && i + 1 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 1]))) {
+    if (c == '.' && !radixJustEnded && (i == 0 || !std::isdigit(static_cast<unsigned char>(input[i - 1]))) && i + 1 < input.size() && std::isdigit(static_cast<unsigned char>(input[i + 1]))) {
       out += '0';
       out += c;
       continue;
     }
 
+    // A radix literal has no fraction part; reject an adjacent '.' (e.g. 0xFF.5)
+    if (radixJustEnded && c == '.') throw asvJSONError("fraction not allowed after radix number in JSON5");
+
     // Signs (+/-) with whitespace-tolerant lookahead (JSON5: - Infinity, + 5)
     if (c == '+' || c == '-') {
+      radixJustEnded = false;
       size_t j = i + 1;
       while (j < input.size()) {
         char nc = input[j];
@@ -339,6 +385,7 @@ inline std::string json5ToJson(std::string_view input) {
     }
 
     out += c;
+    radixJustEnded = false;
   }
 
   if (str != NONE) throw asvJSONError("unclosed string in JSON5");

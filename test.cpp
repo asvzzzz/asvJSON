@@ -8098,6 +8098,75 @@ TEST(testFromJSON5) {
   }
 }
 
+TEST(testFromJSON5Conformance) {
+  // Unknown escape drops the backslash (JSON5 Sec 5.1 example 5: '\A\C\/\D\C' == 'AC/DC')
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(R"(['\A\C\/\D\C'])")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "AC/DC");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("[\"\\A\"]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "A");
+  }
+  // The escape: `\'` stays the same character in both quote styles
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("['\\\'']")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "'");
+  }
+  // Decimal digit (1-9) after backslash must be rejected (no octal escapes)
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("['\\7']")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[\"a\\9b\"]")));
+  }
+  // A radix literal has no fraction part
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[0xFF.5]")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[0b11.]")));
+  }
+  // A trailing comma must follow a value (not an open bracket / em-dash / colon)
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[,]")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("{,}")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("[1,,]")));
+  }
+  // Multibyte whitespace is a token separator, not part of an identifier key
+  {
+    const char src[] = "{\xe2\x80\xa8k\xe2\x80\xa9" ":1}";
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(src, sizeof(src) - 1)));
+    ASSERT_EQ(j.size(), size_t(1));
+    auto* k = j.getRoot()->get("k");
+    ASSERT(k != nullptr && k->type == asvJSONValue::INT);
+    ASSERT_EQ(k->num, int64_t(1));
+  }
+  {
+    const char src[] = "{k\xef\xbb\xbf" ":1}";
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(src, sizeof(src) - 1)));
+    ASSERT_EQ(j.size(), size_t(1));
+    auto* k = j.getRoot()->get("k");
+    ASSERT(k != nullptr && k->type == asvJSONValue::INT);
+  }
+}
+
 TEST(testToINI) {
   // Simple object
   {
@@ -12205,6 +12274,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
 	RUN(testFromJSON5);
+	RUN(testFromJSON5Conformance);
 
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);
