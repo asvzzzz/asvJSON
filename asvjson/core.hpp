@@ -1383,7 +1383,7 @@ public:
 	bool fromTOON(std::string_view input);
 	std::string toTRON() const;
 	bool fromTRON(std::string_view input);
-	std::string toGOON() const;
+	std::string toGOON(const GoonWriteOptions& opts = {}) const;
 	bool fromGOON(std::string_view input);
 	std::string toSexpr() const;
 	bool fromSexpr(std::string_view input);

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // GOON (Greatly Optimized Object Notation) serialization/parsing for asvJSON++
 //
 // JSON superset with YAML-like indentation:
@@ -14,6 +14,17 @@
 #include "../core.hpp"
 
 namespace asvJSONInternal {
+
+const size_t MAX_REPEAT_COUNT = 10000;
+
+inline bool goonIsForbiddenKey(std::string_view key) {
+  return key == "__proto__" || key == "constructor" || key == "prototype";
+}
+
+class GoonDecodeError : public asvJSONError {
+public:
+  explicit GoonDecodeError(const std::string& msg) : asvJSONError(msg) {}
+};
 
 inline void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
   out += "\"__BASE64__";
@@ -40,9 +51,101 @@ inline std::string goonLiteral(const asvJSONValue* v) {
 }
 
 inline bool goonIsSimpleValue(const asvJSONValue* v) {
-  return v && v->type != asvJSONValue::OBJECT && v->type != asvJSONValue::ARRAY;
+  if (!v) return true;
+  if (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) return false;
+  return true;
 }
 
+inline bool goonIsSmallSimpleCollection(const asvJSONValue* v) {
+  if (!v) return false;
+  if (v->type == asvJSONValue::ARRAY || v->type == asvJSONValue::OBJECT) {
+    if (v->size() > 5) return false;
+    if (v->type == asvJSONValue::ARRAY) {
+      for (size_t i = 0; i < v->size(); i++) {
+        if (!goonIsSimpleValue(v->get(i))) return false;
+      }
+    } else {
+      for (const auto& [k, child] : *(v->obj)) {
+        if (!goonIsSimpleValue(child.get())) return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// Forward declarations for mutual recursion
+inline std::string goonFormatSpecial(const asvJSONValue* v);
+inline bool goonNeedsQuotes(const std::string& s);
+inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
+inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
+inline void goonSerializeInlineArray(const asvJSONValue* arr, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
+inline void goonSerializeInlineObject(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
+
+inline void goonSerializeInlineVal(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
+  if (!v || v->type == asvJSONValue::NULL_VAL) { out += "_"; return; }
+  if (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) {
+    if (v->size() > 0 && goonIsSmallSimpleCollection(v) && opts.mode == GoonWriteOptions::Mode::Compact) {
+      if (v->type == asvJSONValue::OBJECT) goonSerializeInlineObject(v, out, dict, opts);
+      else goonSerializeInlineArray(v, out, dict, opts);
+      return;
+    }
+  }
+  switch (v->type) {
+    case asvJSONValue::BOOL_VAL: out += (v->flag ? "T" : "F"); break;
+    case asvJSONValue::STRING:
+      if (v->str_data.empty()) out += "~";
+      else {
+        out += '"';
+        appendJsonEscaped(out, v->str_data);
+        out += '"';
+      }
+      break;
+    case asvJSONValue::INT: out += std::to_string(v->num); break;
+    case asvJSONValue::DOUBLE:
+      if (std::isnan(v->dbl) || std::isinf(v->dbl)) out += "_";
+      else fmtDoubleVal(v->dbl, out);
+      break;
+    default: {
+      std::string spec = goonFormatSpecial(v);
+      if (!spec.empty()) out += spec;
+      else out += "_";
+      break;
+    }
+  }
+}
+
+inline void goonSerializeInlineArray(const asvJSONValue* arr, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
+  out += '[';
+  for (size_t i = 0; i < arr->size(); i++) {
+    if (i > 0) out += ',';
+    goonSerializeInlineVal(arr->get(i), out, dict, opts);
+  }
+  out += ']';
+}
+
+inline void goonSerializeInlineObject(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
+  out += '{';
+  bool first = true;
+  for (const auto& [k, child] : *(v->obj)) {
+    if (!first) out += ',';
+    first = false;
+    if (dict && dict->count(k)) {
+      out += "$" + std::to_string(dict->at(k)) + ':';
+    } else {
+      if (goonNeedsQuotes(k)) {
+        out += '"';
+        appendJsonEscaped(out, k);
+        out += '"';
+      } else {
+        out += k;
+      }
+      out += ':';
+    }
+    goonSerializeInlineVal(child.get(), out, dict, opts);
+  }
+  out += '}';
+}
 inline std::string goonFormatSpecial(const asvJSONValue* v) {
   if (!v) return "_";
   switch (v->type) {
@@ -142,9 +245,11 @@ inline void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict
   out += '\n';
 }
 
-inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0, const std::unordered_map<std::string, int>* dict = nullptr);
 
-inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr) {
+
+
+
+inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr, const GoonWriteOptions& opts = {}) {
   if (!arr || arr->size() == 0) {
     if (!key.empty()) {
       std::string pad(static_cast<size_t>(indent) * 2, ' ');
@@ -157,8 +262,12 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   bool tabular = (arr->size() > 0 && arr->get(0) && arr->get(0)->type == asvJSONValue::OBJECT);
   std::vector<std::string> cols;
   if (tabular) {
-    for (size_t i = 1; i < arr->size(); i++) {
-      if (!arr->get(i) || arr->get(i)->type != asvJSONValue::OBJECT) { tabular = false; break; }
+    if (arr->size() > 5 && opts.mode != GoonWriteOptions::Mode::Compact) {
+      tabular = false;
+    } else {
+      for (size_t i = 1; i < arr->size(); i++) {
+        if (!arr->get(i) || arr->get(i)->type != asvJSONValue::OBJECT) { tabular = false; break; }
+      }
     }
   }
   if (tabular && arr->get(0) && arr->get(0)->type == asvJSONValue::OBJECT && arr->get(0)->obj) {
@@ -221,19 +330,19 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
             }
           }
         }
-        if (r > 0 && !prevCols[c].empty() && cell == prevCols[c]) {
+        if (r > 0 && !prevCols[c].empty() && cell == prevCols[c] && opts.mode != GoonWriteOptions::Mode::LLM) {
           row += '^';
         } else {
           row += cell;
           prevCols[c] = cell;
         }
       }
-      if (!prevRow.empty() && row == prevRow) {
+      if (!prevRow.empty() && row == prevRow && opts.mode != GoonWriteOptions::Mode::LLM) {
         repeatCount++;
       } else {
         if (!prevRow.empty()) {
           out += pad + "  " + prevRow;
-          if (repeatCount > 1) out += "*" + std::to_string(repeatCount);
+          if (repeatCount > 1) out += "*" + std::to_string(std::min<size_t>(static_cast<size_t>(repeatCount), MAX_REPEAT_COUNT));
           out += '\n';
         }
         prevRow = row;
@@ -242,7 +351,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
     }
     if (!prevRow.empty()) {
       out += pad + "  " + prevRow;
-      if (repeatCount > 1) out += "*" + std::to_string(repeatCount);
+      if (repeatCount > 1) out += "*" + std::to_string(std::min<size_t>(static_cast<size_t>(repeatCount), MAX_REPEAT_COUNT));
       out += '\n';
     }
     return;
@@ -264,31 +373,40 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       out += pad + "  -\n";
       if (child->obj) {
         for (const auto& [k, sub] : *(child->obj))
-          goonSerializeVal(sub.get(), out, indent + 2, k, depth + 1, dict);
+          goonSerializeVal(sub.get(), out, indent + 2, k, depth + 1, dict, opts);
       }
     } else if (child->type == asvJSONValue::ARRAY) {
-      out += pad + "  - ";
-      out += '[';
-      for (size_t j = 0; j < child->size(); j++) {
-        if (j > 0) out += ',';
-        auto* el = child->get(j);
-        if (!el) out += "_";
-        else {
-          std::string elLit = goonLiteral(el);
-          if (!elLit.empty()) out += elLit;
+      if (child->size() > 0 && goonIsSmallSimpleCollection(child) && opts.mode == GoonWriteOptions::Mode::Compact) {
+        out += pad + "  - [";
+        for (size_t j = 0; j < child->size(); j++) {
+          if (j > 0) out += ",";
+          goonSerializeInlineVal(child->get(j), out, dict, opts);
+        }
+        out += "]\n";
+      } else {
+        out += pad + "  - ";
+        out += '[';
+        for (size_t j = 0; j < child->size(); j++) {
+          if (j > 0) out += ',';
+          auto* el = child->get(j);
+          if (!el) out += "_";
           else {
-            std::string spec = goonFormatSpecial(el);
-            if (!spec.empty()) out += spec;
-            else if (el->type == asvJSONValue::INT) out += std::to_string(el->num);
-            else if (el->type == asvJSONValue::DOUBLE) {
-              fmtDoubleVal(el->dbl, out);
-            } else {
-              goonWriteString(el->str_data, out, dict);
+            std::string elLit = goonLiteral(el);
+            if (!elLit.empty()) out += elLit;
+            else {
+              std::string spec = goonFormatSpecial(el);
+              if (!spec.empty()) out += spec;
+              else if (el->type == asvJSONValue::INT) out += std::to_string(el->num);
+              else if (el->type == asvJSONValue::DOUBLE) {
+                fmtDoubleVal(el->dbl, out);
+              } else {
+                goonWriteString(el->str_data, out, dict);
+              }
             }
           }
         }
+        out += "]\n";
       }
-      out += "]\n";
     } else {
       out += pad + "  - ";
       if (child->type == asvJSONValue::INT) out += std::to_string(child->num);
@@ -306,7 +424,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   }
 }
 
-inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict) {
+inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr, const GoonWriteOptions& opts = {}) {
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
@@ -374,11 +492,11 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
       }
       int childIndent = indent + (key.empty() ? 0 : 1);
       for (const auto& [k, child] : *(v->obj))
-        goonSerializeVal(child.get(), out, childIndent, k, depth + 1, dict);
+        goonSerializeVal(child.get(), out, childIndent, k, depth + 1, dict, opts);
       break;
     }
     case asvJSONValue::ARRAY:
-      goonSerializeArray(v, out, indent, key, depth, dict);
+      goonSerializeArray(v, out, indent, key, depth, dict, opts);
       break;
     default: {
       std::string spec = goonFormatSpecial(v);
@@ -609,8 +727,9 @@ inline std::string goonToJson(std::string_view input) {
               {
                 bool inQAst = false;
                 for (size_t ci = 0; ci < rcont.size(); ci++) {
-                  if (rcont[ci] == '"') { inQAst = !inQAst; }
-                  else if (rcont[ci] == '*' && ci > 0 && !inQAst) { asterisk = ci; break; }
+                  char c_char = rcont[ci];
+                  if (c_char == '"') { inQAst = !inQAst; }
+                  else if (c_char == '*' && ci > 0 && !inQAst) { asterisk = ci; break; }
                 }
               }
               int repeat = 1;
@@ -618,11 +737,14 @@ inline std::string goonToJson(std::string_view input) {
               if (asterisk != std::string_view::npos) {
                 std::string countStr(rcont.substr(asterisk + 1));
                 repeat = atoi(countStr.c_str());
-                if (repeat > 10000) repeat = 10000;
                 if (repeat < 1) repeat = 1;
+                else if (repeat > 10000) {
+                  throw GoonDecodeError("RLE repeat count exceeds limit of 10000 at line " + std::to_string(li + 1));
+                }
                 rowStr = rcont.substr(0, asterisk);
               }
               std::vector<std::string> prevValues(fields.size(), "");
+
               for (int ri = 0; ri < repeat; ri++) {
                 std::vector<std::string> vals;
                   {
@@ -849,16 +971,20 @@ inline std::string goonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
 
-      if (valPart.empty()) {
-        out += '"' + keyStr + "\":{";
-        stack.push_back({'O', true, indent, true, false});
-      } else if (valPart == "{}") {
-        out += '"' + keyStr + "\":{}";
-      } else if (valPart == "[]") {
-        out += '"' + keyStr + "\":[]";
-      } else {
-        out += '"' + keyStr + "\":" + expandCell(valPart);
-      }
+// Check for prototype pollution/sensitive keys
+if (goonIsForbiddenKey(keyStr)) {
+  throw GoonDecodeError("Security error: forbidden key detected: " + keyStr);
+}
+if (valPart.empty()) {
+  out += '"' + keyStr + "\":{";
+  stack.push_back({'O', true, indent, true, false});
+} else if (valPart == "{}") {
+  out += '"' + keyStr + "\":{}";
+} else if (valPart == "[]") {
+  out += '"' + keyStr + "\":[]";
+} else {
+  out += '"' + keyStr + "\":" + expandCell(valPart);
+}
     }
   }
 
@@ -873,12 +999,12 @@ inline std::string goonToJson(std::string_view input) {
   return out;
 }
 
-inline std::string asvJSON::toGOON() const {
+inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
   if (!root) return "_\n";
   auto dict = goonBuildDict(root.get());
   std::string out;
   goonWriteDictHeader(dict, out);
-  goonSerializeVal(root.get(), out, 0, "", 0, &dict);
+  goonSerializeVal(root.get(), out, 0, "", 0, &dict, opts);
   return out;
 }
 

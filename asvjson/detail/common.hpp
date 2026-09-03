@@ -75,6 +75,18 @@ struct YamlWriteOptions {
 	bool doubleQuotes = false;       // prefer "..." over '...' when quoting
 };
 
+// GOON serialization options.
+struct GoonWriteOptions {
+	enum class Mode : int { LLM = 0, Compact = 1, Balanced = 2 };
+	// LLM: verbose, including all comments and extra whitespace for readability.
+	// Compact: minimal whitespace and no comments (matches toGOON(true)).
+	// Balanced: hybrid mode with indentation and standard spacing.
+	Mode mode = Mode::LLM;
+	int indentWidth = 2;     // spaces per indentation level
+	bool alwaysQuoteStrings = false; // quote every string scalar
+	bool alwaysQuoteKeys = false;    // quote every mapping key
+};
+
 struct FormatFrame {
 	char type = 'O';
 	bool hasVal = false;
