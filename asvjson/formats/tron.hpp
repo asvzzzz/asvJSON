@@ -319,6 +319,17 @@ struct TronParseState {
   bool match(TronTokType t) { if (toks[pos].type == t) { pos++; return true; } return false; }
   void skipNewlines() { while (toks[pos].type == TronTokType::NEWLINE || toks[pos].type == TronTokType::SEMICOLON) pos++; }
 
+  // A property name is a bare identifier or a quoted string. Per the spec, an
+  // unquoted identifier immediately followed by '(' is a class *instantiation*
+  // (the start of the data section), not a property — even when it follows a
+  // newline separator. Without this guard the data identifier would be
+  // swallowed into the preceding class's property list.
+  bool propAhead() const {
+    auto t = toks[pos].type;
+    return (t == TronTokType::IDENT || t == TronTokType::STRING) &&
+           !(pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN);
+  }
+
   asvJSONValue* parseValue();
 
   asvJSONValue* parseObject() {
@@ -394,6 +405,8 @@ struct TronParseState {
         advance(); // '='
         skipNewlines();
         asvJSONValue* val = parseValue();
+        if (namedArgs.find(propName) != namedArgs.end())
+          throw asvJSONError("duplicate argument: " + propName);
         namedArgs[propName] = std::unique_ptr<asvJSONValue>(val);
       } else {
         if (namedMode) throw asvJSONError("positional arg after named");
@@ -403,6 +416,18 @@ struct TronParseState {
       skipNewlines();
     }
     if (!match(TronTokType::RPAREN)) throw asvJSONError("expected ')'");
+    // Per spec, argument counts/names must match the class definition.
+    // Positional args fill the first posArgs.size() properties in order.
+    if (posArgs.size() > props.size())
+      throw asvJSONError("too many arguments for class " + className);
+    for (auto& kv : namedArgs) {
+      if (std::find(props.begin(), props.end(), kv.first) == props.end())
+        throw asvJSONError("unknown argument: " + kv.first);
+    }
+    for (size_t i = 0; i < posArgs.size(); i++) {
+      if (namedArgs.find(props[i]) != namedArgs.end())
+        throw asvJSONError("argument specified twice: " + props[i]);
+    }
     for (size_t i = 0; i < props.size(); i++) {
       std::unique_ptr<asvJSONValue> valPtr;
       if (i < posArgs.size()) {
@@ -543,17 +568,20 @@ inline bool asvJSON::fromTRON(std::string_view input) {
       if (!state.match(TronTokType::COLON))
         throw asvJSONError("expected ':' in class definition");
       state.skipNewlines();
-      // Parse property list
+      // Parse property list. Separators are commas or newlines. A newline may
+      // either separate two properties or mark the end of the class definition
+      // (the data section follows); propAhead() disambiguates, so an identifier
+      // that is really a class instantiation is never treated as a property.
       std::vector<std::string> props;
-      while (state.peek().type == TronTokType::IDENT || state.peek().type == TronTokType::STRING) {
+      while (state.propAhead()) {
         if (state.peek().type == TronTokType::STRING) {
           props.push_back(tronUnescape(state.advance().text));
         } else {
           props.push_back(state.advance().text);
         }
-        state.skipNewlines();
         if (state.peek().type == TronTokType::COMMA) { state.advance(); state.skipNewlines(); }
-        else if (state.peek().type == TronTokType::NEWLINE) { state.advance(); state.skipNewlines(); if (state.peek().type != TronTokType::IDENT && state.peek().type != TronTokType::STRING) break; }
+        else if (state.peek().type == TronTokType::NEWLINE) { state.advance(); state.skipNewlines(); }
+        else if (state.peek().type == TronTokType::SEMICOLON) { state.advance(); state.skipNewlines(); break; }
         else break;
       }
       if (props.empty())

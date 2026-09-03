@@ -6270,6 +6270,44 @@ TEST(testToTRONComprehensive) {
 		// TIMESTAMP round-trips as int
 		ASSERT_EQ(j2.getInt("ts"), int64_t(1000));
 	}
+	// Newline-separated property list (spec form) followed by data on the next
+	// line whose first token is a class instantiation identifier.
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class Person:\n  first_name\n  last_name\n  age\nPerson(\"A\",\"B\",30)\n")));
+		ASSERT_EQ(std::string(j.getString("first_name")), "A");
+		ASSERT_EQ(std::string(j.getString("last_name")), "B");
+		ASSERT_EQ(j.getInt("age"), int64_t(30));
+	}
+	// A data identifier on the line after a class definition must NOT be
+	// swallowed into the class's property list (an identifier followed by '('
+	// is an instantiation, not a property).
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: a\nclass B: u,v\nB(1,2)\n")));
+		ASSERT_EQ(j.getInt("u"), int64_t(1));
+		ASSERT_EQ(j.getInt("v"), int64_t(2));
+	}
+	// Too many positional arguments -> SyntaxError (spec).
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1,2,3)\n")));
+	}
+	// Unknown named argument -> SyntaxError (spec).
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(x=1,y=2,z=3)\n")));
+	}
+	// Duplicate named argument -> SyntaxError (spec).
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(x=1,x=2)\n")));
+	}
+	// Positional and named assignment of the same property -> SyntaxError.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1, x=2)\n")));
+	}
 }
 
 TEST(testToGOON) {
