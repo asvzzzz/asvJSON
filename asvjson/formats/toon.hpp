@@ -90,6 +90,53 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
   }
 }
 
+inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int indent, int depth);
+inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth);
+
+// Spec (toon-format/spec) §9.2/§9.4: a nested array rendered as a list item.
+//   - empty inner array:  "- [0]:"
+//   - primitive inner array: "- [M]: v1,v2,..."  (§9.2)
+//   - non-uniform / array of objects: "- [M]:" header, then nested items at
+//     depth +1 relative to the hyphen line (§9.4). Tabular form is not
+//     available in list-item position, so nested objects/arrays use list form.
+inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int indent, int depth) {
+  if (!v || v->type != asvJSONValue::ARRAY || v->size() == 0) {
+    out += std::string(static_cast<size_t>(indent) * 2, ' ') + "- [0]:\n";
+    return;
+  }
+  bool allPrim = true;
+  for (size_t i = 0; i < v->size(); i++) {
+    auto* e = v->get(i);
+    if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY)) { allPrim = false; break; }
+  }
+  std::string pad(static_cast<size_t>(indent) * 2, ' ');
+  std::string head = pad + "- [" + std::to_string(v->size()) + "]:";
+  if (allPrim) {
+    out += head + " ";
+    for (size_t i = 0; i < v->size(); i++) {
+      if (i > 0) out += ",";
+      out += toonLeafVal(v->get(i));
+    }
+    out += "\n";
+    return;
+  }
+  out += head + "\n";
+  std::string cpad(static_cast<size_t>(indent + 1) * 2, ' ');
+  for (size_t i = 0; i < v->size(); i++) {
+    auto* e = v->get(i);
+    if (!e) continue;
+    if (e->type == asvJSONValue::OBJECT) {
+      out += cpad + "-\n";
+      for (const auto& [k, sub] : *(e->obj))
+        valToToon(sub.get(), out, indent + 2, k, depth + 1);
+    } else if (e->type == asvJSONValue::ARRAY) {
+      toonNestedArrayItem(e, out, indent + 1, depth + 1);
+    } else {
+      out += cpad + "- " + toonLeafVal(e) + "\n";
+    }
+  }
+}
+
 inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
@@ -117,9 +164,9 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
         if (child->type == asvJSONValue::OBJECT) {
           out += pad + "-\n";
           for (const auto& [k, sub] : *(child->obj))
-            valToToon(sub.get(), out, indent + 1, k);
+            valToToon(sub.get(), out, indent + 1, k, depth + 1);
         } else if (child->type == asvJSONValue::ARRAY) {
-          out += pad + "- " + toonLeafVal(child) + "\n";
+          toonNestedArrayItem(child, out, indent, depth + 1);
         } else {
           out += pad + "- " + toonLeafVal(child) + "\n";
         }
@@ -132,7 +179,9 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
         if (child->type == asvJSONValue::OBJECT) {
           out += pad + "  -\n";
           for (const auto& [k, sub] : *(child->obj))
-            valToToon(sub.get(), out, indent + 2, k);
+            valToToon(sub.get(), out, indent + 2, k, depth + 1);
+        } else if (child->type == asvJSONValue::ARRAY) {
+          toonNestedArrayItem(child, out, indent + 1, depth + 1);
         } else {
           out += pad + "  - " + toonLeafVal(child) + "\n";
         }
@@ -172,6 +221,31 @@ inline std::vector<std::string> toonSplitCommas(std::string_view s) {
   }
   result.push_back(std::move(cur));
   return result;
+}
+
+// Recognizes a nested-array list-item header: "- [M]:" or "- [M]" (M digits,
+// no leading zeros; "0" only canonical zero). Distinguishes it from the
+// backward-compat JSON literal form "- [1,2]": a literal has a ',' before the
+// closing ']' or content after the ']' other than ':'.
+inline bool toonParseListArrayHeader(std::string_view val, size_t& len) {
+  if (val.size() < 3 || val[0] != '[') return false;
+  size_t i = 1;
+  if (i >= val.size() || val[i] < '0' || val[i] > '9') return false;
+  size_t n = 0;
+  if (val[i] == '0') {
+    n = 0; i++;
+  } else {
+    while (i < val.size() && val[i] >= '0' && val[i] <= '9') {
+      if (n > 1000000000ULL / 10) return false;
+      n = n * 10 + static_cast<size_t>(val[i] - '0');
+      i++;
+    }
+  }
+  if (i >= val.size() || val[i] != ']') return false;
+  i++;
+  if (i < val.size() && val[i] != ':') return false;
+  len = n;
+  return true;
 }
 
 // TOON -> JSON text converter
@@ -292,6 +366,37 @@ inline std::string toonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
       std::string_view val = content.substr(2);
+      // nested array header form "- [M]: ..." / "- [M]" (spec §9.2/§9.4)
+      size_t arrLen = 0;
+      if (toonParseListArrayHeader(val, arrLen)) {
+        std::string_view rest = val;
+        size_t lb = rest.find('[');
+        size_t rb = rest.find(']', lb);
+        std::string_view after = rest.substr(rb + 1); // starts with ':' or empty
+        out += '[';
+        if (!after.empty() && after.size() > 1) {
+          // inline primitive array: "- [M]: v1,v2,..."
+          size_t ac = 1;
+          while (ac < after.size() && after[ac] == ' ') ac++;
+          std::string_view inlineContent = after.substr(ac);
+          auto cells = toonSplitCommas(inlineContent);
+          for (size_t ci = 0; ci < cells.size(); ci++) {
+            if (ci > 0) out += ',';
+            std::string c(cells[ci]);
+            size_t cs = 0; while (cs < c.size() && c[cs] == ' ') cs++;
+            size_t ce = c.size(); while (ce > cs && c[ce-1] == ' ') ce--;
+            out += toonJsonQuoteBare(c.substr(cs, ce - cs));
+          }
+          out += ']';
+        } else if (arrLen == 0) {
+          // empty inner array "- [0]:" -> []
+          out += ']';
+        } else {
+          // non-primitive list-form opener: leave frame open
+          stack.push_back({'A', true, indent, true, false});
+        }
+        continue;
+      }
       out += toonJsonQuoteBare(val);
       continue;
     }

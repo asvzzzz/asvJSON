@@ -5706,10 +5706,15 @@ TEST(testToTOONAdvanced) {
 		ASSERT_EQ(empty->size(), size_t(0));
 	}
 	// Root array of nested arrays round-trip (structural preservation)
+	// Spec (toon-format/spec §9.2/§9.4): primitive nested arrays render as
+	// "- [M]: v1,v2" headers, NOT the flattened or inline-JSON "[1,2]" forms.
 	{
 		asvJSON j;
 		ASSERT(j.parse(std::string_view(R"([[1,2],[3,4]])")));
 		std::string toon = j.toTOON();
+		ASSERT(toon.find("- [2]: 1,2") != std::string::npos);
+		ASSERT(toon.find("- [2]: 3,4") != std::string::npos);
+		ASSERT(toon.find("- [1,2]") == std::string::npos);
 		asvJSON j2;
 		ASSERT(j2.fromTOON(std::string_view(toon)));
 		auto* r = j2.getRoot();
@@ -5762,6 +5767,68 @@ TEST(testToTOONAdvanced) {
 		ASSERT_EQ(r->get(1)->get("x")->getInt(), int64_t(3));
 		ASSERT_EQ(r->get(2)->size(), size_t(1));
 		ASSERT_EQ(r->get(3)->get(1)->getInt(), int64_t(6));
+	}
+}
+
+TEST(testToTOONSpecListForm) {
+	// Decoder accepts the spec list-form nested-array headers (§9.2/§9.4):
+	// "- [M]: v1,v2" (primitive), "- [M]:" + deeper items (non-uniform),
+	// and "- [0]:" (empty inner array).
+	{
+		// Primitive inner arrays via list-form headers
+		asvJSON j;
+		ASSERT(j.fromTOON("k: []\n  - [2]: 1,2\n  - [2]: 3,4\n"));
+		auto* items = j.getRoot()->getConst("k");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(items->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(items->get(1)->get(1)->getInt(), int64_t(4));
+	}
+	{
+		// Empty inner array "- [0]:"
+		asvJSON j;
+		ASSERT(j.fromTOON("k: []\n  - [0]:\n  - [1]: 7\n"));
+		auto* items = j.getRoot()->getConst("k");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->size(), size_t(0));
+		ASSERT_EQ(items->get(1)->get(0)->getInt(), int64_t(7));
+	}
+	{
+		// Non-uniform inner array: "- [M]:" + deeper items (nested array + object)
+		asvJSON j;
+		ASSERT(j.fromTOON("k: []\n  - [2]:\n    - 1\n    - [2]: 2,3\n"));
+		auto* items = j.getRoot()->getConst("k");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->size(), size_t(1));
+		ASSERT_EQ(items->get(0)->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(items->get(0)->get(1)->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->get(1)->get(1)->getInt(), int64_t(3));
+	}
+	{
+		// Root array whose elements are nested arrays in list form
+		asvJSON j;
+		ASSERT(j.fromTOON("- [2]: 10,20\n- [1]: 30\n"));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(r->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->get(1)->getInt(), int64_t(20));
+		ASSERT_EQ(r->get(1)->get(0)->getInt(), int64_t(30));
+	}
+	// Backward-compat: inline JSON literal "- [1,2]" still parses
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("k: []\n  - [1,2]\n  - [3,4]\n"));
+		auto* items = j.getRoot()->getConst("k");
+		ASSERT(items != nullptr);
+		ASSERT_EQ(items->size(), size_t(2));
+		ASSERT_EQ(items->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(items->get(1)->get(1)->getInt(), int64_t(4));
 	}
 }
 
@@ -12300,6 +12367,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
 	RUN(testToTOONAdvanced);
+	RUN(testToTOONSpecListForm);
 	
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);
