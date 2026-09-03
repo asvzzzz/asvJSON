@@ -9930,6 +9930,46 @@ TEST(testUDECommentPrefixStrings) {
   }
 }
 
+TEST(testUDEBlockScalarKeepChomping) {
+  // |+ with trailing blank line: the join already captures the separator \n
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |+\n  hello\n\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
+  }
+  // |- strips all trailing newlines
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |-\n  hello\n\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello");
+  }
+  // | (clip) keeps exactly one trailing newline
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |\n  hello\n\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
+  }
+  // |+ with no trailing blank line
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |+\n  hello"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello");
+  }
+  // |+ with two trailing blank lines
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |+\n  hello\n\n\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n\n");
+  }
+  // Folded >+ with trailing blank line: the blank line becomes a paragraph
+  // break ('\n') during folding, same as literal
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: >+\n  hello\n\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
+  }
+}
+
 TEST(testByteSizeNullRoot) {
 	asvJSON j;
 	ASSERT_EQ(j.byteSize(), 0);
@@ -12882,6 +12922,7 @@ RUN(testCBORFloat16);
 	RUN(testUDEAnchors);
 	RUN(testUDERawNumberRoundTrip);
 	RUN(testUDECommentPrefixStrings);
+	RUN(testUDEBlockScalarKeepChomping);
 
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
