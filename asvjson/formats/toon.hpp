@@ -5,6 +5,8 @@
 //   key: value            -- object member (value may be a bare token or JSON)
 //   - item                -- array element
 //   key:                  -- nested object / array (children indented)
+//   key[N]: v1,v2         -- inline primitive array with length header (§9.1)
+//   key[N]: / - items     -- list-form array with length header (§9.4)
 //   key[N]{"f1","f2"}:    -- tabular array; subsequent indented lines are rows
 // Strings are quoted only when required; full round-trip via toTOON()/fromTOON().
 
@@ -157,34 +159,37 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       else out += "[]\n";
       return;
     }
-    if (key.empty()) {
+    // Spec §9.1: length-bearing header "key[N]:" for non-empty arrays. All
+    // primitive members render inline on the header line ("key[N]: v1,v2");
+    // otherwise the header opens a list whose items nest at indent + 1 (§9.4).
+    bool allPrim = true;
+    for (size_t i = 0; i < v->size(); i++) {
+      auto* e = v->get(i);
+      if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY)) { allPrim = false; break; }
+    }
+    std::string head = pad + (key.empty() ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
+    if (allPrim) {
+      out += head + " ";
       for (size_t i = 0; i < v->size(); i++) {
-        auto* child = v->get(i);
-        if (!child) continue;
-        if (child->type == asvJSONValue::OBJECT) {
-          out += pad + "-\n";
-          for (const auto& [k, sub] : *(child->obj))
-            valToToon(sub.get(), out, indent + 1, k, depth + 1);
-        } else if (child->type == asvJSONValue::ARRAY) {
-          toonNestedArrayItem(child, out, indent, depth + 1);
-        } else {
-          out += pad + "- " + toonLeafVal(child) + "\n";
-        }
+        if (i > 0) out += ",";
+        out += toonLeafVal(v->get(i));
       }
-    } else {
-      out += pad + toonQuoteVal(key) + ": []\n";
-      for (size_t i = 0; i < v->size(); i++) {
-        auto* child = v->get(i);
-        if (!child) continue;
-        if (child->type == asvJSONValue::OBJECT) {
-          out += pad + "  -\n";
-          for (const auto& [k, sub] : *(child->obj))
-            valToToon(sub.get(), out, indent + 2, k, depth + 1);
-        } else if (child->type == asvJSONValue::ARRAY) {
-          toonNestedArrayItem(child, out, indent + 1, depth + 1);
-        } else {
-          out += pad + "  - " + toonLeafVal(child) + "\n";
-        }
+      out += "\n";
+      return;
+    }
+    out += head + "\n";
+    std::string cpad(static_cast<size_t>(indent + 1) * 2, ' ');
+    for (size_t i = 0; i < v->size(); i++) {
+      auto* child = v->get(i);
+      if (!child) continue;
+      if (child->type == asvJSONValue::OBJECT) {
+        out += cpad + "-\n";
+        for (const auto& [k, sub] : *(child->obj))
+          valToToon(sub.get(), out, indent + 2, k, depth + 1);
+      } else if (child->type == asvJSONValue::ARRAY) {
+        toonNestedArrayItem(child, out, indent + 1, depth + 1);
+      } else {
+        out += cpad + "- " + toonLeafVal(child) + "\n";
       }
     }
   } else {
@@ -248,6 +253,27 @@ inline bool toonParseListArrayHeader(std::string_view val, size_t& len) {
   return true;
 }
 
+// Finds the index of the first occurrence of `target` that is not inside a
+// double-quoted, escape-aware string within `s`. Returns npos if absent.
+inline size_t toonFindFirstUnquoted(std::string_view s, char target) {
+  bool inQ = false, esc = false;
+  for (size_t i = 0; i < s.size(); i++) {
+    char c = s[i];
+    if (esc) { esc = false; continue; }
+    if (c == '\\' && inQ) { esc = true; continue; }
+    if (c == '"') { inQ = !inQ; continue; }
+    if (c == target && !inQ) return i;
+  }
+  return std::string_view::npos;
+}
+
+// Decodes a TOON key token (optionally double-quoted) into a JSON-escaped string.
+inline std::string toonDecodeKey(std::string_view key) {
+  if (key.size() >= 2 && key.front() == '"' && key.back() == '"')
+    return toonJsonEscape(std::string(key.substr(1, key.size() - 2)));
+  return toonJsonEscape(std::string(key));
+}
+
 // TOON -> JSON text converter
 inline std::string toonToJson(std::string_view input) {
   auto lines = splitLines(input);
@@ -277,86 +303,120 @@ inline std::string toonToJson(std::string_view input) {
     if (stack.empty()) break;
     auto& curFrame = stack.back();
 
-    // check for array header [n]{fields}:
-    if (content.size() >= 2 && content[0] == '[') {
-      size_t closeB = content.find(']');
-      if (closeB != std::string_view::npos) {
-        size_t afterB = closeB + 1;
-        bool hasFields = afterB < content.size() && content[afterB] == '{';
-        std::vector<std::string> fields;
-        if (hasFields) {
-          size_t closeBr = content.find('}', afterB);
-          if (closeBr != std::string_view::npos) {
-            std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
-            auto fieldParts = toonSplitCommas(fc);
-            for (auto& f : fieldParts) {
-              size_t fs = 0; while (fs < f.size() && f[fs] == ' ') fs++;
-              size_t fe = f.size(); while (fe > fs && f[fe-1] == ' ') fe--;
-              fields.push_back(f.substr(fs, fe - fs));
-            }
-            afterB = closeBr + 1;
+    // array header: [optional key][N][{fields}]:  (spec §9.1-§9.4, §10)
+    // The header's first unquoted ':' must occur after the [N]{fields} segment,
+    // and an unquoted '[' must appear before any such ':'. This generalizes the
+    // old root-only "content[0]=='['" check to also cover named "key[N]:" headers.
+    {
+      size_t firstColon = toonFindFirstUnquoted(content, ':');
+      size_t lb = toonFindFirstUnquoted(content, '[');
+      // Skip list items ("- [...]") here -- they hold their own "- [M]:" nested
+      // header handling in the list-item branch below.
+      bool isListItem = !content.empty() && content[0] == '-';
+      if (lb != std::string_view::npos && !isListItem && (firstColon == std::string_view::npos || lb < firstColon)) {
+        std::string_view keyRaw = content.substr(0, lb);
+        while (!keyRaw.empty() && (keyRaw.back() == ' ' || keyRaw.back() == '\t')) keyRaw = keyRaw.substr(0, keyRaw.size() - 1);
+        size_t rb = content.find(']', lb + 1);
+        bool okArrLen = false;
+        size_t arrLen = 0;
+        if (rb != std::string_view::npos && rb > lb + 1) {
+          std::string_view num = content.substr(lb + 1, rb - lb - 1);
+          bool digits = !num.empty() && !(num[0] == '0' && num.size() > 1);
+          size_t acc = 0;
+          for (char c : num) {
+            if (c < '0' || c > '9') { digits = false; break; }
+            acc = acc * 10 + static_cast<size_t>(c - '0');
+            if (acc > 1000000000) { digits = false; break; }
           }
+          if (digits) { arrLen = acc; okArrLen = true; }
         }
-        if (afterB < content.size() && content[afterB] == ':') {
-    addComma(stack, out);
-    if (!stack.empty()) stack.back().first = false;
-    out += '[';
-    stack.push_back({'A', true, indent, true, false});
-          size_t afterColon = afterB + 1;
-          while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
+        if (okArrLen) {
+          size_t afterB = rb + 1;
+          bool hasFields = afterB < content.size() && content[afterB] == '{';
+          std::vector<std::string> fields;
           if (hasFields) {
-            // tabular - read subsequent indented lines as rows
-            for (size_t rl = li + 1; rl < lines.size(); rl++) {
-              auto& rline = lines[rl];
-              if (rline.empty()) continue;
-              int rindent = countIndent(rline);
-              if (rindent <= indent) break;
-              std::string_view rcont = stripIndent(rline);
-              auto vals = toonSplitCommas(rcont);
-              if (!stack.empty() && !stack.back().first) out += ',';
-              if (!stack.empty()) stack.back().first = false;
-              out += '{';
-              for (size_t fi = 0; fi < fields.size() && fi < vals.size(); fi++) {
-                if (fi > 0) out += ',';
-                out += '"' + toonJsonEscape(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi]);
+            size_t closeBr = content.find('}', afterB);
+            if (closeBr != std::string_view::npos) {
+              std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
+              auto fieldParts = toonSplitCommas(fc);
+              for (auto& f : fieldParts) {
+                size_t fs = 0; while (fs < f.size() && f[fs] == ' ') fs++;
+                size_t fe = f.size(); while (fe > fs && f[fe-1] == ' ') fe--;
+                fields.push_back(f.substr(fs, fe - fs));
               }
-              out += '}';
+              afterB = closeBr + 1;
             }
-            out += ']';
-            if (!stack.empty()) stack.pop_back();
-            continue;
-          } else if (afterColon < content.size()) {
-            // inline array items
-            std::string_view inlineContent = content.substr(afterColon);
-            auto inlineVals = toonSplitCommas(inlineContent);
-            for (auto& v : inlineVals) {
-              size_t vs = 0; while (vs < v.size() && v[vs] == ' ') vs++;
-              size_t ve = v.size(); while (ve > vs && v[ve-1] == ' ') ve--;
-              if (!stack.empty() && !stack.back().first) out += ',';
-              if (!stack.empty()) stack.back().first = false;
-              out += toonJsonQuoteBare(v.substr(vs, ve - vs));
-            }
-            // after inline items, read list items from subsequent lines
-            for (size_t rl = li + 1; rl < lines.size(); rl++) {
-              auto& rline = lines[rl];
-              if (rline.empty()) continue;
-              int rindent = countIndent(rline);
-              if (rindent <= indent) break;
-              std::string_view rcont = stripIndent(rline);
-              if (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ') {
-                out += ',';
-                std::string vv(rcont.substr(2));
-                size_t vs = 0; while (vs < vv.size() && vv[vs] == ' ') vs++;
-                size_t ve = vv.size(); while (ve > vs && vv[ve-1] == ' ') ve--;
-                vv = vv.substr(vs, ve - vs);
-                out += toonJsonQuoteBare(vv);
-              }
-            }
-            out += ']';
-            if (!stack.empty()) stack.pop_back();
-            continue;
           }
-          continue;
+          if (afterB < content.size() && content[afterB] == ':') {
+            // If this header is the already-open root array with an empty key,
+            // do NOT open another '['/frame -- fill the existing root frame.
+            bool isRootHeader = stack.back().isRoot && stack.back().type == 'A' && keyRaw.empty();
+            size_t afterColon = afterB + 1;
+            while (afterColon < content.size() && (content[afterColon] == ' ' || content[afterColon] == '\t')) afterColon++;
+            bool hasInline = false;
+            for (size_t p = afterColon; p < content.size(); p++)
+              if (content[p] != ' ' && content[p] != '\t') { hasInline = true; break; }
+
+            if (!isRootHeader) {
+              addComma(stack, out);
+              if (!stack.empty()) stack.back().first = false;
+              if (!keyRaw.empty()) out += '"' + toonDecodeKey(keyRaw) + "\":";
+              out += '[';
+              stack.push_back({'A', true, indent, true, false});
+            }
+
+            if (hasFields) {
+              // tabular - read subsequent indented lines as rows
+              size_t rowCount = 0;
+              for (size_t rl = li + 1; rl < lines.size(); rl++) {
+                auto& rline = lines[rl];
+                if (rline.empty()) continue;
+                int rindent = countIndent(rline);
+                if (rindent <= indent) break;
+                std::string_view rcont = stripIndent(rline);
+                auto vals = toonSplitCommas(rcont);
+                if (!stack.empty() && !stack.back().first) out += ',';
+                if (!stack.empty()) stack.back().first = false;
+                out += '{';
+                for (size_t fi = 0; fi < fields.size() && fi < vals.size(); fi++) {
+                  if (fi > 0) out += ',';
+                  out += '"' + toonJsonEscape(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi]);
+                }
+                out += '}';
+                rowCount++;
+                li = rl; // consume this row so the outer loop doesn't re-read it
+              }
+              if (rowCount != arrLen)
+                throw asvJSONError("TOON: tabular array length mismatch (declared " + std::to_string(arrLen) + ", got " + std::to_string(rowCount) + ")");
+              if (!isRootHeader) { out += ']'; stack.pop_back(); }
+              continue;
+            } else if (hasInline) {
+              // inline (primitive) array cells
+              size_t cellCount = 0;
+              auto inlineVals = toonSplitCommas(content.substr(afterColon));
+              for (auto& v : inlineVals) {
+                size_t vs = 0; while (vs < v.size() && v[vs] == ' ') vs++;
+                size_t ve = v.size(); while (ve > vs && v[ve-1] == ' ') ve--;
+                if (vs == ve) continue;
+                if (!stack.empty() && !stack.back().first) out += ',';
+                if (!stack.empty()) stack.back().first = false;
+                out += toonJsonQuoteBare(v.substr(vs, ve - vs));
+                cellCount++;
+              }
+              if (cellCount != arrLen)
+                throw asvJSONError("TOON: array length mismatch (declared " + std::to_string(arrLen) + ", got " + std::to_string(cellCount) + ")");
+              if (!isRootHeader) { out += ']'; stack.pop_back(); }
+              continue;
+            } else if (arrLen == 0) {
+              // empty array header (e.g. "key[0]:" / "[0]:")
+              if (!isRootHeader) { out += ']'; stack.pop_back(); }
+              // root: its '[' is closed by the EOF pass
+              continue;
+            } else {
+              // list form: frame left open; deeper "- value" items fill it.
+              continue;
+            }
+          }
         }
       }
     }
@@ -380,13 +440,18 @@ inline std::string toonToJson(std::string_view input) {
           while (ac < after.size() && after[ac] == ' ') ac++;
           std::string_view inlineContent = after.substr(ac);
           auto cells = toonSplitCommas(inlineContent);
-          for (size_t ci = 0; ci < cells.size(); ci++) {
-            if (ci > 0) out += ',';
-            std::string c(cells[ci]);
+          size_t cellCount = 0;
+          for (auto& c0 : cells) {
+            std::string c(c0);
             size_t cs = 0; while (cs < c.size() && c[cs] == ' ') cs++;
             size_t ce = c.size(); while (ce > cs && c[ce-1] == ' ') ce--;
+            if (cs == ce) continue;
+            if (cellCount > 0) out += ',';
             out += toonJsonQuoteBare(c.substr(cs, ce - cs));
+            cellCount++;
           }
+          if (cellCount != arrLen)
+            throw asvJSONError("TOON: nested array length mismatch (declared " + std::to_string(arrLen) + ", got " + std::to_string(cellCount) + ")");
           out += ']';
         } else if (arrLen == 0) {
           // empty inner array "- [0]:" -> []
@@ -462,7 +527,14 @@ inline std::string asvJSON::toTOON() const {
 
 inline bool asvJSON::fromTOON(std::string_view input) {
   formatType = FormatType::Unknown;
-  std::string json = toonToJson(input);
+  std::string json;
+  try {
+    json = toonToJson(input);
+  } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  }
   bool ok = parse(std::string_view(json));
   if (ok) formatType = FormatType::TOON;
   return ok;

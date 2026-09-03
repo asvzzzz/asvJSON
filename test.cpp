@@ -5832,6 +5832,90 @@ TEST(testToTOONSpecListForm) {
 	}
 }
 
+TEST(testToTOONHeadersStrict) {
+	// Named "key[N]:" length-bearing headers (§9.1) -- encoder emits them and
+	// the decoder round-trips them for primitive arrays.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"k":[1,2,3],"s":"x"})")));
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("k[3]: 1,2,3") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(std::string(j2.getString("s")), "x");
+		auto* arr = j2.getRoot()->getConst("k");
+		ASSERT(arr != nullptr);
+		ASSERT_EQ(arr->size(), size_t(3));
+		ASSERT_EQ(arr->get(2)->getInt(), int64_t(3));
+	}
+	// Named non-primitive array uses "key[N]:" + list items at deeper indent.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"k":[{"a":1},{"a":2}]})")));
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("k[2]:") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		auto* arr = j2.getRoot()->getConst("k");
+		ASSERT(arr != nullptr);
+		ASSERT_EQ(arr->size(), size_t(2));
+		ASSERT_EQ(arr->get(1)->get("a")->getInt(), int64_t(2));
+	}
+	// Decoder accepts named "key[N]:" + indented list items (list form).
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("k[2]:\n  - 1\n  - 2\n"));
+		auto* arr = j.getRoot()->getConst("k");
+		ASSERT(arr != nullptr);
+		ASSERT_EQ(arr->size(), size_t(2));
+		ASSERT_EQ(arr->get(1)->getInt(), int64_t(2));
+	}
+	// Root "[N]:" + list items parses without extra nesting (root array fix).
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("[2]:\n  - 10\n  - 20\n"));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(r->size(), size_t(2));
+		ASSERT_EQ(r->get(1)->getInt(), int64_t(20));
+	}
+	// Root "[N]:" + inline primitive still parses as a flat array (no double-wrap).
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("[3]: 1,2,3\n"));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(r->size(), size_t(3));
+		ASSERT_EQ(r->get(2)->getInt(), int64_t(3));
+	}
+	// Strict length: named inline array count must equal the declared N.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTOON("k[3]: 1,2\n"));
+	}
+	// Strict length: nested-array list header count must equal the declared M.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTOON("k[2]:\n  - [2]: 1\n"));
+	}
+	// Strict length: tabular row count must equal the declared N.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTOON("k[2]{a,b}:\n  x,1\n"));
+	}
+	// Empty array header "key[0]:" parses to an empty array.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("k[0]:\n"));
+		auto* arr = j.getRoot()->getConst("k");
+		ASSERT(arr != nullptr);
+		ASSERT_EQ(arr->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->size(), size_t(0));
+	}
+}
+
 TEST(testToTRON) {
 	// Basic object (no repeated schema -> JSON fallback)
 	{
@@ -12368,6 +12452,7 @@ RUN(testCBORFloat16);
 	RUN(testToTOON);
 	RUN(testToTOONAdvanced);
 	RUN(testToTOONSpecListForm);
+	RUN(testToTOONHeadersStrict);
 	
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);

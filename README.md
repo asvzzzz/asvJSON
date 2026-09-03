@@ -605,10 +605,7 @@ Output:
 name: John
 age: 30
 active: true
-items:
-  - 10
-  - 20
-  - 30
+items[3]: 10,20,30
 address:
   city: NYC
 ```
