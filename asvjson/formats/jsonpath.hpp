@@ -120,6 +120,29 @@ public:
   size_t pos() const { return pos_; }
   void setPos(size_t p) { pos_ = p; }
 
+  // Advance raw position past the ']' that closes the current bracket segment
+  // (depth-aware over nested '[', skipped quoted strings). Caller has consumed
+  // the opening '['.
+  void skipToEndBracket() {
+    int depth = 0;
+    char q = 0;
+    while (pos_ < src.size()) {
+      char c = src[pos_];
+      if (q) {
+        if (c == '\\') { pos_ += 2; continue; }
+        if (c == q) q = 0;
+        pos_++; continue;
+      }
+      if (c == '\'' || c == '"') { q = c; pos_++; continue; }
+      if (c == '[') { depth++; pos_++; continue; }
+      if (c == ']') {
+        if (depth == 0) { pos_++; return; }
+        depth--; pos_++; continue;
+      }
+      pos_++;
+    }
+  }
+
 private:
   void skipWS() { while (pos_ < src.size() && src[pos_] == ' ') pos_++; }
 };
@@ -171,11 +194,17 @@ inline std::vector<const asvJSONValue*> jpSlice(const asvJSONValue* n,
   if (sz == 0) return r;
 
   if (step > 0) {
+    if (start < 0) start = 0;
+    if (start >= sz) return r;
+    if (end > sz) end = sz;
     for (int64_t i = start; i < end; i += step)
-      if (i >= 0 && i < sz) r.push_back((*n->arr)[static_cast<size_t>(i)].get());
+      r.push_back((*n->arr)[static_cast<size_t>(i)].get());
   } else {
+    if (start >= sz) start = sz - 1;
+    if (start < 0) return r;
+    if (end < -1) end = -1;
     for (int64_t i = start; i > end; i += step)
-      if (i >= 0 && i < sz) r.push_back((*n->arr)[static_cast<size_t>(i)].get());
+      r.push_back((*n->arr)[static_cast<size_t>(i)].get());
   }
   return r;
 }
@@ -224,7 +253,9 @@ inline bool jpIsTruthy(const asvJSONValue* v) {
   if (v->type == asvJSONValue::INT) return v->num != 0;
   if (v->type == asvJSONValue::DOUBLE) return v->dbl != 0.0;
   if (v->type == asvJSONValue::STRING) return !v->str_data.empty();
-  return true;
+  if (v->type == asvJSONValue::ARRAY) return v->arr && !v->arr->empty();
+  if (v->type == asvJSONValue::OBJECT) return v->obj && !v->obj->empty();
+  return false;
 }
 
 inline bool jpIsFuncName(const std::string& s) {
@@ -242,6 +273,7 @@ inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const as
 class JPFilterEval {
   PathLexer& lex_;
   const asvJSONValue* cur_;
+  const asvJSONValue* root_;
   std::vector<std::unique_ptr<asvJSONValue>> temp_vals_;
 
   const asvJSONValue* hold(std::unique_ptr<asvJSONValue> val) {
@@ -281,9 +313,11 @@ class JPFilterEval {
 
   const asvJSONValue* resolvePath() {
     Tok t = lex_.next();
-    if (t.type != TokType::IDENT || t.val != "@") return nullptr;
+    const asvJSONValue* node = nullptr;
+    if (t.type == TokType::IDENT && t.val == "@") node = cur_;
+    else if (t.type == TokType::IDENT && t.val == "$") node = root_;
+    else return nullptr;
 
-    const asvJSONValue* node = cur_;
     while (lex_.peek().type == TokType::DOT) {
       lex_.next();
       Tok p = lex_.next();
@@ -465,7 +499,8 @@ class JPFilterEval {
   }
 
 public:
-  JPFilterEval(PathLexer& lex, const asvJSONValue* cur) : lex_(lex), cur_(cur) {}
+  JPFilterEval(PathLexer& lex, const asvJSONValue* cur, const asvJSONValue* root = nullptr)
+    : lex_(lex), cur_(cur), root_(root) {}
   bool evaluate() { return parseOr(); }
 };
 
@@ -473,6 +508,7 @@ struct PathResult {
   std::vector<const asvJSONValue*> values;
   std::vector<std::unique_ptr<asvJSONValue>> owned;
   std::string error;
+  const asvJSONValue* root = nullptr;
 };
 
 inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res);
@@ -499,145 +535,139 @@ inline void jpExpandDotDot(Tok seg, PathLexer& lex, const asvJSONValue* node,
 
 inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
                              std::vector<const asvJSONValue*>& out, PathResult& res) {
-  Tok inner = lex.peek();
+  while (true) {
+    Tok inner = lex.peek();
 
-  if (inner.type == TokType::STAR) {
-    lex.next();
-    if (lex.peek().type == TokType::RBRACKET) lex.next();
-    auto children = jpAllChildren(node);
-    out.insert(out.end(), children.begin(), children.end());
-    return;
-  }
-
-  if (inner.type == TokType::NUMBER) {
-    lex.next();
-
-    if (lex.peek().type == TokType::COLON || lex.peek().type == TokType::DOT) {
-      int64_t start = std::stoll(inner.val);
-      int64_t end = INT64_MAX, step = 1;
-
+    if (inner.type == TokType::STAR) {
       lex.next();
-      Tok endTok = lex.peek();
-      bool hasEnd = false;
-      if (endTok.type == TokType::NUMBER) {
-        end = std::stoll(endTok.val);
-        hasEnd = true;
+      auto children = jpAllChildren(node);
+      out.insert(out.end(), children.begin(), children.end());
+    }
+
+    else if (inner.type == TokType::NUMBER) {
+      lex.next();
+
+      if (lex.peek().type == TokType::COLON || lex.peek().type == TokType::DOT) {
+        int64_t start = std::stoll(inner.val);
+        int64_t end = INT64_MAX, step = 1;
+        bool hasEnd = false;
+
         lex.next();
+        Tok endTok = lex.peek();
+        if (endTok.type == TokType::NUMBER) {
+          end = std::stoll(endTok.val);
+          hasEnd = true;
+          lex.next();
+        }
+
+        if (lex.peek().type == TokType::COLON) {
+          lex.next();
+          Tok stepTok = lex.peek();
+          if (stepTok.type == TokType::NUMBER) {
+            step = std::stoll(stepTok.val);
+            lex.next();
+          }
+        }
+
+        int64_t sliceSz = (node && node->type == asvJSONValue::ARRAY && node->arr)
+                           ? static_cast<int64_t>(node->arr->size()) : 0;
+        if (!hasEnd) {
+          end = (step > 0) ? sliceSz : -1;
+        } else if (end < 0) {
+          end = sliceSz + end;
+        }
+        if (start < 0) start = sliceSz + start;
+        if (start < 0) start = 0;
+        if (end < 0) end = -1;
+
+        auto sliced = jpSlice(node, start, end, step);
+        out.insert(out.end(), sliced.begin(), sliced.end());
       }
+
+      else if (node && node->type == asvJSONValue::ARRAY && node->arr) {
+        int64_t idx = std::stoll(inner.val);
+        size_t ai;
+        if (idx < 0) {
+          if (static_cast<size_t>(-idx) > node->arr->size()) { /* out of range */ }
+          else {
+            ai = node->arr->size() - static_cast<size_t>(-idx);
+            if (ai < node->arr->size()) out.push_back((*node->arr)[ai].get());
+          }
+        } else {
+          ai = static_cast<size_t>(idx);
+          if (ai < node->arr->size()) out.push_back((*node->arr)[ai].get());
+        }
+      }
+    }
+
+    else if (inner.type == TokType::STRING) {
+      lex.next();
+      const asvJSONValue* child = jpGetProp(node, inner.val);
+      if (child) out.push_back(child);
+    }
+
+    else if (inner.type == TokType::COLON || inner.type == TokType::DOT) {
+      int64_t start = 0, end = INT64_MAX, step = 1;
+      bool hasStart = false, hasEnd = false, hasStep = false;
 
       if (lex.peek().type == TokType::COLON) {
         lex.next();
-        Tok stepTok = lex.peek();
-        if (stepTok.type == TokType::NUMBER) {
-          step = std::stoll(stepTok.val);
+        Tok endTok = lex.peek();
+        if (endTok.type == TokType::NUMBER) {
+          end = std::stoll(endTok.val);
+          hasEnd = true;
           lex.next();
+        } else if (endTok.type != TokType::COLON) {
+          end = INT64_MAX;
+          hasEnd = true;
+        }
+
+        if (lex.peek().type == TokType::COLON) {
+          lex.next();
+          Tok stepTok = lex.peek();
+          if (stepTok.type == TokType::NUMBER) {
+            step = std::stoll(stepTok.val);
+            hasStep = true;
+            lex.next();
+          }
         }
       }
 
-      if (lex.peek().type == TokType::RBRACKET) lex.next();
-
       int64_t sliceSz = (node && node->type == asvJSONValue::ARRAY && node->arr)
                          ? static_cast<int64_t>(node->arr->size()) : 0;
+      if (!hasStart) {
+        start = (step > 0) ? 0 : sliceSz - 1;
+      } else if (start < 0) {
+        start = sliceSz + start;
+      }
       if (!hasEnd) {
         end = (step > 0) ? sliceSz : -1;
       } else if (end < 0) {
         end = sliceSz + end;
       }
+      if (start < 0) start = 0;
       if (end < 0) end = -1;
 
       auto sliced = jpSlice(node, start, end, step);
       out.insert(out.end(), sliced.begin(), sliced.end());
-      return;
     }
 
-    if (lex.peek().type == TokType::RBRACKET) lex.next();
-
-    if (node && node->type == asvJSONValue::ARRAY && node->arr) {
-      int64_t idx = std::stoll(inner.val);
-      size_t ai;
-      if (idx < 0) {
-        if (static_cast<size_t>(-idx) > node->arr->size()) return;
-        ai = node->arr->size() - static_cast<size_t>(-idx);
-      } else {
-        ai = static_cast<size_t>(idx);
-      }
-      if (ai < node->arr->size()) out.push_back((*node->arr)[ai].get());
-    }
-    return;
-  }
-
-  if (inner.type == TokType::STRING) {
-    lex.next();
-    if (lex.peek().type == TokType::RBRACKET) lex.next();
-    const asvJSONValue* child = jpGetProp(node, inner.val);
-    if (child) out.push_back(child);
-    return;
-  }
-
-  if (inner.type == TokType::COLON || inner.type == TokType::DOT) {
-    int64_t start = 0, end = INT64_MAX, step = 1;
-    bool hasStart = false, hasEnd = false, hasStep = false;
-
-    if (lex.peek().type == TokType::COLON) {
+    else if (inner.type == TokType::QUESTION) {
       lex.next();
-      Tok endTok = lex.peek();
-      if (endTok.type == TokType::NUMBER) {
-        end = std::stoll(endTok.val);
-        hasEnd = true;
-        lex.next();
-      } else if (endTok.type == TokType::COLON) {
-      } else {
-        end = INT64_MAX;
-        hasEnd = true;
+      if (lex.peek().type == TokType::LPAREN) lex.next();
+
+      auto children = jpAllChildren(node);
+      for (const asvJSONValue* child : children) {
+        PathLexer filterLex(lex);
+        JPFilterEval filterEval(filterLex, child, res.root);
+        if (filterEval.evaluate()) out.push_back(child);
       }
 
-      if (lex.peek().type == TokType::COLON) {
-        lex.next();
-        Tok stepTok = lex.peek();
-        if (stepTok.type == TokType::NUMBER) {
-          step = std::stoll(stepTok.val);
-          hasStep = true;
-          lex.next();
-        }
-      }
+      lex.skipToEndBracket();
     }
 
-    if (lex.peek().type == TokType::RBRACKET) lex.next();
-
-    int64_t sliceSz = (node && node->type == asvJSONValue::ARRAY && node->arr)
-                       ? static_cast<int64_t>(node->arr->size()) : 0;
-    if (!hasStart) {
-      start = (step > 0) ? 0 : sliceSz - 1;
-    } else if (start < 0) {
-      start = sliceSz + start;
-    }
-    if (!hasEnd) {
-      end = (step > 0) ? sliceSz : -1;
-    } else if (end < 0) {
-      end = sliceSz + end;
-    }
-    if (start < 0) start = 0;
-    if (end < 0) end = -1;
-
-    auto sliced = jpSlice(node, start, end, step);
-    out.insert(out.end(), sliced.begin(), sliced.end());
-    return;
-  }
-
-  if (inner.type == TokType::QUESTION) {
-    lex.next();
-    if (lex.peek().type == TokType::LPAREN) lex.next();
-
-    auto children = jpAllChildren(node);
-    for (const asvJSONValue* child : children) {
-      PathLexer filterLex(lex);  
-      JPFilterEval filterEval(filterLex, child);
-      if (filterEval.evaluate()) out.push_back(child);
-    }
-
-    while (lex.hasMore() && lex.peek().type != TokType::RBRACKET) lex.next();
-    if (lex.peek().type == TokType::RBRACKET) lex.next();
-    return;
+    if (lex.peek().type == TokType::COMMA) { lex.next(); continue; }
+    break;
   }
 
   if (lex.peek().type == TokType::RBRACKET) lex.next();
@@ -727,7 +757,11 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
     else if (t.type == TokType::LBRACKET) {
       lex.next();
       std::vector<const asvJSONValue*> next;
-      for (auto* n : current) jpExpandBracket(lex, n, next, res);
+      for (auto* n : current) {
+        PathLexer blex(lex);
+        jpExpandBracket(blex, n, next, res);
+      }
+      lex.skipToEndBracket();
       current = std::move(next);
     }
     else {
@@ -755,6 +789,7 @@ inline PathResult jpQuery(const asvJSONValue* root, std::string_view path) {
     return res;
   }
 
+  res.root = root;
   jpExpand(root, lex, res);
   return res;
 }

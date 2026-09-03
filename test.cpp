@@ -10476,6 +10476,90 @@ TEST(testJSONPath) {
 		auto r2 = doc.query("$[?(@.v <= 2)]");
 		ASSERT_EQ(r2.size(), size_t(2));
 	}
+	// -- filter: RFC 9535 truthiness (empty array/object are falsy) --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":[]},{"a":{}},{"a":1},{"a":"x"}])")));
+		auto r = doc.query("$[?(@.a)]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	// -- bracket union: names --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":2,"c":3})")));
+		auto r = doc.query("$['a','c']");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 1);
+		ASSERT(r[1]->num == 3);
+	}
+	// -- bracket union: indexes --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30,40])")));
+		auto r = doc.query("$[0,2]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 10);
+		ASSERT(r[1]->num == 30);
+	}
+	// -- bracket union: mixed --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[2,0]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 30);
+		ASSERT(r[1]->num == 10);
+	}
+	// -- slice: negative start/end normalization --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"(["a","b","c","d","e","f","g"])")));
+		auto r = doc.query("$[-3:-1]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT_EQ(r[0]->str_data, "e");
+		ASSERT_EQ(r[1]->str_data, "f");
+		auto r2 = doc.query("$[-3:]");
+		ASSERT_EQ(r2.size(), size_t(3));
+		ASSERT_EQ(r2[0]->str_data, "e");
+		ASSERT_EQ(r2[1]->str_data, "f");
+		ASSERT_EQ(r2[2]->str_data, "g");
+	}
+	// -- slice: full slice must not hang --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		auto r = doc.query("$[:]");
+		ASSERT_EQ(r.size(), size_t(3));
+	}
+	// -- filter referencing root with $ --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"threshold":5,"items":[{"v":1},{"v":10}]})")));
+		auto r = doc.query("$.items[?(@.v > $.threshold)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->obj->find("v")->second->num == 10);
+		auto r2 = doc.query("$.items[?(@.v > $['threshold'])]");
+		ASSERT_EQ(r2.size(), size_t(1));
+	}
+	// -- bracket applied to multiple recursive-descent results --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"book":[1,2,3]},"b":{"book":[4,5]}})")));
+		auto r = doc.query("$..book[1]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 2);
+		ASSERT(r[1]->num == 5);
+		auto rw = doc.query("$..book[*]");
+		ASSERT_EQ(rw.size(), size_t(5));
+	}
+	// -- nested bracket subscript inside a filter --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"x":[{"arr":[5,6],"v":10},{"arr":[1],"v":20}]})")));
+		auto r = doc.query("$.x[?(@.arr[0] == 5)].v");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 10);
+	}
 }
 
 TEST(testJsonSax) {
