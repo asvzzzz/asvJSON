@@ -9857,6 +9857,79 @@ TEST(testUDEAnchors) {
   }
 }
 
+TEST(testUDERawNumberRoundTrip) {
+  // High-precision decimal stored as raw_number string by JSON parser
+  // must round-trip through UDE as a string (quoted), not a double.
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"d\":0.42857142857142855}"));
+    auto* v = j.getRoot()->get("d");
+    ASSERT(v != nullptr);
+    ASSERT(v->type == asvJSONValue::STRING);
+    ASSERT(v->raw_number);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+    auto* v2 = j2.getRoot()->get("d");
+    ASSERT(v2->type == asvJSONValue::STRING);
+  }
+  // Big integer (int64 overflow) stays bare and round-trips
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"n\":12345678901234567890}"));
+    auto* v = j.getRoot()->get("n");
+    ASSERT(v->raw_number);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+  }
+}
+
+TEST(testUDECommentPrefixStrings) {
+  // String value starting with "//" must be quoted to avoid comment parsing
+  {
+    asvJSON j;
+    j.parse("{\"k\":\"//}\"}");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+    ASSERT_EQ(std::string(j2.getString("k")), "//}");
+  }
+  // String value starting with "/*"
+  {
+    asvJSON j;
+    j.parse("{\"k\":\"/* block\"}");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+    ASSERT_EQ(std::string(j2.getString("k")), "/* block");
+  }
+  // Plain "//" string
+  {
+    asvJSON j;
+    j.parse("{\"k\":\"//\"}");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+    ASSERT_EQ(std::string(j2.getString("k")), "//");
+  }
+  // Single "/" string should remain unquoted
+  {
+    asvJSON j;
+    j.parse("{\"k\":\"/foo\"}");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("/foo") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+  }
+}
+
 TEST(testByteSizeNullRoot) {
 	asvJSON j;
 	ASSERT_EQ(j.byteSize(), 0);
@@ -12807,6 +12880,8 @@ RUN(testCBORFloat16);
 	RUN(testUDESpecConformance);
 	RUN(testUDEStrict);
 	RUN(testUDEAnchors);
+	RUN(testUDERawNumberRoundTrip);
+	RUN(testUDECommentPrefixStrings);
 
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);

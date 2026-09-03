@@ -1399,6 +1399,9 @@ inline bool udeStringNeedsQuote(std::string_view s, bool strict) {
   std::string lower = udeToLower(s);
   if (lower == "true" || lower == "false" || lower == "null") return true;
   if (udeTryParseNumber(std::string(s))) return true;
+  // Strings starting with comment prefixes would be misinterpreted as comments
+  // by the parser (skipWsAndComments runs before parseValue).
+  if (s.size() >= 2 && s[0] == '/' && (s[1] == '/' || s[1] == '*')) return true;
   for (unsigned char c : s) {
     if (!udeIsUnquotedChar(static_cast<char>(c))) return true;
     if (strict && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return true;
@@ -1411,11 +1414,13 @@ inline void udeWriteIndent(std::ostream& os, int indent) {
 }
 
 // A string can be written as a block scalar only when it round-trips through
-// the parser. Blank lines are content (they are never terminators) and
-// round-trip correctly, but the encoder keeps a conservative subset here:
-// at least one content line, no leading whitespace (absorbed into the base
-// indent), and at most one trailing blank line. Other strings are written as
-// quoted strings by the caller instead.
+// the parser. The decoder treats any all-whitespace line (including one made
+// of spaces/tabs only) as a blank line, and leading whitespace on a content
+// line is absorbed into the base indent (or rejected outright for tabs), so
+// the encoder keeps a conservative subset here: at least one content line,
+// every line is either truly empty or begins with a non-whitespace character,
+// and at most one trailing blank line. Other strings (whose value cannot be
+// preserved exactly) are written as quoted strings by the caller instead.
 inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
   size_t trailing = 0;
@@ -1427,30 +1432,31 @@ inline bool udeCanBlockEncode(std::string_view s) {
   while (i < s.size()) {
     size_t nl = s.find('\n', i);
     std::string_view line = (nl == std::string_view::npos) ? s.substr(i) : s.substr(i, nl - i);
-    bool blank = true;
-    for (char c : line) if (c != ' ' && c != '\t' && c != '\r') { blank = false; break; }
-    if (nl == std::string_view::npos) {
-      // Final line without a trailing break; a blank one after content would
-      // lose that break under clip chomping and fail to round-trip.
-      if (blank && seenContent) return false;
-      if (!blank) {
-        if (trailingBlank) return false; // blank line followed by more content
-        seenContent = true;
-      }
-      break;
-    }
-    if (blank) {
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    bool allWhite = true;
+    for (char c : line) if (c != ' ' && c != '\t') { allWhite = false; break; }
+    bool emptyLine = line.empty();
+    // A non-empty whitespace-only line (e.g. " " or "\t") is content that the
+    // decoder folds into a blank line, so it cannot round-trip here. Only a
+    // truly empty line can represent a blank line.
+    if (allWhite && !emptyLine) return false;
+    if (emptyLine) {
+      // Blank line. A trailing blank line is allowed once (it supplies the
+      // line break that clip chomping keeps); anything else is unsafe.
       if (seenContent) {
-        if (trailingBlank) return false; // two or more trailing blank lines
+        if (trailingBlank) return false;
         trailingBlank = true;
       }
     } else {
       if (trailingBlank) return false; // blank line followed by more content
-      if (!seenContent && !line.empty() &&
-          (line[0] == ' ' || line[0] == '\t' || line[0] == '\r'))
-        return false; // leading whitespace would be absorbed into the base indent
+      // Leading whitespace on a content line is unsafe: it is absorbed into
+      // the base indent (a leading space) or rejected by the parser (a tab in
+      // the indentation margin). Fall back to a quoted string.
+      if (line[0] == ' ' || line[0] == '\t' || line[0] == '\r')
+        return false;
       seenContent = true;
     }
+    if (nl == std::string_view::npos) break;
     i = nl + 1;
   }
   return seenContent;
@@ -1562,8 +1568,17 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       break;
     case T::STRING: {
       if (v->raw_number) {
-        // Exact numeric literal (e.g. big integer stored beyond int64 range).
-        os << v->str_data;
+        // Exact numeric literal.  Emit bare only when the decoder re-parses it
+        // as a raw_number (e.g. big integers that overflow int64, or hex/oct/binary
+        // overflow).  High-precision decimals (>MAX_DOUBLE_SIG_DIGITS sig digits)
+        // would be re-parsed as plain doubles, losing the STRING type, so quote
+        // them to preserve fidelity.
+        auto probe = udeTryParseNumber(v->str_data);
+        if (probe && probe->raw_number) {
+          os << v->str_data;
+        } else {
+          udeWriteQuoted(os, v->str_data);
+        }
         break;
       }
       if (lineContext && udeCanFoldEncode(v->str_data)) {
@@ -1649,12 +1664,21 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
 inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, bool strict) {
   if (val.type == asvJSONValue::OBJECT && val.obj && indent == 0) {
     bool first = true;
+    bool prevEndsNl = false;
     for (const auto& [k, sub] : *val.obj) {
-      if (!first) os << '\n';
+      // Separate top-level entries with exactly one newline. A block scalar
+      // (| / >) already ends with a newline, so emitting an extra separator
+      // would create a blank line that the scalar swallows as content, adding
+      // a spurious trailing newline on round-trip.
+      if (!first && !prevEndsNl) os << '\n';
       first = false;
       udeWriteKey(os, k, strict);
       os << ": ";
-      udeWriteValue(os, sub.get(), 1, true, strict);
+      std::ostringstream vbuf;
+      udeWriteValue(vbuf, sub.get(), 1, true, strict);
+      std::string vs = vbuf.str();
+      prevEndsNl = !vs.empty() && vs.back() == '\n';
+      os << vs;
     }
   } else {
     udeWriteValue(os, &val, indent, false, strict);
