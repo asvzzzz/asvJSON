@@ -374,6 +374,7 @@ public:
     if (error_) return false;
     if (done_) { lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false; }
     buffer_.append(chunk.data(), chunk.size());
+    needMore_ = false; // new data may resolve a paused token
     return process();
   }
 
@@ -395,17 +396,11 @@ public:
         afterValue();
         break;
       case State::LIT_TRUE:
-        if (tokenBuffer_ == "tru") { handler_.onBoolValue(true); afterValue(); }
-        else { lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false; }
-        break;
       case State::LIT_FALSE:
-        if (tokenBuffer_ == "fals") { handler_.onBoolValue(false); afterValue(); }
-        else { lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false; }
-        break;
       case State::LIT_NULL:
-        if (tokenBuffer_ == "nul") { handler_.onNullValue(); afterValue(); }
-        else { lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false; }
-        break;
+        // A LIT_* state at EOF always means the literal was truncated; there is
+        // no further input, so the token is invalid.
+        lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false;
       case State::LINE_COMMENT:
         // Comment consumed to end of input -- OK
         state_ = State::TOP;
@@ -458,6 +453,9 @@ private:
   std::string lastError_;
   bool done_ = false;
   bool error_ = false;
+  bool strEscape_ = false;  // last string char captured was a backslash awaiting its escaped target
+  size_t litIdx_ = 0;       // number of literal chars validated so far (LIT_* states)
+  bool needMore_ = false;   // true when processing paused without consuming (awaiting more input)
 
   // Container stack for tracking context
   enum class Container { OBJ, ARR };
@@ -467,16 +465,24 @@ private:
     lastError_ = msg; error_ = true; handler_.onError(lastError_);
   }
 
+  // True when the next unconsumed char is a '/' sitting at the very end of the
+  // buffer (the rest of a `//` or `/*` comment may arrive in a later chunk).
+  bool pendingComment() const {
+    return allowComments && pos_ < buffer_.size() && buffer_[pos_] == '/' && pos_ + 1 >= buffer_.size();
+  }
+
   // Compact buffer when it grows large and we're at a safe point
   void compact() {
-    if (pos_ > 0 && pos_ <= buffer_.size() && state_ != State::STR_VALUE && state_ != State::STR_KEY && state_ != State::NUM) {
+    if (pos_ > 0 && pos_ <= buffer_.size() &&
+        state_ != State::STR_VALUE && state_ != State::STR_KEY && state_ != State::NUM &&
+        state_ != State::LIT_TRUE && state_ != State::LIT_FALSE && state_ != State::LIT_NULL) {
       buffer_.erase(0, pos_);
       pos_ = 0;
     }
   }
 
   bool process() {
-    while (pos_ < buffer_.size() && !done_ && !error_) {
+    while (pos_ < buffer_.size() && !done_ && !error_ && !needMore_) {
       switch (state_) {
         case State::TOP:
         case State::OBJ_VALUE:
@@ -542,9 +548,10 @@ private:
     skipWsAndComments();
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true; // need more data
+    if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
 
     char c = buffer_[pos_];
-    if (c == ',' && state_ == State::ARR_VALUE) { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pos_ >= buffer_.size()) return true; c = buffer_[pos_]; }
+    if (c == ',' && state_ == State::ARR_VALUE) { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pendingComment() || pos_ >= buffer_.size()) { if (pendingComment()) needMore_ = true; return true; } c = buffer_[pos_]; }
     if (c == '{') {
       if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
       depth_++;
@@ -595,9 +602,9 @@ private:
       state_ = State::STR_VALUE;
       return processString();
     }
-    if (c == 't') { tokenBuffer_.clear(); tokenStart_ = pos_; state_ = State::LIT_TRUE; advance(); return processLiteral(); }
-    if (c == 'f') { tokenBuffer_.clear(); tokenStart_ = pos_; state_ = State::LIT_FALSE; advance(); return processLiteral(); }
-    if (c == 'n') { tokenBuffer_.clear(); tokenStart_ = pos_; state_ = State::LIT_NULL; advance(); return processLiteral(); }
+    if (c == 't') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_TRUE; advance(); return processLiteral(); }
+    if (c == 'f') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_FALSE; advance(); return processLiteral(); }
+    if (c == 'n') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_NULL; advance(); return processLiteral(); }
     if (allowNaNInfinity && c == 'N') {
       if (buffer_.compare(pos_, 3, "NaN") == 0) {
         pos_ += 3;
@@ -644,8 +651,9 @@ private:
     skipWsAndComments();
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true;
+    if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
     char c = buffer_[pos_];
-    if (c == ',') { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pos_ >= buffer_.size()) return true; c = buffer_[pos_]; }
+    if (c == ',') { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pendingComment() || pos_ >= buffer_.size()) { if (pendingComment()) needMore_ = true; return true; } c = buffer_[pos_]; }
     if (c == '}') {
       containerStack_.pop_back();
       depth_--;
@@ -669,6 +677,7 @@ private:
     skipWsAndComments();
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true;
+    if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
     if (buffer_[pos_] == ':') {
       advance();
       state_ = State::OBJ_VALUE;
@@ -681,6 +690,13 @@ private:
   bool processString() {
     // Scan from pos_ for closing quote
     while (pos_ < buffer_.size()) {
+      if (strEscape_) {
+        // The previous chunk ended on a backslash; the current char is its
+        // escaped target and must not be treated as a closing quote/control.
+        pos_++;
+        strEscape_ = false;
+        continue;
+      }
       char c = buffer_[pos_];
       if (c == '"') {
         // Complete string found
@@ -717,10 +733,12 @@ private:
       }
       if (c == '\\') {
         if (pos_ + 1 >= buffer_.size()) {
-          // Escape at end of buffer -- need more data
+          // Backslash at end of buffer -- capture up to and including it; the
+          // escaped target arrives in a later chunk and is consumed via strEscape_.
           tokenBuffer_.append(buffer_, tokenStart_, pos_ - tokenStart_ + 1);
           pos_++;
           tokenStart_ = pos_;
+          strEscape_ = true;
           return true; // need more data
         }
         pos_ += 2; // skip escaped char
@@ -805,76 +823,24 @@ private:
   }
 
   bool processLiteral() {
-    static const char* literals[] = { "true", "false", "null" };
-    size_t expectedLens[] = { 4, 5, 4 };
-    int idx = (state_ == State::LIT_TRUE) ? 0 : (state_ == State::LIT_FALSE) ? 1 : 2;
-    const char* expected = literals[idx];
-    size_t expectedLen = expectedLens[idx];
-
-    // Rebuild what we have so far
-    std::string current = tokenBuffer_;
-    current.append(buffer_, tokenStart_, pos_ - tokenStart_);
-
-    // Check if we've consumed more from buffer since tokenStart_
-    // Actually tokenStart_ was set when we entered the literal state
-    // and pos_ has been advancing. tokenBuffer_ holds data from previous chunks.
-    // But we also need to re-read from tokenStart_ in current buffer...
-    // Let me reconsider: when we enter LIT state, tokenStart_ = pos_ (before advance)
-    // and we advanced pos_. So we need to gather from tokenStart_ to pos_.
-    // But if we've been accumulating, tokenBuffer_ has old data.
-
-    // Simpler approach: scan what we have vs what we need
-    if (current.size() > expectedLen) {
-      setError("Invalid literal");
-      return false;
+    size_t len = (state_ == State::LIT_TRUE) ? 4 : (state_ == State::LIT_FALSE) ? 5 : 4;
+    const char* lit = (state_ == State::LIT_TRUE) ? "true" : (state_ == State::LIT_FALSE) ? "false" : "null";
+    // tokenStart_ points at the first literal char; litIdx_ counts chars already
+    // validated. buffer_ is never compacted while in a LIT_* state (see
+    // compact()), so the token always lives intact starting at tokenStart_.
+    while (litIdx_ < len) {
+      size_t idx = tokenStart_ + litIdx_;
+      if (idx >= buffer_.size()) break; // need more data
+      if (buffer_[idx] != lit[litIdx_]) { setError("Invalid literal"); return false; }
+      litIdx_++;
     }
-
-    for (size_t i = 0; i < current.size(); i++) {
-      if (current[i] != expected[i]) {
-        setError("Invalid literal");
-        return false;
-      }
-    }
-
-    if (current.size() == expectedLen) {
-      // Complete literal
-      if (idx == 0) handler_.onBoolValue(true);
-      else if (idx == 1) handler_.onBoolValue(false);
-      else handler_.onNullValue();
-      tokenBuffer_.clear();
-      afterValue();
-      return true;
-    }
-
-    // Incomplete -- need more data
-    // Scan more from buffer if available
-    while (pos_ < buffer_.size() && current.size() < expectedLen) {
-      current += buffer_[pos_];
-      pos_++;
-    }
-
-    if (current.size() > expectedLen) {
-      setError("Invalid literal");
-      return false;
-    }
-
-    if (current.size() == expectedLen) {
-      for (size_t i = 0; i < expectedLen; i++) {
-        if (current[i] != expected[i]) {
-          setError("Invalid literal");
-          return false;
-        }
-      }
-      if (idx == 0) handler_.onBoolValue(true);
-      else if (idx == 1) handler_.onBoolValue(false);
-      else handler_.onNullValue();
-      tokenBuffer_.clear();
-      afterValue();
-      return true;
-    }
-
-    tokenBuffer_ = current;
-    return true; // need more data
+    pos_ = tokenStart_ + litIdx_; // scan pointer derived from validated progress
+    if (litIdx_ < len) return true; // need more data
+    if (state_ == State::LIT_TRUE) handler_.onBoolValue(true);
+    else if (state_ == State::LIT_FALSE) handler_.onBoolValue(false);
+    else handler_.onNullValue();
+    afterValue();
+    return true;
   }
 
   bool processLineComment() {

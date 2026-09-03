@@ -10735,6 +10735,108 @@ TEST(testJsonStream) {
 		ASSERT_EQ(events[0], "int:1");
 		ASSERT_EQ(events[1], "int:2");
 	}
+
+	// -- regression: backslash escape split across a chunk boundary --
+	// The `\"` must be treated as an escaped quote even when the backslash is the
+	// last byte of a chunk and the quote arrives in the next chunk.
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		std::string input = R"(["abc\"def"])";
+		for (char c : input) {
+			ASSERT(sp.feed(std::string_view(&c, 1)));
+		}
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, "abc\"def");
+	}
+
+	// -- regression: literal split across chunks with a compact() in between --
+	// `true` arrives as two chunks that straddle the literal; the parser must not
+	// compact away the partial literal nor loop forever.
+	{
+		bool val = false;
+		struct : JsonSaxHandler {
+			bool* v;
+			void onBoolValue(bool b) override { *v = b; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("tr"));
+		ASSERT(sp.feed("ue"));
+		ASSERT(sp.finish());
+		ASSERT(val);
+	}
+	{
+		bool val = false;
+		struct : JsonSaxHandler {
+			bool* v;
+			void onBoolValue(bool b) override { *v = b; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		std::string input = "false";
+		for (size_t i = 0; i < input.size(); i += 2) {
+			ASSERT(sp.feed(std::string_view(input.data() + i, std::min<size_t>(2, input.size() - i))));
+		}
+		ASSERT(sp.finish());
+		ASSERT(!val);
+	}
+	{
+		bool emitted = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onNullValue() override { *e = true; }
+		} h;
+		h.e = &emitted;
+		JsonStreamParser sp(h);
+		std::string input = "null";
+		for (char c : input) {
+			ASSERT(sp.feed(std::string_view(&c, 1)));
+		}
+		ASSERT(sp.finish());
+		ASSERT(emitted);
+	}
+
+	// -- regression: `//` comment whose first slash lands at a chunk boundary --
+	// A dangling `/` at the end of a chunk must not spin forever or error; it
+	// waits for the next chunk to form `//` or `/*`.
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onKey(std::string_view k) override { ev->push_back("key:" + std::string(k)); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("{/"));
+		ASSERT(sp.feed("/ c\n\"a\":1}"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(events.size(), size_t(2));
+		ASSERT_EQ(events[0], "key:a");
+		ASSERT_EQ(events[1], "int:1");
+	}
+	// -- regression: block comment `/*` split at the first slash boundary --
+	{
+		bool got = false;
+		int64_t val = 0;
+		struct : JsonSaxHandler {
+			bool* g; int64_t* v;
+			void onIntegerValue(int64_t i) override { *g = true; *v = i; }
+		} h;
+		h.g = &got; h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("[1, /"));
+		ASSERT(sp.feed("* b\n*/2]"));
+		ASSERT(sp.finish());
+		ASSERT(got);
+		ASSERT_EQ(val, 2);
+	}
 }
 
 TEST(testSaxToDom) {
