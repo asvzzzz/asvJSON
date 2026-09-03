@@ -17,9 +17,17 @@ namespace asvJSONInternal {
 
 enum SexprTokenType { SEXPR_LPAREN, SEXPR_RPAREN, SEXPR_STRING, SEXPR_NUMBER, SEXPR_SYMBOL, SEXPR_TRUE, SEXPR_FALSE, SEXPR_NIL };
 
+// S-Expression internal marker byte for quoted object keys. It is emitted as a
+// LITERAL control byte in the source, so it can be recognized during
+// tokenization (before \u/escape decoding) and can NEVER collide with a value
+// string that merely begins with that byte -- the encoder always escapes such a
+// value as "\u0001...". See sexprTokenize.
+static const char SEXPR_KEY_MARK = '\x01';
+
 struct SexprToken {
   SexprTokenType type;
   std::string value;
+  bool marked = false; // true if source string began with a literal SEXPR_KEY_MARK key marker
 };
 
 inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
@@ -36,6 +44,12 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
     if (c == '"') {
       std::string s;
       i++;
+      // A LITERAL SEXPR_KEY_MARK control byte right after the opening quote is
+      // the key marker emitted by the encoder. Values that merely begin with
+      // that byte are escaped as "\u0001..." instead (appendJsonEscaped), so a
+      // literal marker here can never collide with real data.
+      bool marked = false;
+      if (i < input.size() && input[i] == SEXPR_KEY_MARK) { marked = true; i++; }
       bool closed = false;
       while (i < input.size()) {
         if (input[i] == '\\' && i + 1 < input.size()) {
@@ -52,36 +66,67 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
             case 'u': case 'U': {
               bool isUpper = (input[i] == 'U');
               int count = isUpper ? 8 : 4;
-              if (i + 1 + count > input.size()) {
+              // reads `n` hex digits at input[p]; fills `out`, returns false on
+              // short input or a non-hex character.
+              auto readHex = [&](size_t p, int n, unsigned long& out) -> bool {
+                if (p + static_cast<size_t>(n) > input.size()) return false;
+                out = 0;
+                for (int q = 0; q < n; q++) {
+                  char h = input[p + q];
+                  if (h >= '0' && h <= '9') out = (out << 4) | static_cast<unsigned long>(h - '0');
+                  else if (h >= 'a' && h <= 'f') out = (out << 4) | static_cast<unsigned long>(h - 'a' + 10);
+                  else if (h >= 'A' && h <= 'F') out = (out << 4) | static_cast<unsigned long>(h - 'A' + 10);
+                  else return false;
+                }
+                return true;
+              };
+              auto emitUtf8 = [&](unsigned long cp) {
+                if (cp < 0x80) s += static_cast<char>(cp);
+                else if (cp < 0x800) {
+                  s += static_cast<char>(0xC0 | (cp >> 6));
+                  s += static_cast<char>(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                  s += static_cast<char>(0xE0 | (cp >> 12));
+                  s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                  s += static_cast<char>(0x80 | (cp & 0x3F));
+                } else {
+                  s += static_cast<char>(0xF0 | (cp >> 18));
+                  s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                  s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                  s += static_cast<char>(0x80 | (cp & 0x3F));
+                }
+              };
+              // Preserve an un-decodable escape verbatim (backslash included),
+              // advancing only over the digits we actually copied.
+              auto emitLiteral = [&]() -> size_t {
+                size_t copied = 0;
                 s += '\\'; s += isUpper ? 'U' : 'u';
+                for (int q = 0; q < count; q++) {
+                  size_t p = i + 1 + static_cast<size_t>(q);
+                  if (p >= input.size()) break;
+                  s += input[p];
+                  copied++;
+                }
+                return copied;
+              };
+              unsigned long cp = 0;
+              if (!readHex(i + 1, count, cp)) { i += emitLiteral(); break; }
+              if (cp >= 0xD800 && cp <= 0xDBFF && !isUpper) {
+                // High surrogate: combine with an immediately following \uDC00-\uDFFF.
+                unsigned long lo = 0;
+                if (i + 5 + 4 <= input.size() && input[i + 5] == '\\' &&
+                    input[i + 6] == 'u' &&
+                    readHex(i + 7, 4, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                  cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                  emitUtf8(cp);
+                  i += 10; // consume high escape + low escape (see caller's i++)
+                  break;
+                }
+                i += emitLiteral();
                 break;
               }
-              unsigned long cp = 0;
-              bool ok = true;
-              for (int k = 1; k <= count; k++) {
-                char h = input[i + k];
-                if (h >= '0' && h <= '9') cp = (cp << 4) | (h - '0');
-                else if (h >= 'a' && h <= 'f') cp = (cp << 4) | (h - 'a' + 10);
-                else if (h >= 'A' && h <= 'F') cp = (cp << 4) | (h - 'A' + 10);
-                else { ok = false; break; }
-              }
-              if (!ok || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
-                for (int k = 0; k <= count; k++) s += input[i + k];
-              } else if (cp < 0x80) {
-                s += static_cast<char>(cp);
-              } else if (cp < 0x800) {
-                s += static_cast<char>(0xC0 | (cp >> 6));
-                s += static_cast<char>(0x80 | (cp & 0x3F));
-              } else if (cp < 0x10000) {
-                s += static_cast<char>(0xE0 | (cp >> 12));
-                s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                s += static_cast<char>(0x80 | (cp & 0x3F));
-              } else {
-                s += static_cast<char>(0xF0 | (cp >> 18));
-                s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-                s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-                s += static_cast<char>(0x80 | (cp & 0x3F));
-              }
+              if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) { i += emitLiteral(); break; }
+              emitUtf8(cp);
               i += count;
               break;
             }
@@ -94,7 +139,7 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
         s += input[i]; i++;
       }
       if (!closed) throw asvJSONError("unclosed string in S-Expression");
-      tokens.push_back({SEXPR_STRING, s});
+      tokens.push_back({SEXPR_STRING, std::move(s), marked});
       continue;
     }
 
@@ -146,9 +191,6 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
   }
   return tokens;
 }
-
-// S-Expression internal marker byte for quoted object keys (stripped before JSON escaping)
-static const char SEXPR_KEY_MARK = '\x01';
 
 inline std::string sexprTokenToJson(const SexprToken& token) {
   switch (token.type) {
@@ -204,27 +246,53 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   pos++; // skip '('
   std::vector<std::string> items;
   std::vector<int> itemTypes;
+  // For strings the encoder printed as quoted keys (leading SEXPR_KEY_MARK):
+  // `marked` records the fact and `markedRaw` keeps the ORIGINAL unescaped value
+  // still carrying the marker byte. Stripping is deferred to materialization so
+  // that a value which merely starts with that byte round-trips as data instead
+  // of being misread as a key.
+  std::vector<bool> marked;
+  std::vector<std::string> markedRaw;
   while (pos < tokens.size() && tokens[pos].type != SEXPR_RPAREN) {
     if (tokens[pos].type == SEXPR_LPAREN) {
       std::string sub = sexprTokensToJson(tokens, pos, depth + 1);
       itemTypes.push_back(sub.empty() ? SEXPR_NIL : (sub[0] == '{' ? -2 : -1));
       items.push_back(std::move(sub));
-    } else if (tokens[pos].type == SEXPR_STRING && !tokens[pos].value.empty() && tokens[pos].value[0] == SEXPR_KEY_MARK) {
-      // Marked string key from encoder -- strip marker and treat as symbol
+      marked.push_back(false);
+      markedRaw.push_back(std::string());
+    } else if (tokens[pos].type == SEXPR_STRING && tokens[pos].marked) {
+      // Marked string key from encoder -- marker already stripped by the
+      // tokenizer; treat as a symbol key for the heuristic. Keep the original
+      // marker-prefixed value in case this item is (mistakenly) used as a value.
       SexprToken stripped = tokens[pos];
-      stripped.value = stripped.value.substr(1);
+      markedRaw.push_back(std::string(1, SEXPR_KEY_MARK) + stripped.value);
       items.push_back(sexprTokenToJson(stripped));
       itemTypes.push_back(SEXPR_SYMBOL);
+      marked.push_back(true);
       pos++;
     } else {
       items.push_back(sexprTokenToJson(tokens[pos]));
       itemTypes.push_back(tokens[pos].type);
+      marked.push_back(false);
+      markedRaw.push_back(std::string());
       pos++;
     }
   }
   if (pos >= tokens.size()) throw asvJSONError("unclosed parenthesis in S-Expression");
   pos++; // skip ')'
 
+  // JSON text for item i used as a VALUE: a marker-prefixed item used as data
+  // must keep the marker byte (it was data, not a key).
+  auto valueJson = [&](size_t i) -> std::string {
+    if (marked[i]) {
+      std::string r;
+      r += '"';
+      appendJsonEscaped(r, markedRaw[i]);
+      r += '"';
+      return r;
+    }
+    return items[i];
+  };
   // Object-vs-list heuristic for a parenthesized group:
   // - Odd-length groups are always lists.
   // - Even-length groups are objects only if all even-indexed items are
@@ -262,7 +330,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
     std::string key = items[0];
     if (items.size() == 2) {
-      return '{' + key + ':' + items[1] + '}';
+      return '{' + key + ':' + valueJson(1) + '}';
     }
     // Check if all remaining items are objects -- merge into single object
     bool allObj = true;
@@ -287,7 +355,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
     std::string r = '{' + key + ":[";
     for (size_t j = 1; j < items.size(); j++) {
       if (j > 1) r += ',';
-      r += items[j];
+      r += valueJson(j);
     }
     r += "]}";
     return r;
@@ -298,14 +366,14 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
     out = '{';
     for (size_t j = 0; j < items.size(); j += 2) {
       if (j > 0) out += ',';
-      out += sexprKeyJson(items[j], itemTypes[j]) + ':' + items[j + 1];
+      out += sexprKeyJson(items[j], itemTypes[j]) + ':' + valueJson(j + 1);
     }
     out += '}';
   } else {
     out = '[';
     for (size_t j = 0; j < items.size(); j++) {
       if (j > 0) out += ',';
-      out += items[j];
+      out += valueJson(j);
     }
     out += ']';
   }

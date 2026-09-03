@@ -7757,6 +7757,53 @@ TEST(testFromSexpr) {
   }
 }
 
+// Regression: S-Expression key-marker (\x01) collision and \u/\U surrogate handling
+TEST(testSexprAudit) {
+  // A VALUE string beginning with byte 0x01 must round-trip as data, not be
+  // misread as a marked key.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":"\u0001foo"})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a")), "\u0001foo");
+  }
+  // The same value as the FIRST item of a nested array placed under a key.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"k":["\u0001foo",2]})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.isArray("k"));
+    ASSERT_EQ(j2.getConst("k")->size(), size_t(2));
+    ASSERT_EQ(std::string(j2.getConst("k")->get(static_cast<size_t>(0))->getString()), "\u0001foo");
+    ASSERT_EQ(j2.getConst("k")->get(static_cast<size_t>(1))->getInt(), int64_t(2));
+  }
+  // A KEY that itself begins with byte 0x01 (encoder double-marks).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"\u0001foo":"v"})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("\u0001foo")), "v");
+  }
+  // Hand-written surrogate pair is combined into the supplementary code point.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a \"x\\uD83D\\uDE00y\")")));
+    ASSERT_EQ(std::string(j.getString("a")), "x\U0001F600y");
+  }
+  // A lone surrogate is preserved literally (backslash no longer dropped).
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a \"x\\uD83Dy\")")));
+    ASSERT_EQ(std::string(j.getString("a")), "x\\uD83Dy");
+  }
+}
+
 TEST(testToJSON5) {
   // Basic object round-trip
   {
@@ -12481,6 +12528,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- S-Expression Serialization Tests ---\n";
 	RUN(testToSexpr);
 	RUN(testFromSexpr);
+	RUN(testSexprAudit);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
