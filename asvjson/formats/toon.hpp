@@ -119,7 +119,7 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
           for (const auto& [k, sub] : *(child->obj))
             valToToon(sub.get(), out, indent + 1, k);
         } else if (child->type == asvJSONValue::ARRAY) {
-          valToToon(child, out, indent, "");
+          out += pad + "- " + toonLeafVal(child) + "\n";
         } else {
           out += pad + "- " + toonLeafVal(child) + "\n";
         }

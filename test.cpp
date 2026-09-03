@@ -5705,6 +5705,64 @@ TEST(testToTOONAdvanced) {
 		ASSERT(empty != nullptr);
 		ASSERT_EQ(empty->size(), size_t(0));
 	}
+	// Root array of nested arrays round-trip (structural preservation)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([[1,2],[3,4]])")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(r->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(r->get(1)->get(1)->getInt(), int64_t(4));
+	}
+	// Root array of deeply nested arrays (multi-level)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([[[1,2],[3,4]],[[5,6]]])")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(r->get(1)->get(0)->get(1)->getInt(), int64_t(6));
+	}
+	// Root array with an empty nested array (must keep the empty element)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([[],[1]])")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->size(), size_t(2));
+		ASSERT_EQ(r->get(0)->size(), size_t(0));
+		ASSERT_EQ(r->get(1)->get(0)->getInt(), int64_t(1));
+	}
+	// Root array mixing nested arrays and objects
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([[1,2],{"x":3},[4],[5,6]])")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT_EQ(r->size(), size_t(4));
+		ASSERT_EQ(r->get(0)->size(), size_t(2));
+		ASSERT_EQ(r->get(1)->type, asvJSONValue::OBJECT);
+		ASSERT_EQ(r->get(1)->get("x")->getInt(), int64_t(3));
+		ASSERT_EQ(r->get(2)->size(), size_t(1));
+		ASSERT_EQ(r->get(3)->get(1)->getInt(), int64_t(6));
+	}
 }
 
 TEST(testToTRON) {
