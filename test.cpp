@@ -10147,6 +10147,34 @@ TEST(testJSONSchema) {
 		std::string err;
 		ASSERT(!doc.validate(schema, err));
 	}
+	// Circular $ref must be detected, not overflow the stack.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"a":{"$ref":"#/definitions/a"}},"$ref":"#/definitions/a"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// Mutual (A -> B -> A) circular $ref.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"a":{"$ref":"#/definitions/b"},"b":{"$ref":"#/definitions/a"}},"$ref":"#/definitions/a"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// A legitimate recursive schema that consumes a document level per step
+	// must still validate (the guard only rejects $ref loops).
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"node":{"type":"object","properties":{"value":{"type":"number"},"child":{"$ref":"#/definitions/node"}},"required":["value"]}},"$ref":"#/definitions/node"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"value":1,"child":{"value":2,"child":{"value":3}}})")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
 }
 
 TEST(testJSONPath) {

@@ -37,6 +37,13 @@ private:
   const asvJSONValue* rootSchema_ = nullptr;
   std::string error_;
   std::string path_;
+  // Tracks how deeply nested $ref resolution currently is for the value being
+  // validated. A self-/mutually-referential schema (e.g. `{"$ref":"#"}` or
+  // `"a":{"$ref":"#/definitions/a"}`) would otherwise recurse forever through
+  // validateNode and overflow the stack. Cap at MAX_NESTING_DEPTH like the
+  // parsers do; a legitimate recursive schema follows the document's finite
+  // depth, so a chain deeper than MAX_NESTING_DEPTH is necessarily a loop.
+  int refDepth_ = 0;
 
   void setError(const std::string& msg) {
     if (!error_.empty()) return;
@@ -224,7 +231,14 @@ private:
       if (refNode && refNode->type == asvJSONValue::STRING) {
         auto resolved = resolveRef(refNode->str_data);
         if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
-        return validateNode(value, resolved);
+        if (refDepth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+          setError("Circular $ref detected at: " + refNode->str_data);
+          return false;
+        }
+        refDepth_++;
+        bool ok = validateNode(value, resolved);
+        refDepth_--;
+        return ok;
       }
     }
 
