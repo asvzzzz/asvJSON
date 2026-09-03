@@ -3133,6 +3133,189 @@ TEST(testFromXMLIntOverflow) {
 	}
 }
 
+TEST(testXMLStringRoundTrip) {
+	// A STRING that looks like a number/bool/null must not be re-detected on
+	// a toXML -> fromXML round trip (type="string" annotation preserves it).
+	{
+		asvJSON json;
+		json.putString("s", "42");
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "42");
+	}
+	// Numeric-looking double string
+	{
+		asvJSON json;
+		json.putString("s", "3.14");
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "3.14");
+	}
+	// Bool-looking string
+	{
+		asvJSON json;
+		json.putString("s", "true");
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "true");
+	}
+	// Null-looking string
+	{
+		asvJSON json;
+		json.putString("s", "null");
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "null");
+	}
+	// Empty string must stay STRING, not become NULL
+	{
+		asvJSON json;
+		json.putString("s", "");
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "");
+	}
+	// A normal string has no type annotation and still round-trips
+	{
+		asvJSON json;
+		json.putString("s", "hello");
+		std::string xml = json.toXML();
+		ASSERT(xml.find("type=\"string\"") == std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* v = json2.get("s");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "hello");
+	}
+}
+
+TEST(testXMLArrayStringRoundTrip) {
+	// Arrays of numeric/bool/null-looking strings must preserve STRING type
+	// on a toXML -> fromXML round trip.
+	{
+		asvJSON json;
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeString("42", 2));
+		arr->arr->push_back(asvJSONValue::makeString("true", 4));
+		arr->arr->push_back(asvJSONValue::makeString("", 0));
+		arr->arr->push_back(asvJSONValue::makeString("hello", 5));
+		json.setValue("a", std::move(arr));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* a = json2.get("a");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT(a->arr->size() == 4);
+		ASSERT((*a->arr)[0]->type == asvJSONValue::STRING && std::string((*a->arr)[0]->getString()) == "42");
+		ASSERT((*a->arr)[1]->type == asvJSONValue::STRING && std::string((*a->arr)[1]->getString()) == "true");
+		ASSERT((*a->arr)[2]->type == asvJSONValue::STRING && std::string((*a->arr)[2]->getString()) == "");
+		ASSERT((*a->arr)[3]->type == asvJSONValue::STRING && std::string((*a->arr)[3]->getString()) == "hello");
+	}
+	// Normal arrays of primitives still round-trip without type annotations
+	{
+		asvJSON json;
+		json.parse(std::string("[1, true, null, 3.5]"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* a = json2.get("root");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT(a->arr->size() == 4);
+		ASSERT((*a->arr)[0]->type == asvJSONValue::INT && (*a->arr)[0]->getInt() == 1);
+		ASSERT((*a->arr)[1]->type == asvJSONValue::BOOL_VAL && (*a->arr)[1]->getBool() == true);
+		ASSERT((*a->arr)[2]->type == asvJSONValue::NULL_VAL);
+	}
+}
+
+TEST(testXMLTextContentRoundTrip) {
+	// Object with attribute + text content (#text) must round-trip instead of
+	// emitting an invalid <#text> element that fails to re-parse.
+	{
+		asvJSON json;
+		ASSERT(json.fromXML(R"(<root attr="x">hello</root>)"));
+		auto* r = json.getRoot()->get("root");
+		ASSERT(r != nullptr && r->hasKey("@attr") && r->hasKey("#text"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<#text>") == std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* r2 = json2.getRoot()->get("root");
+		ASSERT(r2 != nullptr && r2->hasKey("@attr") && r2->hasKey("#text"));
+		ASSERT_EQ(std::string(r2->get("#text")->getString()), "hello");
+	}
+	// #text with special characters escapes on output and unescapes on input
+	{
+		asvJSON json;
+		ASSERT(json.fromXML(R"(<root attr="x">a &amp; b</root>)"));
+		auto* r = json.getRoot()->get("root");
+		ASSERT(r != nullptr && r->hasKey("#text"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* r2 = json2.getRoot()->get("root");
+		ASSERT(r2 != nullptr && r2->hasKey("#text"));
+		ASSERT_EQ(std::string(r2->get("#text")->getString()), "a & b");
+	}
+	// Numeric #text stays typed (INT) through the round trip
+	{
+		asvJSON json;
+		ASSERT(json.fromXML(R"(<root attr="x">42</root>)"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* r2 = json2.getRoot()->get("root");
+		ASSERT(r2 != nullptr && r2->hasKey("#text"));
+		ASSERT(r2->get("#text")->type == asvJSONValue::INT);
+		ASSERT(r2->get("#text")->getInt() == 42);
+	}
+	// Attribute + element + trailing text round-trips
+	{
+		asvJSON json;
+		ASSERT(json.fromXML(R"(<root lang="en"><p>hi</p>tail</root>)"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* r2 = json2.getRoot()->get("root");
+		ASSERT(r2 != nullptr);
+	}
+	// #text-bearing object with a child object that itself carries only #text:
+	// the inner object must serialize as an element (not a nested <#text>)
+	// so the document re-parses.
+	{
+		asvJSON json;
+		json.setValue("root", asvJSONValue::makeObject());
+		asvJSONValue* root = json.getRoot()->get("root");
+		auto k0 = asvJSONValue::makeObject();
+		k0->obj->emplace("k0", asvJSONValue::makeBool(false));
+		k0->obj->emplace("#text", asvJSONValue::makeString("3.14", 4));
+		auto k2 = asvJSONValue::makeObject();
+		k2->obj->emplace("#text", asvJSONValue::makeString("hello", 5));
+		k0->obj->emplace("k2", std::move(k2));
+		root->obj->emplace("k0", std::move(k0));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<#text>") == std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* r2 = json2.getRoot()->get("root");
+		ASSERT(r2 != nullptr && r2->hasKey("k0"));
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -12850,6 +13033,9 @@ RUN(testCBORFloat16);
 	RUN(testToXML);
 	RUN(testFromXML);
 	RUN(testFromXMLIntOverflow);
+	RUN(testXMLStringRoundTrip);
+	RUN(testXMLArrayStringRoundTrip);
+	RUN(testXMLTextContentRoundTrip);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);

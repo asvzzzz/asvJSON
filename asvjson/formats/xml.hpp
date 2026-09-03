@@ -59,6 +59,9 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 }
 
 
+// Forward declaration (defined alongside the decoder below)
+inline bool xmlNeedsStringType(std::string_view s);
+
 inline void asvJSONValue::toXML(std::string& out) const {
 	toXML(out, "root", 0);
 }
@@ -87,7 +90,10 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			break;
 		}
 		case T::STRING:
-			out += pad + "<" + xmlSanitizeElementName(name) + ">" + xmlEscapeContent(str_data) + "</" + xmlSanitizeElementName(name) + ">\n";
+			if (xmlNeedsStringType(str_data))
+				out += pad + "<" + xmlSanitizeElementName(name) + " type=\"string\">" + xmlEscapeContent(str_data) + "</" + xmlSanitizeElementName(name) + ">\n";
+			else
+				out += pad + "<" + xmlSanitizeElementName(name) + ">" + xmlEscapeContent(str_data) + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		case T::DATETIME: {
 			std::string dt; fmtDateTimeVal(timestamp, datetime_ms, dt);
@@ -178,6 +184,36 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				out += "</" + xmlSanitizeElementName(name) + ">\n";
 				break;
 			}
+			// If this object carries #text (text content alongside attributes or
+			// element children), emit it compactly on one line -- like the
+			// #content/mixed-content path -- so no indentation whitespace leaks
+			// into the text value on a re-parse.
+			auto textIt = obj->find("#text");
+			if (textIt != obj->end() && textIt->second &&
+			    (textIt->second->type == STRING || textIt->second->type == INT ||
+			     textIt->second->type == DOUBLE || textIt->second->type == BOOL_VAL)) {
+				out += pad + "<" + xmlSanitizeElementName(name);
+				for (const auto& [k, v] : *obj) {
+					if (k == "#text") continue;
+					if (!k.empty() && k[0] == '@') out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
+				}
+				out += ">";
+				auto& tv = textIt->second;
+				if (tv->type == asvJSONValue::STRING) out += xmlEscapeContent(tv->str_data);
+				else if (tv->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), tv->num); if (ec == std::errc()) out += std::string(buf, ptr); }
+				else if (tv->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(tv->dbl, val); out += val; }
+				else if (tv->type == asvJSONValue::BOOL_VAL) out += tv->flag ? "true" : "false";
+				for (const auto& [k, v] : *obj) {
+					if (!k.empty() && k[0] == '@') continue;
+					if (k == "#text") continue;
+					std::string tmp;
+					v->toXML(tmp, k, 0);
+					if (!tmp.empty() && tmp.back() == '\n') tmp.pop_back();
+					out += tmp;
+				}
+				out += "</" + xmlSanitizeElementName(name) + ">\n";
+				break;
+			}
 			out += pad + "<" + xmlSanitizeElementName(name);
 			for (const auto& [k, v] : *obj) {
 				if (!k.empty() && k[0] == '@') out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"" + xmlEscapeContent(v->type == asvJSONValue::STRING ? v->str_data : "") + "\"";
@@ -185,6 +221,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			out += ">\n";
 			for (const auto& [k, v] : *obj) {
 				if (!k.empty() && k[0] == '@') continue;
+				if (k == "#text") continue;
 				v->toXML(out, k, indent + 1);
 			}
 			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
@@ -204,16 +241,20 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			} else {
 				out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
 				for (const auto& item : *arr) {
-					out += pad + "  <item";
-					if (item->type == asvJSONValue::NULL_VAL) {
-						out += "/>\n";
-					} else {
-						out += ">";
-						if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
-						else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
-						else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
-						else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
-						out += "</item>\n";
+					if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))
+						out += pad + "  <item type=\"string\">" + xmlEscapeContent(item->str_data) + "</item>\n";
+					else {
+						out += pad + "  <item";
+						if (item->type == asvJSONValue::NULL_VAL) {
+							out += " xsi:nil=\"true\"/>\n";
+						} else {
+							out += ">";
+							if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
+							else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
+							else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
+							else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
+							out += "</item>\n";
+						}
 					}
 				}
 				out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
@@ -282,6 +323,13 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 #endif
 	}
 	return asvJSONValue::makeString(s.data(), s.size());
+}
+
+// true when a STRING needs a type="string" annotation on output so that a
+// re-parse preserves STRING rather than re-detecting a number/bool/null.
+inline bool xmlNeedsStringType(std::string_view s) {
+	auto detected = xmlDetectValue(s);
+	return detected && detected->type != asvJSONValue::STRING;
 }
 
 // Forward declaration
@@ -479,6 +527,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	if (segments.empty()) {
 		// No content - just attributes or plain
 		if (attrs.empty()) return xmlDetectValue(combinedText);
+		// A type="string" annotation with empty content is an empty STRING, not
+		// an attribute-only object (round-trips empty string values).
+		auto tit = attrs.find("type");
+		if (tit != attrs.end() && tit->second == "string") return asvJSONValue::makeString("", 0);
 		auto obj = asvJSONValue::makeObject();
 		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
 		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
@@ -490,17 +542,22 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		if (attrs.empty()) return xmlDetectValue(combinedText);
 		// Check for special type attribute (from toXML)
 		auto tit = attrs.find("type");
-		if (tit != attrs.end() && !combinedText.empty()) {
+		if (tit != attrs.end()) {
 			const std::string& t = tit->second;
-			if (t == "datetime") {
+			if (t == "string") {
+				// Force STRING (preserves numeric/bool/null-looking literals, empty
+				// text included)
+				return asvJSONValue::makeString(combinedText.data(), combinedText.size());
+			}
+			if (t == "datetime" && !combinedText.empty()) {
 				time_t ts = 0; int ms = 0;
 				if (tryParseDateTime(combinedText, ts, &ms)) return asvJSONValue::makeDateTime(ts, ms);
 			}
-			if (t == "binary") {
+			if (t == "binary" && !combinedText.empty()) {
 				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
 				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
 			}
-			if (t == "objectid") {
+			if (t == "objectid" && !combinedText.empty()) {
 				if (combinedText.size() == 24) {
 					std::string oid; oid.reserve(12);
 					for (size_t i = 0; i + 1 < combinedText.size(); i += 2) {
@@ -510,7 +567,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 					if (oid.size() == 12) return asvJSONValue::makeObjectId(std::string_view(oid.data(), 12));
 				}
 			}
-			if (t == "regex") {
+			if (t == "regex" && !combinedText.empty()) {
 				size_t sep = combinedText.rfind('|');
 				if (sep != std::string::npos) {
 					std::string pat = combinedText.substr(0, sep);
@@ -519,12 +576,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				}
 				return asvJSONValue::makeRegex(combinedText.c_str(), "");
 			}
-			if (t == "timestamp") {
+			if (t == "timestamp" && !combinedText.empty()) {
 				long long v;
 				auto [ptr, ec] = std::from_chars(combinedText.data(), combinedText.data() + combinedText.size(), v);
 				if (ec == std::errc()) return asvJSONValue::makeTimestamp(v);
 			}
-			if (t == "extension") {
+			if (t == "extension" && !combinedText.empty()) {
 				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
 				if (!decoded.empty()) {
 					auto eit = attrs.find("exttype");
