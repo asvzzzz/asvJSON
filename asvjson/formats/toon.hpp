@@ -88,6 +88,56 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
       r += "]";
       return r;
     }
+    case asvJSONValue::BINARY:
+    case asvJSONValue::EXTENSION: {
+      std::string r = "{\"$binary\":{\"base64\":\"";
+      appendJsonEscaped(r, encodeBase64(v->bin_data.data(), v->bin_data.size()));
+      r += "\",\"subType\":\"";
+      if (v->type == asvJSONValue::EXTENSION) {
+        char hex[3];
+        snprintf(hex, sizeof(hex), "%02x", static_cast<uint8_t>(v->ext_type));
+        r += hex;
+      } else {
+        r += "00";
+      }
+      r += "\"}}";
+      return r;
+    }
+    case asvJSONValue::OBJECTID: {
+      std::string r = "{\"$oid\":\"";
+      fmtObjectIdHexVal(v->str_data, r);
+      r += "\"}";
+      return r;
+    }
+    case asvJSONValue::REGEX: {
+      size_t sep = v->str_data.rfind('\0');
+      std::string_view pattern = (sep != std::string_view::npos) ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
+      std::string_view opts = (sep != std::string_view::npos) ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1) : std::string_view();
+      std::string r = "{\"$regex\":\"";
+      appendJsonEscaped(r, pattern);
+      r += "\"";
+      if (!opts.empty()) {
+        r += ",\"$options\":\"";
+        appendJsonEscaped(r, opts);
+        r += "\"";
+      }
+      r += "}";
+      return r;
+    }
+    case asvJSONValue::TIMESTAMP: {
+      std::string r = "{\"$timestamp\":{\"t\":";
+      char buf[32];
+      auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+      if (ec == std::errc()) r.append(buf, ptr - buf);
+      r += "}}";
+      return r;
+    }
+    case asvJSONValue::DATETIME: {
+      std::string r = "\"";
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, r);
+      r += '"';
+      return r;
+    }
     default: return "null";
   }
 }
@@ -109,7 +159,10 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
   bool allPrim = true;
   for (size_t i = 0; i < v->size(); i++) {
     auto* e = v->get(i);
-    if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY)) { allPrim = false; break; }
+    if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
+              e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
+              e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
+              e->type == asvJSONValue::TIMESTAMP)) { allPrim = false; break; }
   }
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   std::string head = pad + "- [" + std::to_string(v->size()) + "]:";
@@ -165,7 +218,10 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
     bool allPrim = true;
     for (size_t i = 0; i < v->size(); i++) {
       auto* e = v->get(i);
-      if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY)) { allPrim = false; break; }
+      if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
+                e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
+                e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
+                e->type == asvJSONValue::TIMESTAMP)) { allPrim = false; break; }
     }
     std::string head = pad + (key.empty() ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
     if (allPrim) {
