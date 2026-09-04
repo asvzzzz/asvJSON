@@ -8565,6 +8565,78 @@ TEST(testSexprAudit) {
   }
 }
 
+TEST(testSexprSpecialTypes) {
+  // Special types used to be serialized to `nil` (silently lost) on a
+  // round-trip. They now serialize via the Extended JSON conventions and the
+  // decoder's JSON pass reconstructs the typed values.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    uint8_t bin[] = {0xde, 0xad, 0xbe, 0xef};
+    j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(bin, 4));
+    j.getRoot()->obj->emplace("oid", asvJSONValue::makeObjectId("1234567890ab"));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("foo.*bar", "gi"));
+    j.getRoot()->obj->emplace("ts", asvJSONValue::makeTimestamp(1234567890));
+    j.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(127, bin, 4));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1700000000, 123, 0));
+    std::string s = j.toSexpr();
+    ASSERT(!s.empty());
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    auto* bin2 = j2.getRoot()->getConst("bin");
+    ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin2->bin_data.size(), size_t(4));
+    ASSERT_EQ(bin2->bin_data[0], 0xde);
+    ASSERT_EQ(bin2->bin_data[3], 0xef);
+    auto* oid = j2.getRoot()->getConst("oid");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("1234567890ab"));
+    auto* re = j2.getRoot()->getConst("re");
+    ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "foo.*bar");
+    ASSERT_EQ(j2.getRegexOptions("re"), "gi");
+    auto* ts = j2.getRoot()->getConst("ts");
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(1234567890));
+    auto* ext = j2.getRoot()->getConst("ext");
+    ASSERT(ext != nullptr && ext->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext->ext_type, 127);
+    ASSERT_EQ(ext->bin_data.size(), size_t(4));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1700000000));
+  }
+  // Special types nested inside an array also survive.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    j.getRoot()->arr->push_back(asvJSONValue::makeObjectId("abcdefabcdef"));
+    j.getRoot()->arr->push_back(asvJSONValue::makeTimestamp(999));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot() != nullptr && j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+    auto* oid = j2.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("abcdefabcdef"));
+    auto* ts = j2.getRoot()->get(static_cast<size_t>(1));
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(999));
+  }
+  // A value-only regex with empty options still round-trips.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("^abc$", ""));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(j2.getRegexPattern("re"), "^abc$");
+    ASSERT_EQ(j2.getRegexOptions("re"), "");
+  }
+}
+
 TEST(testToJSON5) {
   // Basic object round-trip
   {
@@ -13792,7 +13864,8 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- S-Expression Serialization Tests ---\n";
 	RUN(testToSexpr);
 	RUN(testFromSexpr);
-	RUN(testSexprAudit);
+    RUN(testSexprAudit);
+    RUN(testSexprSpecialTypes);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

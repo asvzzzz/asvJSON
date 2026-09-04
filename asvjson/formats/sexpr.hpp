@@ -447,6 +447,70 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
       out += ')';
       break;
     }
+    // Special types round-trip through the Extended JSON conventions (an OBJECT
+    // whose members hold the $binary/$oid/$regex/$timestamp markers), which the
+    // decoder's JSON pass reconstructs into typed values. String keys are marked
+    // so the heuristic treats them as keys. Without this, these values would be
+    // dropped to `nil` and silently lost on round-trip.
+    case asvJSONValue::BINARY:
+    case asvJSONValue::EXTENSION: {
+      out += "(\"";
+      out += SEXPR_KEY_MARK; out += "$binary\" (\"";
+      out += SEXPR_KEY_MARK; out += "base64\" \"";
+      appendJsonEscaped(out, encodeBase64(v->bin_data.data(), v->bin_data.size()));
+      out += "\" \"";
+      out += SEXPR_KEY_MARK; out += "subType\" \"";
+      if (v->type == asvJSONValue::EXTENSION) {
+        char hex[3];
+        snprintf(hex, sizeof(hex), "%02x", static_cast<uint8_t>(v->ext_type));
+        out += hex;
+      } else {
+        out += "00";
+      }
+      out += "\"))";
+      break;
+    }
+    case asvJSONValue::OBJECTID: {
+      out += "(\"";
+      out += SEXPR_KEY_MARK; out += "$oid\" \"";
+      fmtObjectIdHexVal(v->str_data, out);
+      out += "\")";
+      break;
+    }
+    case asvJSONValue::REGEX: {
+      size_t sep = v->str_data.rfind('\0');
+      std::string_view pattern = (sep != std::string_view::npos) ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
+      std::string_view opts = (sep != std::string_view::npos) ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1) : std::string_view();
+      out += "(\"";
+      out += SEXPR_KEY_MARK; out += "$regex\" \"";
+      appendJsonEscaped(out, pattern);
+      out += "\"";
+      if (!opts.empty()) {
+        out += " \"";
+        out += SEXPR_KEY_MARK; out += "$options\" \"";
+        appendJsonEscaped(out, opts);
+        out += "\"";
+      }
+      out += ")";
+      break;
+    }
+    case asvJSONValue::TIMESTAMP: {
+      out += "(\"";
+      out += SEXPR_KEY_MARK; out += "$timestamp\" (\"";
+      out += SEXPR_KEY_MARK; out += "t\" ";
+      char buf[32];
+      auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+      if (ec == std::errc()) out.append(buf, ptr - buf);
+      out += "))";
+      break;
+    }
+    case asvJSONValue::DATETIME: {
+      // ISO-8601 string; the JSON parser auto-reconstructs DATETIME on decode.
+      out += '"';
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      out += '"';
+      break;
+    }
     default: out += "nil"; break;
   }
 }
