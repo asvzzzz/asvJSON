@@ -79,9 +79,6 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
     case T::BINARY:
     case T::OBJECTID:
     case T::EXTENSION: {
-      const auto& data = (type == T::OBJECTID) ? str_data
-                        : (type == T::EXTENSION && !bin_data.empty()) ? std::string_view(reinterpret_cast<const char*>(bin_data.data()), bin_data.size())
-                        : std::string_view();
       if (type == T::EXTENSION && !bin_data.empty()) {
         // Encode extension as tag 257 + array [extType, byteString]
         out.push_back(0xD9); out.push_back(0x01); out.push_back(0x01); // tag 257
@@ -90,7 +87,8 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
         cborWriteUint(out, 2, bin_data.size());
         out.insert(out.end(), bin_data.begin(), bin_data.end());
       } else if (type == T::OBJECTID && str_data.size() == 12) {
-        // Encode ObjectId as byte string (no standard tag, decodes to BINARY)
+        // Encode ObjectId as tag 4 (MongoDB convention) + byte string
+        out.push_back(0xC4); // tag 4
         cborWriteUint(out, 2, str_data.size());
         out.insert(out.end(), str_data.begin(), str_data.end());
       } else if (type == T::BINARY) {
@@ -332,9 +330,18 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
           return asvJSONValue::makeDateTime(t, ms);
         }
         if (val->type == asvJSONValue::INT) {
-          return asvJSONValue::makeDateTime(static_cast<time_t>(val->num), 0);
+          return asvJSONValue::makeTimestamp(val->num);
         }
         return val; // pass through unknown
+      }
+      if (tag == 4) {
+        // ObjectId: tag 4 + byte string of exactly 12 bytes
+        if (val->type == asvJSONValue::BINARY && val->bin_data.size() == 12) {
+          std::string_view sv(reinterpret_cast<const char*>(val->bin_data.data()), 12);
+          auto oid = asvJSONValue::makeObjectId(sv);
+          if (oid) return oid;
+        }
+        return val;
       }
       if (tag == 35) {
         // Regular expression: stored as "pattern\0options" (NUL-separated, see makeRegex)

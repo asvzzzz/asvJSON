@@ -2384,17 +2384,83 @@ TEST(testCBORObjectIdTimestamp) {
 	asvJSON json2;
 	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
 
-	// ObjectId round-trips as BINARY (no standard CBOR tag for ObjectId)
+	// ObjectId round-trips correctly via CBOR tag 4 (MongoDB convention)
 	auto* oidV = json2.getRoot()->get("oid");
 	ASSERT(oidV != nullptr);
-	ASSERT_EQ(oidV->type, asvJSONValue::BINARY);
-	ASSERT_EQ(oidV->bin_data.size(), static_cast<size_t>(12));
+	ASSERT_EQ(oidV->type, asvJSONValue::OBJECTID);
+	ASSERT_EQ(oidV->str_data, std::string("ABCDEF123456", 12));
 
-	// Timestamp round-trips as DATETIME (tag 1)
+	// Timestamp round-trips as TIMESTAMP (tag 1 + integer)
 	auto* tsV = json2.getRoot()->get("ts");
 	ASSERT(tsV != nullptr);
-	ASSERT_EQ(tsV->type, asvJSONValue::DATETIME);
-	ASSERT_EQ(tsV->timestamp, 1234567890);
+	ASSERT_EQ(tsV->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(tsV->num, 1234567890);
+}
+
+TEST(testCBORTimestampRoundTrip) {
+	// Bug: tag 1 + INT decoded as DATETIME instead of TIMESTAMP
+	// Now TIMESTAMP encodes as tag 1 + int and round-trips correctly
+	asvJSON json;
+	json.putTimestamp("ts", 1700000000);
+	json.putTimestamp("ts_neg", -1000);
+	json.putTimestamp("ts_zero", 0);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* ts1 = json2.getRoot()->get("ts");
+	ASSERT(ts1 != nullptr);
+	ASSERT_EQ(ts1->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(ts1->num, 1700000000);
+
+	auto* ts2 = json2.getRoot()->get("ts_neg");
+	ASSERT(ts2 != nullptr);
+	ASSERT_EQ(ts2->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(ts2->num, -1000);
+
+	auto* ts3 = json2.getRoot()->get("ts_zero");
+	ASSERT(ts3 != nullptr);
+	ASSERT_EQ(ts3->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(ts3->num, 0);
+}
+
+TEST(testCBORObjectIdRoundTrip) {
+	// Bug: ObjectId encoded as raw byte string, decoded as BINARY
+	// Now ObjectId encodes as CBOR tag 4 and round-trips correctly
+	asvJSON json;
+	json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* oid = json2.getRoot()->get("oid");
+	ASSERT(oid != nullptr);
+	ASSERT_EQ(oid->type, asvJSONValue::OBJECTID);
+	ASSERT_EQ(oid->str_data, std::string("ABCDEF123456", 12));
+}
+
+TEST(testCBORDatetimeVsTimestamp) {
+	// DATETIME (tag 1 + float) and TIMESTAMP (tag 1 + int) must round-trip to distinct types
+	asvJSON json;
+	json.putDateTime("dt", 1700000000, 500);
+	json.putTimestamp("ts", 1700000000);
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* dt = json2.getRoot()->get("dt");
+	ASSERT(dt != nullptr);
+	ASSERT_EQ(dt->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(dt->timestamp, 1700000000);
+	ASSERT_EQ(dt->datetime_ms, 500);
+
+	auto* ts = json2.getRoot()->get("ts");
+	ASSERT(ts != nullptr);
+	ASSERT_EQ(ts->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(ts->num, 1700000000);
 }
 
 TEST(testCBORNestedObject) {
@@ -13355,6 +13421,9 @@ RUN(testCBORFloat16);
 	RUN(testCBORIndefiniteArrayTruncated);
 	RUN(testCBORIndefiniteMapTruncated);
 	RUN(testCBORIndefiniteStringTruncated);
+	RUN(testCBORTimestampRoundTrip);
+	RUN(testCBORObjectIdRoundTrip);
+	RUN(testCBORDatetimeVsTimestamp);
 
 	std::cout << "\n--- Protobuf Tests ---\n";
 	RUN(testProtobufBasic);
