@@ -6911,6 +6911,87 @@ TEST(testProtobufPackedFixed) {
 	}
 }
 
+TEST(testProtobufSchemaLessRoundTrip) {
+	// Schema-less wire round-trip must preserve STRING/DOUBLE/message/array types;
+	// the embedded name map now carries per-field type codes so real values stay
+	// faithful (previously strings corrupted into sub-messages and doubles into
+	// huge ints).
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":"hello"})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT_EQ(std::string(j2.serialize()), std::string(R"({"a":"hello"})"));
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"s":"42","i":42})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* s = j2.getRoot()->get("s");
+		ASSERT(s != nullptr && s->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getString("s")), "42");
+		ASSERT(j2.get("i") != nullptr && j2.get("i")->type == asvJSONValue::INT);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":[1.5,2.5]})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* arr = j2.getRoot()->get("arr");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT(arr->arr->at(0)->type == asvJSONValue::DOUBLE);
+		ASSERT(arr->arr->at(1)->type == asvJSONValue::DOUBLE);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":["x","y"]})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* arr = j2.getRoot()->get("arr");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT(arr->arr->at(0)->type == asvJSONValue::STRING);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"nested":{"k":"v"}})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT_EQ(std::string(j2.serialize()), std::string(R"({"nested":{"k":"v"}})"));
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"empty":{}})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* e = j2.getRoot()->get("empty");
+		ASSERT(e != nullptr && e->type == asvJSONValue::OBJECT);
+	}
+}
+
+TEST(testProtobufTextArrayOfObjects) {
+	// Text-format array-of-objects must serialize as a bracketed list and
+	// round-trip (previously the malformed repeated-block form lost all but the
+	// first element).
+	asvJSON j;
+	j.parse(std::string(R"({"arr":[{"x":1},{"x":2}]})"));
+	std::string text = j.toProtobufText();
+	asvJSON j2;
+	ASSERT(j2.fromProtobufText(text));
+	auto* arr = j2.getRoot()->get("arr");
+	ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+	ASSERT_EQ(arr->arr->size(), size_t(2));
+	ASSERT(arr->arr->at(0)->get("x") != nullptr && arr->arr->at(0)->get("x")->num == 1);
+	ASSERT(arr->arr->at(1)->get("x") != nullptr && arr->arr->at(1)->get("x")->num == 2);
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -13214,6 +13295,8 @@ RUN(testCBORFloat16);
 	RUN(testProtobufStaticConverters);
 	RUN(testProtobufStringOverload);
 	RUN(testProtobufPackedFixed);
+	RUN(testProtobufSchemaLessRoundTrip);
+	RUN(testProtobufTextArrayOfObjects);
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);

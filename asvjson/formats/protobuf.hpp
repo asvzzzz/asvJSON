@@ -144,6 +144,52 @@ inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique
 
 // ======================= Wire format encoder =======================
 
+// Compact type code for a value, used inside the schema-less name map so the
+// decoder can recover the JSON type that the raw wire format cannot express.
+// Lowercase = scalar, Uppercase = repeated (array) of that element type.
+inline std::string protoSchemaLessTypeCode(const asvJSONValue* v) {
+  if (!v) return "u";
+  using T = asvJSONValue::Type;
+  switch (v->type) {
+    case T::STRING: return "s";
+    case T::INT: return "i";
+    case T::DOUBLE: return "d";
+    case T::BOOL_VAL: return "b";
+    case T::NULL_VAL: return "n";
+    case T::BINARY: case T::EXTENSION: return "y";
+    case T::OBJECT: return "m";
+    case T::ARRAY: {
+      if (!v->arr || v->arr->empty()) return "A";
+      const asvJSONValue* first = nullptr;
+      for (const auto& e : *v->arr) if (e) { first = e.get(); break; }
+      if (!first) return "A";
+      std::string c = protoSchemaLessTypeCode(first);
+      if (c == "s") return "S"; if (c == "i") return "I"; if (c == "d") return "D";
+      if (c == "b") return "B"; if (c == "n") return "N"; if (c == "y") return "Y";
+      if (c == "m") return "M";
+      return "A";
+    }
+    default: return "u";
+  }
+}
+
+// Map a name-map type code back to a protobuf wire type string and repeated flag.
+inline std::string protoLessCodeToType(const std::string& code, bool& repeated) {
+  repeated = false;
+  if (code.empty() || code == "u" || code == "A" || code == "n" || code == "N") return "";
+  char c = code[0];
+  if (c >= 'A' && c <= 'Z') { repeated = true; c = static_cast<char>(c + 32); }
+  switch (c) {
+    case 's': return "string";
+    case 'i': return "int64";
+    case 'd': return "double";
+    case 'b': return "bool";
+    case 'y': return "bytes";
+    case 'm': return "message";
+    default: return "";
+  }
+}
+
 inline void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val, const std::string& type) {
   if (!val) return;
   if (type == "int32" || type == "int64") {
@@ -241,12 +287,16 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
     for (const auto& [k, v] : *val->obj) {
       if (v) fields.push_back({k, v.get()});
     }
-    // Build JSON name map at the reserved field number (19000-19999)
+    // Build JSON name map at the reserved field number (19000-19999).
+    // Each entry carries the field name and a compact type code so the decoder
+    // can reconstruct string/message/double/array types that are ambiguous in
+    // the raw wire format (a length-delimited field could be a string or a
+    // sub-message; a fixed-width field could be a double or an int).
     if (!fields.empty()) {
       std::string nm = "{";
       for (size_t i = 0; i < fields.size(); i++) {
         if (i > 0) nm += ",";
-        nm += '"' + std::to_string(i + 1) + "\":\"";
+        nm += '"' + std::to_string(i + 1) + "\":{\"n\":\"";
         for (char c : fields[i].key) {
           if (c == '"') nm += "\\\"";
           else if (c == '\\') nm += "\\\\";
@@ -256,7 +306,9 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
           else if (static_cast<unsigned char>(c) < 0x20) { char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c); nm += buf; }
           else nm += c;
         }
-        nm += '"';
+        nm += "\",\"t\":\"";
+        nm += protoSchemaLessTypeCode(fields[i].val);
+        nm += "\"}";
       }
       nm += '}';
       protoWriteTag(out, protoNameMapFieldNum, 2);
@@ -378,36 +430,134 @@ inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
 
 // ======================= Wire format decoder =======================
 
-inline void protoApplyNameMap(asvJSONValue* obj) {
-  if (!obj || !obj->obj) return;
-  const std::string nmKey = std::to_string(protoNameMapFieldNum);
-  auto it = obj->obj->find(nmKey);
-  if (it == obj->obj->end() || it->second->type != asvJSONValue::STRING) return;
+inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
+                                                           int wireType, const std::string& type,
+                                                           const ProtoSchema* schema, int depth = 0);
+
+// Name/type map embedded at the reserved schema-less field number.
+struct ProtoLessMap {
+  std::unordered_map<int, std::string> names; // fnum -> JSON key
+  std::unordered_map<int, std::string> types; // fnum -> type code
+  bool present = false;
+};
+
+// Extract the embedded name/type map (field 19000) from a raw schema-less
+// message region [begin, end). Tolerates the old single-string value form
+// {"1":"name"} whose entries carry no type code (types stay empty -> legacy
+// heuristic), and the new {"1":{"n":"name","t":"code"}} form.
+inline ProtoLessMap protoExtractLessMap(const uint8_t* data, size_t begin, size_t end) {
+  ProtoLessMap m;
+  size_t pos = begin;
+  size_t foundStart = end, foundLen = 0;
+  bool found = false;
+  try {
+    while (pos < end) {
+      int fnum = 0; int wt = protoReadTag(data, end, pos, fnum);
+      if (wt < 0 || wt > 5 || fnum <= 0) break;
+      if (fnum == protoNameMapFieldNum && wt == 2) {
+        uint64_t len = protoReadVarint(data, end, pos);
+        if (len > end - pos) break;
+        foundStart = pos; foundLen = static_cast<size_t>(len); found = true; break;
+      }
+      if (wt == 0) { protoReadVarint(data, end, pos); }
+      else if (wt == 1) { if (pos + 8 <= end) pos += 8; else break; }
+      else if (wt == 5) { if (pos + 4 <= end) pos += 4; else break; }
+      else if (wt == 2) { uint64_t len = protoReadVarint(data, end, pos); if (len <= end - pos) pos += static_cast<size_t>(len); else break; }
+      else break;
+    }
+  } catch (...) {}
+  if (!found || foundLen == 0) return m;
+  std::string js(reinterpret_cast<const char*>(data + foundStart), foundLen);
   asvJSON nm;
-  if (!nm.parse(it->second->str_data)) { obj->obj->erase(nmKey); return; }
+  if (!nm.parse(js)) return m;
   auto* mapRoot = nm.getRoot();
-  if (!mapRoot || mapRoot->type != asvJSONValue::OBJECT || !mapRoot->obj) {
-    obj->obj->erase(nmKey); return;
-  }
-  std::vector<std::pair<std::string, std::string>> renames;
-  for (const auto& [fnumStr, nameVal] : *mapRoot->obj) {
-    if (nameVal->type == asvJSONValue::STRING) renames.push_back({fnumStr, nameVal->str_data});
-  }
-  for (const auto& [oldNum, newName] : renames) {
-    auto eit = obj->obj->find(oldNum);
-    if (eit != obj->obj->end() && eit->first != nmKey) {
-      auto val = std::move(eit->second);
-      obj->obj->erase(eit);
-      obj->obj->erase(newName);
-      obj->obj->emplace(newName, std::move(val));
+  if (!mapRoot || mapRoot->type != asvJSONValue::OBJECT || !mapRoot->obj) return m;
+  for (const auto& [fs, nameVal] : *mapRoot->obj) {
+    int fnum = 0; try { fnum = std::stoi(fs); } catch (...) { continue; }
+    if (fnum <= 0) continue;
+    if (!nameVal) continue;
+    if (nameVal->type == asvJSONValue::STRING) {
+      m.names[fnum] = nameVal->str_data;
+      m.types[fnum] = "";
+    } else if (nameVal->type == asvJSONValue::OBJECT && nameVal->obj) {
+      auto* nv = nameVal->get("n");
+      auto* tv = nameVal->get("t");
+      if (nv && nv->type == asvJSONValue::STRING) m.names[fnum] = nv->str_data;
+      if (tv && tv->type == asvJSONValue::STRING) m.types[fnum] = tv->str_data;
     }
   }
-  obj->obj->erase(nmKey);
+  m.present = true;
+  return m;
+}
+
+// Decode a protobuf message body (sequence of fields) in region [begin, end).
+// Handles the schema-less name/type map (field 19000) and schema-driven names.
+inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data, size_t begin, size_t end,
+                                                           const ProtoSchema* schema, int depth) {
+  if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+  auto obj = asvJSONValue::makeObject();
+  if (!obj) return nullptr;
+  ProtoLessMap less;
+  if (!schema) less = protoExtractLessMap(data, begin, end);
+  size_t pos = begin;
+  while (pos < end) {
+    int fnum = 0; int wt = protoReadTag(data, end, pos, fnum);
+    if (wt < 0 || wt > 5 || fnum <= 0) break;
+    if (wt == 3 || wt == 4) break;
+    if (!schema && fnum == protoNameMapFieldNum) {
+      if (wt == 2) { uint64_t len = protoReadVarint(data, end, pos); if (len <= end - pos) pos += static_cast<size_t>(len); }
+      continue;
+    }
+    std::string fname = std::to_string(fnum);
+    std::string ftype;
+    bool repeated = false;
+    const ProtoSchema* subSchema = nullptr;
+    if (schema) {
+      auto it = schema->numberToName.find(fnum);
+      if (it != schema->numberToName.end()) {
+        fname = it->second;
+        auto fit = schema->fields.find(fname);
+        if (fit != schema->fields.end()) {
+          ftype = fit->second.type; repeated = fit->second.repeated;
+          if (fit->second.schema) subSchema = fit->second.schema.get();
+        }
+      }
+    } else {
+      auto it = less.types.find(fnum);
+      if (it != less.types.end()) {
+        ftype = protoLessCodeToType(it->second, repeated);
+        auto nit = less.names.find(fnum);
+        if (nit != less.names.end()) fname = nit->second;
+      }
+    }
+    size_t beforePos = pos;
+    auto val = protoDecodeWireValue(data, end, pos, wt, ftype, subSchema, depth + 1);
+    if (!val) { if (pos == beforePos) pos++; continue; }
+    if (repeated) {
+      auto* existing = obj->get(fname);
+      if (existing && existing->type == asvJSONValue::ARRAY && existing->arr) {
+        if (val->type == asvJSONValue::ARRAY && val->arr) {
+          for (auto& e : *val->arr) if (e) existing->arr->push_back(std::move(e));
+        } else {
+          existing->arr->push_back(std::move(val));
+        }
+      } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+        protoSetField(obj.get(), fname, std::move(val));
+      } else {
+        auto arr = asvJSONValue::makeArray();
+        if (arr && arr->arr) arr->arr->push_back(std::move(val));
+        if (arr) protoSetField(obj.get(), fname, std::move(arr));
+      }
+    } else {
+      protoSetField(obj.get(), fname, std::move(val));
+    }
+  }
+  return obj;
 }
 
 inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
                                                            int wireType, const std::string& type,
-                                                           const ProtoSchema* schema, int depth = 0) {
+                                                           const ProtoSchema* schema, int depth) {
   switch (wireType) {
     case 0: {
       uint64_t raw = protoReadVarint(data, size, pos);
@@ -437,63 +587,13 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
 
       if (type == "message" || type.empty()) {
         if (depth > asvJSONValue::MAX_NESTING_DEPTH) { pos = end; return nullptr; }
-        auto obj = asvJSONValue::makeObject();
+        auto obj = protoDecodeMessageBody(data, pos, end, type == "message" ? schema : nullptr, depth);
         if (!obj) { pos = end; return nullptr; }
-        while (pos < end) {
-          int fnum = 0; int wt = protoReadTag(data, end, pos, fnum);
-          if (wt < 0 || wt > 5 || fnum <= 0) { pos = end; break; }
-          if (wt == 3 || wt == 4) break;
-    std::string fname = std::to_string(fnum);
-    std::string ftype;
-    bool repeated = false;
-    const ProtoSchema* subSchema = nullptr;
-    if (schema) {
-      auto it = schema->numberToName.find(fnum);
-      if (it != schema->numberToName.end()) {
-        fname = it->second;
-        auto fit = schema->fields.find(fname);
-        if (fit != schema->fields.end()) {
-          ftype = fit->second.type; repeated = fit->second.repeated;
-          if (fit->second.schema) subSchema = fit->second.schema.get();
-        }
-      }
-    }
-    if (ftype.empty() && fnum == protoNameMapFieldNum) ftype = "string";
-          if (ftype.empty() && fnum == protoNameMapFieldNum) ftype = "string";
-          size_t beforePos = pos;
-          auto val = protoDecodeWireValue(data, end, pos, wt, ftype, subSchema, depth + 1);
-          if (!val) { pos = end; break; }
-          if (repeated) {
-            auto* existing = obj->get(fname);
-            if (existing && existing->type == asvJSONValue::ARRAY && existing->arr) {
-              if (val->type == asvJSONValue::ARRAY && val->arr) {
-                for (auto& e : *val->arr) if (e) existing->arr->push_back(std::move(e));
-              } else {
-                existing->arr->push_back(std::move(val));
-              }
-            } else if (val->type == asvJSONValue::ARRAY && val->arr) {
-              // Packed repeated -- use the array directly
-              protoSetField(obj.get(), fname, std::move(val));
-            } else {
-              auto arr = asvJSONValue::makeArray();
-              if (arr && arr->arr) arr->arr->push_back(std::move(val));
-              if (arr) protoSetField(obj.get(), fname, std::move(arr));
-            }
-          } else {
-            protoSetField(obj.get(), fname, std::move(val));
-          }
-        }
-        pos = end;
-        // Apply embedded name map in schema-less mode
-        if (type.empty()) protoApplyNameMap(obj.get());
-        // Schema-less wireType=2: return the parsed sub-message if it has fields;
-        // otherwise fall through to the BINARY branch (no printable-ASCII heuristic,
-        // so binary payloads that happen to be printable are not corrupted)
-        if (type.empty()) {
-          if (!obj->obj->empty()) return obj;
-        } else {
-          return obj;
-        }
+        if (type == "message") { pos = end; return obj; }
+        // Schema-less unknown type: use the parsed sub-message only if it has
+        // structural content (via an embedded name map or real fields); otherwise
+        // fall through to the BINARY branch so byte strings stay opaque.
+        if (obj->obj && !obj->obj->empty()) { pos = end; return obj; }
       }
       if (type == "string") {
         size_t start = end - static_cast<size_t>(len);
@@ -551,55 +651,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
 
 inline std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t size, const ProtoSchema* schema, int depth = 0) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
-  size_t pos = 0;
-  auto root = asvJSONValue::makeObject();
-  if (!root) return nullptr;
-  while (pos < size) {
-    int fnum = 0; int wt = protoReadTag(data, size, pos, fnum);
-    if (wt < 0 || wt > 5 || fnum <= 0) break;
-    if (wt == 3 || wt == 4) break;
-
-    std::string fname = std::to_string(fnum);
-    std::string ftype;
-    bool repeated = false;
-    const ProtoSchema* subSchema = nullptr;
-    if (schema) {
-      auto it = schema->numberToName.find(fnum);
-      if (it != schema->numberToName.end()) {
-        fname = it->second;
-        auto fit = schema->fields.find(fname);
-        if (fit != schema->fields.end()) {
-          ftype = fit->second.type; repeated = fit->second.repeated;
-          if (fit->second.schema) subSchema = fit->second.schema.get();
-        }
-      }
-    }
-    size_t beforePos = pos;
-    auto val = protoDecodeWireValue(data, size, pos, wt, ftype, subSchema, depth + 1);
-    if (!val) { pos = beforePos; pos++; continue; }
-
-    if (repeated) {
-      auto* existing = root->get(fname);
-      if (existing && existing->type == asvJSONValue::ARRAY && existing->arr) {
-        if (val->type == asvJSONValue::ARRAY && val->arr) {
-          for (auto& e : *val->arr) if (e) existing->arr->push_back(std::move(e));
-        } else {
-          existing->arr->push_back(std::move(val));
-        }
-      } else if (val->type == asvJSONValue::ARRAY && val->arr) {
-        // Packed repeated -- use the array directly
-        protoSetField(root.get(), fname, std::move(val));
-      } else {
-        auto arr = asvJSONValue::makeArray();
-        if (arr && arr->arr) arr->arr->push_back(std::move(val));
-        if (arr) protoSetField(root.get(), fname, std::move(arr));
-      }
-    } else {
-      protoSetField(root.get(), fname, std::move(val));
-    }
-  }
-  if (!schema) protoApplyNameMap(root.get());
-  return root;
+  return protoDecodeMessageBody(data, 0, size, schema, depth);
 }
 
 // ======================= Text format parser =======================
@@ -872,14 +924,20 @@ inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
       bool allMsg = true;
       for (const auto& e : *val->arr) if (e && e->type != asvJSONValue::OBJECT) { allMsg = false; break; }
       if (allMsg) {
-        for (const auto& e : *val->arr) {
+        // Array of messages serializes as a bracketed list so each element is a
+        // distinct parsed sub-message (the bare repeated-block form was
+        // malformed and only the first element survived a round-trip).
+        out += "[\n";
+        for (size_t i = 0; i < val->arr->size(); i++) {
+          const auto& e = (*val->arr)[i];
           if (!e) continue;
-          for (int i = 0; i < indent; i++) out += "  ";
-          protoTextSerializeMsg(e.get(), out, indent);
+          for (int j = 0; j < indent + 1; j++) out += "  ";
+          protoTextSerializeMsg(e.get(), out, indent + 1);
+          if (i + 1 < val->arr->size()) out += ',';
           out += '\n';
         }
-        // Remove trailing whitespace lines
-        while (out.size() >= 2 && out[out.size()-1] == '\n' && out[out.size()-2] == ' ') out.resize(out.size() - 2);
+        for (int j = 0; j < indent; j++) out += "  ";
+        out += ']';
       } else {
         out += '[';
         for (size_t i = 0; i < val->arr->size(); i++) {
