@@ -9184,6 +9184,83 @@ TEST(testFromJSON5Conformance) {
   }
 }
 
+TEST(testJSON5Audit) {
+  // REGEX round-trip: the encoder used to bind a std::string_view to the dead
+  // temporary from str_data.substr(...), leaving a dangling view into freed
+  // memory that corrupted the emitted pattern/options (e.g. "\u0000oo.*bar").
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("foo.*bar", "gi"));
+    std::string s = j.toJSON5();
+    // pattern and options must survive intact (no leading \u0000 corruption)
+    ASSERT(s.find("\"$regex\":\"foo.*bar\"") != std::string::npos);
+    ASSERT(s.find("\"$options\":\"gi\"") != std::string::npos);
+    ASSERT(s.find("\\u0000") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getRegexPattern("re"), "foo.*bar");
+    ASSERT_EQ(j2.getRegexOptions("re"), "gi");
+  }
+  // Empty options: only the $regex member is emitted, still intact
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("^start$", ""));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("\"$regex\":\"^start$\"") != std::string::npos);
+    ASSERT(s.find("\\u0000") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getRegexPattern("re"), "^start$");
+    ASSERT_EQ(j2.getRegexOptions("re"), "");
+  }
+  // Special types still round-trip through toJSON5/fromJSON5
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    uint8_t bin[] = {0xde, 0xad, 0xbe, 0xef};
+    j.getRoot()->obj->emplace("oid", asvJSONValue::makeObjectId("1234567890ab"));
+    j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(bin, 4));
+    j.getRoot()->obj->emplace("ts", asvJSONValue::makeTimestamp(1234567890));
+    j.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(127, bin, 4));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* oid = j2.getRoot()->getConst("oid");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("1234567890ab"));
+    auto* bin2 = j2.getRoot()->getConst("bin");
+    ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin2->bin_data.size(), size_t(4));
+    ASSERT_EQ(bin2->bin_data[0], 0xde);
+    ASSERT_EQ(bin2->bin_data[3], 0xef);
+    auto* ts = j2.getRoot()->getConst("ts");
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(1234567890));
+    auto* ext = j2.getRoot()->getConst("ext");
+    ASSERT(ext != nullptr && ext->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext->ext_type, 127);
+  }
+  // NaN / Infinity values survive a JSON5 round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("nan", asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+    j.getRoot()->obj->emplace("ginf", asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+    j.getRoot()->obj->emplace("ninf", asvJSONValue::makeDouble(-std::numeric_limits<double>::infinity()));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* nan = j2.getRoot()->getConst("nan");
+    ASSERT(nan != nullptr && nan->type == asvJSONValue::DOUBLE && std::isnan(nan->dbl));
+    auto* ginf = j2.getRoot()->getConst("ginf");
+    ASSERT(ginf != nullptr && ginf->type == asvJSONValue::DOUBLE && std::isinf(ginf->dbl) && ginf->dbl > 0);
+    auto* ninf = j2.getRoot()->getConst("ninf");
+    ASSERT(ninf != nullptr && ninf->type == asvJSONValue::DOUBLE && std::isinf(ninf->dbl) && ninf->dbl < 0);
+  }
+}
+
 TEST(testToINI) {
   // Simple object
   {
@@ -13720,7 +13797,8 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
 	RUN(testFromJSON5);
-	RUN(testFromJSON5Conformance);
+    RUN(testFromJSON5Conformance);
+    RUN(testJSON5Audit);
 
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);
