@@ -3431,6 +3431,40 @@ TEST(testToYAML) {
 		ASSERT(yml.find('|') != std::string::npos);
 		ASSERT(yml.find("line1") != std::string::npos);
 	}
+	// Empty-string key round-trips in block style ("'': v" instead of dropping
+	// the key and emitting the value as a bare root scalar).
+	{
+		asvJSON json;
+		json.parse(std::string("{\"\":\"v\"}"));
+		std::string yml = json.toYAML();
+		ASSERT(yml.find("'': v") != std::string::npos || yml.find("\"\": v") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT(j2.getRoot()->hasKey(""));
+		ASSERT_EQ(std::string(j2.getRoot()->get("")->getString()), "v");
+	}
+	// Strings containing a tab round-trip (serialized with double quotes which
+	// escape the tab, instead of a raw tab in single quotes that broke the
+	// intermediate JSON on parse). Control chars are escaped the same way.
+	{
+		asvJSON json;
+		json.putString("k", "tab\there");
+		std::string yml = json.toYAML();
+		ASSERT(yml.find("\"tab\\there\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT_EQ(std::string(j2.getRoot()->get("k")->getString()), "tab\there");
+	}
+	{
+		asvJSON json;
+		json.putString("k", "ctrl\x01x");
+		std::string yml = json.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		auto* v = j2.getRoot()->get("k");
+		ASSERT_EQ(v->getStringLen(), 6);
+		ASSERT_EQ(static_cast<unsigned char>(v->getString()[4]), (unsigned char)0x01);
+	}
 }
 
 TEST(testFromYAML) {
@@ -3507,6 +3541,13 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(json.fromYAML("s: 'single quoted'"));
 		ASSERT_EQ(std::string(json.getString("s")), "single quoted");
+	}
+	// Single-quoted scalar containing a tab parses (the control char is escaped
+	// into the intermediate JSON rather than corrupting it).
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("s: 'a\tb'"));
+		ASSERT_EQ(std::string(json.getString("s")), "a\tb");
 	}
 	// Empty containers
 	{

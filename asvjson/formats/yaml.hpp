@@ -17,6 +17,11 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 // Options-aware quoting helpers
 inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 	if (o.doubleQuotes) return yamlDQuote(s);
+	// Single quotes cannot represent control characters safely (a literal tab,
+	// CR or other control byte would be emitted raw and corrupt the document),
+	// so fall back to double quotes which escape them.
+	for (unsigned char c : s)
+		if (c < 0x20) return yamlDQuote(s);
 	return yamlQuote(s);
 }
 
@@ -198,7 +203,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
-		if (!key.empty()) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
+		if (!key.empty() || !isArrayItem) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
 		return "";
 	};
 
@@ -1265,9 +1270,15 @@ inline std::string yamlParseInlineValue(std::string_view s, int depth) {
 			std::string unesc = yamlUnescapeSingle(inner);
 			std::string out = "\"";
 			for (auto c : unesc) {
-				if (c == '"') out += "\\\"";
-				else if (c == '\\') out += "\\\\";
-				else out += c;
+				switch (c) {
+					case '"': out += "\\\""; break;
+					case '\\': out += "\\\\"; break;
+					case '\n': out += "\\n"; break;
+					case '\t': out += "\\t"; break;
+					case '\r': out += "\\r"; break;
+					default: if (static_cast<unsigned char>(c) < 0x20) { char buf[8]; std::snprintf(buf, sizeof(buf), "\\u%04x", c); out += buf; }
+					         else out += c;
+				}
 			}
 			out += "\"";
 			return out;
