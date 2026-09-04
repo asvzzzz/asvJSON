@@ -8760,7 +8760,7 @@ TEST(testToINI) {
     std::string ini = j.toINI();
     ASSERT(ini.find("[db]") != std::string::npos);
     ASSERT(ini.find("host = localhost") != std::string::npos);
-    ASSERT(ini.find("port = 5432") != std::string::npos);
+    ASSERT(ini.find("port = \"5432\"") != std::string::npos);
     ASSERT(ini.find("[log]") != std::string::npos);
     ASSERT(ini.find("level = debug") != std::string::npos);
   }
@@ -8772,7 +8772,7 @@ TEST(testToINI) {
     ASSERT(ini.find("[network.server]") != std::string::npos);
     ASSERT(ini.find("ip = 10.0.0.1") != std::string::npos);
     ASSERT(ini.find("[network.client]") != std::string::npos);
-    ASSERT(ini.find("retries = 3") != std::string::npos);
+    ASSERT(ini.find("retries = \"3\"") != std::string::npos);
   }
   // Quoted value (string with spaces)
   {
@@ -8973,6 +8973,93 @@ TEST(testFromINIIntOverflow) {
     ASSERT_EQ(j.getInt("n"), int64_t(12345));
     ASSERT(j.get("n2") != nullptr && j.get("n2")->type == asvJSONValue::INT);
     ASSERT_EQ(j.getInt("n2"), int64_t(-9876543210123));
+  }
+}
+
+TEST(testINIRoundTrip) {
+  // STRING values that look like numbers/bools/null must be quoted so the
+  // round-trip preserves the STRING type (not INT/DOUBLE/BOOL/NULL).
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":\"42\"}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("k = \"42\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("k")), "42");
+  }
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":\"3.14\"}"));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("k")), "3.14");
+  }
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":\"true\"}"));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("k")), "true");
+  }
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":\"false\"}"));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("k")), "false");
+  }
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":\"null\"}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("k = \"null\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("k")), "null");
+  }
+  // NULL round-trips as null (bare), not as the string "null"
+  {
+    asvJSON j;
+    j.parse(std::string("{\"k\":null}"));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::NULL_VAL);
+  }
+  // Full mixed round-trip: array-of-scalars with empty string and null preserved
+  {
+    asvJSON j;
+    j.parse(std::string("{\"arr\":[\"42\",42,null,\"\",\"x\"]}"));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* arr = j2.getRoot()->get("arr");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->arr->size(), size_t(5));
+    ASSERT(arr->arr->at(0)->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(arr->arr->at(0)->getString()), "42");
+    ASSERT(arr->arr->at(1)->type == asvJSONValue::INT);
+    ASSERT_EQ(arr->arr->at(1)->getInt(), int64_t(42));
+    ASSERT(arr->arr->at(2)->type == asvJSONValue::NULL_VAL);
+    ASSERT(arr->arr->at(3)->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(arr->arr->at(3)->getString()), "");
+    ASSERT(arr->arr->at(4)->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(arr->arr->at(4)->getString()), "x");
   }
 }
 
@@ -13190,6 +13277,7 @@ RUN(testCBORFloat16);
 	RUN(testToINI);
 	RUN(testFromINI);
 	RUN(testFromINIIntOverflow);
+	RUN(testINIRoundTrip);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

@@ -128,6 +128,10 @@ inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
   return cur;
 }
 
+// Try to infer a typed value from a parsed INI string.
+// Quoted values always remain strings; bare values may be null/bool/int/double.
+inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted);
+
 // Format a value as INI text
 inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
   using T = asvJSONValue::Type;
@@ -141,6 +145,14 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
             needsQuotes = true;
             break;
           }
+        }
+        // A bare text that would decode as a different type (bool/int/double/null)
+        // must be quoted so the round-trip preserves the STRING type. raw_number
+        // literals (e.g. overflowed integers) stay bare so they re-decode via the
+        // overflow path.
+        if (!needsQuotes && !v->raw_number) {
+          auto bare = iniParseVal(std::string(sv), false);
+          if (bare && bare->type != T::STRING) needsQuotes = true;
         }
         if (needsQuotes) {
           out += '"';
@@ -169,11 +181,14 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
 }
 
 // Try to infer a typed value from a parsed INI string.
-// Quoted values always remain strings; bare values may be bool/int/double.
+// Quoted values always remain strings; bare values may be null/bool/int/double.
 inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted) {
   if (quoted) {
     return asvJSONValue::makeString(s.data(), s.size());
   }
+  // Bare "null" decodes to the null type (encoder emits the literal, and a
+  // STRING "null" is quoted so it stays text -- see iniFormatVal).
+  if (s == "null") return asvJSONValue::makeNull();
   // Case-insensitive bool
   if (s == "true" || s == "True" || s == "TRUE") return asvJSONValue::makeBool(true);
   if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
