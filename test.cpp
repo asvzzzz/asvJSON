@@ -6786,6 +6786,186 @@ TEST(testToGOON) {
 	}
 }
 
+TEST(testGOONAudit) {
+	// Bug 3: Colon in key round-trip
+	{
+		asvJSON j;
+		j.parse(std::string_view("{}"));
+		j.getRoot()->obj->emplace("a:b", asvJSONValue::makeInt(1));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getInt("a:b"), int64_t(1));
+	}
+	// Bug 4: Empty key round-trip
+	{
+		asvJSON j;
+		j.parse(std::string_view("{}"));
+		j.getRoot()->obj->emplace("", asvJSONValue::makeInt(42));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->getInt(), int64_t(42));
+	}
+	// Bug 6: BINARY round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		uint8_t data[] = {0xDE, 0xAD, 0xBE, 0xEF};
+		j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(data, 4));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("bin");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::BINARY);
+		ASSERT(v->bin_data.size() == 4);
+		ASSERT(v->bin_data[0] == 0xDE);
+	}
+	// Bug 7: EXTENSION round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		uint8_t data[] = {1, 2, 3};
+		j.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(127, data, 3));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("ext");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::EXTENSION);
+		ASSERT(static_cast<uint8_t>(v->ext_type) == 127);
+		ASSERT(v->bin_data.size() == 3);
+		ASSERT(v->bin_data[0] == 1);
+	}
+	// Bug 8: OBJECTID round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		std::string oid_bytes = "1234567890ab";
+		j.getRoot()->obj->emplace("id", asvJSONValue::makeObjectId(oid_bytes));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("id");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::OBJECTID);
+		ASSERT(v->str_data == oid_bytes);
+	}
+	// Bug 9: TIMESTAMP round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("ts", asvJSONValue::makeTimestamp(1234567890));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("ts");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::TIMESTAMP);
+		ASSERT(v->num == 1234567890);
+	}
+	// Bug 10: REGEX round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("foo.*bar", "gi"));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot()->getConst("re");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::REGEX);
+	}
+	// Bug 1: Bare objects in arrays
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[{"c":3}]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* a = j2.getRoot()->getConst("items");
+		ASSERT(a != nullptr);
+		ASSERT(a->type == asvJSONValue::ARRAY);
+		ASSERT(a->size() == 1);
+		const auto* o = a->get(0);
+		ASSERT(o != nullptr);
+		ASSERT(o->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(o->getConst("c")->getInt(), int64_t(3));
+	}
+	// Bug 1b: Array of objects in list form (bare "-" items)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"arr":[{"x":1},{"y":2}]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* a = j2.getRoot()->getConst("arr");
+		ASSERT(a != nullptr);
+		ASSERT(a->type == asvJSONValue::ARRAY);
+		ASSERT(a->size() == 2);
+		ASSERT(a->get(0)->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(a->get(0)->getConst("x")->getInt(), int64_t(1));
+		ASSERT(a->get(1)->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(a->get(1)->getConst("y")->getInt(), int64_t(2));
+	}
+	// Bug 2: Nested arrays in list items
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[1,[2,3]]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* a = j2.getRoot()->getConst("items");
+		ASSERT(a != nullptr);
+		ASSERT(a->size() == 2);
+		ASSERT_EQ(a->get(0)->getInt(), int64_t(1));
+		ASSERT(a->get(1)->type == asvJSONValue::ARRAY);
+		ASSERT(a->get(1)->size() == 2);
+		ASSERT_EQ(a->get(1)->get(0)->getInt(), int64_t(2));
+		ASSERT_EQ(a->get(1)->get(1)->getInt(), int64_t(3));
+	}
+	// Bug 5: Deep nested arrays
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"matrix":[["x","y"],[10]]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* m = j2.getRoot()->getConst("matrix");
+		ASSERT(m != nullptr);
+		ASSERT(m->size() == 2);
+		ASSERT(m->get(0)->type == asvJSONValue::ARRAY);
+		ASSERT(m->get(0)->size() == 2);
+		ASSERT(m->get(1)->type == asvJSONValue::ARRAY);
+		ASSERT(m->get(1)->size() == 1);
+	}
+	// Multi-type round-trip
+	{
+		asvJSON j;
+		j.parse(std::string_view("{}"));
+		j.getRoot()->obj->emplace("str", asvJSONValue::makeString("hello", 5));
+		j.getRoot()->obj->emplace("num", asvJSONValue::makeInt(42));
+		j.getRoot()->obj->emplace("flag", asvJSONValue::makeBool(true));
+		j.getRoot()->obj->emplace("empty", asvJSONValue::makeNull());
+		j.getRoot()->obj->emplace("a:b", asvJSONValue::makeInt(99));
+		j.getRoot()->obj->emplace("", asvJSONValue::makeInt(7));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.getString("str")), "hello");
+		ASSERT_EQ(j2.getInt("num"), int64_t(42));
+		ASSERT(j2.getBool("flag"));
+		ASSERT(j2.isNull("empty"));
+		ASSERT_EQ(j2.getInt("a:b"), int64_t(99));
+		const auto* v7 = j2.getRoot()->getConst("");
+		ASSERT(v7 != nullptr);
+		ASSERT_EQ(v7->getInt(), int64_t(7));
+	}
+}
+
 TEST(testProtobufBasic) {
 	// Schema-less: keys must be numeric field numbers
 	asvJSON json;
@@ -13514,6 +13694,7 @@ RUN(testCBORFloat16);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);
+	RUN(testGOONAudit);
 	
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);

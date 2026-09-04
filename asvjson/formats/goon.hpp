@@ -159,14 +159,23 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
     }
     case asvJSONValue::OBJECTID: {
       std::string hex; fmtObjectIdHexVal(v->str_data, hex);
-      return '"' + hex + '"';
+      return "__OID__" + hex;
     }
     case asvJSONValue::REGEX: {
-      std::string re; fmtRegexVal(v->str_data, re);
-      return re;
+      // Emit __REGEX__<pattern>|<opts> so the decoder can restore the REGEX type
+      std::string raw(v->str_data);
+      raw += '\0';
+      size_t sep = v->str_data.rfind('\0');
+      std::string result = "__REGEX__";
+      result += (sep != std::string::npos) ? std::string(v->str_data.substr(0, sep)) : v->str_data;
+      if (sep != std::string::npos && sep + 1 < v->str_data.size()) {
+        result += '|';
+        result += v->str_data.substr(sep + 1);
+      }
+      return result;
     }
     case asvJSONValue::TIMESTAMP:
-      return std::to_string(v->num);
+      return "__TS__" + std::to_string(v->num);
     case asvJSONValue::EXTENSION: {
       if (v->bin_data.empty()) return "\"\"";
       std::string r; fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), r); return r;
@@ -199,6 +208,17 @@ inline void goonWriteString(const std::string& s, std::string& out, const std::u
     std::string r; appendJsonEscaped(r, x); return r;
   }(s) + '"';
   else out += s;
+}
+
+inline void goonWriteKey(const std::string& key, std::string& out) {
+  if (key.empty()) { out += "\"\""; return; }
+  if (goonNeedsQuotes(key)) {
+    out += '"';
+    appendJsonEscaped(out, key);
+    out += '"';
+  } else {
+    out += key;
+  }
 }
 
 // Build dictionary of frequently occurring strings for GOON compact mode
@@ -251,10 +271,11 @@ inline void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict
 
 inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr, const GoonWriteOptions& opts = {}) {
   if (!arr || arr->size() == 0) {
-    if (!key.empty()) {
+    if (!key.empty() || depth > 0) {
       std::string pad(static_cast<size_t>(indent) * 2, ' ');
-      std::string escaped; appendJsonEscaped(escaped, key);
-      out += pad + escaped + ": []\n";
+      out += pad;
+      goonWriteKey(key, out);
+      out += ": []\n";
     } else out += "[]\n";
     return;
   }
@@ -286,9 +307,9 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   }
   if (tabular && !cols.empty()) {
     std::string pad(static_cast<size_t>(indent) * 2, ' ');
-    if (!key.empty()) {
-      std::string escaped; appendJsonEscaped(escaped, key);
-      out += pad + escaped;
+    if (!key.empty() || depth > 0) {
+      out += pad;
+      goonWriteKey(key, out);
     }
     out += "[" + std::to_string(arr->size()) + "]{" + [](const std::string& x) {
       std::string r; appendJsonEscaped(r, x); return r;
@@ -358,9 +379,9 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   }
   // List format
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
-  if (!key.empty()) {
-    std::string escaped; appendJsonEscaped(escaped, key);
-    out += pad + escaped;
+  if (!key.empty() || depth > 0) {
+    out += pad;
+    goonWriteKey(key, out);
   }
   out += "[]:\n";
   for (size_t i = 0; i < arr->size(); i++) {
@@ -400,7 +421,9 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
               else if (el->type == asvJSONValue::DOUBLE) {
                 fmtDoubleVal(el->dbl, out);
               } else {
-                goonWriteString(el->str_data, out, dict);
+                out += '"';
+                appendJsonEscaped(out, el->str_data);
+                out += '"';
               }
             }
           }
@@ -430,34 +453,38 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   std::string lit = goonLiteral(v);
   if (!lit.empty()) {
-    if (!key.empty()) {
-      std::string escaped; appendJsonEscaped(escaped, key);
-      out += pad + escaped + ": " + lit + "\n";
+    if (!key.empty() || depth > 0) {
+      out += pad;
+      goonWriteKey(key, out);
+      out += ": " + lit + "\n";
     }
     else out += pad + lit + "\n";
     return;
   }
   switch (v->type) {
     case asvJSONValue::INT:
-      if (!key.empty()) {
-        std::string escaped; appendJsonEscaped(escaped, key);
-        out += pad + escaped + ": " + std::to_string(v->num) + "\n";
+      if (!key.empty() || depth > 0) {
+        out += pad;
+        goonWriteKey(key, out);
+        out += ": " + std::to_string(v->num) + "\n";
       }
       else out += pad + std::to_string(v->num) + "\n";
       break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
       if (std::isnan(d) || std::isinf(d)) {
-        if (!key.empty()) {
-          std::string escaped; appendJsonEscaped(escaped, key);
-          out += pad + escaped + ": _\n";
+        if (!key.empty() || depth > 0) {
+          out += pad;
+          goonWriteKey(key, out);
+          out += ": _\n";
         }
         else out += pad + "_\n";
         break;
       }
-      if (!key.empty()) {
-        std::string escaped; appendJsonEscaped(escaped, key);
-        out += pad + escaped + ": ";
+      if (!key.empty() || depth > 0) {
+        out += pad;
+        goonWriteKey(key, out);
+        out += ": ";
         fmtDoubleVal(d, out);
       } else {
         fmtDoubleVal(d, out);
@@ -466,9 +493,10 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
       break;
     }
     case asvJSONValue::STRING: {
-      if (!key.empty()) {
-        std::string escaped; appendJsonEscaped(escaped, key);
-        out += pad + escaped + ": ";
+      if (!key.empty() || depth > 0) {
+        out += pad;
+        goonWriteKey(key, out);
+        out += ": ";
         goonWriteString(v->str_data, out, dict);
         out += '\n';
       } else {
@@ -479,18 +507,20 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
     }
     case asvJSONValue::OBJECT: {
       if (!v->obj || v->obj->empty()) {
-        if (!key.empty()) {
-          std::string escaped; appendJsonEscaped(escaped, key);
-          out += pad + escaped + ": {}\n";
+        if (!key.empty() || depth > 0) {
+          out += pad;
+          goonWriteKey(key, out);
+          out += ": {}\n";
         }
         else out += pad + "{}\n";
         return;
       }
-      if (!key.empty()) {
-        std::string escaped; appendJsonEscaped(escaped, key);
-        out += pad + escaped + ":\n";
+      if (!key.empty() || depth > 0) {
+        out += pad;
+        goonWriteKey(key, out);
+        out += ":\n";
       }
-      int childIndent = indent + (key.empty() ? 0 : 1);
+      int childIndent = indent + (!key.empty() || depth > 0 ? 1 : 0);
       for (const auto& [k, child] : *(v->obj))
         goonSerializeVal(child.get(), out, childIndent, k, depth + 1, dict, opts);
       break;
@@ -502,14 +532,16 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
       std::string spec = goonFormatSpecial(v);
       if (!spec.empty()) {
         if (!key.empty()) {
-          std::string escaped; appendJsonEscaped(escaped, key);
-          out += pad + escaped + ": " + spec + "\n";
+          out += pad;
+          goonWriteKey(key, out);
+          out += ": " + spec + "\n";
         }
         else out += pad + spec + "\n";
       } else {
         if (!key.empty()) {
-          std::string escaped; appendJsonEscaped(escaped, key);
-          out += pad + escaped + ": _\n";
+          out += pad;
+          goonWriteKey(key, out);
+          out += ": _\n";
         }
         else out += pad + "_\n";
       }
@@ -617,6 +649,46 @@ inline std::string goonToJson(std::string_view input) {
     }
     // NaN/Infinity
     if (s == "NaN" || s == "Infinity" || s == "-Infinity") return s;
+    // GOON special prefixes → JSON convention
+    // Handles both raw and double-quoted forms (encoder quotes __BASE64__/__EXT__/__REGEX__)
+    {
+      std::string_view unquoted = s;
+      if (unquoted.size() >= 2 && unquoted.front() == '"' && unquoted.back() == '"') {
+        unquoted.remove_prefix(1);
+        unquoted.remove_suffix(1);
+      }
+      if (unquoted.substr(0, 6) == "__TS__") {
+        return "{\"$timestamp\":{\"t\":" + std::string(unquoted.substr(6)) + "}}";
+      }
+      if (unquoted.substr(0, 7) == "__OID__") {
+        return "{\"$oid\":\"" + std::string(unquoted.substr(7)) + "\"}";
+      }
+      if (unquoted.substr(0, 10) == "__BASE64__") {
+        return "{\"$binary\":{\"base64\":\"" + std::string(unquoted.substr(10)) + "\",\"subType\":\"00\"}}";
+      }
+      if (unquoted.substr(0, 9) == "__REGEX__") {
+        std::string content(unquoted.substr(9));
+        size_t sep = content.rfind('|');
+        if (sep != std::string::npos) {
+          std::string pat = content.substr(0, sep);
+          std::string opts = content.substr(sep + 1);
+          return "{\"$regex\":\"" + [](std::string_view x) { std::string r; appendJsonEscaped(r, x); return r; }(pat) + "\",\"$options\":\"" + opts + "\"}";
+        }
+        return "{\"$regex\":\"" + [](std::string_view x) { std::string r; appendJsonEscaped(r, x); return r; }(content) + "\"}";
+      }
+      if (unquoted.substr(0, 7) == "__EXT__") {
+        std::string rest(unquoted.substr(7));
+        size_t us = rest.find('_');
+        if (us != std::string::npos) {
+          int type = static_cast<int>(std::strtol(rest.substr(0, us).c_str(), nullptr, 10));
+          std::string b64 = rest.substr(us + 1);
+          char hbuf[3];
+          snprintf(hbuf, sizeof(hbuf), "%02x", static_cast<unsigned>(type) & 0xFF);
+          return "{\"$binary\":{\"base64\":\"" + b64 + "\",\"subType\":\"" + hbuf + "\"}}";
+        }
+        return "{\"$binary\":{\"base64\":\"" + rest + "\",\"subType\":\"00\"}}";
+      }
+    }
     // Already JSON value
     if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') || (s.front() == '{' && s.back() == '}') || (s.front() == '[' && s.back() == ']')))
       return s;
@@ -840,29 +912,39 @@ inline std::string goonToJson(std::string_view input) {
           } else {
             // No inline values, no fields -> list items from subsequent lines
             size_t lastRl = li;
-            for (size_t rl = li + 1; rl < lines.size(); rl++) {
+            bool deferToMain = false;
+            for (size_t rl = li + 1; rl < lines.size() && !deferToMain; rl++) {
               auto& rline = lines[rl];
               if (rline.empty()) continue;
               int rindent = countIndent(rline);
               if (rindent <= indent) break;
-              lastRl = rl;
               std::string_view rcont = stripIndent(rline);
-              if (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ') {
+              if (rcont == "-" || (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ' &&
+                  rcont.size() >= 3 && (rcont[2] == '[' || rcont[2] == '{'))) {
+                // Complex list item (bare object / nested flow array or object):
+                // leave the array frame open and let the main loop add array
+                // elements so nested bodies stay inside the array.
+                if (lastRl > li) li = lastRl;
+                deferToMain = true;
+              } else if (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ') {
+                lastRl = rl;
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
                 out += expandCell(rcont.substr(2));
-              } else if (rcont == "-") {
-                if (!stack.empty() && !stack.back().first) out += ',';
-                if (!stack.empty()) stack.back().first = false;
-                out += '{';
-                stack.push_back({'O', true, rindent, true, false});
               } else {
+                lastRl = rl;
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
                 out += expandCell(rcont);
               }
             }
             if (lastRl > li) li = lastRl;
+            // If we deferred a complex item, keep the leading '[' open so the
+            // main loop appends elements into the same array.
+            if (deferToMain && !rootArr) {
+              // The array is still open; just let the main loop continue.
+              continue;
+            }
             if (!rootArr) {
               out += ']';
               if (!stack.empty()) stack.pop_back();
@@ -955,7 +1037,14 @@ inline std::string goonToJson(std::string_view input) {
     }
 
     // key: value
-    size_t colonPos = content.find(':');
+    size_t colonPos = std::string_view::npos;
+    {
+      bool inQ = false;
+      for (size_t ci = 0; ci < content.size(); ci++) {
+        if (content[ci] == '"' && (ci == 0 || content[ci - 1] != '\\')) { inQ = !inQ; continue; }
+        if (!inQ && content[ci] == ':') { colonPos = ci; break; }
+      }
+    }
     if (colonPos != std::string_view::npos) {
       std::string_view key = content.substr(0, colonPos);
       while (!key.empty() && key.back() == ' ') key = key.substr(0, key.size() - 1);
