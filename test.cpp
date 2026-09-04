@@ -7439,6 +7439,36 @@ TEST(testToTOML) {
     ASSERT(j2.hasKey("items"));
     ASSERT_EQ(j2.getRoot()->get("items")->size(), size_t(3));
   }
+  // Round-trip: a table's scalar members must be emitted before its child
+  // [section] headers, else a sibling key after "[child]" leaks into the child
+  // table ("y" would move inside "o").
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"o":{"a":1},"y":1})")));
+    std::string toml = j.toTOML();
+    // The root-level "y" must appear before the "[o]" header so it stays at
+    // document root instead of being scoped into table o.
+    size_t yPos = toml.find("y = 1");
+    size_t oPos = toml.find("[o]");
+    ASSERT(yPos != std::string::npos && oPos != std::string::npos);
+    ASSERT(yPos < oPos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getInt("y"), int64_t(1));
+    ASSERT(j2.hasKey("o"));
+    ASSERT_EQ(j2.getInt("o.a"), int64_t(1));
+    ASSERT(!j2.getRoot()->get("o")->hasKey("y"));
+  }
+  // Same invariant with a null-collapsed subtable and a trailing root sibling.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"o":{"x":null},"y":1})")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getInt("y"), int64_t(1));
+    ASSERT(!j2.getRoot()->get("o")->hasKey("y"));
+  }
 }
 
 TEST(testFromTOML) {

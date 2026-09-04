@@ -885,32 +885,44 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
         }
       }
     } else {
-      // Expanded: use [section] headers for nested objects
+      // Expanded: use [section] headers for nested objects.
+      // TOML scopes bare "key = value" lines to the current table (the most
+      // recent [header]). A table's own scalar members must therefore be
+      // emitted BEFORE any child subtable header: else a sibling emitted after
+      // "[child]" would leak into the child table ({"o":{"a":1},"y":1} would
+      // move y inside o). Scalar members first, subtable headers after.
+      auto isSubtable = [](const asvJSONValue* val) {
+        if (val->type == T::OBJECT) return true;
+        if (val->type == T::ARRAY && val->arr && !val->arr->empty()) {
+          for (const auto& e : *val->arr)
+            if (e->type != T::OBJECT) return false;
+          return true;
+        }
+        return false;
+      };
       if (needHeader && !prefix.empty()) {
         emitHeader(prefix, false);
       }
+      // First pass: this table's scalar members (including primitive arrays).
       for (const auto& [k, val] : *v->obj) {
+        if (isSubtable(val.get())) continue;
+        std::string qk = tomlQuoteKey(k);
+        std::string vs = tomlVal(val.get());
+        if (!vs.empty()) {
+          out += qk + " = " + vs + "\n";
+        }
+      }
+      // Second pass: child subtable headers.
+      for (const auto& [k, val] : *v->obj) {
+        if (!isSubtable(val.get())) continue;
         std::string qk = tomlQuoteKey(k);
         std::string fullKey = prefix.empty() ? qk : prefix + "." + qk;
         if (val->type == T::OBJECT) {
           tomlEmitVal(val.get(), fullKey, true, out, true);
-        } else if (val->type == T::ARRAY && val->arr) {
-          bool allObjects = true;
-          for (const auto& elem : *val->arr)
-            if (elem->type != T::OBJECT) { allObjects = false; break; }
-          if (allObjects && !val->arr->empty()) {
-            for (const auto& elem : *val->arr) {
-              emitHeader(fullKey, true);
-              tomlEmitVal(elem.get(), fullKey, false, out, true);
-            }
-          } else {
-            std::string vs = tomlVal(val.get());
-            out += qk + " = " + vs + "\n";
-          }
         } else {
-          std::string vs = tomlVal(val.get());
-          if (!vs.empty()) {
-            out += qk + " = " + vs + "\n";
+          for (const auto& elem : *val->arr) {
+            emitHeader(fullKey, true);
+            tomlEmitVal(elem.get(), fullKey, false, out, true);
           }
         }
       }
