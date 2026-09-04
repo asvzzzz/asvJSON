@@ -80,18 +80,18 @@ inline void tronSerializeVal(const asvJSONValue* v,
         out += '"';
         return;
       case asvJSONValue::OBJECTID:
-        out += '"';
+        out += "\"__OID__";
         fmtObjectIdHexVal(v->str_data, out);
         out += '"';
         return;
       case asvJSONValue::REGEX:
-        out += '"';
+        out += "\"__REGEX__";
         {
           size_t sep = v->str_data.rfind('\0');
           if (sep != std::string_view::npos) {
-            appendJsonEscaped(out, v->str_data.substr(0, sep));
+            appendJsonEscaped(out, std::string_view(v->str_data.data(), sep));
             out += '|';
-            appendJsonEscaped(out, v->str_data.substr(sep + 1));
+            appendJsonEscaped(out, std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1));
           } else {
             appendJsonEscaped(out, v->str_data);
           }
@@ -99,10 +99,12 @@ inline void tronSerializeVal(const asvJSONValue* v,
         out += '"';
         return;
       case asvJSONValue::TIMESTAMP: {
+        out += "\"__TS__";
         char buf[32];
         auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
         if (ec == std::errc()) out.append(buf, ptr - buf);
         else out += '0';
+        out += '"';
         return;
       }
       case asvJSONValue::EXTENSION:
@@ -457,6 +459,48 @@ asvJSONValue* TronParseState::parseValue() {
     case TronTokType::STRING: {
       std::string raw = advance().text;
       std::string s = tronUnescape(raw);
+      // Check __TS__ prefix (timestamp stored as a quoted marker)
+      if (s.size() > 6 && s.compare(0, 6, "__TS__") == 0) {
+        long long ts;
+        auto [tptr, tec] = std::from_chars(s.data() + 6, s.data() + s.size(), ts);
+        if (tec == std::errc() && tptr == s.data() + s.size()) {
+          auto v = asvJSONValue::makeTimestamp(static_cast<int64_t>(ts));
+          if (!v) throw asvJSONError("out of memory");
+          return v.release();
+        }
+      }
+      // Check __OID__ prefix (ObjectId stored as a 24-char hex string)
+      if (s.size() == 31 && s.compare(0, 7, "__OID__") == 0) {
+        uint8_t bytes[12];
+        bool hexOk = true;
+        for (int i = 0; i < 12; i++) {
+          char buf[3] = {s[i * 2 + 7], s[i * 2 + 8], 0};
+          char* end = nullptr;
+          long byte = std::strtol(buf, &end, 16);
+          if (end != buf + 2) { hexOk = false; break; }
+          bytes[i] = static_cast<uint8_t>(byte);
+        }
+        if (hexOk) {
+          auto v = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
+          if (!v) throw asvJSONError("out of memory");
+          return v.release();
+        }
+      }
+      // Check __REGEX__ prefix: pattern|options (options optional)
+      if (s.size() > 9 && s.compare(0, 9, "__REGEX__") == 0) {
+        std::string content(s.data() + 9, s.size() - 9);
+        size_t sep = content.rfind('|');
+        if (sep != std::string::npos) {
+          std::string pat = content.substr(0, sep);
+          std::string opts = content.substr(sep + 1);
+          auto v = asvJSONValue::makeRegex(pat.c_str(), opts.empty() ? nullptr : opts.c_str());
+          if (!v) throw asvJSONError("out of memory");
+          return v.release();
+        }
+        auto v = asvJSONValue::makeRegex(content.c_str(), nullptr);
+        if (!v) throw asvJSONError("out of memory");
+        return v.release();
+      }
       // Check __BASE64__ prefix
       if (s.size() > 10 && s.compare(0, 10, "__BASE64__") == 0) {
         auto data = decodeBase64Fast(s.data() + 10, s.size() - 10);

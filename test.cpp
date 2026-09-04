@@ -6574,12 +6574,16 @@ TEST(testToTRONComprehensive) {
 		ASSERT_EQ(bin_out.size(), size_t(4));
 		ASSERT_EQ(bin_out[0], uint8_t(0xDE));
 		ASSERT_EQ(bin_out[3], uint8_t(0xEF));
-		// Verify OBJECTID (data preserved as hex string in TRON)
-		ASSERT_EQ(std::string(j2.getString("oid")), "0102030405060708090a0b0c");
-		// Verify REGEX (data preserved as "pattern|opts" string)
-		ASSERT_EQ(std::string(j2.getString("rx")), "^test$|gi");
-		// Verify TIMESTAMP (data preserved as int)
-		ASSERT_EQ(j2.getInt("ts"), int64_t(987654321));
+		// Verify OBJECTID (type preserved via __OID__/hex convention)
+		ASSERT_EQ(std::string(j2.getObjectId("oid")), std::string("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C", 12));
+		// Verify REGEX (type preserved via __REGEX__/pattern|opts convention)
+		ASSERT(j2.hasKey("rx"));
+		ASSERT_EQ(j2.getRoot()->getConst("rx")->type, asvJSONValue::REGEX);
+		ASSERT_EQ(j2.getRegexPattern("rx"), "^test$");
+		ASSERT_EQ(j2.getRegexOptions("rx"), "gi");
+		// Verify TIMESTAMP (type preserved via __TS__ convention)
+		ASSERT_EQ(j2.getRoot()->getConst("ts")->type, asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(j2.getTimestamp("ts"), int64_t(987654321));
 		// Verify EXTENSION (type preserved via __EXT__ detection)
 		auto ext = j2.getExtension("ext");
 		ASSERT_EQ(ext.first, 42);
@@ -6598,10 +6602,14 @@ TEST(testToTRONComprehensive) {
 		asvJSON j2;
 		ASSERT(j2.fromTRON(std::string_view(tron)));
 		ASSERT_EQ(j2.getDateTime("dt"), dt_val);
-		// OBJECTID round-trips as hex string
-		ASSERT_EQ(std::string(j2.getString("oid")), "414243444546313233343536");
-		// TIMESTAMP round-trips as int
-		ASSERT_EQ(j2.getInt("ts"), int64_t(1000));
+		// OBJECTID round-trips with its type preserved
+		ASSERT_EQ(std::string(j2.getObjectId("oid")), "ABCDEF123456");
+		// TIMESTAMP round-trips with its type preserved
+		ASSERT_EQ(j2.getRoot()->getConst("ts")->type, asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(j2.getTimestamp("ts"), int64_t(1000));
+		// REGEX round-trips with its type preserved
+		ASSERT_EQ(j2.getRegexPattern("rx"), "pattern");
+		ASSERT_EQ(j2.getRegexOptions("rx"), "ims");
 	}
 	// Newline-separated property list (spec form) followed by data on the next
 	// line whose first token is a class instantiation identifier.
@@ -8711,6 +8719,93 @@ TEST(testTOONSpecialTypes) {
     std::string s = j.toTOON();
     asvJSON j2;
     ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(j2.getRegexPattern("re"), "^abc$");
+    ASSERT_EQ(j2.getRegexOptions("re"), "");
+  }
+}
+
+TEST(testTRONSpecialTypes) {
+  // Special types used to be serialized without a recoverable marker (ObjectId
+  // as a bare hex string -> STRING, Regex as "pattern|opts" -> STRING, Timestamp
+  // as a bare number -> INT), silently losing the type on round-trip. They now
+  // serialize via the __OID__/__REGEX__/__TS__ prefix conventions (matching the
+  // GOON encoder) and the decoder reconstructs the typed values.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    uint8_t bin[] = {0xde, 0xad, 0xbe, 0xef};
+    j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(bin, 4));
+    j.getRoot()->obj->emplace("oid", asvJSONValue::makeObjectId("1234567890ab"));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("foo.*bar", "gi"));
+    j.getRoot()->obj->emplace("ts", asvJSONValue::makeTimestamp(1234567890));
+    j.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(127, bin, 4));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1700000000, 123, 0));
+    std::string s = j.toTRON();
+    ASSERT(!s.empty());
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* bin2 = j2.getRoot()->getConst("bin");
+    ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin2->bin_data.size(), size_t(4));
+    ASSERT_EQ(bin2->bin_data[0], 0xde);
+    ASSERT_EQ(bin2->bin_data[3], 0xef);
+    auto* oid = j2.getRoot()->getConst("oid");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("1234567890ab"));
+    auto* re = j2.getRoot()->getConst("re");
+    ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "foo.*bar");
+    ASSERT_EQ(j2.getRegexOptions("re"), "gi");
+    auto* ts = j2.getRoot()->getConst("ts");
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(1234567890));
+    auto* ext = j2.getRoot()->getConst("ext");
+    ASSERT(ext != nullptr && ext->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext->ext_type, 127);
+    ASSERT_EQ(ext->bin_data.size(), size_t(4));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1700000000));
+  }
+  // Special types nested inside an array survive.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    j.getRoot()->arr->push_back(asvJSONValue::makeObjectId("abcdefabcdef"));
+    j.getRoot()->arr->push_back(asvJSONValue::makeTimestamp(999));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot() != nullptr && j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+    auto* oid = j2.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("abcdefabcdef"));
+    auto* ts = j2.getRoot()->get(static_cast<size_t>(1));
+    ASSERT(ts != nullptr && ts->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(ts->num, int64_t(999));
+  }
+  // A regex whose pattern contains a '|' preserves the split on the LAST '|'.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("a|b", "im"));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* re = j2.getRoot()->getConst("re");
+    ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "a|b");
+    ASSERT_EQ(j2.getRegexOptions("re"), "im");
+  }
+  // A value-only regex with empty options still round-trips.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("^abc$", ""));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
     ASSERT_EQ(j2.getRegexPattern("re"), "^abc$");
     ASSERT_EQ(j2.getRegexOptions("re"), "");
   }
@@ -13921,6 +14016,7 @@ RUN(testCBORFloat16);
 	RUN(testToTRON);
 	RUN(testToTRONAdvanced);
 	RUN(testToTRONComprehensive);
+	RUN(testTRONSpecialTypes);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);
