@@ -1889,6 +1889,49 @@ TEST(testBSONOversizedKey) {
 	ASSERT(!json.getLastError().empty());
 }
 
+TEST(testBSONExtensionRoundTrip) {
+	// Bug: EXTENSION type had no encoder case, silently encoded as NULL.
+	// Now encodes as BSON binary with ext_type as subtype byte.
+	asvJSON json;
+	json.parse("{}");
+	const unsigned char b[] = {0x01, 0x02, 0x03};
+	json.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(0x80, b, 3));
+
+	auto bson = json.toBSON();
+	ASSERT(bson.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromBSON(bson.data(), bson.size()));
+
+	auto* v = json2.getRoot()->get("ext");
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::EXTENSION);
+	ASSERT_EQ(static_cast<uint8_t>(v->ext_type), static_cast<uint8_t>(0x80));
+	ASSERT_EQ(v->bin_data.size(), static_cast<size_t>(3));
+	ASSERT_EQ(v->bin_data[0], 0x01);
+	ASSERT_EQ(v->bin_data[1], 0x02);
+	ASSERT_EQ(v->bin_data[2], 0x03);
+}
+
+TEST(testBSONEmptyArrayRoundTrip) {
+	// Bug: empty array decoded as empty object (BSON 0x04 subdocument is
+	// structurally identical to empty BSON document).
+	asvJSON json;
+	json.parse("{}");
+	json.getRoot()->obj->emplace("arr", asvJSONValue::makeArray());
+
+	auto bson = json.toBSON();
+	ASSERT(bson.size() > 0);
+
+	asvJSON json2;
+	ASSERT(json2.fromBSON(bson.data(), bson.size()));
+
+	auto* v = json2.getRoot()->get("arr");
+	ASSERT(v != nullptr);
+	ASSERT_EQ(v->type, asvJSONValue::ARRAY);
+	ASSERT_EQ(v->size(), static_cast<size_t>(0));
+}
+
 TEST(testISODateTime) {
 	{
 		asvJSON json;
@@ -13367,6 +13410,8 @@ int main() {
 	RUN(testBSONStrictTerminator);
 	RUN(testBSONMalformedRegex);
 	RUN(testBSONOversizedKey);
+	RUN(testBSONExtensionRoundTrip);
+	RUN(testBSONEmptyArrayRoundTrip);
 
 	std::cout << "\n--- ISO 8601 DateTime Tests ---\n";
 	RUN(testISODateTime);

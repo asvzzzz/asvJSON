@@ -170,6 +170,14 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			}
 			break;
 		}
+		case T::EXTENSION: {
+			out.push_back(0x05);
+			uint32_t blen = static_cast<uint32_t>(bin_data.size());
+			writeLE32(out, blen);
+			out.push_back(static_cast<uint8_t>(ext_type));
+			out.insert(out.end(), bin_data.begin(), bin_data.end());
+			break;
+		}
 		default: out.push_back(0x0A); break;
 	}
 }
@@ -249,6 +257,11 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 						subArr->obj.reset();
 						subArr->arr = std::move(newArr);
 					}
+				} else if (subArr && subArr->type == asvJSONValue::OBJECT) {
+					// Empty BSON array document → empty asvJSON array
+					subArr->type = asvJSONValue::ARRAY;
+					subArr->obj.reset();
+					subArr->arr = std::make_unique<std::vector<std::unique_ptr<asvJSONValue>>>();
 				}
 				obj->obj->emplace(key, std::move(subArr));
 				break;
