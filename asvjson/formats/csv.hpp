@@ -5,17 +5,30 @@
 
 namespace asvJSONInternal {
 
-inline std::string csvEscape(std::string_view s) {
-	if (!s.empty() && (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@')) {
-		return "'" + std::string(s);
+inline std::string csvEscape(std::string_view s, bool forceQuote = false, bool injectionTarget = true) {
+	bool need = forceQuote;
+	if (!need) for (auto c : s) if (c == ',' || c == '"' || c == '\n' || c == '\r') { need = true; break; }
+	if (!need) {
+		// Formula-injection guard: prefix leading =+-@ with a single quote so the
+		// cell is treated as text by spreadsheets. "..." quoting needs no guard.
+		// Only applies to text-like cells (STRINGS, headers), not numeric ones.
+		if (injectionTarget && !s.empty() && (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@')) {
+			return "'" + std::string(s);
+		}
+		return std::string(s);
 	}
-	bool need = false;
-	for (auto c : s) if (c == ',' || c == '"' || c == '\n' || c == '\r') { need = true; break; }
-	if (!need) return std::string(s);
 	std::string out; out += '"';
 	for (auto c : s) { if (c == '"') out += "\"\""; else out += c; }
 	out += '"';
 	return out;
+}
+
+// Strip the single-quote formula-injection guard added by csvEscape, restoring
+// the original value on decode so toCSV->fromCSV round-trips losslessly.
+inline std::string csvStripInjection(std::string_view s) {
+	if (s.size() >= 2 && s[0] == '\'' && (s[1] == '=' || s[1] == '+' || s[1] == '-' || s[1] == '@'))
+		return std::string(s.substr(1));
+	return std::string(s);
 }
 
 
@@ -38,6 +51,28 @@ inline std::vector<std::string> csvSplitLine(std::string_view line) {
 		cur += c;
 	}
 	fields.push_back(std::move(cur));
+	return fields;
+}
+
+// Like csvSplitLine but also reports whether each field was quoted with "...".
+// A quoted field (RFC 4180) is treated as an explicit text literal on decode,
+// which lets empty strings and numeric-looking strings round-trip as STRING.
+inline std::vector<std::pair<std::string, bool>> csvSplitLineQ(std::string_view line) {
+	std::vector<std::pair<std::string, bool>> fields;
+	std::string cur;
+	bool inQuotes = false;
+	bool quoted = false;
+	for (size_t i = 0; i < line.size(); i++) {
+		char c = line[i];
+		if (!inQuotes && c == '"') { inQuotes = true; quoted = true; continue; }
+		if (inQuotes && c == '"') {
+			if (i + 1 < line.size() && line[i + 1] == '"') { cur += '"'; i++; continue; }
+			inQuotes = false; continue;
+		}
+		if (!inQuotes && c == ',') { fields.emplace_back(std::move(cur), quoted); cur.clear(); quoted = false; continue; }
+		cur += c;
+	}
+	fields.emplace_back(std::move(cur), quoted);
 	return fields;
 }
 
@@ -109,29 +144,34 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 
 		if (lines.empty()) throw asvJSONError("empty CSV data");
 
-		std::vector<std::string> headers = csvSplitLine(lines[0]);
-		if (headers.empty()) throw asvJSONError("empty CSV header");
+		auto rawHeaders = csvSplitLine(lines[0]);
+		if (rawHeaders.empty()) throw asvJSONError("empty CSV header");
+		std::vector<std::string> headers;
+		headers.reserve(rawHeaders.size());
+		for (auto& h : rawHeaders) headers.push_back(csvStripInjection(h));
 
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) throw asvJSONError("out of memory");
 
 		for (size_t li = 1; li < lines.size(); li++) {
 			if (lines[li].empty()) continue;
-			auto fields = csvSplitLine(lines[li]);
+			auto fields = csvSplitLineQ(lines[li]);
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("out of memory");
 			for (size_t fi = 0; fi < headers.size(); fi++) {
-				std::string val = fi < fields.size() ? std::string(fields[fi]) : std::string();
-				std::string unescaped;
-				if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
-					for (size_t vi = 1; vi < val.size() - 1; vi++) {
-						if (val[vi] == '"' && vi + 1 < val.size() - 1 && val[vi + 1] == '"') { unescaped += '"'; vi++; }
-						else unescaped += val[vi];
-					}
+				bool quoted = fi < fields.size() && fields[fi].second;
+				std::string text = fi < fields.size() ? std::move(fields[fi].first) : std::string();
+				std::unique_ptr<asvJSONValue> val;
+				if (quoted) {
+					// RFC 4180 quoted field is an explicit text literal: preserve
+					// STRING even when empty or numeric-looking.
+					val = asvJSONValue::makeString(text.data(), text.size());
 				} else {
-					unescaped = std::move(val);
+					// Bare field: strip the formula-injection guard then detect type.
+					text = csvStripInjection(text);
+					val = csvDetectType(text);
 				}
-				obj->obj->emplace(headers[fi], csvDetectType(unescaped));
+				obj->obj->emplace(headers[fi], std::move(val));
 			}
 			arr->arr->push_back(std::move(obj));
 		}
@@ -149,39 +189,55 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 }
 
 inline void asvJSONValue::toCSV(std::string& out) const {
+	using T = asvJSONValue::Type;
+
+	// Unescaped textual representation of a value cell, without quoting.
 	auto cellValue = [](const asvJSONValue* v) -> std::string {
 		if (!v) return {};
-		using T = asvJSONValue::Type;
+		using T2 = asvJSONValue::Type;
 		switch (v->type) {
-			case T::NULL_VAL: return {};
-			case T::BOOL_VAL: return v->flag ? "true" : "false";
-			case T::INT: return std::to_string(v->num);
-			case T::DOUBLE: {
+			case T2::NULL_VAL: return "null"; // bare literal so an all-null row survives (not dropped as an empty line)
+			case T2::BOOL_VAL: return v->flag ? "true" : "false";
+			case T2::INT: return std::to_string(v->num);
+			case T2::DOUBLE: {
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return {};
 				std::string s; fmtDoubleVal(v->dbl, s); return s;
 			}
-			case T::STRING: return v->str_data;
-			case T::DATETIME: {
+			case T2::STRING: return v->str_data;
+			case T2::DATETIME: {
 				std::string s; fmtDateTimeVal(v->timestamp, v->datetime_ms, s); return s;
 			}
-			case T::BINARY: return encodeBase64(v->bin_data.data(), v->bin_data.size());
-			case T::OBJECTID: {
+			case T2::BINARY: return encodeBase64(v->bin_data.data(), v->bin_data.size());
+			case T2::OBJECTID: {
 				std::string s; fmtObjectIdHexVal(v->str_data, s); return s;
 			}
-			case T::REGEX: {
+			case T2::REGEX: {
 				size_t sep = v->str_data.rfind('\0');
 				return (sep != std::string_view::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
 			}
-			case T::TIMESTAMP: return std::to_string(v->num);
-			case T::EXTENSION: return encodeBase64(v->bin_data.data(), v->bin_data.size());
-			case T::ARRAY:
-			case T::OBJECT: {
+			case T2::TIMESTAMP: return std::to_string(v->num);
+			case T2::EXTENSION: return encodeBase64(v->bin_data.data(), v->bin_data.size());
+			case T2::ARRAY:
+			case T2::OBJECT: {
 				std::string s; v->serialize(s, false); return s;
 			}
 			default: return {};
 		}
 	};
-	using T = asvJSONValue::Type;
+
+	// Fully-escaped cell. A STRING whose text would decode as a different type
+	// (number/bool/null/empty) is quoted so the round-trip preserves STRING.
+	// The formula-injection guard applies only to STRING cells and headers.
+	auto csvCell = [&](const asvJSONValue* v) -> std::string {
+		std::string s = cellValue(v);
+		bool forceQuote = v && v->type == T::STRING;
+		if (forceQuote) {
+			auto d = csvDetectType(s);
+			forceQuote = !d || d->type != T::STRING;
+			return csvEscape(s, forceQuote, true);
+		}
+		return csvEscape(s, false, v && v->type == T::STRING);
+	};
 
 	auto writeArrayOfObjects = [&](const std::vector<std::unique_ptr<asvJSONValue>>& items) {
 		if (items.empty()) return;
@@ -213,13 +269,13 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				if (v->type == T::OBJECT && v->obj) {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
-				} else { flat[prefix.empty() ? "value" : prefix] = cellValue(v); }
+				} else { flat[prefix.empty() ? "value" : prefix] = csvCell(v); }
 			};
 			fill(fill, item.get(), "", fillVisited);
 			for (size_t i = 0; i < keys.size(); i++) {
 				if (i > 0) out += ',';
 				auto it = flat.find(keys[i]);
-				out += csvEscape(it != flat.end() ? it->second : "");
+				out += (it != flat.end()) ? it->second : "";
 			}
 			out += '\n';
 		}
@@ -247,14 +303,14 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				if (v->type == T::OBJECT && v->obj) {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
-				} else { flat[prefix.empty() ? "value" : prefix] = cellValue(v); }
+				} else { flat[prefix.empty() ? "value" : prefix] = csvCell(v); }
 			};
 			flatten(flatten, this, "", flattenVisited);
 			bool first = true;
 			for (const auto& [k, _] : flat) { if (!first) out += ','; out += csvEscape(k); first = false; }
 			out += '\n';
 			first = true;
-			for (const auto& [_, v] : flat) { if (!first) out += ','; out += csvEscape(v); first = false; }
+			for (const auto& [_, v] : flat) { if (!first) out += ','; out += v; first = false; }
 			out += '\n';
 			break;
 		}
@@ -267,12 +323,12 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				writeArrayOfObjects(*arr);
 			} else {
 				out += "value\n";
-				for (const auto& v : *arr) { out += csvEscape(cellValue(v.get())); out += '\n'; }
+				for (const auto& v : *arr) { out += csvCell(v.get()); out += '\n'; }
 			}
 			break;
 		}
 		default:
-			out += csvEscape(cellValue(this)); out += '\n';
+			out += csvCell(this); out += '\n';
 			break;
 	}
 }

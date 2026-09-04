@@ -7154,6 +7154,105 @@ TEST(testFromCSVIntOverflow) {
   }
 }
 
+TEST(testCSVRoundTrip) {
+	// STRING literals that look like numbers/bools/null/empty must round-trip
+	// as STRING, not be re-detected as another type on re-parse.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":"42","b":"3.14","c":"true","d":"null","e":"","f":"hello"})")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("a")->getString()), "42");
+		ASSERT(r->get("b")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("b")->getString()), "3.14");
+		ASSERT(r->get("c")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("c")->getString()), "true");
+		ASSERT(r->get("d")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("d")->getString()), "null");
+		ASSERT(r->get("e")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("e")->getString()), "");
+		ASSERT(r->get("f")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("f")->getString()), "hello");
+	}
+	// Empty string and null stay distinct across the round trip.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":""},{"k":null},{"k":"x"}])")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 3U);
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("k")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(0))->get("k")->getString()), "");
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(1))->get("k")->type == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(2))->get("k")->getString()), "x");
+	}
+	// Formula-injection guard (leading =+-@) must be stripped on decode so the
+	// value and header keys round-trip losslessly.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"@x":1,"=y":2,"+z":3,"-w":"@v"}])")));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("'@x") != std::string::npos); // guard applied on output
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->hasKey("@x") && !r->hasKey("'@x"));
+		ASSERT(r->hasKey("=y") && !r->hasKey("'=y"));
+		ASSERT(r->hasKey("+z") && !r->hasKey("'+z"));
+		ASSERT_EQ(r->get("@x")->getInt(), int64_t(1));
+		ASSERT_EQ(r->get("=y")->getInt(), int64_t(2));
+		ASSERT_EQ(r->get("+z")->getInt(), int64_t(3));
+		ASSERT_EQ(std::string(r->get("-w")->getString()), "@v");
+	}
+	// A row whose single value is null (or empty string) must not be dropped.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":null}])")));
+		std::string csv = j.toCSV();
+		ASSERT(!csv.empty());
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 1U);
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("k")->type == asvJSONValue::NULL_VAL);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":""}])")));
+		asvJSON j2;
+		ASSERT(j2.fromCSV(j.toCSV()));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 1U);
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("k")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(0))->get("k")->getString()), "");
+	}
+	// Array of scalars: empty string and null elements both survive.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"(["hello","","world"])")));
+		asvJSON j2;
+		ASSERT(j2.fromCSV(j.toCSV()));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 3U);
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(0))->get("value")->getString()), "hello");
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(1))->get("value")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(1))->get("value")->getString()), "");
+		ASSERT_EQ(std::string(j2.getRoot()->get(static_cast<size_t>(2))->get("value")->getString()), "world");
+	}
+	// Nested flatten with empty string round-trips.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":{"b":""},"c":1})")));
+		asvJSON j2;
+		ASSERT(j2.fromCSV(j.toCSV()));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("a.b")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("a.b")->getString()), "");
+		ASSERT_EQ(r->get("c")->getInt(), int64_t(1));
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -13045,6 +13144,7 @@ RUN(testCBORFloat16);
 	RUN(testToCSV);
 	RUN(testFromCSV);
 	RUN(testFromCSVIntOverflow);
+	RUN(testCSVRoundTrip);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
