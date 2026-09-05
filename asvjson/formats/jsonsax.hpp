@@ -14,6 +14,8 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+#include <cerrno>
 #include <algorithm>
 
 namespace asvJSONInternal {
@@ -69,6 +71,12 @@ public:
         static_cast<unsigned char>(input_[2]) == 0xBF)
       input_.remove_prefix(3);
 
+    if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(input_.data()), input_.size())) {
+      lastError_ = "Invalid UTF-8 in input";
+      handler_->onError(lastError_);
+      return false;
+    }
+
     try {
       if (!parseValue()) return false;
       skip();
@@ -79,6 +87,8 @@ public:
       }
       return true;
     } catch (const std::exception& e) {
+      // Single delivery point: error handlers are notified here (and at the
+      // early-return paths above), never twice.
       lastError_ = e.what();
       handler_->onError(lastError_);
       return false;
@@ -88,6 +98,7 @@ public:
   std::string_view getLastError() const { return lastError_; }
 
 private:
+
   std::string_view input_;
   size_t pos_ = 0;
   int depth_ = 0;
@@ -115,7 +126,7 @@ private:
         if (input_[pos_ + 1] == '*') {
           pos_ += 2;
           while (pos_ + 1 < input_.size() && !(input_[pos_] == '*' && input_[pos_ + 1] == '/')) pos_++;
-          if (pos_ + 1 >= input_.size()) { handler_->onError("Unclosed multiline comment"); throw std::runtime_error("Unclosed multiline comment"); }
+          if (pos_ + 1 >= input_.size()) throw std::runtime_error("Unclosed multiline comment");
           pos_ += 2;
           continue;
         }
@@ -143,17 +154,11 @@ private:
     if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'N')
       return parseNaN();
     if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
-    std::string msg = std::string("Unexpected: '") + c + "'";
-    handler_->onError(msg);
-    throw std::runtime_error(msg);
-    return false;
+    throw std::runtime_error(std::string("Unexpected: '") + c + "'");
   }
 
   bool parseObject() {
-    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) {
-      handler_->onError("Maximum nesting depth exceeded");
-      throw std::runtime_error("Maximum nesting depth exceeded");
-    }
+    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     handler_->onStartObject();
     advance(); // consume '{'
@@ -161,7 +166,10 @@ private:
     if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
     while (true) {
       skip();
-      if (cur() != '"') { handler_->onError("Expected string key"); throw std::runtime_error("Expected string key"); }
+      // A trailing comma ({"a":1,}) is accepted, matching the DOM parser; a
+      // leading or duplicate comma ({,}, {"a":1,,}) still fails below.
+      if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
+      if (cur() != '"') throw std::runtime_error("Expected string key");
       // Parse key
       {
         std::string raw = scanStringRaw();
@@ -169,33 +177,32 @@ private:
         handler_->onKey(key);
       }
       skip();
-      if (cur() != ':') { handler_->onError("Expected ':'"); throw std::runtime_error("Expected ':'"); }
+      if (cur() != ':') throw std::runtime_error("Expected ':'");
       advance();
       if (!parseValue()) return false;
       skip();
       if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
       if (cur() == ',') { advance(); continue; }
-      handler_->onError("Expected ',' or '}'");
       throw std::runtime_error("Expected ',' or '}'");
     }
   }
 
   bool parseArray() {
-    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) {
-      handler_->onError("Maximum nesting depth exceeded");
-      throw std::runtime_error("Maximum nesting depth exceeded");
-    }
+    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     handler_->onStartArray();
     advance(); // consume '['
     skip();
     if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
     while (true) {
+      skip();
+      // A trailing comma ([1,]) is accepted, matching the DOM parser; a leading
+      // or duplicate comma ([,], [1,,2]) still fails inside parseValue().
+      if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
       if (!parseValue()) return false;
       skip();
       if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
       if (cur() == ',') { advance(); continue; }
-      handler_->onError("Expected ',' or ']'");
       throw std::runtime_error("Expected ',' or ']'");
     }
   }
@@ -213,7 +220,7 @@ private:
     }
     std::string unescaped;
     try { unescaped = unescapeJsonString(raw, true); }
-    catch (const std::runtime_error&) { handler_->onError("Invalid escape in string"); throw std::runtime_error("Invalid escape in string"); }
+    catch (const std::runtime_error&) { throw std::runtime_error("Invalid escape in string"); }
     handler_->onStringValue(unescaped);
     return true;
   }
@@ -241,25 +248,21 @@ private:
     size_t intStart = pos_;
     while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') advance();
     size_t intLen = pos_ - intStart;
-    if (intLen == 0) { handler_->onError("Invalid number"); throw std::runtime_error("Invalid number"); }
-    if (intLen > 1 && input_[intStart] == '0') { handler_->onError("Leading zero"); throw std::runtime_error("Leading zero"); }
+    if (intLen == 0) throw std::runtime_error("Invalid number");
+    if (intLen > 1 && input_[intStart] == '0') throw std::runtime_error("Leading zero");
 
     bool isDouble = false;
     if (cur() == '.') {
       isDouble = true; advance();
-      if (pos_ >= input_.size() || input_[pos_] < '0' || input_[pos_] > '9') {
-        handler_->onError("Digit required after decimal point");
+      if (pos_ >= input_.size() || input_[pos_] < '0' || input_[pos_] > '9')
         throw std::runtime_error("Digit required after decimal point");
-      }
       while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') advance();
     }
     if (cur() == 'e' || cur() == 'E') {
       isDouble = true; advance();
       if (cur() == '+' || cur() == '-') advance();
-      if (pos_ >= input_.size() || input_[pos_] < '0' || input_[pos_] > '9') {
-        handler_->onError("Digit required after exponent");
+      if (pos_ >= input_.size() || input_[pos_] < '0' || input_[pos_] > '9')
         throw std::runtime_error("Digit required after exponent");
-      }
       while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') advance();
     }
 
@@ -268,20 +271,37 @@ private:
 
     if (isDouble) {
       double d = 0;
+      bool bad = true;
     #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
-      if (ec != std::errc() || ptr != buf + numLen) {
-    #endif
-        // Copy to local string for null-terminated strtod (input_ may be string_view)
-        std::string numStr(buf, numLen);
-        d = std::strtod(numStr.c_str(), nullptr);
-    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+      if (ec == std::errc() && ptr == buf + numLen) {
+        bad = false;
+      } else if (ec == std::errc() && ptr != buf + numLen) {
+        throw std::runtime_error("Invalid number");
+      } else {
+        // Overflow (e.g. 1e999): from_chars sets d to +/-inf. Honor allowNaNInfinity.
+        // Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected.
+        if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) bad = false;
+        else throw std::runtime_error("Invalid number: out of range");
+      }
+    #else
+      // Copy to local string for null-terminated strtod (input_ may be string_view)
+      std::string numStr(buf, numLen);
+      char* endptr;
+      errno = 0;
+      d = std::strtod(numStr.c_str(), &endptr);
+      if (errno == ERANGE) {
+        if (allowNaNInfinity && std::isinf(d)) { bad = false; }
+        else throw std::runtime_error("Invalid number: out of range");
+      } else if (endptr != numStr.c_str() + numLen) {
+        throw std::runtime_error("Invalid number");
+      } else {
+        bad = false;
       }
     #endif
-      if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) {
-        handler_->onError("NaN or Infinity not allowed");
+      if (!bad && !allowNaNInfinity && (std::isnan(d) || std::isinf(d)))
         throw std::runtime_error("NaN or Infinity not allowed");
-      }
+      if (bad) throw std::runtime_error("Invalid number: out of range");
       handler_->onDoubleValue(d);
     } else {
       long long l = 0;
@@ -302,51 +322,50 @@ private:
     if (cur() == 't') {
       const char exp[] = "true";
       for (int i = 0; i < 4; i++) {
-        if (cur() != exp[i]) { handler_->onError("Invalid boolean"); throw std::runtime_error("Invalid boolean"); }
+        if (cur() != exp[i]) throw std::runtime_error("Invalid boolean");
         advance();
       }
-      if (pos_ < input_.size() && isIdentChar(cur())) { handler_->onError("Invalid boolean"); throw std::runtime_error("Invalid boolean"); }
+      if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid boolean");
       handler_->onBoolValue(true);
       return true;
     }
     if (cur() == 'f') {
       const char exp[] = "false";
       for (int i = 0; i < 5; i++) {
-        if (cur() != exp[i]) { handler_->onError("Invalid boolean"); throw std::runtime_error("Invalid boolean"); }
+        if (cur() != exp[i]) throw std::runtime_error("Invalid boolean");
         advance();
       }
-      if (pos_ < input_.size() && isIdentChar(cur())) { handler_->onError("Invalid boolean"); throw std::runtime_error("Invalid boolean"); }
+      if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid boolean");
       handler_->onBoolValue(false);
       return true;
     }
-    handler_->onError("Expected boolean");
     throw std::runtime_error("Expected boolean");
   }
 
   bool parseNull() {
     const char exp[] = "null";
     for (int i = 0; i < 4; i++) {
-      if (cur() != exp[i]) { handler_->onError("Invalid null"); throw std::runtime_error("Invalid null"); }
+      if (cur() != exp[i]) throw std::runtime_error("Invalid null");
       advance();
     }
-    if (pos_ < input_.size() && isIdentChar(cur())) { handler_->onError("Invalid null"); throw std::runtime_error("Invalid null"); }
+    if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid null");
     handler_->onNullValue();
     return true;
   }
 
   bool parseNaN() {
-    if (input_.compare(pos_, 3, "NaN") != 0) { handler_->onError("Expected NaN"); throw std::runtime_error("Expected NaN"); }
+    if (input_.compare(pos_, 3, "NaN") != 0) throw std::runtime_error("Expected NaN");
     pos_ += 3;
-    if (pos_ < input_.size() && isIdentChar(cur())) { handler_->onError("Invalid NaN"); throw std::runtime_error("Invalid NaN"); }
+    if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid NaN");
     handler_->onDoubleValue(std::numeric_limits<double>::quiet_NaN());
     return true;
   }
 
   bool parseInfinity(bool negative) {
     if (negative) advance(); // skip '-'
-    if (input_.compare(pos_, 8, "Infinity") != 0) { handler_->onError("Expected Infinity"); throw std::runtime_error("Expected Infinity"); }
+    if (input_.compare(pos_, 8, "Infinity") != 0) throw std::runtime_error("Expected Infinity");
     pos_ += 8;
-    if (pos_ < input_.size() && isIdentChar(cur())) { handler_->onError("Invalid Infinity"); throw std::runtime_error("Invalid Infinity"); }
+    if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid Infinity");
     double val = std::numeric_limits<double>::infinity();
     if (negative) val = -val;
     handler_->onDoubleValue(val);
@@ -365,6 +384,7 @@ class JsonStreamParser {
 public:
   bool allowNaNInfinity = false;
   bool allowComments = true;
+  bool validateUTF8 = false;
 
   explicit JsonStreamParser(JsonSaxHandler& handler)
     : handler_(handler) {}
@@ -375,6 +395,41 @@ public:
     if (done_) { lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false; }
     buffer_.append(chunk.data(), chunk.size());
     needMore_ = false; // new data may resolve a paused token
+
+    // Strip a leading UTF-8 BOM (possibly split across chunk boundaries).
+    if (bomPending_) {
+      static const unsigned char BOM[3] = { 0xEF, 0xBB, 0xBF };
+      size_t n = 0;
+      while (n < 3 && n < buffer_.size() && static_cast<unsigned char>(buffer_[n]) == BOM[n]) n++;
+      if (n == 3) {
+        buffer_.erase(0, 3);
+        utf8ScanPos_ = (utf8ScanPos_ > 3) ? utf8ScanPos_ - 3 : 0;
+        bomPending_ = false;
+      } else if (n == buffer_.size() && n < 3) {
+        return true; // partial BOM prefix; wait for more bytes
+      } else {
+        bomPending_ = false; // not a BOM after all
+      }
+    }
+
+    // Incremental structural UTF-8 validation over the newly appended region.
+    if (validateUTF8) {
+      for (size_t i = utf8ScanPos_; i < buffer_.size(); i++) {
+        uint8_t b = static_cast<uint8_t>(buffer_[i]);
+        if (utf8Need_ == 0) {
+          if (b < 0x80) continue;
+          if ((b & 0xE0) == 0xC0) utf8Need_ = 1;
+          else if ((b & 0xF0) == 0xE0) utf8Need_ = 2;
+          else if ((b & 0xF8) == 0xF0) utf8Need_ = 3;
+          else { setError("Invalid UTF-8 in input"); return false; }
+        } else {
+          if ((b & 0xC0) != 0x80) { setError("Invalid UTF-8 in input"); return false; }
+          utf8Need_--;
+        }
+      }
+      utf8ScanPos_ = buffer_.size();
+    }
+
     return process();
   }
 
@@ -391,9 +446,8 @@ public:
       case State::STR_KEY:
         lastError_ = "Unterminated string"; error_ = true; handler_.onError(lastError_); return false;
       case State::NUM:
-        // Emit the pending number
         if (!emitPendingNumber()) return false;
-        afterValue();
+        if (!afterValue()) return false;
         break;
       case State::LIT_TRUE:
       case State::LIT_FALSE:
@@ -402,20 +456,35 @@ public:
         // no further input, so the token is invalid.
         lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false;
       case State::LINE_COMMENT:
-        // Comment consumed to end of input -- OK
-        state_ = State::TOP;
+        // Resume the state the comment interrupted (e.g. waiting for a value)
+        // so incomplete input such as `{"a": //` is still detected.
+        state_ = commentRetState_;
         break;
       case State::BLOCK_COMMENT:
         lastError_ = "Unterminated block comment"; error_ = true; handler_.onError(lastError_); return false;
       default:
-        if (state_ == State::TOP && depth_ == 0 && !hadValue_) {
-          // Empty input is OK only if nothing was parsed
-          if (buffer_.empty() || (pos_ >= buffer_.size() && tokenBuffer_.empty())) break;
-        }
-        if (depth_ > 0 || state_ != State::TOP) {
-          lastError_ = "Incomplete input"; error_ = true; handler_.onError(lastError_); return false;
-        }
         break;
+    }
+
+    // A value completed during the pend-stage above (e.g. a number flushed at
+    // EOF) transitions straight into the done state.
+    if (state_ == State::DONE) {
+      done_ = true;
+      return true;
+    }
+
+    if (validateUTF8 && utf8Need_ != 0) {
+      // A multibyte sequence was cut off at end of input.
+      lastError_ = "Invalid UTF-8 in input"; error_ = true; handler_.onError(lastError_); return false;
+    }
+
+    if (depth_ > 0 || state_ != State::TOP) {
+      // Empty input is the only content-less TOP allowed; a trailing line
+      // comment that was not followed by a newline is harmless.
+      if (!(state_ == State::TOP && depth_ == 0 && !hadValue_ &&
+            (buffer_.empty() || (pos_ >= buffer_.size() && tokenBuffer_.empty())))) {
+        lastError_ = "Incomplete input"; error_ = true; handler_.onError(lastError_); return false;
+      }
     }
     state_ = State::DONE;
     return true;
@@ -456,10 +525,24 @@ private:
   bool strEscape_ = false;  // last string char captured was a backslash awaiting its escaped target
   size_t litIdx_ = 0;       // number of literal chars validated so far (LIT_* states)
   bool needMore_ = false;   // true when processing paused without consuming (awaiting more input)
+  bool bomPending_ = true;  // leading bytes might be a UTF-8 BOM
+  int utf8Need_ = 0;        // remaining continuation bytes of an in-flight UTF-8 sequence
+  size_t utf8ScanPos_ = 0;  // end of the buffer region already UTF-8 validated
 
-  // Container stack for tracking context
+  // Container stack for tracking context; each frame also tracks whether a
+  // value/key has been produced since the last separator and how many members
+  // the container holds (for the MAX_ARRAY_SIZE / MAX_OBJECT_SIZE limits).
   enum class Container { OBJ, ARR };
-  std::vector<Container> containerStack_;
+  struct Frame {
+    Container kind;
+    size_t count = 0;
+    bool hasVal = false;
+  };
+  std::vector<Frame> containerStack_;
+
+  // State to resume once a comment ends. Set before entering a comment so that
+  // e.g. `{"a": /*c*/ 1}` resumes value parsing instead of assuming a key.
+  State commentRetState_ = State::TOP;
 
   void setError(const std::string& msg) {
     lastError_ = msg; error_ = true; handler_.onError(lastError_);
@@ -471,13 +554,50 @@ private:
     return allowComments && pos_ < buffer_.size() && buffer_[pos_] == '/' && pos_ + 1 >= buffer_.size();
   }
 
+  static bool isIdentChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+  }
+
+  static bool isValueStart(char c) {
+    return c == '"' || c == '{' || c == '[' || c == 't' || c == 'f' || c == 'n' ||
+           c == '-' || (c >= '0' && c <= '9') || c == 'N' || c == 'I';
+  }
+
+  // Strict JSON number grammar: [-] int [. frac] [(e|E)[+|-] digits]. Rejects
+  // leading zeros, a missing fractional/exponent digit and other non-JSON
+  // accumulations the permissive scan could otherwise swallow.
+  static bool validJsonNumber(const char* b, size_t n) {
+    size_t i = 0;
+    if (i < n && b[i] == '-') i++;
+    if (i >= n) return false;
+    if (b[i] == '0') i++;
+    else if (b[i] >= '1' && b[i] <= '9') { while (i < n && b[i] >= '0' && b[i] <= '9') i++; }
+    else return false;
+    if (i < n && b[i] == '.') {
+      i++;
+      if (i >= n || b[i] < '0' || b[i] > '9') return false;
+      while (i < n && b[i] >= '0' && b[i] <= '9') i++;
+    }
+    if (i < n && (b[i] == 'e' || b[i] == 'E')) {
+      i++;
+      if (i < n && (b[i] == '+' || b[i] == '-')) i++;
+      if (i >= n || b[i] < '0' || b[i] > '9') return false;
+      while (i < n && b[i] >= '0' && b[i] <= '9') i++;
+    }
+    return i == n;
+  }
+
   // Compact buffer when it grows large and we're at a safe point
   void compact() {
     if (pos_ > 0 && pos_ <= buffer_.size() &&
         state_ != State::STR_VALUE && state_ != State::STR_KEY && state_ != State::NUM &&
         state_ != State::LIT_TRUE && state_ != State::LIT_FALSE && state_ != State::LIT_NULL) {
-      buffer_.erase(0, pos_);
+      size_t consumed = pos_;
+      buffer_.erase(0, consumed);
       pos_ = 0;
+      // Bytes [0, consumed) were already UTF-8 validated and are now gone; keep
+      // the scan pointer aligned with the remaining (already validated) region.
+      utf8ScanPos_ = (utf8ScanPos_ >= consumed) ? utf8ScanPos_ - consumed : 0;
     }
   }
 
@@ -526,16 +646,19 @@ private:
       char ch = buffer_[pos_];
       if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') { pos_++; continue; }
       if (allowComments && ch == '/' && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == '/') {
+        commentRetState_ = state_;
         pos_ += 2;
         state_ = State::LINE_COMMENT;
         return;
       }
       if (allowComments && ch == '/' && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == '*') {
+        commentRetState_ = state_;
         pos_ += 2;
         state_ = State::BLOCK_COMMENT;
         return;
       }
       if (allowComments && ch == '#') {
+        commentRetState_ = state_;
         pos_++;
         state_ = State::LINE_COMMENT;
         return;
@@ -549,95 +672,137 @@ private:
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true; // need more data
     if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
+    if (validateUTF8 && utf8Need_ != 0) { needMore_ = true; return true; } // truncated multibyte at the tail
 
     char c = buffer_[pos_];
-    if (c == ',' && state_ == State::ARR_VALUE) { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pendingComment() || pos_ >= buffer_.size()) { if (pendingComment()) needMore_ = true; return true; } c = buffer_[pos_]; }
+
+    // Enforce array separators: an element must be preceded by ',' or ']', and
+    // a ',' must be preceded by an element. A trailing comma before ']' is
+    // accepted (DOM parity); a leading or duplicate comma is rejected.
+    if (state_ == State::ARR_VALUE && !containerStack_.empty() &&
+        containerStack_.back().kind == Container::ARR) {
+      if (c == ',') {
+        if (!containerStack_.back().hasVal) { setError("Unexpected ','"); return false; }
+        advance();
+        containerStack_.back().hasVal = false;
+        return true;
+      }
+      if (c != ']' && isValueStart(c) && containerStack_.back().hasVal) {
+        setError("Expected ',' or ']'");
+        return false;
+      }
+    }
+
+    // A value is mandatory after ':'; a closing bracket there means the value
+    // is missing (the DOM parser rejects this too).
+    if (state_ == State::OBJ_VALUE) {
+      if (c == '}' || c == ']') { setError("Value expected after ':'"); return false; }
+    }
+
     if (c == '{') {
       if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
       depth_++;
-      containerStack_.push_back(Container::OBJ);
+      containerStack_.push_back({Container::OBJ, 0, false});
       handler_.onStartObject();
       advance();
       state_ = State::OBJ_KEY;
       return true;
     }
     if (c == '}') {
-      if (containerStack_.empty() || containerStack_.back() != Container::OBJ) { setError("Unexpected '}'"); return false; }
+      if (containerStack_.empty() || containerStack_.back().kind != Container::OBJ) { setError("Unexpected '}'"); return false; }
       containerStack_.pop_back();
       depth_--;
       handler_.onEndObject();
       advance();
-      afterValue();
-      return true;
+      return afterValue();
     }
     if (c == '[') {
       if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
       depth_++;
-      containerStack_.push_back(Container::ARR);
+      containerStack_.push_back({Container::ARR, 0, false});
       handler_.onStartArray();
       advance();
       state_ = State::ARR_VALUE;
       return true;
     }
     if (c == ']') {
-      if (containerStack_.empty() || containerStack_.back() != Container::ARR) { setError("Unexpected ']'"); return false; }
+      if (containerStack_.empty() || containerStack_.back().kind != Container::ARR) { setError("Unexpected ']'"); return false; }
       containerStack_.pop_back();
       depth_--;
       handler_.onEndArray();
       advance();
-      afterValue();
-      return true;
+      return afterValue();
     }
     if (c == '"') {
       tokenBuffer_.clear();
       tokenStart_ = pos_ + 1; // past opening quote
       advance();
-      if (!containerStack_.empty() && containerStack_.back() == Container::OBJ && state_ == State::OBJ_VALUE) {
-        // This shouldn't happen -- OBJ_VALUE should go through the colon path
-        // But if we're in ARR_VALUE or TOP with a string, it's a value
-      }
-      // Determine if this is a key (next state should be OBJ_COLON if in OBJ context)
-      state_ = (state_ == State::OBJ_VALUE) ? State::STR_VALUE : State::STR_VALUE;
-      // Actually: if we're at top-level or in array or after colon in object, it's a value
       state_ = State::STR_VALUE;
       return processString();
     }
     if (c == 't') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_TRUE; advance(); return processLiteral(); }
     if (c == 'f') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_FALSE; advance(); return processLiteral(); }
     if (c == 'n') { tokenBuffer_.clear(); tokenStart_ = pos_; litIdx_ = 0; state_ = State::LIT_NULL; advance(); return processLiteral(); }
+
+    // NaN/Infinity may be split across chunks; only match when the whole token
+    // is present, otherwise wait for more input. Ident-char continuation
+    // (NaN5, Infinityx) is rejected.
     if (allowNaNInfinity && c == 'N') {
       if (buffer_.compare(pos_, 3, "NaN") == 0) {
         pos_ += 3;
+        if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) { setError("Invalid NaN literal"); return false; }
         handler_.onDoubleValue(std::numeric_limits<double>::quiet_NaN());
-        afterValue();
-        return true;
+        return afterValue();
       }
+      if (buffer_.size() - pos_ < 3) { needMore_ = true; return true; }
+      setError("Invalid NaN literal");
+      return false;
     }
     if (allowNaNInfinity && c == 'I') {
       if (buffer_.compare(pos_, 8, "Infinity") == 0) {
         pos_ += 8;
+        if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) { setError("Invalid Infinity literal"); return false; }
         handler_.onDoubleValue(std::numeric_limits<double>::infinity());
-        afterValue();
+        return afterValue();
+      }
+      if (buffer_.size() - pos_ < 8) { needMore_ = true; return true; }
+      setError("Invalid Infinity literal");
+      return false;
+    }
+    if (c == '-') {
+      if (allowNaNInfinity && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == 'I') {
+        if (buffer_.compare(pos_ + 1, 8, "Infinity") == 0) {
+          pos_ += 9;
+          if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) { setError("Invalid -Infinity literal"); return false; }
+          handler_.onDoubleValue(-std::numeric_limits<double>::infinity());
+          return afterValue();
+        }
+        if (buffer_.size() - pos_ < 9) { needMore_ = true; return true; }
+        setError("Invalid -Infinity literal");
+        return false;
+      }
+      if (allowNaNInfinity && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == 'N') {
+        if (buffer_.compare(pos_ + 1, 3, "NaN") == 0) {
+          pos_ += 4;
+          if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) { setError("Invalid -NaN literal"); return false; }
+          handler_.onDoubleValue(std::numeric_limits<double>::quiet_NaN());
+          return afterValue();
+        }
+        if (buffer_.size() - pos_ < 4) { needMore_ = true; return true; }
+        setError("Invalid -NaN literal");
+        return false;
+      }
+      if (allowNaNInfinity && pos_ + 1 >= buffer_.size()) {
+        // A lone '-' at the end of the buffer may be the start of '-Infinity'.
+        needMore_ = true;
         return true;
       }
+      tokenBuffer_.clear();
+      tokenStart_ = pos_;
+      state_ = State::NUM;
+      return processNumber();
     }
-    if (allowNaNInfinity && c == '-' && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == 'I') {
-      if (buffer_.compare(pos_ + 1, 8, "Infinity") == 0) {
-        pos_ += 9;
-        handler_.onDoubleValue(-std::numeric_limits<double>::infinity());
-        afterValue();
-        return true;
-      }
-    }
-    if (allowNaNInfinity && c == '-' && pos_ + 1 < buffer_.size() && buffer_[pos_ + 1] == 'N') {
-      if (buffer_.compare(pos_ + 1, 3, "NaN") == 0) {
-        pos_ += 4;
-        handler_.onDoubleValue(std::numeric_limits<double>::quiet_NaN());
-        afterValue();
-        return true;
-      }
-    }
-    if (c == '-' || (c >= '0' && c <= '9')) {
+    if (c >= '0' && c <= '9') {
       tokenBuffer_.clear();
       tokenStart_ = pos_;
       state_ = State::NUM;
@@ -652,17 +817,26 @@ private:
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true;
     if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
+    if (validateUTF8 && utf8Need_ != 0) { needMore_ = true; return true; } // truncated multibyte at the tail
     char c = buffer_[pos_];
-    if (c == ',') { advance(); skipWsAndComments(); if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT || pendingComment() || pos_ >= buffer_.size()) { if (pendingComment()) needMore_ = true; return true; } c = buffer_[pos_]; }
+    Frame& f = containerStack_.back(); // an OBJ frame is always on top here
     if (c == '}') {
       containerStack_.pop_back();
       depth_--;
       handler_.onEndObject();
       advance();
-      afterValue();
+      return afterValue();
+    }
+    if (c == ',') {
+      // Trailing comma is accepted (a key may follow it or '}' closes the
+      // object); a leading or duplicate comma is rejected.
+      if (!f.hasVal) { setError("Unexpected ','"); return false; }
+      advance();
+      f.hasVal = false;
       return true;
     }
     if (c == '"') {
+      if (f.hasVal) { setError("Expected ',' or '}'"); return false; }
       tokenBuffer_.clear();
       tokenStart_ = pos_ + 1;
       advance();
@@ -678,6 +852,7 @@ private:
     if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
     if (pos_ >= buffer_.size()) return true;
     if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a second '/' or '*'; need more data
+    if (validateUTF8 && utf8Need_ != 0) { needMore_ = true; return true; } // truncated multibyte at the tail
     if (buffer_[pos_] == ':') {
       advance();
       state_ = State::OBJ_VALUE;
@@ -705,7 +880,20 @@ private:
         advance(); // past closing quote
 
         if (state_ == State::STR_KEY) {
-          handler_.onKey(raw);
+          if (raw.size() > asvJSONValue::MAX_STRING_LEN) {
+            setError("String too long");
+            return false;
+          }
+          std::string key;
+          try { key = unescapeJsonString(raw, true); }
+          catch (...) { setError("Invalid escape in key"); return false; }
+          Frame& f = containerStack_.back();
+          if (++f.count > asvJSONValue::MAX_OBJECT_SIZE) {
+            setError("Object too large");
+            return false;
+          }
+          f.hasVal = true;
+          handler_.onKey(key);
           state_ = State::OBJ_COLON;
         } else {
           // DateTime heuristic
@@ -718,6 +906,10 @@ private:
             }
           }
           if (!emitted) {
+            if (raw.size() > asvJSONValue::MAX_STRING_LEN) {
+              setError("String too long");
+              return false;
+            }
             try {
               std::string unescaped = unescapeJsonString(raw, true);
               handler_.onStringValue(unescaped);
@@ -726,7 +918,7 @@ private:
               return false;
             }
           }
-          afterValue();
+          return afterValue();
         }
         tokenBuffer_.clear();
         return true;
@@ -753,6 +945,10 @@ private:
     tokenBuffer_.append(buffer_, tokenStart_, buffer_.size() - tokenStart_);
     tokenStart_ = buffer_.size();
     pos_ = buffer_.size();
+    if (tokenBuffer_.size() > asvJSONValue::MAX_STRING_LEN) {
+      setError("String too long");
+      return false;
+    }
     return true; // need more data
   }
 
@@ -784,42 +980,65 @@ private:
       numStr.assign(buffer_, tokenStart_, pos_ - tokenStart_);
     }
 
+    const char* buf = numStr.data();
+    size_t len = numStr.size();
+
+    // The permissive scan may have accumulated non-JSON garbage (leading zeros,
+    // missing exponent digits, embedded signs); enforce the strict grammar.
+    if (!validJsonNumber(buf, len)) {
+      setError("Invalid number");
+      return false;
+    }
+
     bool isDouble = false;
     for (char c : numStr) {
       if (c == '.' || c == 'e' || c == 'E') { isDouble = true; break; }
     }
 
-    const char* buf = numStr.data();
-    size_t len = numStr.size();
-
     if (isDouble) {
       double d = 0;
     #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
       auto [ptr, ec] = std::from_chars(buf, buf + len, d);
-      if (ec != std::errc() || ptr != buf + len) {
-    #endif
+      if (ec == std::errc() && ptr == buf + len) {
+        // ok
+      } else if (ec == std::errc() && ptr != buf + len) {
+        // A grammatically valid number the formatter did not fully consume:
+        // fall back to strtod.
+        errno = 0;
         d = std::strtod(numStr.c_str(), nullptr);
-    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+        if (errno == ERANGE) { setError("Invalid number: out of range"); return false; }
+      } else if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) {
+        // Overflow honoring allowNaNInfinity, matching the DOM parser.
+      } else {
+        setError("Invalid number: out of range");
+        return false;
+      }
+    #else
+      errno = 0;
+      d = std::strtod(numStr.c_str(), nullptr);
+      if (errno == ERANGE) {
+        if (!(allowNaNInfinity && std::isinf(d))) { setError("Invalid number: out of range"); return false; }
       }
     #endif
       if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) {
         setError("NaN or Infinity not allowed");
         return false;
       }
+      tokenBuffer_.clear();
       handler_.onDoubleValue(d);
     } else {
       long long l = 0;
       auto [ptr, ec] = std::from_chars(buf, buf + len, l);
       if (ec != std::errc() || ptr != buf + len) {
+        tokenBuffer_.clear();
         double d = std::strtod(numStr.c_str(), nullptr);
         handler_.onDoubleValue(d);
       } else {
+        tokenBuffer_.clear();
         handler_.onIntegerValue(l);
       }
     }
-    tokenBuffer_.clear();
-    afterValue();
-    return true;
+    return afterValue();
   }
 
   bool processLiteral() {
@@ -839,20 +1058,14 @@ private:
     if (state_ == State::LIT_TRUE) handler_.onBoolValue(true);
     else if (state_ == State::LIT_FALSE) handler_.onBoolValue(false);
     else handler_.onNullValue();
-    afterValue();
-    return true;
+    return afterValue();
   }
 
   bool processLineComment() {
     while (pos_ < buffer_.size()) {
       if (buffer_[pos_] == '\n') {
         pos_++;
-        state_ = State::TOP; // Return to whatever state we were in
-        // Determine correct state from container stack
-        if (!containerStack_.empty()) {
-          if (containerStack_.back() == Container::OBJ) state_ = State::OBJ_KEY;
-          else state_ = State::ARR_VALUE;
-        }
+        state_ = commentRetState_;
         return true;
       }
       pos_++;
@@ -864,11 +1077,7 @@ private:
     while (pos_ + 1 < buffer_.size()) {
       if (buffer_[pos_] == '*' && buffer_[pos_ + 1] == '/') {
         pos_ += 2;
-        state_ = State::TOP;
-        if (!containerStack_.empty()) {
-          if (containerStack_.back() == Container::OBJ) state_ = State::OBJ_KEY;
-          else state_ = State::ARR_VALUE;
-        }
+        state_ = commentRetState_;
         return true;
       }
       pos_++;
@@ -880,19 +1089,25 @@ private:
   void advance() { pos_++; }
 
   // Called after a value is emitted (top-level, in object after colon, or in array)
-  void afterValue() {
+  bool afterValue() {
     hadValue_ = true;
     if (containerStack_.empty()) {
       state_ = State::DONE;
       done_ = true;
-      return;
+      return true;
     }
-    Container top = containerStack_.back();
-    if (top == Container::OBJ) {
-      state_ = State::OBJ_KEY; // after value in object, expect , or }
-    } else {
+    Frame& f = containerStack_.back();
+    f.hasVal = true;
+    if (f.kind == Container::ARR) {
+      if (++f.count > asvJSONValue::MAX_ARRAY_SIZE) {
+        setError("Array too large");
+        return false;
+      }
       state_ = State::ARR_VALUE; // after value in array, expect , or ]
+    } else {
+      state_ = State::OBJ_KEY; // after value in object, expect , or }
     }
+    return true;
   }
 };
 

@@ -12324,6 +12324,323 @@ TEST(testJsonStream) {
 	}
 }
 
+TEST(testJsonSaxStrict) {
+	// Malformed non-JSON that used to be silently accepted must now fail, in
+	// parity with the DOM parser.
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonSaxParser p;
+		ASSERT(!p.parse("[1,2,}", h)); // trailing garbage
+		ASSERT(errored);
+	}
+	{
+		JsonSaxHandler h;
+		JsonSaxParser p;
+		// Trailing commas are accepted (DOM parity); leading/double commas and
+		// missing values are not.
+		ASSERT(p.parse("[1,]", h));
+		ASSERT(p.parse("{\"a\":1,}", h));
+		ASSERT(p.parse("[1,2]", h));
+	}
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonSaxParser p;
+		ASSERT(!p.parse("[,]", h));
+		ASSERT(!p.parse("[1 2]", h));
+		ASSERT(!p.parse("{\"a\":}", h));
+		ASSERT(!p.parse("{\"a\":1\"b\":2}", h));
+		ASSERT(!p.parse("[01]", h));
+		ASSERT(!p.parse("[1+2]", h));
+		ASSERT(!p.parse("[1e+]", h));
+	}
+	// onError is delivered exactly once per failure.
+	{
+		int errors = 0;
+		struct : JsonSaxHandler {
+			int* n;
+			void onError(std::string_view) override { (*n)++; }
+		} h;
+		h.n = &errors;
+		JsonSaxParser p;
+		ASSERT(!p.parse("abc", h));
+		ASSERT_EQ(errors, 1);
+	}
+	// A phantom NaN continuation is rejected: single-pass previously accepted
+	// `parseSax("abc")` style garbage via strtod fallbacks only.
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonSaxParser p;
+		ASSERT(!p.parse("1e999", h));
+		ASSERT(errored);
+	}
+	// validateUTF8 on the single-pass parser mirrors the DOM parser.
+	{
+		JsonSaxHandler h;
+		JsonSaxParser p;
+		std::string bad;
+		bad += '"'; bad += static_cast<char>(0xFF); bad += '"';
+		ASSERT(p.parse(bad, h)); // off: bytes flow through as string content
+		p.validateUTF8 = true;
+		ASSERT(!p.parse(bad, h));
+	}
+}
+
+TEST(testJsonStreamStrict) {
+	// Malformed input that used to be silently accepted must now fail, in
+	// parity with the DOM parser.
+	{
+		JsonSaxHandler hh;
+		// Missing separators / values / invalid numbers are rejected.
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed(R"({"a": })"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[1 2]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed(R"({"a":1"b":2})"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[01]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[1+2]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[1e+]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[-]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[,]"));
+		}
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("{,}"));
+		}
+		// Double comma in the middle is rejected.
+		{
+			JsonStreamParser sp(hh);
+			ASSERT(!sp.feed("[1,,2]"));
+		}
+		// Trailing commas are accepted (DOM parity).
+		{ // [1,]
+			JsonStreamParser sp(hh);
+			ASSERT(sp.feed(std::string("[1,]")));
+			ASSERT(sp.finish());
+		}
+		{ // {"a":1,}
+			JsonStreamParser sp(hh);
+			ASSERT(sp.feed(std::string("{\"a\":1,}")));
+			ASSERT(sp.finish());
+		}
+		{ // {"a":1, + }
+			JsonStreamParser sp(hh);
+			ASSERT(sp.feed(std::string("{\"a\":1,")));
+			ASSERT(sp.feed("}"));
+			ASSERT(sp.finish());
+		}
+	}
+	// Escaped keys are unescaped, matching the single-pass parser and the DOM.
+	{
+		std::string key;
+		struct : JsonSaxHandler {
+			std::string* k;
+			void onKey(std::string_view kk) override { *k = std::string(kk); }
+		} h;
+		h.k = &key;
+		JsonStreamParser sp(h);
+		std::string input = R"({"a\u0041":1})";
+		for (char c : input) ASSERT(sp.feed(std::string_view(&c, 1)));
+		ASSERT(sp.finish());
+		ASSERT_EQ(key, "aA");
+	}
+	// NaN/Infinity literals split across chunk boundaries.
+	{
+		bool nan = false;
+		int ev = 0;
+		struct : JsonSaxHandler {
+			bool* n; int* e;
+			void onDoubleValue(double d) override { (*e)++; if (std::isnan(d)) *n = true; }
+		} h;
+		h.n = &nan; h.e = &ev;
+		JsonStreamParser sp(h);
+		sp.allowNaNInfinity = true;
+		const char* t = "[NaN]";
+		for (size_t i = 0; i < 5; i++) ASSERT(sp.feed(std::string_view(&t[i], 1)));
+		ASSERT(sp.finish());
+		ASSERT(nan);
+	}
+	{
+		bool inf = false, ninf = false;
+		int ev = 0;
+		struct : JsonSaxHandler {
+			bool* p; bool* m; int* e;
+			void onDoubleValue(double d) override { (*e)++; if (std::isinf(d)) { if (d < 0) *m = true; else *p = true; } }
+		} h;
+		h.p = &inf; h.m = &ninf; h.e = &ev;
+		JsonStreamParser sp(h);
+		sp.allowNaNInfinity = true;
+		const std::string t = "[Infinity,-Infinity]";
+		for (size_t i = 0; i < t.size(); i++) ASSERT(sp.feed(std::string_view(&t[i], 1)));
+		ASSERT(sp.finish());
+		ASSERT(inf); ASSERT(ninf);
+	}
+	// A lone `-` at the end of a chunk can start `-Infinity` in the next one.
+	{
+		bool ninf = false;
+		struct : JsonSaxHandler {
+			bool* n;
+			void onDoubleValue(double d) override { if (std::isinf(d) && d < 0) *n = true; }
+		} h;
+		h.n = &ninf;
+		JsonStreamParser sp(h);
+		sp.allowNaNInfinity = true;
+		ASSERT(sp.feed("[-"));
+		ASSERT(sp.feed("Infinity]"));
+		ASSERT(sp.finish());
+		ASSERT(ninf);
+	}
+	// Comment after ':' must resume value parsing.
+	{
+		int64_t val = 0;
+		struct : JsonSaxHandler {
+			int64_t* v;
+			void onIntegerValue(int64_t i) override { *v = i; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(R"({"a": // c
+1})"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, 1);
+	}
+	{
+		int64_t val = 0;
+		struct : JsonSaxHandler {
+			int64_t* v;
+			void onIntegerValue(int64_t i) override { *v = i; }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed(R"({"a":/*x*/2})"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, 2);
+	}
+	// JSON5-style /* */ comments resume correctly.
+	{
+		JsonSaxHandler hh;
+		JsonStreamParser sp(hh);
+		ASSERT(sp.feed("[1, /* x */ 2]"));
+		ASSERT(sp.finish());
+	}
+	// validateUTF8 with a multibyte char split across chunks.
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		sp.validateUTF8 = true;
+		ASSERT(sp.feed("[\""));
+		ASSERT(sp.feed("\xC2\xA9")); // U+00A9 split
+		ASSERT(sp.feed("\"]"));
+		ASSERT(sp.finish());
+		ASSERT(val == "\xC2\xA9");
+	}
+	// validateUTF8 rejects invalid bytes and truncated tails.
+	{
+		struct : JsonSaxHandler {} h;
+		JsonStreamParser sp(h);
+		sp.validateUTF8 = true;
+		ASSERT(!sp.feed("[\"\xFF\"]"));
+	}
+	{
+		struct : JsonSaxHandler {} h;
+		JsonStreamParser sp(h);
+		sp.validateUTF8 = true;
+		ASSERT(sp.feed("[1,\xC2"));
+		ASSERT(!sp.finish()); // truncated 2-byte sequence at EOF
+	}
+	// A UTF-8 BOM is stripped from the stream.
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("\xEF\xBB\xBF\"x\""));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, "x");
+	}
+	{
+		std::string val;
+		struct : JsonSaxHandler {
+			std::string* v;
+			void onStringValue(std::string_view s) override { *v = std::string(s); }
+		} h;
+		h.v = &val;
+		JsonStreamParser sp(h);
+		ASSERT(sp.feed("\xEF"));
+		ASSERT(sp.feed("\xBB\xBF\"y\""));
+		ASSERT(sp.finish());
+		ASSERT_EQ(val, "y");
+	}
+	// Per-value size limits are enforced (previously a bypass in JsonSaxToDom).
+	{
+		struct : JsonSaxHandler {} h;
+		JsonStreamParser sp(h);
+		std::string big = "\"";
+		big.append(asvJSONValue::MAX_STRING_LEN + 1, 'a');
+		big += '"';
+		ASSERT(!sp.feed(big));
+	}
+	{
+		struct : JsonSaxHandler {} h;
+		JsonStreamParser sp(h);
+		std::string arr = "[";
+		for (size_t i = 0; i < asvJSONValue::MAX_ARRAY_SIZE; i++) arr += "0,";
+		arr += "0]";
+		ASSERT(!sp.feed(arr)); // MAX_ARRAY_SIZE exceeded
+	}
+	{
+		struct : JsonSaxHandler {} h;
+		JsonStreamParser sp(h);
+		std::string obj = "{\"a\":0";
+		for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE; i++) obj += ",\"a\":0";
+		obj += "}";
+		ASSERT(!sp.feed(obj)); // MAX_OBJECT_SIZE exceeded (key events are counted)
+	}
+}
+
 TEST(testSaxToDom) {
 	// -- basic object --
 	{
@@ -14176,6 +14493,8 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);
 	RUN(testJsonStream);
+	RUN(testJsonSaxStrict);
+	RUN(testJsonStreamStrict);
 	RUN(testSaxToDom);
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
