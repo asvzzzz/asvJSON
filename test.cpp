@@ -10726,6 +10726,94 @@ TEST(testUDERoundTrip) {
   }
 }
 
+TEST(testUDERoundTripSpecialTypes) {
+  // DateTime round-trip
+  {
+    asvJSON j;
+    j.putDateTime("dt", 1693824000); // 2023-09-04 10:40:00 UTC
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT(j2.get("dt") != nullptr && j2.get("dt")->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(j2.getDateTime("dt"), 1693824000);
+  }
+  // Binary round-trip
+  {
+    asvJSON j;
+    uint8_t data[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    j.putBinary("blob", data, 4);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    auto* b = j2.get("blob");
+    ASSERT(b != nullptr && b->type == asvJSONValue::BINARY);
+    ASSERT_EQ(b->bin_data.size(), size_t(4));
+    ASSERT_EQ(b->bin_data[0], uint8_t(0xDE));
+    ASSERT_EQ(b->bin_data[3], uint8_t(0xEF));
+  }
+  // ObjectId round-trip (24-char hex <-> 12 raw bytes)
+  {
+    asvJSON j;
+    char oid[] = {char(0x50), char(0x7f), char(0x1f), char(0x77), char(0xbc), char(0xf8), char(0x6c), char(0x79), char(0x94), char(0x39), char(0x12), char(0x34)};
+    j.putObjectId("oid", std::string_view(oid, sizeof(oid)));
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("!objectid 507f1f77bcf86c7994391234") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    auto* o = j2.get("oid");
+    ASSERT(o != nullptr && o->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(o->str_data.size(), size_t(12));
+    ASSERT_EQ(std::string_view(j2.getObjectIdView("oid")).size(), size_t(12));
+  }
+  // Regex round-trip (pattern and options)
+  {
+    asvJSON j;
+    j.putRegex("re", "^[a-z]+$", "im");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    auto* r = j2.get("re");
+    ASSERT(r != nullptr && r->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "^[a-z]+$");
+    ASSERT_EQ(j2.getRegexOptions("re"), "im");
+  }
+  // Regex round-trip: pattern containing a literal '|' (split on the last '|')
+  {
+    asvJSON j;
+    j.putRegex("re2", "a|b", "im");
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(j2.getRegexPattern("re2"), "a|b");
+    ASSERT_EQ(j2.getRegexOptions("re2"), "im");
+  }
+  // Timestamp round-trip (64-bit int)
+  {
+    asvJSON j;
+    j.putTimestamp("ts", 1234567890123456789LL);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    auto* t = j2.get("ts");
+    ASSERT(t != nullptr && t->type == asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(j2.getTimestamp("ts"), 1234567890123456789LL);
+  }
+  // Extension round-trip (type:base64)
+  {
+    asvJSON j;
+    uint8_t data[] = {0x12, 0x34, 0xAB, 0xCD};
+    j.putExtension("csv_data", 127, data, 4);
+    std::string ude = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    auto e = j2.getExtension("csv_data");
+    ASSERT_EQ(e.first, int8_t(127));
+    ASSERT_EQ(e.second.size(), size_t(4));
+    ASSERT_EQ(e.second[0], uint8_t(0x12));
+    ASSERT_EQ(e.second[3], uint8_t(0xCD));
+  }
+}
+
 TEST(testUDEBlockScalarChomp) {
   // Default chomping (clip) keeps exactly one trailing newline
   {
@@ -14067,6 +14155,7 @@ RUN(testCBORFloat16);
 	RUN(testUDECustomTags);
 	RUN(testUDEEncoding);
 	RUN(testUDERoundTrip);
+	RUN(testUDERoundTripSpecialTypes);
 	RUN(testUDEBlockScalarChomp);
 	RUN(testUDESpecConformance);
 	RUN(testUDEStrict);

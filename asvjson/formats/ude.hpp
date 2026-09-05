@@ -13,7 +13,8 @@
 //   - Strings: double-quoted with JSON escapes + \xHH/\uXXXX/\UXXXXXXXX/\u{...}
 //     and line continuation; single-quoted (literal, '' escape); multiline
 //   - Anchors (&name) and aliases (*name) with cycle detection
-//   - Tags: !base64, !bin, !datetime, !ext, !regex; unknown tags preserve value
+//   - Tags: !base64, !bin, !datetime, !ext, !regex, !objectid, !timestamp;
+//     unknown tags preserve value
 //   - Strict mode rejects duplicate keys, unquoted keys, and special
 //     characters in bare tokens
 
@@ -1050,7 +1051,52 @@ private:
         throw asvJSONError("UDE: invalid datetime: " + val->str_data);
       return asvJSONValue::makeDateTime(ts, ms);
     }
-    if (tag == "ext") {
+    if (tag == "regex") {
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !regex requires a string value");
+      const std::string& s = val->str_data;
+      // Split on the LAST '|' so patterns containing '|' round-trip (matches
+      // the __REGEX__ convention used by TRON/GOON).
+      size_t sep = s.rfind('|');
+      std::string pattern = (sep == std::string::npos) ? s : s.substr(0, sep);
+      std::string opts = (sep == std::string::npos) ? std::string() : s.substr(sep + 1);
+      auto r = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
+      if (!r) throw asvJSONError("UDE: invalid regex");
+      return r;
+    }
+    if (tag == "objectid") {
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !objectid requires a string value");
+      // The encoder emits a 24-char hex string (fmtObjectIdHexVal). Restore it
+      // to the 12 raw bytes that makeObjectId requires.
+      if (val->str_data.empty() || val->str_data.size() != 24) throw asvJSONError("UDE: invalid !objectid value");
+      uint8_t bytes[12];
+      for (int i = 0; i < 12; i++) {
+        int hi = udeHexDigit(val->str_data[i * 2]);
+        int lo = udeHexDigit(val->str_data[i * 2 + 1]);
+        if (hi < 0 || lo < 0) throw asvJSONError("UDE: invalid !objectid value");
+        bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+      }
+      return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(bytes), 12));
+    }
+    if (tag == "timestamp") {
+      // The encoder emits "!timestamp <int64>". Accept a bare integer (from
+      // the encoder) or an ISO-8601 string (text form); on int64 overflow the
+      // value arrives as a raw_number STRING, which is also accepted.
+      if (val->type == asvJSONValue::INT) return asvJSONValue::makeTimestamp(val->num);
+      if (val->type == asvJSONValue::STRING) {
+        errno = 0;
+        char* end = nullptr;
+        long long ts = std::strtoll(val->str_data.c_str(), &end, 10);
+        if (!errno && end && *end == 0 && end != val->str_data.c_str())
+          return asvJSONValue::makeTimestamp(ts);
+        time_t t = 0;
+        int ms = 0;
+        if (!udeTryParseDateTime(val->str_data, t, &ms))
+          throw asvJSONError("UDE: invalid timestamp: " + val->str_data);
+        return asvJSONValue::makeTimestamp(static_cast<int64_t>(t));
+      }
+      throw asvJSONError("UDE: !timestamp requires an integer or string value");
+    }
+    if (tag == "ext" || tag == "extension") {
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !ext requires a string value");
       const std::string& s = val->str_data;
       size_t colon = s.find(':');
@@ -1059,23 +1105,13 @@ private:
       char* end = nullptr;
       long type = std::strtol(s.c_str(), &end, 10);
       if (errno == ERANGE || !end || end != s.c_str() + static_cast<long>(colon))
-        throw asvJSONError("UDE: invalid ext type");
+        throw asvJSONError("UDE: invalid extension type");
       bool err = false;
       auto bytes = decodeBase64Fast(s.data() + colon + 1, s.size() - colon - 1, &err);
       if (err) throw asvJSONError("UDE: invalid base64 in !ext");
       auto e = asvJSONValue::makeExtension(static_cast<int8_t>(type), bytes.data(), bytes.size());
       if (!e) throw asvJSONError("UDE: extension data too large");
       return e;
-    }
-    if (tag == "regex") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !regex requires a string value");
-      const std::string& s = val->str_data;
-      size_t sep = s.find('|');
-      std::string pattern = (sep == std::string::npos) ? s : s.substr(0, sep);
-      std::string opts = (sep == std::string::npos) ? std::string() : s.substr(sep + 1);
-      auto r = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-      if (!r) throw asvJSONError("UDE: invalid regex");
-      return r;
     }
     // Preserve unknown tags using CUSTOM_TAG type. The tag name is stored
     // separately (str_data) from its value (custom_value), which is the
@@ -1644,14 +1680,14 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
         else os << "null";
         break;
       }
-      case T::TIMESTAMP: {
+case T::TIMESTAMP: {
         char buf[32];
         auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-
-      if (ec == std::errc()) os.write(buf, ptr - buf);
-      else os << '0';
-      break;
-    }
+        os << "!timestamp ";
+        if (ec == std::errc()) os.write(buf, ptr - buf);
+        else os << '0';
+        break;
+      }
     case T::EXTENSION: {
       os << "!ext \"" << static_cast<int>(v->ext_type) << ':' << encodeBase64(v->bin_data.data(), v->bin_data.size()) << '"';
       break;
