@@ -11550,6 +11550,348 @@ TEST(testJSONSchema) {
 	}
 }
 
+TEST(testJSONSchemaExtras) {
+	// H1: an empty document (root == nullptr) must not crash and must
+	// validate as JSON null.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"null"})")));
+		asvJSON doc;
+		ASSERT(doc.validate(schema));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object"})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// H2: exact int64 comparisons at the full int64 range (no double rounding).
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","minimum":9223372036854775807})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("9223372036854775806")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","maximum":9223372036854775806})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("9223372036854775807")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":9223372036854775807})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("9223372036854775806")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// H2: exact multipleOf for wide integers; double path keeps tolerance.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"multipleOf":2})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view("10000000000000001")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view("10000000000000000")));
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"multipleOf":0.1})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view("0.3")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view("0.35")));
+		ASSERT(!doc.validate(schema, err));
+	}
+	// M3: draft-04 legacy boolean exclusiveMinimum/Maximum modifiers.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"number","minimum":5,"exclusiveMinimum":true})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view("5")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view("6")));
+		ASSERT(doc.validate(schema, err));
+	}
+	// M2: JSON Pointer percent-encoding and ~ escapes in $ref.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"a b":{"type":"number"}},"$ref":"#/definitions/a%20b"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"a/b":{"type":"number"}},"$ref":"#/definitions/a~1b"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	// M2: an empty reference token ("#/definitions/") resolves to the key "".
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"":{"type":"number"}},"$ref":"#/definitions/"})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view("5")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view("\"x\"")));
+		ASSERT(!doc.validate(schema, err)); // "" holds a number schema, not the definitions bucket
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"$ref":"#/"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err)); // no "" key -> unresolved
+	}
+	// draft-07: keywords sibling to $ref are ignored.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"n":{"type":"number"}},"$ref":"#/definitions/n","type":"string"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	// L4: a $ref cycle reached again through anyOf must be detected, not
+	// overflow the stack (previously every branch got a fresh depth counter).
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"anyOf":[{"$ref":"#/definitions/loop"}],"definitions":{"loop":{"anyOf":[{"$ref":"#/definitions/loop"}]}}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		bool ok = doc.validate(schema, err); // must not crash
+		ASSERT(!ok);
+	}
+	// L1: malformed keyword values are schema errors, not silent no-ops.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(err.find("Invalid schema") != std::string::npos);
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"minLength":-1})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("\"x\"")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"enum":"x"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"required":"x"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"uniqueItems":1})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1])")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"multipleOf":0})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"minimum":"x"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"pattern":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("\"x\"")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"exclusiveMinimum":"x"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// L2: uniqueItems fast path for scalars (+ double/string/mixed parity).
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","uniqueItems":true})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"([1,2,1])")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"([0.0,-0.0])")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"(["a","a"])")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"([1,1.0])")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":1}])")));
+		ASSERT(!doc.validate(schema, err)); // container fallback
+	}
+	// minProperties / maxProperties.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","minProperties":2,"maxProperties":2})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":2})")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		ASSERT(!doc.validate(schema, err));
+	}
+	// dependencies: property-array form and schema form.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","dependencies":{"a":["b"]}})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":2})")));
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","dependencies":{"a":{"required":["b"]}}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// dependentRequired.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","dependentRequired":{"a":["b"]}})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"({"a":1,"b":2})")));
+		ASSERT(doc.validate(schema, err));
+	}
+	// contains.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","contains":{"type":"number"}})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"([1,"a"])")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"(["a"])")));
+		ASSERT(!doc.validate(schema, err));
+	}
+	// additionalItems: false with a tuple `items` rejects extras.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","items":[{"type":"number"}],"additionalItems":false})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"([1])")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"([1,2])")));
+		ASSERT(!doc.validate(schema, err));
+	}
+	// propertyNames.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"object","propertyNames":{"pattern":"^[a-z]+$"}})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse(std::string_view(R"({"abc":1})")));
+		ASSERT(doc.validate(schema, err));
+		ASSERT(doc.parse(std::string_view(R"({"Abc":1})")));
+		ASSERT(!doc.validate(schema, err));
+	}
+	// A key matched by both `properties` and `patternProperties` is checked by
+	// both schemas.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{"const":1}},"patternProperties":{"^a$":{"const":2}}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// M4: Unicode code points (not bytes) for minLength/maxLength; a stray
+	// continuation byte counts as one character.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","minLength":1,"maxLength":1})")));
+		asvJSON doc;
+		std::string err;
+		ASSERT(doc.parse("\"\xF0\x9F\x98\x80\"")); // U+1F600 = one code point
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"string","minLength":1})")));
+		asvJSON doc;
+		ASSERT(doc.parse("\"\x80\"")); // lone continuation byte counts once
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	// Root-level boolean schemas.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view("true")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		ASSERT(doc.validate(schema));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view("false")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+}
+
 TEST(testJSONPath) {
 	// -- dot notation --
 	{
@@ -14486,6 +14828,7 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- JSON Schema Tests ---\n";
 	RUN(testJSONSchema);
+	RUN(testJSONSchemaExtras);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testJSONPath);

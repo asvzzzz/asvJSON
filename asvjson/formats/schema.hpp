@@ -10,8 +10,14 @@
 //           minProperties, maxProperties, propertyNames, dependentRequired, dependencies.
 
 #include "../core.hpp"
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <cmath>
 #include <regex>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace asvJSONInternal {
 
@@ -21,8 +27,11 @@ public:
     error_.clear();
     path_ = "";
     if (!schema) return true;
+    static const asvJSONValue kNull; // default-constructed node is NULL_VAL
     rootSchema_ = schema;
-    return validateNode(value, schema);
+    refDepth_ = std::make_shared<int>(0);
+    patternCache_ = std::make_shared<PatternCache>();
+    return validateNode(value ? value : &kNull, schema);
   }
 
   bool validate(const asvJSONValue* value, const asvJSONValue* schema, std::string& errorOut) {
@@ -37,13 +46,24 @@ private:
   const asvJSONValue* rootSchema_ = nullptr;
   std::string error_;
   std::string path_;
-  // Tracks how deeply nested $ref resolution currently is for the value being
-  // validated. A self-/mutually-referential schema (e.g. `{"$ref":"#"}` or
-  // `"a":{"$ref":"#/definitions/a"}`) would otherwise recurse forever through
+  // Shared by every sub-validator forked by anyOf/oneOf/not/if/contains (and
+  // copied into them), so it tracks how deeply nested $ref resolution currently
+  // is across the WHOLE validation, not just along one linear ref chain. A
+  // self-/mutually-referential schema (e.g. `{"$ref":"#"}`,
+  // `"a":{"$ref":"#/definitions/a"}`, or a cycle reached again from inside an
+  // anyOf/oneOf/not/if branch) would otherwise recurse forever through
   // validateNode and overflow the stack. Cap at MAX_NESTING_DEPTH like the
   // parsers do; a legitimate recursive schema follows the document's finite
   // depth, so a chain deeper than MAX_NESTING_DEPTH is necessarily a loop.
-  int refDepth_ = 0;
+  std::shared_ptr<int> refDepth_ = std::make_shared<int>(0);
+  // Compiled-regex cache shared across the whole validation so repeated
+  // `pattern` / `patternProperties` evaluations compile each unique regex once
+  // per validate() call instead of once per string node / per object.
+  struct PatternCache {
+    std::unordered_map<std::string, std::regex> ok;
+    std::unordered_set<std::string> bad;
+  };
+  std::shared_ptr<PatternCache> patternCache_;
 
   void setError(const std::string& msg) {
     if (!error_.empty()) return;
@@ -90,8 +110,46 @@ private:
     return s && s->type == asvJSONValue::BOOL_VAL && !s->flag;
   }
 
-  static bool isSchema(const asvJSONValue* s) {
-    return !s || (s->type == asvJSONValue::OBJECT) || isBoolTrue(s) || isBoolFalse(s);
+  // Percent-decodes a single URI-fragment token (%XX -> byte). Bare '%' and
+  // malformed escapes are left as-is.
+  static std::string percentDecode(std::string_view seg) {
+    std::string out;
+    out.reserve(seg.size());
+    auto hex = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    for (size_t i = 0; i < seg.size(); i++) {
+      if (seg[i] == '%' && i + 2 < seg.size()) {
+        int hi = hex(seg[i + 1]);
+        int lo = hex(seg[i + 2]);
+        if (hi >= 0 && lo >= 0) { out += static_cast<char>((hi << 4) | lo); i += 2; }
+        else out += seg[i];
+      } else {
+        out += seg[i];
+      }
+    }
+    return out;
+  }
+
+  // Decodes one JSON Pointer reference token: URI percent-escaping first, then
+  // the ~0 (-> ~) / ~1 (-> /) escapes.
+  static std::string decodePointerToken(std::string_view seg) {
+    std::string decoded = percentDecode(seg);
+    std::string out;
+    out.reserve(decoded.size());
+    for (size_t i = 0; i < decoded.size(); i++) {
+      if (decoded[i] == '~' && i + 1 < decoded.size()) {
+        if (decoded[i + 1] == '0') { out += '~'; i++; }
+        else if (decoded[i + 1] == '1') { out += '/'; i++; }
+        else out += decoded[i];
+      } else {
+        out += decoded[i];
+      }
+    }
+    return out;
   }
 
   const asvJSONValue* resolveRef(std::string_view ref) const {
@@ -101,23 +159,13 @@ private:
     if (ref[0] != '/') return nullptr;
     ref.remove_prefix(1);
     const asvJSONValue* cur = rootSchema_;
-    while (!ref.empty()) {
+    // JSON Pointer reference tokens are the pieces between '/' (the first may
+    // be an empty string, correctly resolving to the object key "").
+    while (true) {
       auto slash = ref.find('/');
       std::string_view seg = (slash == std::string_view::npos) ? ref : ref.substr(0, slash);
       if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
-      // Decode JSON Pointer segment (~0 -> ~, ~1 -> /)
-      std::string key;
-      key.reserve(seg.size());
-      for (size_t i = 0; i < seg.size(); i++) {
-        if (seg[i] == '~' && i + 1 < seg.size()) {
-          if (seg[i + 1] == '0') { key += '~'; i++; }
-          else if (seg[i + 1] == '1') { key += '/'; i++; }
-          else key += seg[i];
-        } else {
-          key += seg[i];
-        }
-      }
-      auto it = cur->obj->find(key);
+      auto it = cur->obj->find(decodePointerToken(seg));
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
       if (slash == std::string_view::npos) break;
@@ -131,9 +179,7 @@ private:
     if (a->type != b->type) {
       if ((a->type == asvJSONValue::INT || a->type == asvJSONValue::DOUBLE) &&
           (b->type == asvJSONValue::INT || b->type == asvJSONValue::DOUBLE)) {
-        double da = (a->type == asvJSONValue::INT) ? static_cast<double>(a->num) : a->dbl;
-        double db = (b->type == asvJSONValue::INT) ? static_cast<double>(b->num) : b->dbl;
-        return da == db;
+        return compareNumbers(a, b) == 0;
       }
       return false;
     }
@@ -193,6 +239,58 @@ private:
     return 0;
   }
 
+  // Exact cross-type int64/double ordering. Avoids the precision loss of
+  // converting a wide int64 to double (e.g. 2^63-1 vs the double 2^63), which
+  // would otherwise make distinct numbers compare equal.
+  static int compareIntDouble(int64_t a, double b) {
+    if (b != b) return 0; // NaN: unordered, treat as equal
+    if (b == std::numeric_limits<double>::infinity()) return -1;
+    if (b == -std::numeric_limits<double>::infinity()) return 1;
+    if (!(b >= -9223372036854775808.0 && b < 9223372036854775808.0)) return b < 0 ? 1 : -1;
+    int64_t ib = static_cast<int64_t>(b);
+    if (a < ib) return -1;
+    if (a > ib) return 1;
+    if (static_cast<double>(ib) == b) return 0;  // b is exactly a
+    return b < 0 ? 1 : -1;                          // a is trunc(b), fractional b is strictly larger/smaller
+  }
+
+  static bool intEqualsDouble(int64_t a, double b) { return compareIntDouble(a, b) == 0; }
+
+  // Exact numeric ordering for two JSON numbers; INT/INT pairs never go
+  // through double.
+  static int compareNumbers(const asvJSONValue* a, const asvJSONValue* b) {
+    if (a->type == asvJSONValue::INT && b->type == asvJSONValue::INT) {
+      if (a->num < b->num) return -1;
+      if (a->num > b->num) return 1;
+      return 0;
+    }
+    if (a->type == asvJSONValue::INT) return compareIntDouble(a->num, b->dbl);
+    if (b->type == asvJSONValue::INT) return -compareIntDouble(b->num, a->dbl);
+    if (a->dbl < b->dbl) return -1;
+    if (a->dbl > b->dbl) return 1;
+    return 0;
+  }
+
+  // Unicode code-point count of a UTF-8 string, robust for malformed input:
+  // stray continuation bytes count as one character each and a truncated
+  // multibyte tail counts once, so the total never runs away.
+  static int64_t utf8Length(const std::string& s) {
+    int64_t n = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+      auto c = static_cast<unsigned char>(s[i]);
+      if (c < 0x80) { n++; i++; }
+      else if (c < 0xC0) { n++; i++; } // stray continuation byte
+      else {
+        size_t len = (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+        if (i + len > s.size()) len = 1; // truncated tail: count once, stop
+        n++;
+        i += len;
+      }
+    }
+    return n;
+  }
+
   bool schemaPassesTypeCheck(const asvJSONValue* value, const asvJSONValue* typeNode) const {
     if (!typeNode) return true;
     if (typeNode->type == asvJSONValue::STRING) {
@@ -221,6 +319,108 @@ private:
     }
   }
 
+  // Returns a compiled regex for `pat` from the validator-wide cache. On a
+  // bad pattern sets valid=false (the pattern is remembered so later lookups
+  // are fast) and returns nullptr without touching error_.
+  const std::regex* getCompiled(const std::string& pat, bool& valid) {
+    if (!patternCache_) patternCache_ = std::make_shared<PatternCache>();
+    auto it = patternCache_->ok.find(pat);
+    if (it != patternCache_->ok.end()) { valid = true; return &it->second; }
+    if (patternCache_->bad.count(pat) != 0) { valid = false; return nullptr; }
+    try {
+      auto res = patternCache_->ok.emplace(pat, std::regex(pat));
+      valid = true;
+      return &res.first->second;
+    } catch (const std::regex_error&) {
+      patternCache_->bad.insert(pat);
+      valid = false;
+      return nullptr;
+    }
+  }
+
+  // Rejects keyword values whose shape is invalid per draft-07 (e.g. a
+  // non-array `enum`, a negative `minLength`, a non-numeric `minimum`).
+  // Malformed schemas fail validation instead of being silently ignored.
+  bool validateKeywordShapes(const asvJSONValue* schema) {
+    if (auto t = schemaGet(schema, "type")) {
+      bool okShape = t->type == asvJSONValue::STRING;
+      if (t->type == asvJSONValue::ARRAY && t->arr) {
+        okShape = true;
+        for (const auto& e : *t->arr)
+          if (e->type != asvJSONValue::STRING) { okShape = false; break; }
+      }
+      if (!okShape) {
+        setError("Invalid schema: 'type' must be a string or an array of strings");
+        return false;
+      }
+    }
+    if (auto e = schemaGet(schema, "enum")) {
+      if (e->type != asvJSONValue::ARRAY || !e->arr) {
+        setError("Invalid schema: 'enum' must be an array");
+        return false;
+      }
+    }
+    if (auto r = schemaGet(schema, "required")) {
+      if (r->type != asvJSONValue::ARRAY || !r->arr) {
+        setError("Invalid schema: 'required' must be an array of strings");
+        return false;
+      }
+      for (const auto& e : *r->arr)
+        if (e->type != asvJSONValue::STRING) {
+          setError("Invalid schema: 'required' entries must be strings");
+          return false;
+        }
+    }
+    if (auto u = schemaGet(schema, "uniqueItems")) {
+      if (u->type != asvJSONValue::BOOL_VAL) {
+        setError("Invalid schema: 'uniqueItems' must be a boolean");
+        return false;
+      }
+    }
+    static const char* const nonNegInts[] = {"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"};
+    for (const char* k : nonNegInts) {
+      if (auto n = schemaGet(schema, k)) {
+        if (n->type != asvJSONValue::INT || n->num < 0) {
+          setError(std::string("Invalid schema: '") + k + "' must be a non-negative integer");
+          return false;
+        }
+      }
+    }
+    static const char* const numbers[] = {"minimum", "maximum", "multipleOf"};
+    for (const char* k : numbers) {
+      if (auto n = schemaGet(schema, k)) {
+        if (!isNumberType(n)) {
+          setError(std::string("Invalid schema: '") + k + "' must be a number");
+          return false;
+        }
+      }
+    }
+    // exclusiveMinimum/exclusiveMaximum take the draft-07 numeric form or the
+    // draft-04 boolean (legacy) form.
+    static const char* const exclusives[] = {"exclusiveMinimum", "exclusiveMaximum"};
+    for (const char* k : exclusives) {
+      if (auto n = schemaGet(schema, k)) {
+        if (n->type != asvJSONValue::BOOL_VAL && !isNumberType(n)) {
+          setError(std::string("Invalid schema: '") + k + "' must be a number or boolean");
+          return false;
+        }
+      }
+    }
+    if (auto m = schemaGet(schema, "multipleOf")) {
+      if (isNumberType(m) && getNumberValue(m) <= 0) {
+        setError("Invalid schema: 'multipleOf' must be greater than 0");
+        return false;
+      }
+    }
+    if (auto p = schemaGet(schema, "pattern")) {
+      if (p->type != asvJSONValue::STRING) {
+        setError("Invalid schema: 'pattern' must be a string");
+        return false;
+      }
+    }
+    return true;
+  }
+
   bool validateNode(const asvJSONValue* value, const asvJSONValue* schema) {
     if (isBoolTrue(schema)) return true;
     if (isBoolFalse(schema)) { setError("False schema rejects all values"); return false; }
@@ -231,16 +431,18 @@ private:
       if (refNode && refNode->type == asvJSONValue::STRING) {
         auto resolved = resolveRef(refNode->str_data);
         if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
-        if (refDepth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+        if (*refDepth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
           setError("Circular $ref detected at: " + refNode->str_data);
           return false;
         }
-        refDepth_++;
+        (*refDepth_)++;
         bool ok = validateNode(value, resolved);
-        refDepth_--;
+        (*refDepth_)--;
         return ok;
       }
     }
+
+    if (!validateKeywordShapes(schema)) return false;
 
     const asvJSONValue* typeNode = schemaGet(schema, "type");
     if (!schemaPassesTypeCheck(value, typeNode)) {
@@ -305,6 +507,8 @@ private:
           SchemaValidator subVal;
           subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_;
+          subVal.refDepth_ = refDepth_;
+          subVal.patternCache_ = patternCache_;
           if (subVal.validateNode(value, sub.get())) return true;
         }
         setError("Does not match any schema in anyOf");
@@ -320,6 +524,8 @@ private:
           SchemaValidator subVal;
           subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_;
+          subVal.refDepth_ = refDepth_;
+          subVal.patternCache_ = patternCache_;
           if (subVal.validateNode(value, sub.get())) matches++;
         }
         if (matches != 1) {
@@ -335,6 +541,8 @@ private:
         SchemaValidator subVal;
         subVal.rootSchema_ = rootSchema_;
         subVal.path_ = path_;
+        subVal.refDepth_ = refDepth_;
+        subVal.patternCache_ = patternCache_;
         if (subVal.validateNode(value, node)) {
           setError("Matches the 'not' schema");
           return false;
@@ -348,6 +556,8 @@ private:
         SchemaValidator ifVal;
         ifVal.rootSchema_ = rootSchema_;
         ifVal.path_ = path_;
+        ifVal.refDepth_ = refDepth_;
+        ifVal.patternCache_ = patternCache_;
         bool cond = ifVal.validateNode(value, ifNode);
         if (cond && schemaHas(schema, "then")) {
           return validateNode(value, schemaGet(schema, "then"));
@@ -368,18 +578,9 @@ private:
     if (schemaHas(schema, "minLength")) {
       auto node = schemaGet(schema, "minLength");
       if (node && node->type == asvJSONValue::INT) {
-        int64_t minLen = node->num;
-        int64_t actualLen = 0;
-        for (size_t i = 0; i < s.size(); ) {
-          auto c = static_cast<unsigned char>(s[i]);
-          if (c < 0x80) { actualLen++; i++; }
-          else if (c < 0xC0) { i++; }
-          else if (c < 0xE0) { actualLen++; i += 2; }
-          else if (c < 0xF0) { actualLen++; i += 3; }
-          else { actualLen++; i += 4; }
-        }
-        if (actualLen < minLen) {
-          setError("String length " + std::to_string(actualLen) + " is less than minLength " + std::to_string(minLen));
+        int64_t actualLen = utf8Length(s);
+        if (actualLen < node->num) {
+          setError("String length " + std::to_string(actualLen) + " is less than minLength " + std::to_string(node->num));
           return false;
         }
       }
@@ -388,18 +589,9 @@ private:
     if (schemaHas(schema, "maxLength")) {
       auto node = schemaGet(schema, "maxLength");
       if (node && node->type == asvJSONValue::INT) {
-        int64_t maxLen = node->num;
-        int64_t actualLen = 0;
-        for (size_t i = 0; i < s.size(); ) {
-          auto c = static_cast<unsigned char>(s[i]);
-          if (c < 0x80) { actualLen++; i++; }
-          else if (c < 0xC0) { i++; }
-          else if (c < 0xE0) { actualLen++; i += 2; }
-          else if (c < 0xF0) { actualLen++; i += 3; }
-          else { actualLen++; i += 4; }
-        }
-        if (actualLen > maxLen) {
-          setError("String length " + std::to_string(actualLen) + " is greater than maxLength " + std::to_string(maxLen));
+        int64_t actualLen = utf8Length(s);
+        if (actualLen > node->num) {
+          setError("String length " + std::to_string(actualLen) + " is greater than maxLength " + std::to_string(node->num));
           return false;
         }
       }
@@ -408,14 +600,14 @@ private:
     if (schemaHas(schema, "pattern")) {
       auto node = schemaGet(schema, "pattern");
       if (node && node->type == asvJSONValue::STRING) {
-        try {
-          std::regex re(node->str_data);
-          if (!std::regex_search(s, re)) {
-            setError("String does not match pattern '" + node->str_data + "'");
-            return false;
-          }
-        } catch (const std::regex_error&) {
+        bool validPattern = false;
+        const std::regex* re = getCompiled(node->str_data, validPattern);
+        if (!validPattern) {
           setError("Invalid regex pattern '" + node->str_data + "'");
+          return false;
+        }
+        if (re && !std::regex_search(s, *re)) {
+          setError("String does not match pattern '" + node->str_data + "'");
           return false;
         }
       }
@@ -426,63 +618,69 @@ private:
 
   bool validateNumber(const asvJSONValue* value, const asvJSONValue* schema) {
     if (!isNumberType(value)) return true;
-    double val = getNumberValue(value);
 
-    if (schemaHas(schema, "minimum")) {
-      auto node = schemaGet(schema, "minimum");
-      if (node && isNumberType(node)) {
-        double min = getNumberValue(node);
-        if (val < min) {
-          setError("Value " + std::to_string(val) + " is less than minimum " + std::to_string(min));
-          return false;
-        }
+    // exclusiveMinimum/exclusiveMaximum accept both the draft-07 numeric form
+    // and the draft-04 boolean (legacy) form that makes `minimum`/`maximum`
+    // strict.
+    const asvJSONValue* minNode = schemaGet(schema, "minimum");
+    const asvJSONValue* maxNode = schemaGet(schema, "maximum");
+    bool strictMin = false;
+    bool strictMax = false;
+    if (auto exMin = schemaGet(schema, "exclusiveMinimum")) {
+      if (exMin->type == asvJSONValue::BOOL_VAL) {
+        strictMin = exMin->flag;
+      } else if (isNumberType(exMin)) {
+        strictMin = true;
+        minNode = exMin;
+      }
+    }
+    if (auto exMax = schemaGet(schema, "exclusiveMaximum")) {
+      if (exMax->type == asvJSONValue::BOOL_VAL) {
+        strictMax = exMax->flag;
+      } else if (isNumberType(exMax)) {
+        strictMax = true;
+        maxNode = exMax;
       }
     }
 
-    if (schemaHas(schema, "maximum")) {
-      auto node = schemaGet(schema, "maximum");
-      if (node && isNumberType(node)) {
-        double max = getNumberValue(node);
-        if (val > max) {
-          setError("Value " + std::to_string(val) + " is greater than maximum " + std::to_string(max));
-          return false;
-        }
+    if (minNode && isNumberType(minNode) &&
+        (strictMin ? compareNumbers(value, minNode) <= 0 : compareNumbers(value, minNode) < 0)) {
+      if (strictMin) {
+        setError("Value " + std::to_string(getNumberValue(value)) + " is not greater than exclusiveMinimum " + std::to_string(getNumberValue(minNode)));
+      } else {
+        setError("Value " + std::to_string(getNumberValue(value)) + " is less than minimum " + std::to_string(getNumberValue(minNode)));
       }
+      return false;
     }
 
-    if (schemaHas(schema, "exclusiveMinimum")) {
-      auto node = schemaGet(schema, "exclusiveMinimum");
-      if (node && isNumberType(node)) {
-        double min = getNumberValue(node);
-        if (val <= min) {
-          setError("Value " + std::to_string(val) + " is not greater than exclusiveMinimum " + std::to_string(min));
-          return false;
-        }
+    if (maxNode && isNumberType(maxNode) &&
+        (strictMax ? compareNumbers(value, maxNode) >= 0 : compareNumbers(value, maxNode) > 0)) {
+      if (strictMax) {
+        setError("Value " + std::to_string(getNumberValue(value)) + " is not less than exclusiveMaximum " + std::to_string(getNumberValue(maxNode)));
+      } else {
+        setError("Value " + std::to_string(getNumberValue(value)) + " is greater than maximum " + std::to_string(getNumberValue(maxNode)));
       }
-    }
-
-    if (schemaHas(schema, "exclusiveMaximum")) {
-      auto node = schemaGet(schema, "exclusiveMaximum");
-      if (node && isNumberType(node)) {
-        double max = getNumberValue(node);
-        if (val >= max) {
-          setError("Value " + std::to_string(val) + " is not less than exclusiveMaximum " + std::to_string(max));
-          return false;
-        }
-      }
+      return false;
     }
 
     if (schemaHas(schema, "multipleOf")) {
       auto node = schemaGet(schema, "multipleOf");
-      if (node && isNumberType(node)) {
-        double mof = getNumberValue(node);
-        if (mof <= 0) {
-          setError("multipleOf must be greater than 0");
-          return false;
+      if (node && isNumberType(node) && getNumberValue(node) > 0) {
+        bool isMultiple = false;
+        if (value->type == asvJSONValue::INT && node->type == asvJSONValue::INT) {
+          // Exact integer arithmetic: no double conversion, so values at the
+          // full int64 range are checked precisely.
+          isMultiple = (value->num % node->num == 0);
+        } else {
+          double val = getNumberValue(value);
+          double mof = getNumberValue(node);
+          double remainder = std::fmod(val, mof);
+          double tolerance = std::fabs(mof) * 1e-9;
+          if (tolerance < 1e-12) tolerance = 1e-12;
+          isMultiple = std::fabs(remainder) <= tolerance || std::fabs(remainder - mof) <= tolerance;
         }
-        double remainder = std::fmod(val, mof);
-        if (std::fabs(remainder) > 1e-9 && std::fabs(remainder - mof) > 1e-9) {
-          setError("Value " + std::to_string(val) + " is not a multiple of " + std::to_string(mof));
+        if (!isMultiple) {
+          setError("Value " + std::to_string(getNumberValue(value)) + " is not a multiple of " + std::to_string(getNumberValue(node)));
           return false;
         }
       }
@@ -515,11 +713,59 @@ private:
     if (schemaHas(schema, "uniqueItems")) {
       auto node = schemaGet(schema, "uniqueItems");
       if (node && node->type == asvJSONValue::BOOL_VAL && node->flag) {
+        // Fast path: arrays of scalars use a hash set; containers fall back to
+        // the O(n^2) deep-compare below.
+        bool allScalars = true;
         for (size_t i = 0; i < count; i++) {
-          for (size_t j = i + 1; j < count; j++) {
-            if (valuesEqual((*items)[i].get(), (*items)[j].get())) {
-              setError("Array items at indices " + std::to_string(i) + " and " + std::to_string(j) + " are not unique");
+          auto t = (*items)[i]->type;
+          if (t != asvJSONValue::STRING && t != asvJSONValue::INT &&
+              t != asvJSONValue::DOUBLE && t != asvJSONValue::BOOL_VAL &&
+              t != asvJSONValue::NULL_VAL) { allScalars = false; break; }
+          if (t == asvJSONValue::DOUBLE && (*items)[i]->dbl != (*items)[i]->dbl) { allScalars = false; break; } // NaN: keep deep compare
+        }
+        if (allScalars) {
+          std::unordered_map<std::string, size_t> first;
+          first.reserve(count);
+          for (size_t i = 0; i < count; i++) {
+            std::string token;
+            const auto& nodePtr = (*items)[i];
+            switch (nodePtr->type) {
+              case asvJSONValue::NULL_VAL: token = "n"; break;
+              case asvJSONValue::BOOL_VAL: token = nodePtr->flag ? "b1" : "b0"; break;
+              case asvJSONValue::INT: token = "i" + std::to_string(nodePtr->num); break;
+              case asvJSONValue::DOUBLE: {
+                double d = nodePtr->dbl;
+                if (d == 0.0) { token = "i0"; break; } // normalizes +0.0 / -0.0
+                if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+                  int64_t id = static_cast<int64_t>(d);
+                  if (static_cast<double>(id) == d) { token = "i" + std::to_string(id); break; } // exactly integral: same value type as INT
+                }
+                uint64_t bits = 0;
+                std::memcpy(&bits, &d, sizeof(bits));
+                token = "d" + std::to_string(bits);
+                break;
+              }
+              case asvJSONValue::STRING:
+                token.reserve(nodePtr->str_data.size() + 1);
+                token += 's';
+                token += nodePtr->str_data;
+                break;
+              default: break;
+            }
+            auto found = first.find(token);
+            if (found != first.end()) {
+              setError("Array items at indices " + std::to_string(found->second) + " and " + std::to_string(i) + " are not unique");
               return false;
+            }
+            first.emplace(std::move(token), i);
+          }
+        } else {
+          for (size_t i = 0; i < count; i++) {
+            for (size_t j = i + 1; j < count; j++) {
+              if (valuesEqual((*items)[i].get(), (*items)[j].get())) {
+                setError("Array items at indices " + std::to_string(i) + " and " + std::to_string(j) + " are not unique");
+                return false;
+              }
             }
           }
         }
@@ -534,6 +780,8 @@ private:
           SchemaValidator subVal;
           subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_ + "/" + std::to_string(i);
+          subVal.refDepth_ = refDepth_;
+          subVal.patternCache_ = patternCache_;
           if (subVal.validateNode((*items)[i].get(), node)) { found = true; break; }
         }
         if (!found) {
@@ -553,7 +801,10 @@ private:
           } else if (schemaHas(schema, "additionalItems")) {
             itemSchema = schemaGet(schema, "additionalItems");
             if (isBoolFalse(itemSchema)) {
+              std::string savedPath = path_;
+              pushIndexPath(i);
               setError("Additional items not allowed at index " + std::to_string(i));
+              path_ = savedPath;
               return false;
             }
           }
@@ -627,12 +878,13 @@ private:
         std::vector<CompiledPattern> compiledPatterns;
         compiledPatterns.reserve(patternPropsSchema->obj->size());
         for (auto& patKV : *patternPropsSchema->obj) {
-          try {
-            compiledPatterns.push_back({std::regex(patKV.first), patKV.second.get()});
-          } catch (const std::regex_error&) {
+          bool validPattern = false;
+          const std::regex* re = getCompiled(patKV.first, validPattern);
+          if (!validPattern) {
             setError("Invalid regex pattern in patternProperties: '" + patKV.first + "'");
             return false;
           }
+          compiledPatterns.push_back({*re, patKV.second.get()});
         }
         for (auto& kv : *obj) {
           for (const auto& cp : compiledPatterns) {
