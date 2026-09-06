@@ -254,6 +254,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 					if (j > 0 && j == frag.size()) needQuote = true;          // space-only line
 					if (j > 0 && frag[0] == '\t') needQuote = true;           // tab in indent margin
+					if (j < frag.size() && frag[j] == '#') needQuote = true;  // '#...' line: decoder treats it as a comment
 					i = eol + 1;
 				}
 				if (!needQuote && hasLeadSpace) {
@@ -495,7 +496,10 @@ inline std::string_view yamlStripComment(std::string_view s) {
 			if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') { i++; continue; }
 			if (s[i] == '\'') inSQ = false;
 		} else {
-			if (s[i] == '#') return s.substr(0, i);
+			// A '#' begins a comment only at the start of a line or after white
+			// space (YAML §5.1); "a#b" is a plain scalar, "value # note" comments.
+			if (s[i] == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t'))
+				return s.substr(0, i);
 			if (s[i] == '"') inDQ = true;
 			if (s[i] == '\'') inSQ = true;
 		}
@@ -1483,7 +1487,7 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 		else if (inDq) { if (c == '\\') i++; else if (c == '"') inDq = false; }
 		else {
 			if (c == '\'') inSq = true; else if (c == '"') inDq = true;
-			else if (c == '#') break;
+			else if (c == '#' && (i == 0 || firstPart[i - 1] == ' ' || firstPart[i - 1] == '\t')) break;
 			else if (c == openCh) depth++; else if (c == closeCh) depth--;
 		}
 	}
@@ -1506,7 +1510,7 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 				clean += c;
 				if (c == '\\' && i + 1 < line.size()) { i++; clean += line[i]; }
 				else if (c == '"') inDq = false;
-			} else if (c == '#') break;
+			} else if (c == '#' && (i == 0 || line[i - 1] == ' ' || line[i - 1] == '\t')) break;
 			else {
 				if (c == '\'') inSq = true; else if (c == '"') inDq = true;
 				if (c == openCh) depth++; else if (c == closeCh) depth--;
@@ -1937,7 +1941,7 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 		int si = countIndent(lines[ci]);
 		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
 		std::string_view sc = stripIndent(lines[ci]);
-		if (sc.empty()) { if (contentIndent > 0) entries.push_back({"", 0, true}); ci++; continue; }
+		if (sc.empty()) { entries.push_back({"", 0, true}); ci++; continue; }
 		if (sc[0] == '#') { ci++; continue; }
 		if (parentIndent >= 0 && si <= parentIndent) break;
 		if (contentIndent < 0) contentIndent = si;
@@ -1967,6 +1971,10 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 					// more-indented line: those line breaks are literal.
 					folded.append(static_cast<size_t>(k), '\n');
 				}
+			} else {
+				// Leading empty lines before the first content line are content
+				// and are never folded away: each contributes a line break.
+				folded.append(static_cast<size_t>(brk), '\n');
 			}
 			if (e.excess > 0) folded.append(static_cast<size_t>(e.excess), ' ');
 			folded += e.content;
@@ -3256,7 +3264,8 @@ inline std::string yamlTrailingComment(std::string_view s) {
 			if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') { i++; continue; }
 			if (s[i] == '\'') inSQ = false;
 		} else {
-			if (s[i] == '#') return std::string(s.substr(i));
+			if (s[i] == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t'))
+				return std::string(s.substr(i));
 			if (s[i] == '"') inDQ = true;
 			if (s[i] == '\'') inSQ = true;
 		}

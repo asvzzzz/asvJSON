@@ -6088,6 +6088,83 @@ TEST(testFromYAML) {
 	}
 }
 
+TEST(testYamlExtras) {
+	// '#' in plain scalar not preceded by whitespace must be kept as data
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: a#b"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("a#b"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("- a#b"));
+		ASSERT_EQ(json.getRoot()->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(json.getRoot()->arr->size(), size_t(1));
+		ASSERT_EQ(std::string(json.getRoot()->arr->at(0)->getString()), std::string("a#b"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: http://x.org/p#frag"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("http://x.org/p#frag"));
+	}
+	// '#' followed by whitespace is still a comment
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: ab #comment"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("ab"));
+	}
+	// Leading blank lines in literal/folded block scalars are content
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: |\n\n  hello"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("\nhello\n"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: >\n\n  hello"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("\nhello\n"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: |\n\n\n  hello"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("\n\nhello\n"));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: >\n\n\n  hello"));
+		ASSERT_EQ(std::string(json.getString("x")), std::string("\n\nhello\n"));
+	}
+	// Encoder must not emit '#' content lines in block scalars (would be dropped)
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string_view(
+			"{\"s\":\"# line\\nmore\"}")));
+		std::string y = json.toYAML();
+		// The string must be quoted, not a block scalar (block would lose the # line)
+		ASSERT(y.find('|') == std::string::npos
+		       || y.find('\'') != std::string::npos
+		       || y.find('"') != std::string::npos);
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT_EQ(std::string(back.getString("s")), std::string("# line\nmore"));
+	}
+	// Flow context: [a#b] is a valid scalar "a#b"
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: [a#b]"));
+		auto* arr = json.getRoot()->get("x");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->size(), size_t(1));
+		ASSERT_EQ(std::string(arr->arr->at(0)->getString()), std::string("a#b"));
+	}
+	// Plain scalar key containing '#' (not preceded by space)
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("key#frag: val"));
+		ASSERT_EQ(std::string(json.getString("key#frag")), std::string("val"));
+	}
+}
+
 TEST(testToTOON) {
 	// Basic object round-trip
 	{
@@ -15472,6 +15549,9 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- YAML Write Options Tests ---\n";
 	RUN(testYamlWriteOptions);
+
+	std::cout << "\n--- YAML Extras Tests ---\n";
+	RUN(testYamlExtras);
 
 	std::cout << "\n--- IsChanged Tests ---\n";
 	RUN(testIsChanged);
