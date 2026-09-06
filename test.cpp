@@ -10143,6 +10143,109 @@ TEST(testINIRoundTrip) {
   }
 }
 
+TEST(testIniExtras) {
+  // UTF-8 BOM is stripped before parsing
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("\xEF\xBB\xBFkey = val\n")));
+    ASSERT_EQ(std::string(j.getString("key")), "val");
+    ASSERT(!j.getRoot()->hasKey("\xEF\xBB\xBFkey"));
+  }
+  // Bare leading-zero numerics stay STRING (zip codes, file modes)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("zip = 042\nneg = -042\nplus = +042\nzero = 0\nd = 0.5\n")));
+    auto* z = j.get("zip");
+    ASSERT(z != nullptr && z->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("zip")), "042");
+    ASSERT(j.get("neg") != nullptr && j.get("neg")->type == asvJSONValue::STRING);
+    ASSERT(j.get("plus") != nullptr && j.get("plus")->type == asvJSONValue::STRING);
+    ASSERT(j.get("zero") != nullptr && j.get("zero")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("zero"), int64_t(0));
+    ASSERT(j.get("d") != nullptr && j.get("d")->type == asvJSONValue::DOUBLE);
+  }
+  // Leading-zero STRING round-trips bare ("042" stays bare 042, not quoted)
+  {
+    asvJSON j, j2;
+    j.parse(std::string("{\"zip\":\"042\"}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("\"042\"") == std::string::npos);
+    ASSERT(j2.fromINI(ini));
+    auto* v = j2.getRoot()->get("zip");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("zip")), "042");
+  }
+  // Arrays of objects with nested sub-objects round-trip (flattened inside [[..]])
+  {
+    asvJSON j, j2;
+    j.parse(std::string("{\"items\":[{\"name\":\"a\",\"host\":{\"ip\":\"1.2.3.4\"}},{\"name\":\"b\",\"host\":{\"ip\":\"5.6.7.8\"}}]}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("host.ip = 1.2.3.4") != std::string::npos);
+    ASSERT(ini.find("[items.host]") == std::string::npos);
+    ASSERT(j2.fromINI(ini));
+    auto* items = j2.getRoot()->get("items");
+    ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(items->arr->size(), size_t(2));
+    auto* h0 = items->get(size_t(0))->get("host");
+    ASSERT(h0 != nullptr && h0->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(std::string(h0->get("ip")->getString()), "1.2.3.4");
+    auto* h1 = items->get(size_t(1))->get("host");
+    ASSERT(h1 != nullptr && h1->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(std::string(h1->get("ip")->getString()), "5.6.7.8");
+  }
+  // Nested arrays-of-objects inside array elements (incl. bracketed keys)
+  {
+    asvJSON j, j2;
+    j.parse(std::string("{\"a[b]\":[{\"y\":[{\"z\":1},{\"z\":2}]}]}"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("[[a\\[b\\]]]") != std::string::npos);
+    ASSERT(ini.find("a[b].y]]") == std::string::npos);
+    ASSERT(j2.fromINI(ini));
+    auto* a = j2.getRoot()->get("a[b]");
+    ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(a->arr->size(), size_t(1));
+    auto* y = a->get(size_t(0))->get("y");
+    ASSERT(y != nullptr && y->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(y->arr->size(), size_t(2));
+    ASSERT_EQ(y->get(size_t(0))->get("z")->getInt(), int64_t(1));
+    ASSERT_EQ(y->get(size_t(1))->get("z")->getInt(), int64_t(2));
+  }
+  // [[arr]] over a pre-existing non-array value is rejected, not overwritten
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("x = 1\n[[x]]\na = 2\n")));
+    ASSERT(j.getLastError().find("array section") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("[x]\nk = 1\n[[x]]\na = 2\n")));
+    ASSERT(j.getLastError().find("array section") != std::string::npos);
+  }
+  // Trailing junk after a section header is rejected, not silently dropped
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("[sec] foo\nk = v\n")));
+    ASSERT(j.getLastError().find("unexpected content after section header") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("[[items]] junk\n")));
+    ASSERT(j.getLastError().find("unexpected content after section header") != std::string::npos);
+  }
+  // Section headers may be followed by a comment
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[sec] ; note\nk = v\n[other] # note\n")));
+    ASSERT_EQ(std::string(j.getString("sec.k")), "v");
+  }
+  // Escaped brackets in section names still survive the trailing check
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[a\\[b\\]]\nc[d] = v\n")));
+    ASSERT_EQ(std::string(j.getString("a[b].c[d]")), "v");
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -15229,6 +15332,7 @@ RUN(testCBORFloat16);
 	RUN(testFromINI);
 	RUN(testFromINIIntOverflow);
 	RUN(testINIRoundTrip);
+	RUN(testIniExtras);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

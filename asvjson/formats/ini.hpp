@@ -194,6 +194,12 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
   if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
   // Try int (base 10 -- no octal surprises)
   if (!s.empty()) {
+    // JSON numbers never carry leading zeros ("042", "-042", "+042"), so those
+    // literals stay STRINGs (otherwise "zip = 042" silently becomes 42 on a
+    // re-parse). "0", "-0", "0.5", "-0.5" still parse as numbers.
+    size_t i0 = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+    if (s.size() > i0 + 1 && s[i0] == '0' && s[i0 + 1] >= '0' && s[i0 + 1] <= '9')
+      return asvJSONValue::makeString(s.data(), s.size());
     errno = 0;
     char* end = nullptr;
     long long ll = std::strtoll(s.c_str(), &end, 10);
@@ -237,6 +243,7 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
 
 // Recursively emit object contents for a given section path (prefix).
 // prefix == current section path; emitHeader controls whether to emit a section header.
+inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix);
 inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
                           bool emitHeader, bool pretty = true) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
@@ -278,7 +285,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           if (!out.empty() && out.back() != '\n') out += '\n';
           out += "[[" + newPrefix + "]]\n";
           if (elem->type == asvJSONValue::OBJECT) {
-            iniEmitObject(elem.get(), out, newPrefix, false, pretty);
+            iniEmitElement(elem.get(), out, newPrefix);
           }
         }
       } else {
@@ -290,6 +297,77 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
       }
     } else {
       out += (pretty ? key : dottedKey) + " = ";
+      iniFormatVal(val.get(), out);
+      out += '\n';
+    }
+  }
+}
+
+// Emit the contents of one array-of-objects element (under a [[...]] header).
+// Direct scalar / primitive-array keys go bare within the current element;
+// nested objects are flattened with dotted keys and nested arrays-of-objects
+// reuse [[full.path]] headers. Section headers must NOT be used here -- a
+// "[x]" header after "[[items]]" would resolve at document scope, not inside
+// the current element (the old encoder emitted e.g. "[items.host]" which
+// failed to re-parse). prefix is the escaped full path of the array itself.
+
+// Flatten object descendants of an array element into dotted leaf keys; nested
+// arrays-of-objects become [[prefix.dotted]] headers resolved back into the
+// element by the array-aware decoder.
+inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, std::string& out, const std::string& prefix) {
+  for (const auto& [key, val] : *obj->obj) {
+    std::string full = dk.empty() ? key : dk + "." + key;
+    if (val->type == asvJSONValue::OBJECT && val->obj) {
+      iniEmitElementFlat(val.get(), full, out, prefix);
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      bool allObjects = true;
+      for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
+      if (allObjects && !val->arr->empty()) {
+        for (const auto& e : *val->arr) {
+          std::string np = prefix.empty() ? full : prefix + "." + full;
+          if (!out.empty() && out.back() != '\n') out += '\n';
+          out += "[[" + np + "]]\n";
+          iniEmitElement(e.get(), out, np);
+        }
+      } else {
+        for (const auto& e : *val->arr) {
+          out += full + " = ";
+          iniFormatVal(e.get(), out);
+          out += '\n';
+        }
+      }
+    } else {
+      out += full + " = ";
+      iniFormatVal(val.get(), out);
+      out += '\n';
+    }
+  }
+}
+
+inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix) {
+  if (!elem || elem->type != asvJSONValue::OBJECT || !elem->obj) return;
+  for (const auto& [key, val] : *elem->obj) {
+    if (val->type == asvJSONValue::OBJECT && val->obj) {
+      iniEmitElementFlat(val.get(), key, out, prefix);
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      bool allObjects = true;
+      for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
+      if (allObjects && !val->arr->empty()) {
+        for (const auto& e : *val->arr) {
+          std::string np = prefix.empty() ? key : prefix + "." + key;
+          if (!out.empty() && out.back() != '\n') out += '\n';
+          out += "[[" + np + "]]\n";
+          iniEmitElement(e.get(), out, np);
+        }
+      } else {
+        for (const auto& e : *val->arr) {
+          out += key + " = ";
+          iniFormatVal(e.get(), out);
+          out += '\n';
+        }
+      }
+    } else {
+      out += key + " = ";
       iniFormatVal(val.get(), out);
       out += '\n';
     }
@@ -361,7 +439,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (!out.empty() && out.back() != '\n') out += '\n';
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT) {
-                  iniEmitObject(elem.get(), out, key, false, true);
+                  iniEmitElement(elem.get(), out, escKey);
                 }
               }
             } else {
@@ -396,6 +474,10 @@ inline bool asvJSON::fromINI(std::string_view input) {
       root = asvJSONValue::makeObject();
       return true;
     }
+
+    // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON/CSV parsers).
+    if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+      input = input.substr(3);
 
     root = asvJSONValue::makeObject();
 
@@ -451,6 +533,14 @@ inline bool asvJSON::fromINI(std::string_view input) {
         if (isArraySection) {
           if (end + 1 >= line.size() || line[end + 1] != ']') throw asvJSONError("malformed array section header");
         }
+        // Only whitespace and an optional ;/# comment may follow the header;
+        // anything else is dropped silently today and would corrupt the layout.
+        {
+          size_t t = end + (isArraySection ? 2 : 1);
+          while (t < line.size() && (line[t] == ' ' || line[t] == '\t')) t++;
+          if (t < line.size() && line[t] != ';' && line[t] != '#')
+            throw asvJSONError("unexpected content after section header");
+        }
         size_t nameLen = end - start;
 
         std::string_view sectionName = iniTrim(line.substr(start, nameLen));
@@ -470,24 +560,47 @@ inline bool asvJSON::fromINI(std::string_view input) {
           std::string arrKey = newPath.back();
           newPath.pop_back();
           asvJSONValue* parent = root.get();
-          if (!newPath.empty()) {
-            parent = iniNavigate(root.get(), newPath, true);
-          }
-          if (parent && parent->type == asvJSONValue::OBJECT) {
-            auto it = parent->obj->find(arrKey);
-            if (it == parent->obj->end() || it->second->type != asvJSONValue::ARRAY) {
-              auto newArr = asvJSONValue::makeArray();
-              auto* arrPtr = newArr.get();
-              parent->obj->insert_or_assign(arrKey, std::move(newArr));
+          // Walk the enclosing path. When a path node is an array (e.g. "items"
+          // in "[[items.host]]"), descend into its last element: the new table
+          // array belongs inside that element, not at document scope (the old
+          // code silently dropped such headers entirely).
+          auto descendArrays = [&]() -> void {
+            while (parent && parent->type == asvJSONValue::ARRAY && parent->arr && !parent->arr->empty())
+              parent = parent->arr->back().get();
+          };
+          descendArrays();
+          for (const auto& seg : newPath) {
+            if (!parent || parent->type != asvJSONValue::OBJECT)
+              throw asvJSONError("cannot navigate through non-object");
+            auto it = parent->obj->find(seg);
+            if (it == parent->obj->end()) {
               auto newObj = asvJSONValue::makeObject();
-              currentArrayElement = newObj.get();
-              arrPtr->arr->push_back(std::move(newObj));
+              auto* raw = newObj.get();
+              parent->obj->emplace(seg, std::move(newObj));
+              parent = raw;
             } else {
-              asvJSONValue* arrVal = it->second.get();
-              auto newObj = asvJSONValue::makeObject();
-              currentArrayElement = newObj.get();
-              arrVal->arr->push_back(std::move(newObj));
+              parent = it->second.get();
             }
+            descendArrays();
+          }
+          if (!parent || parent->type != asvJSONValue::OBJECT)
+            throw asvJSONError("cannot navigate through non-object");
+          auto it = parent->obj->find(arrKey);
+          if (it == parent->obj->end()) {
+            auto newArr = asvJSONValue::makeArray();
+            auto* arrPtr = newArr.get();
+            parent->obj->emplace(arrKey, std::move(newArr));
+            auto newObj = asvJSONValue::makeObject();
+            currentArrayElement = newObj.get();
+            arrPtr->arr->push_back(std::move(newObj));
+          } else if (it->second->type == asvJSONValue::ARRAY) {
+            asvJSONValue* arrVal = it->second.get();
+            auto newObj = asvJSONValue::makeObject();
+            currentArrayElement = newObj.get();
+            arrVal->arr->push_back(std::move(newObj));
+          } else {
+            // Reject instead of silently overwriting the existing value.
+            throw asvJSONError("array section conflicts with existing value for \"" + arrKey + "\"");
           }
           inSection = false;
         } else {
