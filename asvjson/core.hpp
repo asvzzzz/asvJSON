@@ -934,7 +934,7 @@ private:
 	int parseDepth = 0;
 	FormatType formatType = FormatType::Unknown;
 	bool dirty_ = false;
-	mutable std::vector<std::unique_ptr<asvJSONValue>> pathOwned;
+	std::vector<std::unique_ptr<asvJSONValue>> pathOwned;
 
 	inline void skip() {
 		while (pos < json.size()) {
@@ -2171,8 +2171,8 @@ public:
 	bool validate(const asvJSON& schema, std::string& error) const;
 
 	// JSONPath (RFC 9535)
-	std::vector<const asvJSONValue*> query(std::string_view path) const;
-	const asvJSONValue* queryFirst(std::string_view path) const;
+	std::vector<const asvJSONValue*> query(std::string_view path);
+	const asvJSONValue* queryFirst(std::string_view path);
 	static bool isValidPath(std::string_view path);
 
 	// Merge & Patch

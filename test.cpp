@@ -12064,13 +12064,17 @@ TEST(testJSONPath) {
 		ASSERT(rMax[0]->num == 30);
 		auto rSum = doc.query("$.values.sum()");
 		ASSERT_EQ(rSum.size(), size_t(1));
-		ASSERT(rSum[0]->type == asvJSONValue::DOUBLE);
+		ASSERT(rSum[0]->type == asvJSONValue::INT);
+		ASSERT(rSum[0]->num == 60);
+		auto rAvg = doc.query("$.values.avg()");
+		ASSERT_EQ(rAvg.size(), size_t(1));
+		ASSERT(rAvg[0]->type == asvJSONValue::DOUBLE);
 	}
-	// -- function: match() --
+	// -- function: match() (full-string match per RFC 9535) --
 	{
 		asvJSON doc;
 		ASSERT(doc.parse(std::string_view(R"([{"email":"alice@example.com"},{"email":"bob@test.com"}])")));
-		auto r = doc.query("$[?(match(@.email, '^alice'))]");
+		auto r = doc.query(R"($[?(match(@.email, 'alice@example\\.com'))])");
 		ASSERT_EQ(r.size(), size_t(1));
 	}
 	// -- function: search() --
@@ -12153,12 +12157,13 @@ TEST(testJSONPath) {
 		auto r2 = doc.query("$[?(@.v <= 2)]");
 		ASSERT_EQ(r2.size(), size_t(2));
 	}
-	// -- filter: RFC 9535 truthiness (empty array/object are falsy) --
+	// -- filter: RFC 9535 existence test (bare query selects the node
+	//    regardless of its value: null/false/empty are all selectable) --
 	{
 		asvJSON doc;
 		ASSERT(doc.parse(std::string_view(R"([{"a":[]},{"a":{}},{"a":1},{"a":"x"}])")));
 		auto r = doc.query("$[?(@.a)]");
-		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT_EQ(r.size(), size_t(4));
 	}
 	// -- bracket union: names --
 	{
@@ -12236,6 +12241,111 @@ TEST(testJSONPath) {
 		auto r = doc.query("$.x[?(@.arr[0] == 5)].v");
 		ASSERT_EQ(r.size(), size_t(1));
 		ASSERT(r[0]->num == 10);
+	}
+}
+
+TEST(testJSONPathExtras) {
+	// -- invalid selectors never throw; query() is lenient and returns empty --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		ASSERT_EQ(doc.query("$[-]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[1.5]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[0:3:0]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[99999999999999999999999999]").size(), size_t(0));
+		ASSERT_EQ(doc.query(R"($["\z"])").size(), size_t(0));
+	}
+	// -- isValidPath is strict (RFC 9535 grammar + I-JSON ranges + step != 0) --
+	{
+		ASSERT(asvJSON::isValidPath("$"));
+		ASSERT(asvJSON::isValidPath("$.a.b[0]['c']"));
+		ASSERT(asvJSON::isValidPath("$.*"));
+		ASSERT(asvJSON::isValidPath("$..*"));
+		ASSERT(asvJSON::isValidPath("$..['a']"));
+		ASSERT(asvJSON::isValidPath("$[-1]"));
+		ASSERT(asvJSON::isValidPath("$[0:1]"));
+		ASSERT(asvJSON::isValidPath("$[::2]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.a.length() > 1)]"));
+		ASSERT(asvJSON::isValidPath("$[?(match(@.a, 'x'))]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.a == 1 && @.b)]"));
+		ASSERT(!asvJSON::isValidPath("$[-]"));
+		ASSERT(!asvJSON::isValidPath("$[1.5]"));
+		ASSERT(!asvJSON::isValidPath("$[01]"));
+		ASSERT(!asvJSON::isValidPath("$[0:3:0]"));
+		ASSERT(!asvJSON::isValidPath(R"($['ab])"));
+		ASSERT(!asvJSON::isValidPath("$[99999999999999999999999999]"));
+		ASSERT(!asvJSON::isValidPath("$[?(@.a == )]"));
+		ASSERT(!asvJSON::isValidPath("$[?(@.a.match())]"));
+		ASSERT(!asvJSON::isValidPath("$[?(match('x', 'y'))]"));
+		ASSERT(!asvJSON::isValidPath("$[?(match(@.a))]"));
+	}
+	// -- descendant segment with bracket selectors --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":{"b":[1,2]},"c":{"b":[3]}})")));
+		auto r = doc.query("$..b[0]");
+		ASSERT_EQ(r.size(), size_t(2));
+		ASSERT(r[0]->num == 1);
+		ASSERT(r[1]->num == 3);
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":[1,2,3]})")));
+		auto r = doc.query("$..[0]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 1);
+		auto rw = doc.query("$..[*]");
+		ASSERT_EQ(rw.size(), size_t(4));
+	}
+	// -- comparison with missing selectors: empty == empty, empty < null false --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":2}])")));
+		auto r = doc.query("$[?(@.missing == @.missing2)]");
+		ASSERT_EQ(r.size(), size_t(2));
+		auto r2 = doc.query("$[?(@.missing <= null)]");
+		ASSERT_EQ(r2.size(), size_t(0));
+	}
+	// -- int64 precision preserved in filter comparisons and sum() --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":9223372036854775807},{"v":9223372036854775806}])")));
+		auto r = doc.query("$[?(@.v > 9223372036854775806)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->obj->find("v")->second->num == 9223372036854775807ll);
+		auto r2 = doc.query("$[?(@.v >= 9223372036854775806)]");
+		ASSERT_EQ(r2.size(), size_t(2));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"values":[9223372036854775807,9223372036854775807]})")));
+		auto r = doc.query("$.values.sum()");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->type == asvJSONValue::DOUBLE);
+		ASSERT(r[0]->dbl == 18446744073709551616.0);
+	}
+	// -- unicode escapes in name selectors --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"A":1})")));
+		auto r = doc.query(R"($["\u0041"])");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->num == 1);
+	}
+	// -- match/search on non-string: LogicalFalse (empty result) --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1}])")));
+		ASSERT_EQ(doc.query("$[?(search(@.a, 'x'))]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?(match(@.a, 'x'))]").size(), size_t(0));
+	}
+	// -- length() on a scalar is Nothing (not 0), so the filter is false --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":[1,2]}])")));
+		auto r = doc.query("$[?(@.a.length() > 0)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->obj->find("a")->second->type == asvJSONValue::ARRAY);
 	}
 }
 
@@ -14832,6 +14942,7 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testJSONPath);
+	RUN(testJSONPathExtras);
 
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);
