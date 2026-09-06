@@ -7533,6 +7533,79 @@ TEST(testProtobufTextArrayOfObjects) {
 	ASSERT(arr->arr->at(1)->get("x") != nullptr && arr->arr->at(1)->get("x")->num == 2);
 }
 
+TEST(testProtobufExtras) {
+	// Numeric field-name keys (text format: field numbers are valid keys) must
+	// round-trip; previously the parser rejected keys starting with a digit.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"1":"x","2":42})"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.getRoot()->hasKey("1"));
+		ASSERT(j2.getRoot()->hasKey("2"));
+		ASSERT_EQ(std::string(j2.getString("1")), "x");
+		ASSERT_EQ(j2.getInt("2"), int64_t(42));
+	}
+	// A bare top-level numeric field document must parse too.
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("1: \"x\"\n"));
+		ASSERT_EQ(std::string(j2.getString("1")), "x");
+	}
+	// Nested arrays in the text format must round-trip; previously the element
+	// loop never advanced past an inner '[' (infinite loop / hang).
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":[[1,2],[3,4]]})"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* vArr = j2.getRoot()->get("arr");
+		ASSERT(vArr != nullptr && vArr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->size(), size_t(2));
+		ASSERT(vArr->arr->at(0)->type == asvJSONValue::ARRAY);
+		ASSERT(vArr->arr->at(1)->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(vArr->arr->at(0)->arr->size(), size_t(2));
+		ASSERT_EQ(vArr->arr->at(0)->arr->at(0)->num, int64_t(1));
+		ASSERT_EQ(vArr->arr->at(1)->arr->at(1)->num, int64_t(4));
+	}
+	// Schema-less wire round-trip must preserve empty arrays and null values
+	// (they emit no wire bytes, so the decoder reconstructs them from the
+	// embedded name map).
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":[],"n":null,"x":1})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* e = j2.getRoot()->get("arr");
+		ASSERT(e != nullptr && e->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(e->arr->size(), size_t(0));
+		auto* nn = j2.getRoot()->get("n");
+		ASSERT(nn != nullptr && nn->type == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(j2.getInt("x"), int64_t(1));
+	}
+	// A UTF-8 BOM must not break the text parser.
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(std::string("\xEF\xBB\xBFname: \"x\"")));
+		ASSERT_EQ(std::string(j2.getString("name")), "x");
+	}
+	// Malformed packed fixed-size field with trailing garbage must be rejected,
+	// not silently truncated (the extra byte made the payload 5 bytes for a
+	// float field and was silently dropped before the fix).
+	{
+		std::string schemaJson = R"({
+			"vals":{"id":1,"type":"float","repeated":true,"packed":true}
+		})";
+		// field 1 (wire 2): tag 0x0A, len 0x05, payload = 4-byte float + 1 trailing byte
+		const uint8_t raw[] = {0x0A, 0x05, 0x00, 0x00, 0xC0, 0x3F, 0x00};
+		asvJSON json;
+		ASSERT(!json.fromProtobuf(raw, sizeof(raw), schemaJson));
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -15261,6 +15334,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufPackedFixed);
 	RUN(testProtobufSchemaLessRoundTrip);
 	RUN(testProtobufTextArrayOfObjects);
+	RUN(testProtobufExtras);
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);

@@ -552,6 +552,26 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
       protoSetField(obj.get(), fname, std::move(val));
     }
   }
+  // Schema-less: empty arrays and null values produce no wire bytes (protobuf
+  // cannot represent them), so without the name map they'd silently vanish.
+  // Recover them from the embedded type codes -- the wire field is absent
+  // precisely because the value was empty/null. ("N" null-arrays are left alone
+  // as their element count is not recoverable from the wire.)
+  if (!schema && less.present) {
+    for (const auto& [fnum, code] : less.types) {
+      if (code != "A" && code != "n") continue;
+      std::string fname = std::to_string(fnum);
+      auto nit = less.names.find(fnum);
+      if (nit != less.names.end()) fname = nit->second;
+      if (obj->obj->find(fname) != obj->obj->end()) continue;
+      if (code == "A") {
+        auto arr = asvJSONValue::makeArray();
+        if (arr) (*obj->obj)[fname] = std::move(arr);
+      } else {
+        (*obj->obj)[fname] = asvJSONValue::makeNull();
+      }
+    }
+  }
   return obj;
 }
 
@@ -610,7 +630,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
       } else {
         // Packed repeated field -- decode according to element type
         if (static_cast<size_t>(end - pos) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("Protobuf packed field too large");
-        auto arr = asvJSONValue::makeArray();
+auto arr = asvJSONValue::makeArray();
         if (arr && arr->arr) {
           if (type == "float" || type == "fixed32" || type == "sfixed32") {
             while (pos + 4 <= end) {
@@ -619,6 +639,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
               if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); arr->arr->push_back(asvJSONValue::makeDouble(static_cast<double>(f))); }
               else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)))); }
             }
+            if (pos != end) throw asvJSONError("Protobuf packed fixed-size field has trailing data");
           } else if (type == "double" || type == "fixed64" || type == "sfixed64") {
             while (pos + 8 <= end) {
               uint64_t raw = 0;
@@ -626,6 +647,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
               if (type == "double") { double d; std::memcpy(&d, &raw, sizeof(d)); arr->arr->push_back(asvJSONValue::makeDouble(d)); }
               else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(raw))); }
             }
+            if (pos != end) throw asvJSONError("Protobuf packed fixed-size field has trailing data");
           } else if (type == "sint32" || type == "sint64") {
             while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeInt(protoZigZagDecode(v))); }
           } else if (type == "bool") {
@@ -790,6 +812,56 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
   return asvJSONValue::makeString(id.data(), id.size());
 }
 
+// Parse the elements of a `[ ... ]` list (pos just past the `[`), consuming up
+// to and including the matching `]`. Element may be a message, a nested array,
+// or a scalar; nested arrays recurse so the library's own nested-array output
+// round-trips instead of stalling the parser in an infinite loop.
+inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth);
+
+inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSONValue* arr, int depth) {
+  if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
+    int d = 1;
+    while (pos < text.size() && d > 0) {
+      if (text[pos] == '[') d++; else if (text[pos] == ']') d--;
+      if (d > 0) pos++;
+    }
+    if (pos < text.size()) pos++;
+    return;
+  }
+  if (!arr || !arr->arr) {
+    int d = 1;
+    while (pos < text.size() && d > 0) {
+      if (text[pos] == '[') d++; else if (text[pos] == ']') d--;
+      if (d > 0) pos++;
+    }
+    if (pos < text.size()) pos++;
+    return;
+  }
+  bool first = true;
+  while (pos < text.size()) {
+    protoTextSkipWS(text, pos);
+    if (pos >= text.size() || text[pos] == ']') { if (pos < text.size()) pos++; break; }
+    if (!first && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }
+    first = false;
+    if (text[pos] == '{' || text[pos] == '<') {
+      pos++;
+      auto elem = asvJSONValue::makeObject();
+      if (elem) { protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
+      else { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } }
+    } else if (text[pos] == '[') {
+      pos++;
+      auto elem = asvJSONValue::makeArray();
+      if (elem && elem->arr) { protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
+      else { int d = 1; while (pos < text.size() && d > 0) { if (text[pos] == '[') d++; else if (text[pos] == ']') d--; if (d > 0) pos++; } if (pos < text.size()) pos++; }
+    } else {
+      auto elem = protoTextParseScalar(text, pos);
+      if (elem) arr->arr->push_back(std::move(elem));
+    }
+    protoTextSkipWS(text, pos);
+    if (pos < text.size() && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }
+  }
+}
+
 inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth = 0) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) return;
   while (pos < text.size()) {
@@ -801,9 +873,9 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
     std::string fname;
     if (c == '[') {
       pos++;
-      while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
+while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
       if (pos < text.size()) pos++;
-    } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+    } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || (c >= '0' && c <= '9')) {
       fname = protoTextParseIdent(text, pos);
     } else break;
 
@@ -812,37 +884,19 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
     if (hasColon) { pos++; protoTextSkipWS(text, pos); }
     if (pos >= text.size()) break;
 
-    if (text[pos] == '{' || text[pos] == '<') {
-      char close = (text[pos] == '{') ? '}' : '>';
+if (text[pos] == '{' || text[pos] == '<') {
       pos++;
       auto obj = asvJSONValue::makeObject();
       if (!obj) { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } if (pos<text.size()) pos++; continue; }
       protoTextParseBody(text, pos, obj.get(), depth + 1);
-      protoSetField(parent, fname, std::move(obj));
+protoSetField(parent, fname, std::move(obj));
       protoTextSkipWS(text, pos);
       if (pos < text.size() && (text[pos] == ';' || text[pos] == ',')) pos++;
     } else if (text[pos] == '[') {
       pos++;
       auto arr = asvJSONValue::makeArray();
       if (arr && arr->arr) {
-        bool first = true;
-        while (pos < text.size()) {
-          protoTextSkipWS(text, pos);
-          if (pos >= text.size() || text[pos] == ']') { if (pos < text.size()) pos++; break; }
-          if (!first && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }
-          first = false;
-          if (pos < text.size() && (text[pos] == '{' || text[pos] == '<')) {
-            char close = (text[pos] == '{') ? '}' : '>'; pos++;
-            auto elem = asvJSONValue::makeObject();
-            if (elem) { protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
-            else { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } }
-          } else {
-            auto elem = protoTextParseScalar(text, pos);
-            if (elem) arr->arr->push_back(std::move(elem));
-          }
-          protoTextSkipWS(text, pos);
-          if (pos < text.size() && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }
-        }
+        protoTextParseArrayBody(text, pos, arr.get(), depth + 1);
       } else {
         int d = 1;
         while (pos < text.size() && d > 0) {
@@ -995,6 +1049,9 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
   formatType = FormatType::Unknown;
   try {
     size_t pos = 0;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
+      pos = 3;
     protoTextSkipWS(text, pos);
     if (pos >= text.size()) return false;
     if (text[pos] == '{') {
