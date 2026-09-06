@@ -3,6 +3,8 @@
 
 #include "../core.hpp"
 
+#include <unordered_set>
+
 namespace asvJSONInternal {
 
 inline std::string csvEscape(std::string_view s, bool forceQuote = false, bool injectionTarget = true) {
@@ -10,12 +12,19 @@ inline std::string csvEscape(std::string_view s, bool forceQuote = false, bool i
 	if (!need) for (auto c : s) if (c == ',' || c == '"' || c == '\n' || c == '\r') { need = true; break; }
 	if (!need) {
 		// Formula-injection guard: prefix leading =+-@ with a single quote so the
-		// cell is treated as text by spreadsheets. "..." quoting needs no guard.
-		// Only applies to text-like cells (STRINGS, headers), not numeric ones.
+		// cell is treated as text by spreadsheets. A cell that already starts
+		// with a guard apostrophe ("'=", "'+", "'-", "'@") must be quoted instead:
+		// left bare, csvStripInjection would mistake it for a guarded cell and eat
+		// the apostrophe on decode.
 		if (injectionTarget && !s.empty() && (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@')) {
 			return "'" + std::string(s);
 		}
-		return std::string(s);
+		if (injectionTarget && s.size() >= 2 && s[0] == '\'' &&
+		    (s[1] == '=' || s[1] == '+' || s[1] == '-' || s[1] == '@')) {
+			need = true;
+		} else {
+			return std::string(s);
+		}
 	}
 	std::string out; out += '"';
 	for (auto c : s) { if (c == '"') out += "\"\""; else out += c; }
@@ -33,29 +42,9 @@ inline std::string csvStripInjection(std::string_view s) {
 
 
 
-/**
- * @brief Split CSV line into fields respecting RFC 4180 quotes and escapes
- */
-inline std::vector<std::string> csvSplitLine(std::string_view line) {
-	std::vector<std::string> fields;
-	std::string cur;
-	bool inQuotes = false;
-	for (size_t i = 0; i < line.size(); i++) {
-		char c = line[i];
-		if (!inQuotes && c == '"') { inQuotes = true; continue; }
-		if (inQuotes && c == '"') {
-			if (i + 1 < line.size() && line[i + 1] == '"') { cur += '"'; i++; continue; }
-			inQuotes = false; continue;
-		}
-		if (!inQuotes && c == ',') { fields.push_back(std::move(cur)); cur.clear(); continue; }
-		cur += c;
-	}
-	fields.push_back(std::move(cur));
-	return fields;
-}
-
-// Like csvSplitLine but also reports whether each field was quoted with "...".
-// A quoted field (RFC 4180) is treated as an explicit text literal on decode,
+// Split CSV line into fields respecting RFC 4180 quotes and escapes, reporting
+// whether each field was quoted with "...". A quoted field is treated as an
+// explicit text literal on decode (used for both data rows and the header row),
 // which lets empty strings and numeric-looking strings round-trip as STRING.
 inline std::vector<std::pair<std::string, bool>> csvSplitLineQ(std::string_view line) {
 	std::vector<std::pair<std::string, bool>> fields;
@@ -84,31 +73,39 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
 	if (s == "false" || s == "FALSE" || s == "F") return asvJSONValue::makeBool(false);
 	if (!s.empty() && (s[0] == '+' || s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
-		// Skip a leading '+' (some from_chars implementations reject it) but keep
-		// it for '-' which is universally accepted.
-		const char* b = s.data() + (s[0] == '+' ? 1 : 0);
-		long long v;
-		auto [ptr, ec] = std::from_chars(b, s.data() + s.size(), v);
-		if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeInt(v);
-		bool allDigits = (s.size() > 1);
-		const char* p0 = (s[0] == '-') ? b + 1 : b;
-		for (const char* p = p0; p < s.data() + s.size(); ++p)
-			if (*p < '0' || *p > '9') { allDigits = false; break; }
-		if (allDigits) {
-			auto r = asvJSONValue::makeString(s.data(), s.size());
-			if (r) r->raw_number = true;
-			return r;
-		}
-		double d;
+		// JSON numbers never carry leading zeros ("042", "-042", "+042"), so
+		// those literals must stay STRINGs (otherwise the value silently changes
+		// to 42 on a re-parse). "0", "-0", "0.5" and "-0.5" are still numbers.
+		size_t nfirst = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+		bool leadZero = s.size() > nfirst + 1 && s[nfirst] == '0' &&
+		                s[nfirst + 1] >= '0' && s[nfirst + 1] <= '9';
+		if (!leadZero) {
+			// Skip a leading '+' (some from_chars implementations reject it) but keep
+			// it for '-' which is universally accepted.
+			const char* b = s.data() + (s[0] == '+' ? 1 : 0);
+			long long v;
+			auto [ptr, ec] = std::from_chars(b, s.data() + s.size(), v);
+			if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeInt(v);
+			bool allDigits = (s.size() > 1);
+			const char* p0 = (s[0] == '-') ? b + 1 : b;
+			for (const char* p = p0; p < s.data() + s.size(); ++p)
+				if (*p < '0' || *p > '9') { allDigits = false; break; }
+			if (allDigits) {
+				auto r = asvJSONValue::makeString(s.data(), s.size());
+				if (r) r->raw_number = true;
+				return r;
+			}
+			double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
-		auto [ptr2, ec2] = std::from_chars(b, s.data() + s.size(), d);
-		if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
+			auto [ptr2, ec2] = std::from_chars(b, s.data() + s.size(), d);
+			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
-		std::string tmp(s);
-		char* end; errno = 0;
-		d = std::strtod(tmp.c_str(), &end);
-		if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return asvJSONValue::makeDouble(d);
+			std::string tmp(s);
+			char* end; errno = 0;
+			d = std::strtod(tmp.c_str(), &end);
+			if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return asvJSONValue::makeDouble(d);
 #endif
+		}
 	}
 	return asvJSONValue::makeString(s.data(), s.size());
 }
@@ -118,6 +115,10 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 	formatType = FormatType::Unknown;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
+
+		// Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
+		if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+			input = input.substr(3);
 
 		// Split into lines, respecting quoted multi-line fields (RFC 4180)
 		std::vector<std::string_view> lines;
@@ -144,11 +145,23 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 
 		if (lines.empty()) throw asvJSONError("empty CSV data");
 
-		auto rawHeaders = csvSplitLine(lines[0]);
+		auto rawHeaders = csvSplitLineQ(lines[0]);
 		if (rawHeaders.empty()) throw asvJSONError("empty CSV header");
 		std::vector<std::string> headers;
 		headers.reserve(rawHeaders.size());
-		for (auto& h : rawHeaders) headers.push_back(csvStripInjection(h));
+		// A quoted header is an explicit text literal appended verbatim; only an
+		// unquoted header gets the formula-injection guard stripped (a header
+		// like "'@x" that toCSV quoted on purpose must not lose its apostrophe).
+		for (auto& [h, hq] : rawHeaders)
+			headers.push_back(hq ? std::move(h) : csvStripInjection(h));
+
+		// Duplicate column headers make the layout ambiguous; reject the input
+		// instead of silently keeping one column's data and dropping the other's.
+		{
+			std::unordered_set<std::string> seen;
+			for (const auto& h : headers)
+				if (!seen.insert(h).second) throw asvJSONError("CSV: duplicate column header \"" + h + "\"");
+		}
 
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) throw asvJSONError("out of memory");
@@ -156,6 +169,16 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 		for (size_t li = 1; li < lines.size(); li++) {
 			if (lines[li].empty()) continue;
 			auto fields = csvSplitLineQ(lines[li]);
+			// A row with more fields than the header must not silently drop the
+			// extras. Trailing empty fields (from a trailing comma) are tolerated.
+			if (fields.size() > headers.size()) {
+				bool extraData = false;
+				for (size_t k = headers.size(); k < fields.size(); k++)
+					if (!fields[k].first.empty()) { extraData = true; break; }
+				if (extraData)
+					throw asvJSONError("CSV: row " + std::to_string(li) + " has " + std::to_string(fields.size()) +
+					                   " fields, expected " + std::to_string(headers.size()));
+			}
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("out of memory");
 			for (size_t fi = 0; fi < headers.size(); fi++) {

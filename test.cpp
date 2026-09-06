@@ -7875,6 +7875,118 @@ TEST(testCSVRoundTrip) {
 	}
 }
 
+TEST(testCsvExtras) {
+	// first data row of a parsed CSV (matches the get(0) convention used elsewhere)
+	auto row = [](asvJSON& j) -> asvJSONValue* { return j.getRoot()->get(static_cast<size_t>(0)); };
+	// Leading-zero bare numerals must stay STRINGs (JSON has no leading zeros),
+	// otherwise "042" silently becomes 42 on a re-parse.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a,b,c\n042,-042,+042")));
+		auto* r = row(j);
+		ASSERT(r->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("a")->getString()), "042");
+		ASSERT(r->get("b")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("b")->getString()), "-042");
+		ASSERT(r->get("c")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("c")->getString()), "+042");
+		// "0" and "0.5" are still numbers
+		ASSERT(j.fromCSV(std::string_view("a,b\n0,0.5")));
+		auto* r2 = row(j);
+		ASSERT(r2->get("a")->type == asvJSONValue::INT);
+		ASSERT_EQ(r2->get("a")->getInt(), int64_t(0));
+		ASSERT(r2->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(r2->get("b")->getDouble() > 0.49 && r2->get("b")->getDouble() < 0.51);
+	}
+	// Leading-zero STRINGs round-trip as STRING without quotes.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"zip":"01234"})")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(row(j2)->get("zip")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(row(j2)->get("zip")->getString()), "01234");
+	}
+	// A UTF-8 BOM is stripped; the first header keeps its name.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string("\xEF\xBB\xBF" "a,b\n1,2")));
+		ASSERT(row(j)->get("a")->getInt() == 1);
+		ASSERT(row(j)->get("b")->getInt() == 2);
+	}
+	// Ragged rows (more non-empty fields than headers) are rejected instead of
+	// silently dropping data; a trailing comma only adds an empty field.
+	{
+		asvJSON j;
+		ASSERT(!j.fromCSV(std::string_view("a,b\n1,2,3")));
+		ASSERT(j.fromCSV(std::string_view("a,b\n1,2,")));
+		ASSERT_EQ(j.getRoot()->arr->size(), 1U);
+		// line index in the error message is 1-based data rows
+		ASSERT(!j.fromCSV(std::string_view("a,b\n1,2\n3,4,5")));
+		ASSERT(j.getLastError().find("row 2") != std::string::npos);
+	}
+	// Duplicate column headers are rejected instead of keeping one silently.
+	{
+		asvJSON j;
+		ASSERT(!j.fromCSV(std::string_view("a,a\n1,2")));
+		ASSERT(j.getLastError().find("duplicate column header") != std::string::npos);
+	}
+	// A value that starts with a guard apostrophe ("'=", "'+", "'-", "'@") is
+	// quoted on output so the apostrophe is not mistaken for an injection guard.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"k":"'=foo","l":"'@v","m":"'+x"})")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = row(j2);
+		ASSERT(r->get("k")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("k")->getString()), "'=foo");
+		ASSERT_EQ(std::string(r->get("l")->getString()), "'@v");
+		ASSERT_EQ(std::string(r->get("m")->getString()), "'+x");
+	}
+	// The same applies to header keys: a key literally named "'@x" keeps its
+	// apostrophe (it would be stripped as an injection guard otherwise).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"'@x":1}])")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(row(j2)->hasKey("'@x"));
+		ASSERT(!row(j2)->hasKey("@x"));
+		ASSERT_EQ(row(j2)->get("'@x")->getInt(), int64_t(1));
+	}
+	// Quoted headers carrying a guard character plus a comma survive the
+	// round-trip ("=a,b" used to lose its '=' after quote stripping).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"=a,b":3,"+c,d":4}])")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = row(j2);
+		ASSERT(r->hasKey("=a,b"));
+		ASSERT_EQ(r->get("=a,b")->getInt(), int64_t(3));
+		ASSERT(r->hasKey("+c,d"));
+		ASSERT_EQ(r->get("+c,d")->getInt(), int64_t(4));
+	}
+	// Injection-guarded and apostrophe-quoted keys stay distinct columns.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"@x":1,"'@x":2}])")));
+		std::string csv = j.toCSV();
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = row(j2);
+		ASSERT(r->hasKey("@x"));
+		ASSERT(r->hasKey("'@x"));
+		ASSERT_EQ(r->get("@x")->getInt(), int64_t(1));
+		ASSERT_EQ(r->get("'@x")->getInt(), int64_t(2));
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -15065,6 +15177,7 @@ RUN(testCBORFloat16);
 	RUN(testFromCSV);
 	RUN(testFromCSVIntOverflow);
 	RUN(testCSVRoundTrip);
+	RUN(testCsvExtras);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
