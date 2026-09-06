@@ -28,8 +28,12 @@ inline std::string xmlSanitizeElementName(std::string_view key) {
 	std::string name;
 	name.reserve(key.size());
 	for (auto c : key) {
+		// Spaces and markup chars map to '_'. '#' and '@' are also mapped:
+		// the XML name grammar (and this parser's xmlParseName) reject them,
+		// so a user key like "#foo" or "a@b" must not produce an
+		// un-parseable <#foo>/<a@b> element.
 		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') name += '_';
-		else if (c == '"' || c == '\'' || c == '<' || c == '>' || c == '&') name += '_';
+		else if (c == '"' || c == '\'' || c == '<' || c == '>' || c == '&' || c == '#' || c == '@') name += '_';
 		else name += c;
 	}
 	if (name.empty() || (name[0] >= '0' && name[0] <= '9') || name[0] == '-')
