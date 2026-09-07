@@ -26,6 +26,7 @@ inline std::string tomlEscapeStr(std::string_view s) {
       case '\r': out += "\\r"; break;
       case '\b': out += "\\b"; break;
       case '\f': out += "\\f"; break;
+      case '\x7F': out += "\\u007F"; break;
       default:
         if (static_cast<unsigned char>(c) < 0x20) {
           char buf[8];
@@ -130,7 +131,18 @@ inline std::string tomlQuoteKey(const std::string& key) {
   for (char c : key) {
     if (c == '"') out += "\\\"";
     else if (c == '\\') out += "\\\\";
-    else out += c;
+    else if (c == '\n') out += "\\n";
+    else if (c == '\t') out += "\\t";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\b') out += "\\b";
+    else if (c == '\f') out += "\\f";
+    else if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) == 0x7F) {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+      out += buf;
+    } else {
+      out += c;
+    }
   }
   out += '"';
   return out;
@@ -461,7 +473,6 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
     }
     bool escape = false;
-    int qc = 0;
     for (;;) {
       if (s.empty()) throw asvJSONError("unterminated string");
       char c = s[0]; s.remove_prefix(1);
@@ -488,8 +499,22 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         }
         escape = true; continue;
       }
-      if (c == '"') { qc++; if (qc >= 3) break; continue; }
-      qc = 0;
+      if (c == '"') {
+        // A run of 1-2 unescaped quotes is content; a run of 3+ closes the
+        // string with its final three quotes, any earlier quotes in the run
+        // keep as content (e.g. `"""""` = two content quotes + the closer).
+        size_t r = 0;
+        while (r < s.size() && s[r] == '"') r++;
+        size_t total = 1 + r; // including the already-consumed c
+        if (total >= 3) {
+          val.append(total - 3, '"');
+          s.remove_prefix(r);
+          break;
+        }
+        val.append(total, '"');
+        s.remove_prefix(r);
+        continue;
+      }
       val += c;
     }
     rejectTrailing();
@@ -505,12 +530,25 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
     }
     std::string val;
-    int qc = 0;
     for (;;) {
       if (s.empty()) throw asvJSONError("unterminated string");
       char c = s[0]; s.remove_prefix(1);
-      if (c == '\'') { qc++; if (qc >= 3) break; continue; }
-      qc = 0;
+      if (c == '\'') {
+        // A run of 1-2 unescaped quotes is content; a run of 3+ closes the
+        // string with its final three quotes, any earlier quotes in the run
+        // keep as content (e.g. `'''''` = two content quotes + the closer).
+        size_t r = 0;
+        while (r < s.size() && s[r] == '\'') r++;
+        size_t total = 1 + r; // including the already-consumed c
+        if (total >= 3) {
+          val.append(total - 3, '\'');
+          s.remove_prefix(r);
+          break;
+        }
+        val.append(total, '\'');
+        s.remove_prefix(r);
+        continue;
+      }
       val += c;
     }
     rejectTrailing();
@@ -1159,7 +1197,9 @@ if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
         // `s="""\n"""""` continues to the next line. Only close at a position
         // that leaves real content (or a genuine ``"""`` terminator) before it.
         size_t closePos = vtmp.find(delim, 3);
-        if (closePos == 3) closePos = vtmp.find("\\" + delim, 3);
+        // A `"""` exactly at position 3 usually closes an empty string
+        // (`""""""`); it is a continuation only when escaped as `\"""`.
+        if (closePos == 3 && vtmp.size() > 2 && vtmp[2] == '\\') closePos = vtmp.find("\\" + delim, 3);
         size_t fieldClose = std::string_view::npos;
         if (closePos != std::string_view::npos) {
           size_t endPos = vtmp.find_first_of(" \t\r\n", closePos + 3);

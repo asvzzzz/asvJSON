@@ -8231,6 +8231,38 @@ TEST(testToTOML) {
     ASSERT_EQ(j2.getInt("y"), int64_t(1));
     ASSERT(!j2.getRoot()->get("o")->hasKey("y"));
   }
+  // Keys containing control characters must be quoted/escaped so that the
+  // emitted TOML round-trips (a raw newline in a quoted key is invalid TOML).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a\nb":1,"c\td":2,"e\re":3})")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getInt("a\nb"), int64_t(1));
+    ASSERT_EQ(j2.getInt("c\td"), int64_t(2));
+    ASSERT_EQ(j2.getInt("e\re"), int64_t(3));
+  }
+  {
+    // Key with the DEL character (0x7F) -- must be escaped, not emitted raw.
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\x7f""b\":1}")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getInt("a\x7f""b"), int64_t(1));
+  }
+  // Values with DEL (0x7F) must escape to \\u007F so the decoder (which rejects
+  // a raw 0x7F in a basic string) can read them back.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"s\":\"a\x7f""b\"}")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("\\u007F") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getString("s"), std::string("a\x7f""b"));
+  }
 }
 
 TEST(testFromTOML) {
@@ -8320,6 +8352,42 @@ price = 2)")));
 line1
 line2""")")));
     ASSERT_EQ(std::string(j.getString("str")), "line1\nline2");
+  }
+  // Interior quote runs (1-2) in multi-line strings are content, not closers
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """x"y""")")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("x\"y"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """x""y""")")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("x\"\"y"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = '''x'y''')")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("x'y"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = '''x''y''')")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("x''y"));
+  }
+  // Quote runs of 4-5 at the end: leading quotes content, final 3 close
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """x"""" )")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("x\""));
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(R"(str = """x""""")")));
+    ASSERT_EQ(std::string(j2.getString("str")), std::string("x\"\""));
+  }
+  // Empty multi-line string """""" is an empty string, not a continuation
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """""" )")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string(""));
   }
   // Hex number
   {
