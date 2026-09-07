@@ -32,7 +32,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
   using T = asvJSONValue::Type;
   switch (type) {
     case T::NULL_VAL:
-      out.push_back(0xF7);
+      out.push_back(0xF6); // RFC 8949: 0xF6 = null (0xF7 is undefined)
       break;
     case T::BOOL_VAL:
       out.push_back(flag ? 0xF5 : 0xF4);
@@ -79,8 +79,9 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
     case T::BINARY:
     case T::OBJECTID:
     case T::EXTENSION: {
-      if (type == T::EXTENSION && !bin_data.empty()) {
-        // Encode extension as tag 257 + array [extType, byteString]
+      if (type == T::EXTENSION) {
+        // Encode extension as tag 257 + array [extType, byteString]; keeps
+        // the type even when the payload is empty (no data-loss to null).
         out.push_back(0xD9); out.push_back(0x01); out.push_back(0x01); // tag 257
         out.push_back(0x82); // array of 2 items
         cborWriteUint(out, 0, static_cast<uint8_t>(ext_type));
@@ -95,7 +96,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
         cborWriteUint(out, 2, bin_data.size());
         out.insert(out.end(), bin_data.begin(), bin_data.end());
       } else {
-        out.push_back(0xF7); // null fallback
+        out.push_back(0xF6); // null fallback
       }
       break;
     }
@@ -235,15 +236,22 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (data[pos] == 0xFF) { pos++; terminated = true; break; }
         auto chunk = parseCBOR(data, pos, dataLen, depth + 1);
         if (!chunk) throw asvJSONError("CBOR indefinite string chunk");
-        const auto* src = (chunk->type == asvJSONValue::BINARY) ? chunk->bin_data.data() : nullptr;
-        size_t srcLen = (chunk->type == asvJSONValue::BINARY) ? chunk->bin_data.size() : 0;
-        if (!src && chunk->type == asvJSONValue::STRING) {
+        // RFC 8949 s3.2.2: an indefinite-length byte string (major 2) is made
+        // up only of byte-string chunks, a text string (major 3) only of
+        // text-string chunks. Require the matching major type.
+        const uint8_t* src = nullptr;
+        size_t srcLen = 0;
+        if (major == 2) {
+          if (chunk->type != asvJSONValue::BINARY) throw asvJSONError("CBOR indefinite bytes invalid chunk type");
+          src = chunk->bin_data.data();
+          srcLen = chunk->bin_data.size();
+        } else {
+          if (chunk->type != asvJSONValue::STRING) throw asvJSONError("CBOR indefinite text invalid chunk type");
           src = reinterpret_cast<const uint8_t*>(chunk->str_data.data());
           srcLen = chunk->str_data.size();
         }
-        if (!src) throw asvJSONError("CBOR indefinite string invalid chunk");
         if (total + srcLen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("CBOR indefinite string too large");
-        allData.insert(allData.end(), src, src + srcLen);
+        if (srcLen > 0) allData.insert(allData.end(), src, src + srcLen);
         total += srcLen;
       }
       if (!terminated) throw asvJSONError("CBOR indefinite string missing terminator");
@@ -385,7 +393,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (sv == 21) return asvJSONValue::makeBool(true);
         if (sv == 22) return asvJSONValue::makeNull();
         if (sv == 23) return asvJSONValue::makeNull();
-        return asvJSONValue::makeNull();
+        // RFC 8949 s3.3: simple values 24-31 are reserved and MUST error.
+        if (sv >= 24 && sv <= 31) throw asvJSONError("CBOR: reserved simple value");
+        return asvJSONValue::makeNull(); // unassigned simple value
       }
       if (info == 25) {
         // Half-precision float (IEEE 754): decode to double

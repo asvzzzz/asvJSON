@@ -2690,6 +2690,75 @@ TEST(testCBORIndefiniteStringTruncated) {
 	ASSERT(!json.getLastError().empty());
 }
 
+TEST(testCBORExtras) {
+	// 1. JSON null must encode as CBOR null (0xF6), NOT undefined (0xF7).
+	{
+		asvJSON json;
+		json.putNull("k");
+		auto cbor = json.toCBOR();
+		ASSERT_EQ(cbor.size(), static_cast<size_t>(4));
+		ASSERT_EQ(cbor[3], 0xF6);
+	}
+	{
+		asvJSON json;
+		json.parse(std::string("[null]"));
+		auto cbor = json.toCBOR();
+		ASSERT_EQ(cbor.size(), static_cast<size_t>(2));
+		ASSERT_EQ(cbor[1], 0xF6);
+	}
+	// Old 0xF7 (undefined) input still decodes as null (lenient).
+	{
+		uint8_t u[] = { 0xF7 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(u, 1));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::NULL_VAL);
+	}
+
+	// 2. Extension with an empty payload must not degrade to null.
+	{
+		asvJSON json;
+		json.putExtension("e", 7, nullptr, 0);
+		auto cbor = json.toCBOR();
+		asvJSON json2;
+		ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+		ASSERT(json2.isExtension("e"));
+		std::vector<uint8_t> payload = json2.getExtension("e").second;
+		ASSERT(payload.empty());
+	}
+
+	// 3. Indefinite text/byte strings must reject chunks of the wrong major type.
+	{
+		uint8_t data[] = { 0x7F, 0x42, 0x01, 0x02, 0xFF }; // indefinite text w/ bytes chunk
+		asvJSON json;
+		bool ok = json.fromCBOR(data, 5);
+		if (ok) throw std::runtime_error("fromCBOR accepted binary chunk in indefinite text string");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		uint8_t data[] = { 0x5F, 0x61, 0x61, 0xFF }; // indefinite bytes w/ text chunk
+		asvJSON json;
+		bool ok = json.fromCBOR(data, 4);
+		if (ok) throw std::runtime_error("fromCBOR accepted text chunk in indefinite byte string");
+		ASSERT(!json.getLastError().empty());
+	}
+
+	// 4. Reserved extended simple values 24-31 are syntax errors (RFC 8949 s3.3).
+	{
+		uint8_t data[] = { 0xF8, 0x1F };
+		asvJSON json;
+		bool ok = json.fromCBOR(data, 2);
+		if (ok) throw std::runtime_error("fromCBOR accepted reserved simple value 31");
+		ASSERT(!json.getLastError().empty());
+	}
+	// Valid extended simples still decode.
+	{
+		uint8_t f[] = { 0xF8, 0x14 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(f, 2));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::BOOL_VAL && !json.getRoot()->flag);
+	}
+}
+
 TEST(testObjectKeyEscapes) {
 	// Object keys with escape sequences must be decoded per RFC 7159
 	{
@@ -15466,6 +15535,7 @@ RUN(testCBORFloat16);
 	RUN(testCBORTimestampRoundTrip);
 	RUN(testCBORObjectIdRoundTrip);
 	RUN(testCBORDatetimeVsTimestamp);
+	RUN(testCBORExtras);
 
 	std::cout << "\n--- Protobuf Tests ---\n";
 	RUN(testProtobufBasic);
