@@ -7418,6 +7418,241 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testGOONExtras) {
+	// Caret cross-row RLE in Compact mode (numeric column)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"a":1,"b":1},{"a":2,"b":2},{"a":3,"b":3}])")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 3);
+		ASSERT_EQ(j2.getRoot()->get(2)->getConst("b")->getInt(), int64_t(3));
+	}
+	// Caret across rows with dictionary references (string column)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"s":"x","n":1},{"s":"x","n":2},{"s":"x","n":3}])")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 3);
+		for (size_t i = 0; i < 3; i++) {
+			ASSERT(j2.getRoot()->get(i)->hasKey("s"));
+			ASSERT_EQ(std::string(j2.getRoot()->get(i)->getConst("s")->getString()), "x");
+		}
+		ASSERT_EQ(j2.getRoot()->get(2)->getConst("n")->getInt(), int64_t(3));
+	}
+	// Object nested in array in array (Compact and default)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[[{"x":1}],[{"x":2}]]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* a = j2.getRoot()->getConst("items");
+		ASSERT(a != nullptr);
+		ASSERT(a->size() == 2);
+		ASSERT(a->get(0)->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->get(0)->get(0)->getConst("x")->getInt(), int64_t(1));
+		ASSERT(a->get(1)->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->get(1)->get(0)->getConst("x")->getInt(), int64_t(2));
+	}
+	// Booleans inside nested arrays in Compact mode (valid JSON inline)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":[[1,true]]})")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* a = j2.getRoot()->getConst("a");
+		ASSERT(a != nullptr);
+		ASSERT(a->get(0)->type == asvJSONValue::ARRAY);
+		ASSERT(a->get(0)->get(0)->getInt() == 1);
+		ASSERT(a->get(0)->get(1)->getBool());
+	}
+	// Quoted keys with backslash-comma and tab-comma
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("a\\b,c", asvJSONValue::makeInt(1));
+		j.getRoot()->obj->emplace(std::string("a\tb,c"), asvJSONValue::makeInt(2));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getRoot()->getConst("a\\b,c")->getInt(), int64_t(1));
+		ASSERT_EQ(j2.getRoot()->getConst(std::string("a\tb,c"))->getInt(), int64_t(2));
+	}
+	// REGEX pattern containing '|' and backslash, with and without options
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("r1", asvJSONValue::makeRegex("a|b", nullptr));
+		j.getRoot()->obj->emplace("r2", asvJSONValue::makeRegex("a|b", "i"));
+		j.getRoot()->obj->emplace("r3", asvJSONValue::makeRegex("a\\b", "g"));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* r1 = j2.getRoot()->getConst("r1");
+		ASSERT(r1 != nullptr);
+		ASSERT(r1->type == asvJSONValue::REGEX);
+		ASSERT(r1->str_data == std::string("a|b") + std::string(1, '\0'));
+		ASSERT(j2.getRoot()->getConst("r2")->str_data == std::string("a|b") + std::string(1, '\0') + "i");
+		ASSERT(j2.getRoot()->getConst("r3")->str_data == std::string("a\\b") + std::string(1, '\0') + "g");
+	}
+	// Forbidden key __proto__ round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"__proto__":1})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->hasKey("__proto__"));
+		ASSERT_EQ(j2.getRoot()->getConst("__proto__")->getInt(), int64_t(1));
+	}
+	// Root scalar round-trips (INT and STRING) and rejects trailing content
+	{
+		asvJSON j;
+		j.setByPointer("/", asvJSONValue::makeInt(5));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot() != nullptr);
+		ASSERT(j2.getRoot()->type == asvJSONValue::INT);
+		ASSERT_EQ(j2.getRoot()->getInt(), int64_t(5));
+	}
+	{
+		asvJSON j;
+		j.setByPointer("/", asvJSONValue::makeString("hello", 5));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot() != nullptr);
+		ASSERT(j2.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->getString()), "hello");
+	}
+	{
+		asvJSON j2;
+		ASSERT(!j2.fromGOON(std::string_view("5\n  extra\n")));
+	}
+	// Comma in column name falls back to list format and round-trips
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"items":[{"a,b":1,"c":2}]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* it = j2.getRoot()->getConst("items");
+		ASSERT(it != nullptr);
+		ASSERT(it->size() == 1);
+		ASSERT_EQ(it->get(0)->getConst("a,b")->getInt(), int64_t(1));
+		ASSERT_EQ(it->get(0)->getConst("c")->getInt(), int64_t(2));
+	}
+	// Strings that look like numbers/Infinities/special-prefixes stay strings
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("s1", asvJSONValue::makeString("NaN", 3));
+		j.getRoot()->obj->emplace("s2", asvJSONValue::makeString("+1", 2));
+		j.getRoot()->obj->emplace("s3", asvJSONValue::makeString("Infinity", 8));
+		j.getRoot()->obj->emplace("s4", asvJSONValue::makeString("-Infinity", 9));
+		j.getRoot()->obj->emplace("s5", asvJSONValue::makeString("__TS__42", 8));
+		j.getRoot()->obj->emplace("s6", asvJSONValue::makeString("__BASE64__33", 12));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->getConst("s1")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s1")->getString()), "NaN");
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s2")->getString()), "+1");
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s3")->getString()), "Infinity");
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s4")->getString()), "-Infinity");
+		ASSERT(j2.getRoot()->getConst("s5")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s5")->getString()), "__TS__42");
+		ASSERT(j2.getRoot()->getConst("s6")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->getConst("s6")->getString()), "__BASE64__33");
+	}
+	// Quoted special-prefix strings in hand-written GOON stay strings
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: \"__TS__42\"\n")));
+		ASSERT(j.getRoot()->getConst("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.getRoot()->getConst("a")->getString()), "__TS__42");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __TS__42\n")));
+		ASSERT(j.getRoot()->getConst("a")->type == asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(j.getRoot()->getConst("a")->num, int64_t(42));
+	}
+	// Dictionary-referenced numeric/bool/special-looking string values
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":"42","n":1},{"k":"42","n":2}])")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		for (size_t i = 0; i < 2; i++) {
+			const auto* k = j2.getRoot()->get(i)->getConst("k");
+			ASSERT(k != nullptr);
+			ASSERT(k->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(k->getString()), "42");
+		}
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":"true","n":1},{"k":"true","n":2}])")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		for (size_t i = 0; i < 2; i++) {
+			const auto* k = j2.getRoot()->get(i)->getConst("k");
+			ASSERT(k != nullptr);
+			ASSERT(k->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(k->getString()), "true");
+		}
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"k":"__TS__42","n":1},{"k":"__TS__42","n":2}])")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* k = j2.getRoot()->get(1)->getConst("k");
+		ASSERT(k != nullptr);
+		ASSERT(k->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(k->getString()), "__TS__42");
+	}
+	// BINARY inside inline array in Compact mode
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		const unsigned char hb[] = {'H', 'i'};
+		j.getRoot()->obj->emplace("arr", asvJSONValue::makeArray());
+		const auto* arrp = j.getRoot()->getConst("arr");
+		const_cast<asvJSONValue*>(arrp)->arr->emplace_back(asvJSONValue::makeBinary(hb, 2));
+		const_cast<asvJSONValue*>(arrp)->arr->emplace_back(asvJSONValue::makeExtension(15, hb, 2));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* r = j2.getRoot()->getConst("arr");
+		ASSERT(r != nullptr);
+		ASSERT(r->size() == 2);
+		ASSERT(r->get(0)->type == asvJSONValue::BINARY);
+		ASSERT(r->get(1)->type == asvJSONValue::EXTENSION);
+		ASSERT(static_cast<int>(r->get(1)->ext_type) == 15);
+		ASSERT(r->get(1)->bin_data.size() == 2);
+		ASSERT(r->get(1)->bin_data[1] == 'i');
+	}
+}
+
 TEST(testProtobufBasic) {
 	// Schema-less: keys must be numeric field numbers
 	asvJSON json;
@@ -15683,6 +15918,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);
 	RUN(testGOONAudit);
+	RUN(testGOONExtras);
 	
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);

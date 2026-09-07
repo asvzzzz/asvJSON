@@ -17,28 +17,10 @@ namespace asvJSONInternal {
 
 const size_t MAX_REPEAT_COUNT = 10000;
 
-inline bool goonIsForbiddenKey(std::string_view key) {
-  return key == "__proto__" || key == "constructor" || key == "prototype";
-}
-
 class GoonDecodeError : public asvJSONError {
 public:
   explicit GoonDecodeError(const std::string& msg) : asvJSONError(msg) {}
 };
-
-inline void fmtBase64JsonVal(const uint8_t* data, size_t len, std::string& out) {
-  out += "\"__BASE64__";
-  out += encodeBase64(data, len);
-  out += '"';
-}
-
-inline void fmtExtJsonVal(int8_t type, const uint8_t* data, size_t len, std::string& out) {
-  out += "\"__EXT__";
-  out += std::to_string(type);
-  out += '_';
-  out += encodeBase64(data, len);
-  out += '"';
-}
 
 inline std::string goonLiteral(const asvJSONValue* v) {
   if (!v) return "_";
@@ -50,101 +32,102 @@ inline std::string goonLiteral(const asvJSONValue* v) {
   }
 }
 
-inline bool goonIsSimpleValue(const asvJSONValue* v) {
-  if (!v) return true;
-  if (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) return false;
-  return true;
-}
-
-inline bool goonIsSmallSimpleCollection(const asvJSONValue* v) {
-  if (!v) return false;
-  if (v->type == asvJSONValue::ARRAY || v->type == asvJSONValue::OBJECT) {
-    if (v->size() > 5) return false;
-    if (v->type == asvJSONValue::ARRAY) {
-      for (size_t i = 0; i < v->size(); i++) {
-        if (!goonIsSimpleValue(v->get(i))) return false;
-      }
-    } else {
-      for (const auto& [k, child] : *(v->obj)) {
-        if (!goonIsSimpleValue(child.get())) return false;
-      }
-    }
-    return true;
-  }
-  return false;
-}
-
 // Forward declarations for mutual recursion
 inline std::string goonFormatSpecial(const asvJSONValue* v);
 inline bool goonNeedsQuotes(const std::string& s);
 inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
-inline void goonSerializeInlineArray(const asvJSONValue* arr, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
-inline void goonSerializeInlineObject(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 
-inline void goonSerializeInlineVal(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
-  if (!v || v->type == asvJSONValue::NULL_VAL) { out += "_"; return; }
-  if (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) {
-    if (v->size() > 0 && goonIsSmallSimpleCollection(v) && opts.mode == GoonWriteOptions::Mode::Compact) {
-      if (v->type == asvJSONValue::OBJECT) goonSerializeInlineObject(v, out, dict, opts);
-      else goonSerializeInlineArray(v, out, dict, opts);
+// Serialize a value as valid JSON text. Used for elements inside inline
+// `[...]` cells, which the decoder passes through to the JSON parser verbatim
+// (so GOON literals like T/F/_/~ and __OID__ prefixes would be invalid there).
+inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0) {
+  if (!v || !asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
+  switch (v->type) {
+    case asvJSONValue::NULL_VAL: out += "null"; return;
+    case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); return;
+    case asvJSONValue::INT: out += std::to_string(v->num); return;
+    case asvJSONValue::DOUBLE:
+      if (std::isnan(v->dbl) || std::isinf(v->dbl)) out += "null";
+      else fmtDoubleVal(v->dbl, out);
+      return;
+    case asvJSONValue::STRING:
+      out += '"';
+      appendJsonEscaped(out, v->str_data);
+      out += '"';
+      return;
+    case asvJSONValue::DATETIME: {
+      out += '"';
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      out += '"';
       return;
     }
-  }
-  switch (v->type) {
-    case asvJSONValue::BOOL_VAL: out += (v->flag ? "T" : "F"); break;
-    case asvJSONValue::STRING:
-      if (v->str_data.empty()) out += "~";
-      else {
-        out += '"';
-        appendJsonEscaped(out, v->str_data);
-        out += '"';
-      }
-      break;
-    case asvJSONValue::INT: out += std::to_string(v->num); break;
-    case asvJSONValue::DOUBLE:
-      if (std::isnan(v->dbl) || std::isinf(v->dbl)) out += "_";
-      else fmtDoubleVal(v->dbl, out);
-      break;
-    default: {
-      std::string spec = goonFormatSpecial(v);
-      if (!spec.empty()) out += spec;
-      else out += "_";
-      break;
+    case asvJSONValue::BINARY:
+      if (v->bin_data.empty()) { out += "\"\""; return; }
+      out += "{\"$binary\":{\"base64\":\"";
+      out += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      out += "\",\"subType\":\"00\"}}";
+      return;
+    case asvJSONValue::EXTENSION: {
+      if (v->bin_data.empty()) { out += "\"\""; return; }
+      out += "{\"$binary\":{\"base64\":\"";
+      out += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      out += "\",\"subType\":\"";
+      char hbuf[3];
+      snprintf(hbuf, sizeof(hbuf), "%02x", static_cast<unsigned>(v->ext_type) & 0xFF);
+      out += hbuf;
+      out += "\"}}";
+      return;
     }
-  }
-}
-
-inline void goonSerializeInlineArray(const asvJSONValue* arr, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
-  out += '[';
-  for (size_t i = 0; i < arr->size(); i++) {
-    if (i > 0) out += ',';
-    goonSerializeInlineVal(arr->get(i), out, dict, opts);
-  }
-  out += ']';
-}
-
-inline void goonSerializeInlineObject(const asvJSONValue* v, std::string& out, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts) {
-  out += '{';
-  bool first = true;
-  for (const auto& [k, child] : *(v->obj)) {
-    if (!first) out += ',';
-    first = false;
-    if (dict && dict->count(k)) {
-      out += "$" + std::to_string(dict->at(k)) + ':';
-    } else {
-      if (goonNeedsQuotes(k)) {
+    case asvJSONValue::OBJECTID: {
+      std::string hex;
+      fmtObjectIdHexVal(v->str_data, hex);
+      out += "{\"$oid\":\"";
+      out += hex;
+      out += "\"}";
+      return;
+    }
+    case asvJSONValue::TIMESTAMP:
+      out += "{\"$timestamp\":{\"t\":";
+      out += std::to_string(v->num);
+      out += "}}";
+      return;
+    case asvJSONValue::REGEX: {
+      size_t sep = v->str_data.rfind('\0');
+      out += "{\"$regex\":\"";
+      if (sep != std::string::npos) appendJsonEscaped(out, v->str_data.substr(0, sep));
+      else appendJsonEscaped(out, v->str_data);
+      out += "\",\"$options\":\"";
+      if (sep != std::string::npos && sep + 1 < v->str_data.size())
+        appendJsonEscaped(out, v->str_data.substr(sep + 1));
+      out += "\"}";
+      return;
+    }
+    case asvJSONValue::OBJECT: {
+      out += '{';
+      bool first = true;
+      for (const auto& [k, child] : *(v->obj)) {
+        if (!first) out += ',';
+        first = false;
         out += '"';
         appendJsonEscaped(out, k);
-        out += '"';
-      } else {
-        out += k;
+        out += "\":";
+        goonJsonText(child.get(), out, depth + 1);
       }
-      out += ':';
+      out += '}';
+      return;
     }
-    goonSerializeInlineVal(child.get(), out, dict, opts);
+    case asvJSONValue::ARRAY: {
+      out += '[';
+      for (size_t i = 0; i < v->size(); i++) {
+        if (i > 0) out += ',';
+        goonJsonText(v->get(i), out, depth + 1);
+      }
+      out += ']';
+      return;
+    }
+    default: out += "null"; return;
   }
-  out += '}';
 }
 inline std::string goonFormatSpecial(const asvJSONValue* v) {
   if (!v) return "_";
@@ -155,22 +138,34 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
     }
     case asvJSONValue::BINARY: {
       if (v->bin_data.empty()) return "\"\"";
-      std::string r; fmtBase64JsonVal(v->bin_data.data(), v->bin_data.size(), r); return r;
+      std::string r("__BASE64__");
+      r += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      return r;
     }
     case asvJSONValue::OBJECTID: {
       std::string hex; fmtObjectIdHexVal(v->str_data, hex);
       return "__OID__" + hex;
     }
     case asvJSONValue::REGEX: {
-      // Emit __REGEX__<pattern>|<opts> so the decoder can restore the REGEX type
-      std::string raw(v->str_data);
-      raw += '\0';
+      // Emit __REGEX__<escaped-pattern>|<opts> so the decoder can restore the
+      // REGEX type. '|' and '\' inside the pattern and options are backslash-
+      // escaped so a pattern that itself contains '|' round-trips losslessly.
       size_t sep = v->str_data.rfind('\0');
-      std::string result = "__REGEX__";
-      result += (sep != std::string::npos) ? std::string(v->str_data.substr(0, sep)) : v->str_data;
-      if (sep != std::string::npos && sep + 1 < v->str_data.size()) {
+      std::string pat = (sep != std::string::npos) ? v->str_data.substr(0, sep) : v->str_data;
+      std::string opts = (sep != std::string::npos && sep + 1 < v->str_data.size()) ? v->str_data.substr(sep + 1) : std::string();
+      std::string esc;
+      esc.reserve(pat.size());
+      for (char c : pat) {
+        if (c == '\\' || c == '|') esc += '\\';
+        esc += c;
+      }
+      std::string result = "__REGEX__" + esc;
+      if (!opts.empty()) {
         result += '|';
-        result += v->str_data.substr(sep + 1);
+        for (char c : opts) {
+          if (c == '\\' || c == '|') result += '\\';
+          result += c;
+        }
       }
       return result;
     }
@@ -178,7 +173,11 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
       return "__TS__" + std::to_string(v->num);
     case asvJSONValue::EXTENSION: {
       if (v->bin_data.empty()) return "\"\"";
-      std::string r; fmtExtJsonVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), r); return r;
+      std::string r("__EXT__");
+      r += std::to_string(v->ext_type);
+      r += '_';
+      r += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      return r;
     }
     default: return {};
   }
@@ -191,8 +190,12 @@ inline bool goonNeedsQuotes(const std::string& s) {
   if (s.front() == ' ' || s.back() == ' ') return true;
   if (s.front() == '$' || s.front() == '#' || s.front() == '^' || (s.front() >= '0' && s.front() <= '9') || s.front() == '-')
     return true;
+  if (s.front() == '+' && s.size() > 1 && s[1] >= '0' && s[1] <= '9') return true;
+  if (s.front() == '{' || s.front() == '[') return true;
+  if (s.size() >= 2 && s[0] == '_' && s[1] == '_') return true;
   if (s == "T" || s == "F" || s == "_" || s == "~" || s == "true" || s == "false" || s == "null")
     return true;
+  if (s == "NaN" || s == "Infinity" || s == "-Infinity") return true;
   return false;
 }
 
@@ -305,6 +308,19 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       if (rowKeys != cols) { tabular = false; break; }
     }
   }
+  // A tabular header cannot represent column names containing separators
+  // (`,` splits columns, `{}`/`"`/`\` break header parsing), so fall back to
+  // list format which quotes keys robustly.
+  if (tabular) {
+    for (const auto& c : cols) {
+      if (c.empty() || c.front() == ' ' || c.back() == ' ') { tabular = false; break; }
+      bool bad = false;
+      for (char ch : c) {
+        if (ch == ',' || ch == '{' || ch == '}' || ch == '"' || ch == '\\' || ch == '\n' || ch == '\r') { bad = true; break; }
+      }
+      if (bad) { tabular = false; break; }
+    }
+  }
   if (tabular && !cols.empty()) {
     std::string pad(static_cast<size_t>(indent) * 2, ' ');
     if (!key.empty() || depth > 0) {
@@ -397,39 +413,16 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
           goonSerializeVal(sub.get(), out, indent + 2, k, depth + 1, dict, opts);
       }
     } else if (child->type == asvJSONValue::ARRAY) {
-      if (child->size() > 0 && goonIsSmallSimpleCollection(child) && opts.mode == GoonWriteOptions::Mode::Compact) {
-        out += pad + "  - [";
-        for (size_t j = 0; j < child->size(); j++) {
-          if (j > 0) out += ",";
-          goonSerializeInlineVal(child->get(j), out, dict, opts);
-        }
-        out += "]\n";
-      } else {
-        out += pad + "  - ";
-        out += '[';
-        for (size_t j = 0; j < child->size(); j++) {
-          if (j > 0) out += ',';
-          auto* el = child->get(j);
-          if (!el) out += "_";
-          else {
-            std::string elLit = goonLiteral(el);
-            if (!elLit.empty()) out += elLit;
-            else {
-              std::string spec = goonFormatSpecial(el);
-              if (!spec.empty()) out += spec;
-              else if (el->type == asvJSONValue::INT) out += std::to_string(el->num);
-              else if (el->type == asvJSONValue::DOUBLE) {
-                fmtDoubleVal(el->dbl, out);
-              } else {
-                out += '"';
-                appendJsonEscaped(out, el->str_data);
-                out += '"';
-              }
-            }
-          }
-        }
-        out += "]\n";
+      // Nested array inside a list item serializes as an inline `[...]` cell.
+      // The decoder passes `[...]` through to the JSON parser verbatim, so the
+      // elements must be valid JSON text (GOON literals like T/_/~ and the
+      // __OID__ prefixes are invalid there and would corrupt the value).
+      out += pad + "  - [";
+      for (size_t j = 0; j < child->size(); j++) {
+        if (j > 0) out += ',';
+        goonJsonText(child->get(j), out, depth + 1);
       }
+      out += "]\n";
     } else {
       out += pad + "  - ";
       if (child->type == asvJSONValue::INT) out += std::to_string(child->num);
@@ -622,7 +615,21 @@ inline std::string goonToJson(std::string_view input) {
   int rootIndent = countIndent(lines[firstLine]);
 
   auto expandCell = [&](std::string_view raw) -> std::string {
+    // A bare $N dictionary reference always denotes the dict *string* value,
+    // so the resolved text must stay a quoted string — never reinterpreted as
+    // a number/bool/special prefix (e.g. a repeated string "42" or "__TS__1").
+    bool wasDictRef = raw.size() > 1 && raw[0] == '$';
+    if (wasDictRef) {
+      for (size_t di = 1; di < raw.size(); di++) {
+        if (raw[di] < '0' || raw[di] > '9') { wasDictRef = false; break; }
+      }
+    }
     std::string s = resolveRef(raw);
+    if (wasDictRef) {
+      std::string r;
+      appendJsonEscaped(r, s);
+      return '"' + r + '"';
+    }
     // T->true, F->false, _->null, ~->""
     if (s == "T") return "true";
     if (s == "F") return "false";
@@ -649,14 +656,11 @@ inline std::string goonToJson(std::string_view input) {
     }
     // NaN/Infinity
     if (s == "NaN" || s == "Infinity" || s == "-Infinity") return s;
-    // GOON special prefixes → JSON convention
-    // Handles both raw and double-quoted forms (encoder quotes __BASE64__/__EXT__/__REGEX__)
-    {
+    // GOON special prefixes → JSON convention. Applied ONLY to unquoted cells:
+    // a quoted value is literal text, so a string like "__TS__42" (which the
+    // encoder now quotes) stays a string instead of becoming a timestamp.
+    if (s.size() >= 1 && s.front() != '"') {
       std::string_view unquoted = s;
-      if (unquoted.size() >= 2 && unquoted.front() == '"' && unquoted.back() == '"') {
-        unquoted.remove_prefix(1);
-        unquoted.remove_suffix(1);
-      }
       if (unquoted.substr(0, 6) == "__TS__") {
         return "{\"$timestamp\":{\"t\":" + std::string(unquoted.substr(6)) + "}}";
       }
@@ -667,14 +671,33 @@ inline std::string goonToJson(std::string_view input) {
         return "{\"$binary\":{\"base64\":\"" + std::string(unquoted.substr(10)) + "\",\"subType\":\"00\"}}";
       }
       if (unquoted.substr(0, 9) == "__REGEX__") {
+        // The encoder escapes '|' and '\' inside the pattern, so split at the
+        // LAST unescaped '|' and unescape the pattern/options sides.
         std::string content(unquoted.substr(9));
-        size_t sep = content.rfind('|');
-        if (sep != std::string::npos) {
-          std::string pat = content.substr(0, sep);
-          std::string opts = content.substr(sep + 1);
-          return "{\"$regex\":\"" + [](std::string_view x) { std::string r; appendJsonEscaped(r, x); return r; }(pat) + "\",\"$options\":\"" + opts + "\"}";
+        size_t sep = std::string::npos;
+        size_t bs = 0;
+        for (size_t ci = 0; ci < content.size(); ci++) {
+          if (content[ci] == '\\') { bs++; continue; }
+          if (content[ci] == '|') {
+            if (bs % 2 == 0) sep = ci;
+            bs = 0;
+          } else bs = 0;
         }
-        return "{\"$regex\":\"" + [](std::string_view x) { std::string r; appendJsonEscaped(r, x); return r; }(content) + "\"}";
+        auto unescapeReg = [](const std::string& x) {
+          std::string r;
+          for (size_t i = 0; i < x.size(); i++) {
+            if (x[i] == '\\' && i + 1 < x.size() && (x[i + 1] == '\\' || x[i + 1] == '|')) {
+              r += x[i + 1]; i++;
+            } else r += x[i];
+          }
+          return r;
+        };
+        std::string pat = (sep != std::string::npos) ? unescapeReg(content.substr(0, sep)) : unescapeReg(content);
+        std::string opts = (sep != std::string::npos) ? unescapeReg(content.substr(sep + 1)) : std::string();
+        std::string patEsc, optsEsc;
+        appendJsonEscaped(patEsc, pat);
+        appendJsonEscaped(optsEsc, opts);
+        return "{\"$regex\":\"" + patEsc + "\",\"$options\":\"" + optsEsc + "\"}";
       }
       if (unquoted.substr(0, 7) == "__EXT__") {
         std::string rest(unquoted.substr(7));
@@ -697,6 +720,33 @@ inline std::string goonToJson(std::string_view input) {
       std::string r; appendJsonEscaped(r, x); return r;
     }(s) + '"';
   };
+
+  // Bare scalar root document (e.g. a root INT/STRING/DATETIME serialized by
+  // toGOON()). Without this, a bare first line fell through every branch of
+  // the object path and silently produced "{}". Expanded to JSON here so
+  // scalar roots round-trip exactly like the JSON layer.
+  if (!rootIsArr) {
+    bool hasColon = false;
+    {
+      bool inQ = false;
+      for (size_t i = 0; i < firstContent.size(); i++) {
+        if (firstContent[i] == '"' && (i == 0 || firstContent[i - 1] != '\\')) inQ = !inQ;
+        else if (!inQ && firstContent[i] == ':') { hasColon = true; break; }
+      }
+    }
+    bool looksScalar = !hasColon &&
+      !firstContent.empty() && firstContent[0] != '-' &&
+      firstContent[0] != '{' && firstContent[0] != '[' && firstContent[0] != ']' &&
+      firstContent[0] != '}';
+    if (looksScalar) {
+      for (size_t k = firstLine + 1; k < lines.size(); k++) {
+        if (!lines[k].empty()) {
+          throw GoonDecodeError("GOON: unexpected trailing content after root value");
+        }
+      }
+      return expandCell(firstContent);
+    }
+  }
 
   // TOON-compatible comma splitter for GOON decoder
   auto goonSplitCommas = [](std::string_view s) -> std::vector<std::string> {
@@ -787,7 +837,10 @@ inline std::string goonToJson(std::string_view input) {
           size_t afterColon = afterB + 1;
           while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
           if (hasFields && !fields.empty()) {
-            // Tabular: read subsequent rows
+            // Tabular: read subsequent rows. prevValues carries the previous
+            // ROW's cell values so a `^` reference resolves across rows (the
+            // encoder emits `^` between consecutive rows, not within one).
+            std::vector<std::string> prevValues(fields.size(), "");
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
               auto& rline = lines[rl];
               if (rline.empty()) continue;
@@ -815,7 +868,6 @@ inline std::string goonToJson(std::string_view input) {
                 }
                 rowStr = rcont.substr(0, asterisk);
               }
-              std::vector<std::string> prevValues(fields.size(), "");
 
               for (int ri = 0; ri < repeat; ri++) {
                 std::vector<std::string> vals;
@@ -1050,7 +1102,9 @@ inline std::string goonToJson(std::string_view input) {
       while (!key.empty() && key.back() == ' ') key = key.substr(0, key.size() - 1);
       std::string keyStr;
       if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
-        keyStr = goonEscKey(key.substr(1, key.size() - 2));
+        // Quoted key content is JSON-escaped text; decode it first so that
+        // `\"`/`\\`/`\uXXXX` sequences are not escaped a second time.
+        keyStr = goonEscKey(unescapeJsonString(key.substr(1, key.size() - 2), false));
       } else {
         keyStr = goonEscKey(key);
       }
@@ -1060,10 +1114,6 @@ inline std::string goonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
 
-// Check for prototype pollution/sensitive keys
-if (goonIsForbiddenKey(keyStr)) {
-  throw GoonDecodeError("Security error: forbidden key detected: " + keyStr);
-}
 if (valPart.empty()) {
   out += '"' + keyStr + "\":{";
   stack.push_back({'O', true, indent, true, false});
