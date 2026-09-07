@@ -9577,6 +9577,99 @@ TEST(testSexprSpecialTypes) {
   }
 }
 
+TEST(testSexprExtras) {
+  // Even-length scalar arrays (>=4 elements) used to decode as key/value
+  // objects. The encoder now emits an ARRAY marker so they round-trip as arrays.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[1,2,3,4]")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->size(), size_t(4));
+    ASSERT_EQ(j2.getRoot()->get(3)->getInt(), int64_t(4));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"(["a","b","c","d"])")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->get(2)->getString(), std::string("c"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[true,false,true,false]")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->get(1)->getBool(), false);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([1,"a",2,"b"])")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->get(1)->getString(), std::string("a"));
+  }
+  // Nested even-length scalar arrays keep their nesting.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[[10,20,30,40]]")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT(j2.getRoot()->get(0)->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j2.getRoot()->get(0)->size(), size_t(4));
+  }
+  // Small and odd-sized arrays are unaffected.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[1,2]")));
+    std::string s = j.toSexpr();
+    ASSERT_EQ(s, "(1 2)");
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+  }
+  // Objects with scalar values still decode as objects (control).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":1,"b":2,"c":3,"d":4})")));
+    std::string s = j.toSexpr();
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(j2.getInt("d"), int64_t(4));
+  }
+  // DATETIME with a nonzero UTC offset survives (was flattened to Z).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1599999999, 0, 120));
+    std::string s = j.toSexpr();
+    ASSERT(s.find("+02:00") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1599999999));
+    ASSERT_EQ(dt->tz_offset_min, 120);
+  }
+  // UTF-8 BOM at the start of the input is skipped.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("\xEF\xBB\xBF(name \"John\")")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+  }
+}
+
 TEST(testTOONSpecialTypes) {
   // Special types used to be serialized to `null` (silently lost) on a
   // round-trip. They now serialize via the Extended JSON conventions and the
@@ -10487,6 +10580,20 @@ TEST(testJSON5Extras) {
     ASSERT(v->obj->find("$timestamp") != v->obj->end());
     ASSERT(v->obj->find("$regex") != v->obj->end());
     ASSERT(v->getConst("$regex")->type == asvJSONValue::STRING);
+  }
+  // DATETIME with a nonzero UTC offset survives a JSON5 round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1599999999, 0, 120));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("+02:00") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1599999999));
+    ASSERT_EQ(dt->tz_offset_min, 120);
   }
   // Sole $regex with $options still decodes to a REGEX value
   {
@@ -16002,6 +16109,7 @@ RUN(testCBORFloat16);
 	RUN(testFromSexpr);
     RUN(testSexprAudit);
     RUN(testSexprSpecialTypes);
+    RUN(testSexprExtras);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

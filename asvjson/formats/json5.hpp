@@ -457,7 +457,7 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::DATETIME: {
       out += '"';
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
       out += '"';
       break;
     }

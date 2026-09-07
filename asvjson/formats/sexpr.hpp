@@ -23,6 +23,12 @@ enum SexprTokenType { SEXPR_LPAREN, SEXPR_RPAREN, SEXPR_STRING, SEXPR_NUMBER, SE
 // string that merely begins with that byte -- the encoder always escapes such a
 // value as "\u0001...". See sexprTokenize.
 static const char SEXPR_KEY_MARK = '\x01';
+// S-Expression internal marker token for arrays whose elements would be
+// misread as an object by the object/list heuristic (an even-length group of
+// scalars). The encoder emits a single literal SEXPR_ARRAY_MARK string token
+// as the first element of such arrays; values that merely contain this byte
+// are escaped as "\u0002..." so a literal marker never collides with data.
+static const char SEXPR_ARRAY_MARK = '\x02';
 
 struct SexprToken {
   SexprTokenType type;
@@ -244,6 +250,15 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   }
 
   pos++; // skip '('
+  // A leading literal ARRAY marker forces array interpretation, overriding
+  // the object/list heuristic (the encoder emits it for even-length scalar
+  // arrays that would otherwise decode as key/value objects).
+  bool forceArray = false;
+  if (pos < tokens.size() && tokens[pos].type == SEXPR_STRING && !tokens[pos].marked &&
+      tokens[pos].value.size() == 1 && static_cast<unsigned char>(tokens[pos].value[0]) == SEXPR_ARRAY_MARK) {
+    forceArray = true;
+    pos++;
+  }
   std::vector<std::string> items;
   std::vector<int> itemTypes;
   // For strings the encoder printed as quoted keys (leading SEXPR_KEY_MARK):
@@ -307,12 +322,12 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   bool isObj = false;
 
   // Empty object marker: (() #t) -- empty group + true sentinel
-  if (items.size() == 2 && items[0] == "[]" && items[1] == "true"
+  if (!forceArray && items.size() == 2 && items[0] == "[]" && items[1] == "true"
       && itemTypes[0] == -1 && itemTypes[1] == SEXPR_TRUE) {
     return "{}";
   }
 
-  if (items.size() >= 2 && items.size() % 2 == 0) {
+  if (!forceArray && items.size() >= 2 && items.size() % 2 == 0) {
     // For 2-item lists, only treat as object if first item is a bare symbol
     if (items.size() == 2) {
       isObj = (itemTypes[0] == SEXPR_SYMBOL);
@@ -327,7 +342,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // Fallback: if first item is a bare symbol key, emit {key: values}.
   // A quoted string in first position is data, not a key -- odd-length
   // groups are always lists, so ("a" "b" "c") stays an array.
-  if (!isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
+  if (!forceArray && !isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
     std::string key = items[0];
     if (items.size() == 2) {
       return '{' + key + ':' + valueJson(1) + '}';
@@ -439,7 +454,23 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
       break;
     }
     case asvJSONValue::ARRAY: {
+      // Even-length arrays whose even positions are all scalar key-type
+      // tokens would decode as an object (key/value heuristic). Disambiguate
+      // by emitting a leading literal ARRAY marker token ("\x02").
+      bool ambiguous = v->size() >= 4 && v->size() % 2 == 0;
+      if (ambiguous) {
+        for (size_t i = 0; i < v->size() && ambiguous; i += 2) {
+          const asvJSONValue* el = v->get(i);
+          int t = el ? el->type : asvJSONValue::NULL_VAL;
+          if (!(t == asvJSONValue::STRING || t == asvJSONValue::INT ||
+                t == asvJSONValue::DOUBLE || t == asvJSONValue::BOOL_VAL ||
+                t == asvJSONValue::NULL_VAL || t == asvJSONValue::DATETIME)) {
+            ambiguous = false;
+          }
+        }
+      }
       out += '(';
+      if (ambiguous) { out += '"'; out += SEXPR_ARRAY_MARK; out += '"'; }
       for (size_t i = 0; i < v->size(); i++) {
         if (i > 0) out += ' ';
         sexprSerializeVal(v->get(i), out, depth + 1);
@@ -507,7 +538,7 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::DATETIME: {
       // ISO-8601 string; the JSON parser auto-reconstructs DATETIME on decode.
       out += '"';
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
       out += '"';
       break;
     }
@@ -525,6 +556,11 @@ inline std::string asvJSON::toSexpr() const {
 inline bool asvJSON::fromSexpr(std::string_view input) {
   formatType = FormatType::Unknown;
   try {
+    if (input.empty()) throw asvJSONError("empty input");
+    if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xEF &&
+        static_cast<unsigned char>(input[1]) == 0xBB && static_cast<unsigned char>(input[2]) == 0xBF) {
+      input.remove_prefix(3);
+    }
     if (input.empty()) throw asvJSONError("empty input");
     auto tokens = sexprTokenize(input);
     if (tokens.empty()) throw asvJSONError("no tokens");
