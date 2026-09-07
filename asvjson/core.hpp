@@ -2958,6 +2958,9 @@ inline std::vector<uint8_t> asvJSON::toBSON() const {
 	writeLE32(sub, 0);
 	if (root->type == asvJSONValue::OBJECT && root->obj) {
 		for (const auto& [k, v] : *root->obj) {
+			// BSON keys are NUL-terminated C strings; a key containing a
+			// NUL byte cannot be represented (it would truncate on read).
+			if (k.find('\0') != std::string::npos) throw asvJSONError("BSON key contains NUL byte");
 			std::vector<uint8_t> elem;
 			elem.reserve(64 + k.size());
 			size_t elemStart = elem.size();

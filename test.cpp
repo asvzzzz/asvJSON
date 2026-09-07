@@ -1932,6 +1932,101 @@ TEST(testBSONEmptyArrayRoundTrip) {
 	ASSERT_EQ(v->size(), static_cast<size_t>(0));
 }
 
+TEST(testBSONExtras) {
+	// Bug: a key containing an embedded NUL byte was serialized as invalid
+	// BSON (the key terminator truncated it on read).  It must throw.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"a\\u0000b\":1}")));
+		try {
+			auto bson = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError& e) {
+			ASSERT(std::string(e.what()).find("NUL") != std::string::npos);
+		}
+	}
+	// Same at a nested-object level.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string("{\"n\":{\"a\\u0000b\":1}}")));
+		try {
+			auto bson = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError&) {
+		}
+	}
+
+	// Bug: timestamps outside the BSON uint32 seconds field silently wrapped.
+	{
+		asvJSON json;
+		json.putTimestamp("t", -1);
+		try {
+			auto bson = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError&) {
+		}
+		json.putTimestamp("t", 4294967296LL);
+		try {
+			auto bson = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError&) {
+		}
+	}
+	// Valid range still round-trips.
+	{
+		asvJSON json;
+		json.putTimestamp("t", 4294967295LL);
+		auto bson = json.toBSON();
+		asvJSON json2;
+		ASSERT(json2.fromBSON(bson.data(), bson.size()));
+		auto* v = json2.getRoot()->get("t");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->num, 4294967295LL);
+	}
+
+	// DateTime overflow guard: exact INT64 extremes must pass, one past must throw.
+	{
+		asvJSON json;
+		// (max sec, 807 ms) == INT64_MAX ms exactly
+		json.putDateTime("t", 9223372036854775LL, 807);
+		auto bson = json.toBSON();
+		ASSERT(bson.size() > 0);
+		asvJSON json2;
+		ASSERT(json2.fromBSON(bson.data(), bson.size()));
+		auto* v = json2.getRoot()->get("t");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->timestamp, 9223372036854775LL);
+		ASSERT_EQ(v->datetime_ms, 807);
+
+		// one ms past max throws
+		json.putDateTime("t", 9223372036854775LL, 808);
+		try {
+			auto bson2 = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError&) {
+		}
+
+		// (-9223372036854775,-807) normalizes to (-9223372036854776,193) == INT64_MIN ms
+		json.putDateTime("t", -9223372036854775LL, -807);
+		bson = json.toBSON();
+		ASSERT(bson.size() > 0);
+		asvJSON json3;
+		ASSERT(json3.fromBSON(bson.data(), bson.size()));
+		v = json3.getRoot()->get("t");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->timestamp, -9223372036854776LL);
+		ASSERT_EQ(v->datetime_ms, 193);
+
+		// one ms past min: (-9223372036854776, 191) -> INT64_MIN - 1 ms
+		json.putDateTime("t", -9223372036854776LL, 191);
+		try {
+			auto bson3 = json.toBSON();
+			ASSERT(false);
+		} catch (const asvJSONError&) {
+		}
+	}
+}
+
 TEST(testISODateTime) {
 	{
 		asvJSON json;
@@ -15478,6 +15573,7 @@ int main() {
 	RUN(testBSONOversizedKey);
 	RUN(testBSONExtensionRoundTrip);
 	RUN(testBSONEmptyArrayRoundTrip);
+	RUN(testBSONExtras);
 
 	std::cout << "\n--- ISO 8601 DateTime Tests ---\n";
 	RUN(testISODateTime);

@@ -42,6 +42,9 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			writeLE32(sub, 0);
 			if (obj) {
 				for (const auto& [k, v] : *obj) {
+					// BSON keys are NUL-terminated C strings; a key containing a
+					// NUL byte cannot be represented (it would truncate on read).
+					if (k.find('\0') != std::string::npos) throw asvJSONError("BSON key contains NUL byte");
 					std::vector<uint8_t> elem;
 					elem.reserve(64 + k.size());
 					size_t elemStart = elem.size();
@@ -112,13 +115,28 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			int64_t t = timestamp;
 			int64_t m = datetime_ms;
 			// Guard t*1000+m against signed overflow without performing it.
+			// makeDateTime normalizes m into [0, 999], so only t>0 and t<0
+			// with m>=0 are reachable through the public API.
 			bool overflow = false;
 			if (t > 0)
 				overflow = m >= 0 ? t > (std::numeric_limits<int64_t>::max() - m) / 1000
 			                     : t > std::numeric_limits<int64_t>::max() / 1000;
-			else if (t < 0)
-				overflow = m <= 0 ? t < (std::numeric_limits<int64_t>::min() - m) / 1000
-			                     : t < std::numeric_limits<int64_t>::min() / 1000;
+			else if (t < 0) {
+				if (m >= 0) {
+					// overflow iff t*1000 + m < INT64_MIN. Derived without
+					// overflowing the subtraction: min = 1000*minQ + minR with
+					// minR in [-999,0]; then min - m = 1000*minQ + (minR - m)
+					// and the exact threshold for t is:
+					//   t <= minQ + (minR - m)/1000 - 1   (C++ trunc division).
+					int64_t d = (std::numeric_limits<int64_t>::min() % 1000) - m; // in [-1999, 0]
+					int64_t threshold = (std::numeric_limits<int64_t>::min() / 1000) + (d / 1000) - 1;
+					overflow = t <= threshold;
+				} else {
+					// m<0 is unreachable via the public API (makeDateTime
+					// normalizes into [0,999]); err on the side of throwing.
+					overflow = t < std::numeric_limits<int64_t>::min() / 1000;
+				}
+			}
 			if (overflow)
 				throw asvJSONError("BSON datetime out of int64 milliseconds range");
 			int64_t ms = t * 1000 + m;
@@ -150,6 +168,10 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::TIMESTAMP: {
+			// BSON 0x11 seconds field is uint32; values outside [0, 2^32-1]
+			// would silently wrap via the cast, so reject them instead.
+			if (num < 0 || num > static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
+				throw asvJSONError("BSON timestamp out of uint32 seconds range");
 			out.push_back(0x11);
 			uint32_t t = static_cast<uint32_t>(num);
 			// BSON 0x11 layout is {t: uint32, i: uint32}; t comes first.
