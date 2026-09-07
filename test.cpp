@@ -10440,6 +10440,67 @@ TEST(testJSON5Audit) {
   }
 }
 
+TEST(testJSON5Extras) {
+  // Escape round-trip through double-quoted strings: \n \t \r \b \f \\ \"
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    std::string val("a\nb\tc\rd\be\ff\\g\"h", 15);
+    j.getRoot()->obj->emplace("s", asvJSONValue::makeString(val.data(), (int)val.size()));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* v = j2.getRoot()->getConst("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT(v->str_data == val);
+  }
+  // Escaped \n \t \r \b \f and \' inside single-quoted JSON5 strings
+  {
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view("{'s':'a\\nb\\tc\\rd\\be\\ff\\\\g\\''}")));
+    auto* v = j2.getRoot()->getConst("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    std::string want("a\nb\tc\rd\be\ff\\g'", 14);
+    ASSERT(v->str_data == want);
+  }
+  // Empty binary / extension payloads keep their types through a JSON5 round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("b", asvJSONValue::makeBinary(nullptr, 0));
+    j.getRoot()->obj->emplace("e", asvJSONValue::makeExtension(7, nullptr, 0));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    auto* b = j2.getRoot()->getConst("b");
+    ASSERT(b != nullptr && b->type == asvJSONValue::BINARY && b->bin_data.empty());
+    auto* e = j2.getRoot()->getConst("e");
+    ASSERT(e != nullptr && e->type == asvJSONValue::EXTENSION && e->bin_data.empty() && e->ext_type == 7);
+  }
+  // A $regex-looking plain object with extra members stays a plain object:
+  // REGEX needs the sole member, or the $regex+$options pair
+  {
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view("{$timestamp:5,$regex:\"x\"}")));
+    auto* v = j2.getRoot();
+    ASSERT(v != nullptr && v->type == asvJSONValue::OBJECT);
+    ASSERT(v->obj->find("$timestamp") != v->obj->end());
+    ASSERT(v->obj->find("$regex") != v->obj->end());
+    ASSERT(v->getConst("$regex")->type == asvJSONValue::STRING);
+  }
+  // Sole $regex with $options still decodes to a REGEX value
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("r", asvJSONValue::makeRegex("a.\\d+", "im"));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getRegexPattern("r"), "a.\\d+");
+    ASSERT_EQ(j2.getRegexOptions("r"), "im");
+  }
+}
+
 TEST(testToINI) {
   // Simple object
   {
@@ -15947,6 +16008,7 @@ RUN(testCBORFloat16);
 	RUN(testFromJSON5);
     RUN(testFromJSON5Conformance);
     RUN(testJSON5Audit);
+    RUN(testJSON5Extras);
 
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);

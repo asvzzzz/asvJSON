@@ -89,6 +89,11 @@ inline std::string json5ToJson(std::string_view input) {
           }
         }
         else if (n == '\'') { out += '\''; i++; }
+        else if (n == 'n') { out += "\\n"; i++; }
+        else if (n == 't') { out += "\\t"; i++; }
+        else if (n == 'r') { out += "\\r"; i++; }
+        else if (n == 'b') { out += "\\b"; i++; }
+        else if (n == 'f') { out += "\\f"; i++; }
         else {
           if (n >= '1' && n <= '9') throw asvJSONError("octal escape not allowed in JSON5");
           if (n == '"' || n == '\\') out += '\\';
@@ -148,6 +153,11 @@ inline std::string json5ToJson(std::string_view input) {
           }
         }
         else if (n == '\'') { out += '\''; }
+        else if (n == 'n') { out += "\\n"; }
+        else if (n == 't') { out += "\\t"; }
+        else if (n == 'r') { out += "\\r"; }
+        else if (n == 'b') { out += "\\b"; }
+        else if (n == 'f') { out += "\\f"; }
         else if (n == '"') { out += "\\\""; }
         else {
           if (n >= '1' && n <= '9') throw asvJSONError("octal escape not allowed in JSON5");

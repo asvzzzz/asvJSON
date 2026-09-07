@@ -1118,23 +1118,24 @@ private:
 					auto subIt = binIt->second->obj->find("subType");
 					if (base64It != binIt->second->obj->end() && base64It->second->type == asvJSONValue::STRING) {
 						auto data = decodeBase64Fast(base64It->second->str_data.data(), base64It->second->str_data.size());
-						if (!data.empty()) {
-							int subType = 0;
-							if (subIt != binIt->second->obj->end() && subIt->second->type == asvJSONValue::STRING) {
-								subType = static_cast<int>(std::strtol(subIt->second->str_data.c_str(), nullptr, 16));
-							}
+						if (subIt != binIt->second->obj->end() && subIt->second->type == asvJSONValue::STRING) {
+							int subType = static_cast<int>(std::strtol(subIt->second->str_data.c_str(), nullptr, 16));
 							if (subType == 0) {
 								return asvJSONValue::makeBinary(data.data(), data.size());
 							} else {
 								return asvJSONValue::makeExtension(static_cast<int8_t>(subType), data.data(), data.size());
 							}
+						} else {
+							return asvJSONValue::makeBinary(data.data(), data.size());
 						}
 					}
 				}
 			}
 			{
 				auto regexIt = obj->obj->find("$regex");
-				if (regexIt != obj->obj->end() && regexIt->second->type == asvJSONValue::STRING) {
+				bool regexSolo = (obj->obj->size() == 1) ||
+					(obj->obj->size() == 2 && obj->obj->find("$options") != obj->obj->end());
+				if (regexIt != obj->obj->end() && regexIt->second->type == asvJSONValue::STRING && regexSolo) {
 					std::string pattern = regexIt->second->str_data;
 					std::string opts;
 					auto optsIt = obj->obj->find("$options");
