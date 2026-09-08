@@ -21,10 +21,15 @@ inline std::string tronSchemaSignature(const asvJSONValue* v) {
   keys.reserve(v->obj->size());
   for (const auto& [k, _] : *v->obj) keys.push_back(k);
   std::sort(keys.begin(), keys.end());
+  // Each key is JSON-quoted so a key containing ',' (e.g. ["a,b"] as a single
+  // key) can never collide with a multi-key shape (["a","b"]): the plain
+  // comma-joined form merged both into the same signature, corrupting values.
   std::string r;
   for (size_t i = 0; i < keys.size(); i++) {
     if (i > 0) r += ',';
-    r += keys[i];
+    r += '"';
+    appendJsonEscaped(r, keys[i]);
+    r += '"';
   }
   return r;
 }
@@ -61,6 +66,16 @@ inline std::string tronClassName(int idx) {
   return r;
 }
 
+inline bool tronLooksLikeMarker(std::string_view s) {
+  static constexpr std::string_view pre[] = {
+    "__TS__", "__OID__", "__REGEX__", "__BASE64__", "__EXT__"
+  };
+  for (auto p : pre) {
+    if (s.size() >= p.size() && s.compare(0, p.size(), p) == 0) return true;
+  }
+  return false;
+}
+
 inline void tronSerializeVal(const asvJSONValue* v,
     const std::unordered_map<std::string, std::string>& sigToClass,
     const std::unordered_map<std::string, std::vector<std::string>>& classKeys,
@@ -71,7 +86,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
     switch (v->type) {
       case asvJSONValue::DATETIME:
         out.push_back('"');
-        fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+        fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
         out.push_back('"');
         return;
       case asvJSONValue::BINARY:
@@ -120,7 +135,20 @@ inline void tronSerializeVal(const asvJSONValue* v,
     case asvJSONValue::BOOL_VAL:
     case asvJSONValue::INT:
     case asvJSONValue::DOUBLE:
+      appendJsonToken(out, v, allowNaNInfinity);
+      break;
     case asvJSONValue::STRING:
+      // A literal string starting with a special-type marker prefix (__TS__,
+      // __OID__, ...) must not be re-interpreted by the decoder as that type.
+      // The decoder only recognizes markers in raw (unescaped-by-tokenizer)
+      // form, so escape the leading '_' as \u005F to keep the value a string.
+      if (tronLooksLikeMarker(v->str_data)) {
+        out += '"';
+        out += "\\u005F";
+        appendJsonEscaped(out, std::string_view(v->str_data.data() + 1, v->str_data.size() - 1));
+        out += '"';
+        break;
+      }
       appendJsonToken(out, v, allowNaNInfinity);
       break;
     case asvJSONValue::ARRAY: {
@@ -179,6 +207,15 @@ inline std::string asvJSON::toTRON() const {
     if (cit != counts.end() && keys.size() > 1 && cit->second > 1)
       qualified.push_back({sig, keys});
   }
+  // Sort before assigning class names: firstKeys iterates an unordered_map, so
+  // without this the A..Z name assignment (and thus the emitted document) would
+  // be hash-order dependent instead of deterministic.
+  std::sort(qualified.begin(), qualified.end(),
+    [](const std::pair<std::string, std::vector<std::string>>& a,
+       const std::pair<std::string, std::vector<std::string>>& b) {
+      if (a.second.size() != b.second.size()) return a.second.size() < b.second.size();
+      return a.first < b.first;
+    });
   std::unordered_map<std::string, std::string> sigToClass;
   std::unordered_map<std::string, std::vector<std::string>> classKeys;
   int idx = 0;
@@ -332,9 +369,9 @@ struct TronParseState {
            !(pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN);
   }
 
-  asvJSONValue* parseValue();
+  asvJSONValue* parseValue(int depth = 0);
 
-  asvJSONValue* parseObject() {
+  asvJSONValue* parseObject(int depth) {
     advance(); // '{'
     auto obj = asvJSONValue::makeObject();
     if (!obj) throw asvJSONError("out of memory");
@@ -342,6 +379,8 @@ struct TronParseState {
     if (peek().type == TronTokType::RBRACE) { advance(); return obj.release(); }
     bool first = true;
     while (true) {
+      if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE)
+        throw asvJSONError("TRON object too large");
       if (!first) {
         if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
         else break;
@@ -352,15 +391,15 @@ struct TronParseState {
       std::string key = tronUnescape(advance().text);
       if (!match(TronTokType::COLON)) throw asvJSONError("expected ':'");
       skipNewlines();
-      asvJSONValue* val = parseValue();
-      if (val) obj->obj->emplace(key, std::unique_ptr<asvJSONValue>(val));
+      asvJSONValue* val = parseValue(depth + 1);
+      if (val) obj->obj->insert_or_assign(key, std::unique_ptr<asvJSONValue>(val));
       skipNewlines();
     }
     if (!match(TronTokType::RBRACE)) throw asvJSONError("expected '}' or ',' in object");
     return obj.release();
   }
 
-  asvJSONValue* parseArray() {
+  asvJSONValue* parseArray(int depth) {
     advance(); // '['
     auto arr = asvJSONValue::makeArray();
     if (!arr) throw asvJSONError("out of memory");
@@ -368,13 +407,15 @@ struct TronParseState {
     if (peek().type == TronTokType::RBRACKET) { advance(); return arr.release(); }
     bool first = true;
     while (true) {
+      if (arr->size() >= asvJSONValue::MAX_ARRAY_SIZE)
+        throw asvJSONError("TRON array too large");
       if (!first) {
         if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
         else break;
       }
       first = false;
       if (peek().type == TronTokType::RBRACKET) break;
-      asvJSONValue* val = parseValue();
+      asvJSONValue* val = parseValue(depth + 1);
       if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
       skipNewlines();
     }
@@ -382,7 +423,7 @@ struct TronParseState {
     return arr.release();
   }
 
-  asvJSONValue* parseInstance() {
+  asvJSONValue* parseInstance(int depth) {
     std::string className = advance().text;
     auto it = classes.find(className);
     if (it == classes.end()) throw asvJSONError("undefined class: " + className);
@@ -406,13 +447,13 @@ struct TronParseState {
         else propName = advance().text;
         advance(); // '='
         skipNewlines();
-        asvJSONValue* val = parseValue();
+        asvJSONValue* val = parseValue(depth + 1);
         if (namedArgs.find(propName) != namedArgs.end())
           throw asvJSONError("duplicate argument: " + propName);
         namedArgs[propName] = std::unique_ptr<asvJSONValue>(val);
       } else {
         if (namedMode) throw asvJSONError("positional arg after named");
-        asvJSONValue* val = parseValue();
+        asvJSONValue* val = parseValue(depth + 1);
         posArgs.push_back(std::unique_ptr<asvJSONValue>(val));
       }
       skipNewlines();
@@ -448,19 +489,25 @@ struct TronParseState {
   }
 };
 
-asvJSONValue* TronParseState::parseValue() {
+asvJSONValue* TronParseState::parseValue(int depth) {
   skipNewlines();
+  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("TRON nesting too deep");
   auto& tok = peek();
   static const double tronNaN = std::numeric_limits<double>::quiet_NaN();
   static const double tronInf = std::numeric_limits<double>::infinity();
   switch (tok.type) {
-    case TronTokType::LBRACE: return parseObject();
-    case TronTokType::LBRACKET: return parseArray();
+    case TronTokType::LBRACE: return parseObject(depth);
+    case TronTokType::LBRACKET: return parseArray(depth);
     case TronTokType::STRING: {
       std::string raw = advance().text;
       std::string s = tronUnescape(raw);
+      // Marker recognition runs on the RAW token text (not the unescaped
+      // value): the encoder escapes literal strings that start with a marker
+      // prefix as \u005F..., so they stay strings instead of being converted
+      // into special types here.
       // Check __TS__ prefix (timestamp stored as a quoted marker)
-      if (s.size() > 6 && s.compare(0, 6, "__TS__") == 0) {
+      if (raw.size() > 6 && raw.compare(0, 6, "__TS__") == 0) {
         long long ts;
         auto [tptr, tec] = std::from_chars(s.data() + 6, s.data() + s.size(), ts);
         if (tec == std::errc() && tptr == s.data() + s.size()) {
@@ -470,7 +517,7 @@ asvJSONValue* TronParseState::parseValue() {
         }
       }
       // Check __OID__ prefix (ObjectId stored as a 24-char hex string)
-      if (s.size() == 31 && s.compare(0, 7, "__OID__") == 0) {
+      if (raw.size() == 31 && raw.compare(0, 7, "__OID__") == 0) {
         uint8_t bytes[12];
         bool hexOk = true;
         for (int i = 0; i < 12; i++) {
@@ -487,7 +534,7 @@ asvJSONValue* TronParseState::parseValue() {
         }
       }
       // Check __REGEX__ prefix: pattern|options (options optional)
-      if (s.size() > 9 && s.compare(0, 9, "__REGEX__") == 0) {
+      if (raw.size() > 9 && raw.compare(0, 9, "__REGEX__") == 0) {
         std::string content(s.data() + 9, s.size() - 9);
         size_t sep = content.rfind('|');
         if (sep != std::string::npos) {
@@ -501,33 +548,35 @@ asvJSONValue* TronParseState::parseValue() {
         if (!v) throw asvJSONError("out of memory");
         return v.release();
       }
-      // Check __BASE64__ prefix
-      if (s.size() > 10 && s.compare(0, 10, "__BASE64__") == 0) {
+      // Check __BASE64__ prefix (payload may be empty)
+      if (raw.size() >= 10 && raw.compare(0, 10, "__BASE64__") == 0) {
         auto data = decodeBase64Fast(s.data() + 10, s.size() - 10);
         auto v = asvJSONValue::makeBinary(data.data(), data.size());
         if (!v) throw asvJSONError("out of memory");
         return v.release();
       }
-      // Check __EXT__ prefix: "__EXT__<type>__<base64>"
-      if (s.size() > 7 && s.compare(0, 7, "__EXT__") == 0) {
+      // Check __EXT__ prefix: "__EXT__<type>__<base64>". An unparsable type
+      // falls through to a plain string instead of rejecting the whole doc.
+      if (raw.size() > 7 && raw.compare(0, 7, "__EXT__") == 0) {
         size_t sep = s.find("__", 7);
         if (sep != std::string::npos && sep > 7) {
           int extType;
           auto [ptr, ec] = std::from_chars(s.data() + 7, s.data() + sep, extType);
-          if (ec != std::errc() || ptr != s.data() + sep)
-            throw asvJSONError("invalid extension type");
-          auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2);
-          auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
-          if (!v) throw asvJSONError("out of memory");
-          return v.release();
+          if (ec == std::errc() && ptr == s.data() + sep) {
+            auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2);
+            auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
+            if (!v) throw asvJSONError("out of memory");
+            return v.release();
+          }
         }
       }
       // Check ISO 8601 date
       if (s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T') {
         time_t ts;
         int ms = 0;
-        if (tryParseDateTime(s, ts, &ms)) {
-          auto v = asvJSONValue::makeDateTime(ts, ms);
+        int tz = 0;
+        if (tryParseDateTime(s, ts, &ms, &tz)) {
+          auto v = asvJSONValue::makeDateTime(ts, ms, tz);
           if (!v) throw asvJSONError("out of memory");
           return v.release();
         }
@@ -574,7 +623,7 @@ asvJSONValue* TronParseState::parseValue() {
     }
     case TronTokType::IDENT: {
       if (pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN)
-        return parseInstance();
+        return parseInstance(depth);
       throw asvJSONError("unexpected identifier: " + tok.text);
     }
     default:

@@ -9983,6 +9983,145 @@ TEST(testToonExtras) {
   }
 }
 
+TEST(testTRONExtras) {
+  // DATETIME preserves tz_offset_min across a TRON round-trip (encoder used to
+  // call fmtDateTimeVal with 3 args and the decoder ignored the offset).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1700000000, 123, 180));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1700000000));
+    ASSERT_EQ(dt->datetime_ms, 123);
+    ASSERT_EQ(dt->tz_offset_min, 180);
+    // negative offset
+    asvJSON jn;
+    ASSERT(jn.parse(std::string_view("[]")));
+    jn.getRoot()->arr->push_back(asvJSONValue::makeDateTime(1700000000, 0, -210));
+    asvJSON jn2;
+    ASSERT(jn2.fromTRON(std::string_view(jn.toTRON())));
+    ASSERT_EQ(jn2.getRoot()->get(static_cast<size_t>(0))->tz_offset_min, -210);
+  }
+  // Literal strings that start with a special-type marker prefix must round-trip
+  // as STRINGs, not be re-interpreted as the special type.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    const char* mk[] = {
+      "__TS__987", "__TS__-5", "__TS__abc",
+      "__OID__0123456789abcdef01234567", "__OID__1234",
+      "__REGEX__abc|i", "__REGEX__",
+      "__BASE64__aGk=", "__BASE64__",
+      "__EXT__7__aGk=", "__EXT__-3__aGk=", "__EXT__x__aGk=",
+      "__XXX__1", "plain"
+    };
+    for (const char* m : mk) {
+      j.getRoot()->arr->push_back(asvJSONValue::makeStringView(std::string_view(m)));
+    }
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(14));
+    for (size_t i = 0; i < 14; i++) {
+      auto* v = j2.getRoot()->get(i);
+      ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+      ASSERT_EQ(std::string(v->str_data), std::string(mk[i]));
+    }
+    // Object keys prefixed like markers remain plain keys.
+    asvJSON k;
+    ASSERT(k.parse(std::string_view("{\"__TS__5\":1}")));
+    asvJSON k2;
+    ASSERT(k2.fromTRON(std::string_view(k.toTRON())));
+    auto* kv = k2.getRoot()->getConst("__TS__5");
+    ASSERT(kv != nullptr && kv->type == asvJSONValue::INT && kv->num == 1);
+  }
+  // External marker documents still decode as special types.
+  {
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("{\"ts\":\"__TS__42\"}")));
+    ASSERT_EQ(j.getRoot()->getConst("ts")->type, asvJSONValue::TIMESTAMP);
+    ASSERT_EQ(j.getRoot()->getConst("ts")->num, int64_t(42));
+    ASSERT(j.fromTRON(std::string_view("{\"oid\":\"__OID__0123456789abcdef01234567\"}")));
+    ASSERT_EQ(j.getRoot()->getConst("oid")->type, asvJSONValue::OBJECTID);
+    ASSERT(j.fromTRON(std::string_view("{\"b64\":\"__BASE64__aGk=\"}")));
+    ASSERT_EQ(j.getRoot()->getConst("b64")->type, asvJSONValue::BINARY);
+    ASSERT(j.fromTRON(std::string_view("{\"re\":\"__REGEX__a.c|i\"}")));
+    ASSERT_EQ(j.getRoot()->getConst("re")->type, asvJSONValue::REGEX);
+  }
+  // Empty BINARY and empty EXTENSION round-trip with their types preserved
+  // (empty binary __BASE64__ used to decode as a plain string).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("ebin", asvJSONValue::makeBinary(nullptr, 0));
+    j.getRoot()->obj->emplace("eext", asvJSONValue::makeExtension(-7, nullptr, 0));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* ebin = j2.getRoot()->getConst("ebin");
+    ASSERT(ebin != nullptr && ebin->type == asvJSONValue::BINARY);
+    ASSERT(ebin->bin_data.empty());
+    auto* eext = j2.getRoot()->getConst("eext");
+    ASSERT(eext != nullptr && eext->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(eext->ext_type, -7);
+    ASSERT(eext->bin_data.empty());
+  }
+  // Schema signature must not merge a single comma-bearing key with a
+  // multi-key shape (["a,b"] vs ["a","b"]) -- previously the collision turned
+  // {"a,b":5} into {"a":null,"b":null}.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4},{\"a,b\":5}]")));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+    auto* v0 = j2.getRoot()->get(static_cast<size_t>(0));
+    auto* v1 = j2.getRoot()->get(static_cast<size_t>(1));
+    auto* v2 = j2.getRoot()->get(static_cast<size_t>(2));
+    ASSERT(v0->getConst("a") && v0->getConst("a")->num == 1);
+    ASSERT(v0->getConst("b") && v0->getConst("b")->num == 2);
+    ASSERT(v1->getConst("a") && v1->getConst("a")->num == 3);
+    ASSERT(v1->getConst("b") && v1->getConst("b")->num == 4);
+    ASSERT(v2->getConst("a,b") && v2->getConst("a,b")->num == 5);
+    ASSERT(v2->getConst("a") == nullptr);
+    ASSERT(v2->getConst("b") == nullptr);
+  }
+  // Duplicate keys in a literal object follow JSON semantics (last wins).
+  {
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("{\"a\":1,\"a\":2}")));
+    ASSERT_EQ(j.getRoot()->getConst("a")->num, int64_t(2));
+  }
+  // Overly deep nesting is rejected (was an unbounded recursion => stack
+  // overflow on crafted input), while moderate nesting still parses.
+  {
+    std::string ok;
+    ok.append(20, '[');
+    ok.append(20, ']');
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view(ok)));
+    std::string deep;
+    deep.append(500, '[');
+    deep.append(500, ']');
+    asvJSON j2;
+    ASSERT(!j2.fromTRON(std::string_view(deep)));
+  }
+  // Repeated-shape hoisting is deterministic across calls.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[{\"z\":1,\"a\":\"m\",\"m\":2},{\"z\":3,\"a\":\"q\",\"m\":4}]")));
+    std::string s1 = j.toTRON();
+    std::string s2 = j.toTRON();
+    ASSERT_EQ(s1, s2);
+    ASSERT(s1.find("class A:") != std::string::npos);
+  }
+}
+
 TEST(testTRONSpecialTypes) {
   // Special types used to be serialized without a recoverable marker (ObjectId
   // as a bare hex string -> STRING, Regex as "pattern|opts" -> STRING, Timestamp
@@ -16317,6 +16456,7 @@ RUN(testCBORFloat16);
 	RUN(testToTRON);
 	RUN(testToTRONAdvanced);
 	RUN(testToTRONComprehensive);
+	RUN(testTRONExtras);
 	RUN(testTRONSpecialTypes);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
