@@ -176,12 +176,15 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
   for (size_t i = 0; i < lines.size(); ++i) {
     const auto& line = lines[i];
     std::string_view t = udeTrim(line);
-    if (udeIsDocSeparator(t)) {
+    // Document separators/end-markers must start at column 0.
+    // An indented line like "  ---" inside a block scalar is not a separator.
+    bool col0 = !line.empty() && line[0] != ' ' && line[0] != '\t';
+    if (col0 && udeIsDocSeparator(t)) {
       if (!cur.empty()) docs.push_back(cur);
       cur.clear();
       continue;
     }
-    if (udeIsDocEndMarker(t)) {
+    if (col0 && udeIsDocEndMarker(t)) {
       // End of the current document: close it, a following "---" opens the next.
       if (!cur.empty()) docs.push_back(cur);
       cur.clear();
@@ -330,8 +333,9 @@ inline std::string udeFoldScalar(std::string_view s) {
 // Parse a UDE datetime value. Accepts the full ISO-8601 form handled by
 // tryParseDateTime (with optional fractional seconds and timezone offset) as
 // well as date-only "YYYY-MM-DD" (midnight UTC).
-inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
+inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int* tz_out = nullptr) {
   if (ms_out) *ms_out = 0;
+  if (tz_out) *tz_out = 0;
   // Date-only form: YYYY-MM-DD exactly.
   if (sv.size() == 10 && sv[4] == '-' && sv[7] == '-') {
     auto parse2 = [](const char* p, int& v) -> bool {
@@ -352,7 +356,7 @@ inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out) {
     out = asvjson_timegm(&tm);
     return true;
   }
-  return tryParseDateTime(sv, out, ms_out);
+  return tryParseDateTime(sv, out, ms_out, tz_out);
 }
 
 // ====================== Parser ======================
@@ -362,6 +366,10 @@ public:
   explicit UDEParser(std::string_view text, bool strict) : text_(text), strict_(strict) {}
 
   std::unique_ptr<asvJSONValue> parseDocument();
+  std::unique_ptr<asvJSONValue> parseScalarDocValue() {
+    skipWsAndComments();
+    return parseValue(1);
+  }
 
 private:
   // Documented resource limits (Section 10 of the UDE spec): the maximum
@@ -537,16 +545,18 @@ private:
     return segs >= 1;
   }
 
-  std::unique_ptr<asvJSONValue> parseValue() {
+  std::unique_ptr<asvJSONValue> parseValue(int depth) {
     skipWsAndComments();
     if (eof()) throw asvJSONError("UDE: expected value at line " + std::to_string(lineNum_));
+    if (!asvJSONValue::checkNestingDepth(depth))
+      throw asvJSONError("UDE: nesting too deep at line " + std::to_string(lineNum_));
     char c = peek();
     if (c == '"') return parseQuotedString();
     if (c == '\'') return parseSingleQuotedString();
-    if (c == '[') return parseArray();
-    if (c == '{') return parseObject();
-    if (c == '!') return parseTagged();
-    if (c == '&') return parseAnchored();
+    if (c == '[') return parseArray(depth + 1);
+    if (c == '{') return parseObject(depth + 1);
+    if (c == '!') return parseTagged(depth + 1);
+    if (c == '&') return parseAnchored(depth + 1);
     if (c == '*') return parseAlias();
     if (c == '|' || c == '>') return parseBlockScalar();
     return parseScalar();
@@ -715,7 +725,7 @@ private:
     return asvJSONValue::makeStringView(udeUnescapeSingle(raw));
   }
 
-  std::unique_ptr<asvJSONValue> parseArray() {
+  std::unique_ptr<asvJSONValue> parseArray(int depth) {
     pos_++; // consume '['
     auto arr = asvJSONValue::makeArray();
     while (true) {
@@ -725,7 +735,7 @@ private:
       if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
         throw asvJSONError("UDE: array too large");
-      arr->arr->push_back(parseValue());
+      arr->arr->push_back(parseValue(depth));
       skipWsAndComments();
       if (eof()) throw asvJSONError("UDE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
@@ -735,7 +745,7 @@ private:
     return arr;
   }
 
-  std::unique_ptr<asvJSONValue> parseObject() {
+  std::unique_ptr<asvJSONValue> parseObject(int depth) {
     pos_++; // consume '{'
     auto obj = asvJSONValue::makeObject();
     while (true) {
@@ -751,13 +761,13 @@ private:
         if (strict_) throw asvJSONError("UDE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
-        val = parseValue();
+        val = parseValue(depth);
       }
       // YAML-style merge key inside inline objects: "{<<: *default}".
       if (pk.name == "<<" && !pk.quoted) {
         applyMergeKey(obj.get(), std::move(val));
       } else {
-        insertKey(obj.get(), std::move(pk), std::move(val));
+        insertKey(obj.get(), std::move(pk), std::move(val), depth);
       }
       skipWsAndComments();
       if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
@@ -898,10 +908,10 @@ private:
     anchors_[name] = std::move(c);
   }
 
-  std::unique_ptr<asvJSONValue> parseAnchored() {
+  std::unique_ptr<asvJSONValue> parseAnchored(int depth) {
     std::string name = parseAnchorName();
     skipWsAndComments();
-    auto val = parseValue();
+    auto val = parseValue(depth);
     registerAnchor(name, val.get());
     return val;
   }
@@ -1047,9 +1057,10 @@ private:
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !datetime requires a string value");
       time_t ts = 0;
       int ms = 0;
-      if (!udeTryParseDateTime(val->str_data, ts, &ms))
+      int tz = 0;
+      if (!udeTryParseDateTime(val->str_data, ts, &ms, &tz))
         throw asvJSONError("UDE: invalid datetime: " + val->str_data);
-      return asvJSONValue::makeDateTime(ts, ms);
+      return asvJSONValue::makeDateTime(ts, ms, tz);
     }
     if (tag == "regex") {
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !regex requires a string value");
@@ -1123,7 +1134,7 @@ private:
     return custom;
   }
 
-  std::unique_ptr<asvJSONValue> parseTagged() {
+  std::unique_ptr<asvJSONValue> parseTagged(int depth) {
     pos_++; // consume '!'
     std::string tag;
     if (!eof() && peek() == '<') {
@@ -1152,7 +1163,7 @@ private:
       if (tag == "null") return asvJSONValue::makeNull();
       throw asvJSONError("UDE: !" + tag + " requires a value");
     }
-    auto val = parseValue();
+    auto val = parseValue(depth);
     // Apply the tag first so the anchor references the final tagged value.
     val = applyTag(tag, std::move(val));
     if (!anchor.empty()) registerAnchor(anchor, val.get());
@@ -1176,6 +1187,8 @@ private:
     if (!obj || !obj->obj || !src || src->type != asvJSONValue::OBJECT || !src->obj) return;
     for (const auto& [k, v] : *src->obj) {
       if (obj->obj->find(k) == obj->obj->end()) {
+        if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+          throw asvJSONError("UDE: object too large");
         auto copy = cloneValue(v.get());
         if (copy) obj->obj->emplace(k, std::move(copy));
       }
@@ -1200,7 +1213,7 @@ private:
     }
   }
 
-  void insertKey(asvJSONValue* obj, ParsedKey pk, std::unique_ptr<asvJSONValue> val) {
+  void insertKey(asvJSONValue* obj, ParsedKey pk, std::unique_ptr<asvJSONValue> val, int depth = 1) {
     if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) {
       throw asvJSONError("UDE: cannot insert key into non-object");
     }
@@ -1208,10 +1221,18 @@ private:
     // key (single segment) is always a literal key (Section 3).
     if (!pk.segs.empty() && udeDottedKeyExpandable(pk.segs)) {
       asvJSONValue* cur = obj;
+      // `depth` is the object's nesting depth in the tree; each new dotted
+      // segment adds one object level, bounded by the nesting limit (Section 12).
+      int prefixDepth = depth;
       for (size_t i = 0; i + 1 < pk.segs.size(); i++) {
         const std::string& seg = pk.segs[i].first;
         auto it = cur->obj->find(seg);
         if (it == cur->obj->end()) {
+          if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
+            throw asvJSONError("UDE: object too large");
+          if (prefixDepth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+            throw asvJSONError("UDE: nesting too deep");
+          prefixDepth++;
           auto no = asvJSONValue::makeObject();
           auto* raw = no.get();
           cur->obj->emplace(seg, std::move(no));
@@ -1229,6 +1250,8 @@ private:
         if (strict_) throw asvJSONError("UDE: duplicate key '" + leaf + "' in strict mode");
         cur->obj->insert_or_assign(leaf, std::move(val));
       } else {
+        if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
+          throw asvJSONError("UDE: object too large");
         cur->obj->emplace(leaf, std::move(val));
       }
     } else {
@@ -1237,6 +1260,8 @@ private:
         if (strict_) throw asvJSONError("UDE: duplicate key '" + pk.name + "' in strict mode");
         obj->obj->insert_or_assign(std::move(pk.name), std::move(val));
       } else {
+        if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+          throw asvJSONError("UDE: object too large");
         obj->obj->emplace(std::move(pk.name), std::move(val));
       }
     }
@@ -1256,7 +1281,7 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
       char c = peek();
       if (c == '[' || c == '{') {
         if (any) throw asvJSONError("UDE: unexpected top-level collection at line " + std::to_string(lineNum_));
-        auto coll = (c == '[') ? parseArray() : parseObject();
+        auto coll = (c == '[') ? parseArray(2) : parseObject(2);
         skipWsAndComments();
         if (!eof()) throw asvJSONError("UDE: trailing content after top-level collection");
         return coll;
@@ -1277,7 +1302,7 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
         if (strict_) throw asvJSONError("UDE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
-        val = parseValue();
+        val = parseValue(1);
       }
       // YAML-style merge key: "<<: *default" (only the unquoted form merges).
       if (key.name == "<<" && !key.quoted) {
@@ -1294,14 +1319,28 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
 // Only applied when the line cannot be a structured UDE document at all, so
 // that malformed documents and strict-mode rejections report their error
 // instead of silently degrading to a plain string.
-inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& text) {
+inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& text, bool strict) {
   std::string_view t = udeTrim(text);
   if (t.empty()) return nullptr;
   if (t.find('\n') != std::string_view::npos) return nullptr;
-  if (t.find(':') != std::string_view::npos) return nullptr;
   char c = t[0];
-  if (c == '[' || c == '{' || c == '|' || c == '>' || c == '!' || c == '&' || c == '*' || c == '"') return nullptr;
-  return asvJSONValue::makeStringView(t);
+  if (c == '[' || c == '{' || c == '|' || c == '>' || c == '!' || c == '&' || c == '*') return nullptr;
+  // A ':' only disambiguates a key if the text is not a quoted scalar root;
+  // inside quotes it is part of the string and must be preserved.
+  if (c != '"' && c != '\'' && t.find(':') != std::string_view::npos) return nullptr;
+  // Unquoted multi-word plain text is a verbatim string (a scalar token never
+  // contains a space), so keep the whole trimmed line as-is.
+  if (c != '"' && c != '\'' && t.find(' ') != std::string_view::npos)
+    return asvJSONValue::makeStringView(t);
+  // Keep the temporary buffer alive for the whole parse: UDEParser stores a
+  // string_view, so the std::string must outlive the parser object.
+  std::string buffer(t);
+  try {
+    UDEParser p(buffer, strict);
+    return p.parseScalarDocValue();
+  } catch (...) {
+    return nullptr;
+  }
 }
 
 // Versioning of the "# UDE vX.Y" header (Section 6 of the spec): the major
@@ -1369,7 +1408,7 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
         UDEParser p(doc, strict);
         v = p.parseDocument();
       } catch (const asvJSONError&) {
-        v = udePlainTextFallback(doc);
+        v = udePlainTextFallback(doc, strict);
         if (!v) throw;
       }
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
@@ -1382,7 +1421,7 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
     UDEParser p(docs[0], strict);
     return p.parseDocument();
   } catch (const asvJSONError&) {
-    auto v = udePlainTextFallback(docs[0]);
+    auto v = udePlainTextFallback(docs[0], strict);
     if (!v) throw;
     return v;
   }
@@ -1433,7 +1472,9 @@ inline void udeWriteKey(std::ostream& os, const std::string& k, bool strict) {
 inline bool udeStringNeedsQuote(std::string_view s, bool strict) {
   if (s.empty()) return true;
   std::string lower = udeToLower(s);
-  if (lower == "true" || lower == "false" || lower == "null") return true;
+  if (lower == "true" || lower == "false" || lower == "null" ||
+      lower == ".nan" || lower == "-.nan" ||
+      lower == ".inf" || lower == "-.inf" || lower == ".infinity" || lower == "-.infinity") return true;
   if (udeTryParseNumber(std::string(s))) return true;
   // Strings starting with comment prefixes would be misinterpreted as comments
   // by the parser (skipWsAndComments runs before parseValue).
@@ -1651,7 +1692,7 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
     case T::NULL_VAL: os << "null"; break;
     case T::DATETIME: {
       std::string dt;
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
       os << "!datetime \"" << dt << '"';
       break;
     }
@@ -1675,7 +1716,12 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
         // str_data holds the tag name; custom_value holds the value. Unknown
         // tags are emitted in the canonical "!<name> <value>" form so that a
         // name containing special characters still round-trips exactly.
-        os << '!' << v->str_data << ' ';
+        bool verbatim = false;
+        if (!v->str_data.empty())
+          for (char ch : v->str_data)
+            if (!udeIsTagChar(ch)) { verbatim = true; break; }
+        if (verbatim) os << "!<" << v->str_data << "> ";
+        else os << '!' << v->str_data << ' ';
         if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent, true, strict);
         else os << "null";
         break;

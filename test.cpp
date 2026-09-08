@@ -12768,6 +12768,137 @@ TEST(testUDEBlockScalarKeepChomping) {
   }
 }
 
+TEST(testUDEExtras) {
+  // 1. DATETIME timezone offset survives round-trips (encode + decode)
+  {
+    // positive offset
+    asvJSON j;
+    ASSERT(j.fromUDE("dt: !datetime \"2023-09-04T14:10:00.500+03:30\"\n"));
+    auto* v = j.get("dt");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v->tz_offset_min, 210);
+    std::string out = j.toUDE();
+    asvJSON j2;
+    ASSERT(j2.fromUDE(out));
+    auto* v2 = j2.get("dt");
+    ASSERT(v2 != nullptr && v2->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v2->tz_offset_min, 210);
+    // negative offset
+    asvJSON jn;
+    ASSERT(jn.fromUDE("dt: !datetime \"2023-09-04T14:10:00-05:00\"\n"));
+    ASSERT(jn.get("dt") != nullptr && jn.get("dt")->tz_offset_min == -300);
+    // zero offset emitted as Z
+    asvJSON jz;
+    ASSERT(jz.fromUDE("dt: !datetime \"2023-09-04T14:10:00Z\"\n"));
+    ASSERT(jz.get("dt") != nullptr && jz.get("dt")->tz_offset_min == 0);
+  }
+  // 2. Doc separators inside block scalars must be column-0 only
+  {
+    // indented "---" is block-scalar content, not a document split
+    asvJSON j;
+    ASSERT(j.fromUDE("a: |\n  hello\n  ---\n  world\n"));
+    ASSERT_EQ(std::string(j.getString("a")), "hello\n---\nworld");
+    // trailing-space indicator line at column 0 IS a split (multi-doc)
+    asvJSON jm;
+    ASSERT(jm.fromUDE("a: 1\n---\nb: 2\n"));
+    ASSERT(jm.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(jm.getRoot()->arr->size(), size_t(2));
+  }
+  // 3. Non-finite keyword strings must be quoted on output (round-trip as strings)
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: \"-.nan\"\n"));
+    auto* v = j.get("a");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->str_data), "-.nan");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    auto* v2 = j2.get("a");
+    ASSERT(v2 != nullptr && v2->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v2->str_data), "-.nan");
+  }
+  // 4. Scalar root documents are typed correctly by the decoder
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("42\n"));
+    ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getRoot()->num, int64_t(42));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("true\n"));
+    ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::BOOL_VAL);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("hello\n"));
+    ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->str_data), "hello");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"a:b\"\n"));
+    ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->str_data), "a:b");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE(".inf\n"));
+    ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isinf(j.getRoot()->dbl));
+  }
+  // Scalar root round-trips through encode->decode
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("42\n"));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT(j2.getRoot() && j2.getRoot()->type == asvJSONValue::INT && j2.getRoot()->num == 42);
+  }
+  // 5. Custom tags with special characters (`,` in the name) round-trip verbatim
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("v: !<tag:example.com,2026:type> 7\n"));
+    auto* v = j.get("v");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v->str_data), "tag:example.com,2026:type");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    auto* v2 = j2.get("v");
+    ASSERT(v2 != nullptr && v2->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(v2->str_data), "tag:example.com,2026:type");
+    ASSERT(v2->custom_value != nullptr && v2->custom_value->type == asvJSONValue::INT);
+  }
+  // 6. Resource limits (Section 12): nesting depth and object size
+  {
+    // depth guard rejects a deeply nested value
+    std::string deep = "a: ";
+    for (int i = 0; i < 500; i++) deep += "[";
+    for (int i = 0; i < 500; i++) deep += "]";
+    deep += "\n";
+    asvJSON j;
+    ASSERT(!j.fromUDE(deep));
+    // object-size guard rejects >1,000,000 keys (inline object)
+    std::string big = "{";
+    for (int i = 0; i < 1000001; i++) { if (i) big += ", "; big += "k" + std::to_string(i) + ": " + std::to_string(i); }
+    big += "}\n";
+    asvJSON jb;
+    ASSERT(!jb.fromUDE(big));
+    // exactly 1,000,000 keys are accepted (boundary)
+    std::string bound = "{";
+    for (int i = 0; i < 1000000; i++) { if (i) bound += ", "; bound += "k" + std::to_string(i) + ": " + std::to_string(i); }
+    bound += "}\n";
+    asvJSON jc;
+    ASSERT(jc.fromUDE(bound));
+    // dotted-key expansion cannot exceed the nesting limit
+    std::string dots;
+    for (int i = 0; i < 200; i++) { if (i) dots += "."; dots += "k" + std::to_string(i); }
+    dots += ": 1\n";
+    asvJSON jd;
+    ASSERT(!jd.fromUDE(dots));
+  }
+}
+
 TEST(testByteSizeNullRoot) {
 	asvJSON j;
 	ASSERT_EQ(j.byteSize(), 0);
@@ -16520,6 +16651,7 @@ RUN(testCBORFloat16);
 	RUN(testUDERawNumberRoundTrip);
 	RUN(testUDECommentPrefixStrings);
 	RUN(testUDEBlockScalarKeepChomping);
+	RUN(testUDEExtras);
 
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
