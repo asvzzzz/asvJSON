@@ -2328,6 +2328,92 @@ TEST(testMsgPackRegexFidelity) {
 	}
 }
 
+TEST(testMsgpackExtras) {
+	// ext type 3 (timestamp) payload with len != 8 must be consumed as null so sibling
+	// array elements parse cleanly (previously the extra bytes leaked into the stream).
+	{
+		std::vector<uint8_t> raw;
+		raw.push_back(0x92); // array of 2
+		raw.push_back(0xC7); raw.push_back(0x0C); raw.push_back(0x03); // ext8 len 12 type 3
+		for (int i = 0; i < 8; i++) raw.push_back(0x11);
+		raw.push_back(0x01); raw.push_back(0x02); raw.push_back(0x03); raw.push_back(0x04);
+		raw.push_back(0x00); // second element: fixed int 0
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r && r->type == asvJSONValue::ARRAY && r->arr->size() == 2);
+		ASSERT((*r->arr)[0]->type == asvJSONValue::NULL_VAL);
+		ASSERT((*r->arr)[1]->num == 0);
+	}
+	// ext type 3 with len < 8 also consumes the payload and yields null.
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x04, 0x03, 0x00, 0x00, 0x00, 0x00};
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		ASSERT(j.getRoot()->type == asvJSONValue::NULL_VAL);
+	}
+	// TIMESTAMP extremes survive the fixext8 signed decode path.
+	{
+		asvJSON j;
+		j.putTimestamp("t", INT64_MIN);
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = j2.getRoot()->get("t");
+		ASSERT(v && v->type == asvJSONValue::TIMESTAMP && v->num == INT64_MIN);
+	}
+	// int32 / int64 minimums decode exactly (unsigned accumulation, then cast).
+	{
+		std::vector<uint8_t> i32 = {0xD2, 0x80, 0x00, 0x00, 0x00};
+		std::vector<uint8_t> i64 = {0xD3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+		asvJSON a;
+		ASSERT(a.fromMessagePack(i32.data(), i32.size()));
+		ASSERT(a.getRoot()->num == -2147483648LL);
+		asvJSON b;
+		ASSERT(b.fromMessagePack(i64.data(), i64.size()));
+		ASSERT(b.getRoot()->num == INT64_MIN);
+	}
+	// Empty extension (len 0) round-trips as an EXTENSION with the type preserved.
+	{
+		asvJSON j;
+		j.putExtension("e", 42, nullptr, 0);
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = j2.getRoot()->get("e");
+		ASSERT(v && v->type == asvJSONValue::EXTENSION && v->ext_type == 42 && v->bin_data.empty());
+	}
+	// Large and negative DATETIME use the ext8 96-bit timestamp form and round-trip.
+	{
+		asvJSON j;
+		j.setValue("big", asvJSONValue::makeDateTime(17179869184LL, 999));
+		j.setValue("neg", asvJSONValue::makeDateTime(-1, 500));
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* big = j2.getRoot()->get("big");
+		ASSERT(big && big->type == asvJSONValue::DATETIME && big->timestamp == 17179869184LL && big->datetime_ms == 999);
+		auto* neg = j2.getRoot()->get("neg");
+		ASSERT(neg && neg->type == asvJSONValue::DATETIME && neg->timestamp == -1 && neg->datetime_ms == 500);
+	}
+	// Canonical re-encode of decoded output is byte-identical.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":[1,2,"x",true,null,3.5],"b":{"c":-9}})"));
+		auto m1 = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(m1.data(), m1.size()));
+		auto m2 = j2.toMessagePack();
+		ASSERT(m1 == m2);
+	}
+	// Convenience helpers.
+	{
+		auto mp = asvJSON::messagePackFromString(R"({"n":7})");
+		std::string back = asvJSON::stringFromMessagePack(mp.data(), mp.size());
+		ASSERT(back.find("\"n\":7") != std::string::npos);
+	}
+}
+
 TEST(testCBOR) {
 	asvJSON json;
 	json.putString("str", "hello");
@@ -16152,6 +16238,7 @@ int main() {
 	RUN(testLoneSurrogateRejected);
 	RUN(testMessagePackObjectIdRegexTimestamp);
 	RUN(testMsgPackRegexFidelity);
+	RUN(testMsgpackExtras);
 	
 	std::cout << "\n--- Object Key Escape Tests ---\n";
 	RUN(testObjectKeyEscapes);
