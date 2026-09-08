@@ -14213,6 +14213,43 @@ TEST(testJsonSax) {
 		ASSERT(doc.parseSax(R"({"x":"y"})", h));
 		ASSERT_EQ(events.size(), size_t(4));
 	}
+
+	// -- regression: stateless JsonSaxParser must enforce array/object size
+	//    limits (stream parser already did; the stateless one previously only
+	//    enforced MAX_NESTING_DEPTH and MAX_STRING_LEN).
+	{
+		struct : JsonSaxHandler {} h;
+		JsonSaxParser p;
+		std::string arr = "[";
+		for (size_t i = 0; i < asvJSONValue::MAX_ARRAY_SIZE + 1; i++) { if (i) arr += ','; arr += '0'; }
+		arr += "]";
+		ASSERT(!p.parse(arr, h)); // MAX_ARRAY_SIZE exceeded
+	}
+	{
+		struct : JsonSaxHandler {} h;
+		JsonSaxParser p;
+		std::string obj = "{";
+		for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE + 1; i++) { if (i) obj += ','; obj += "\"a\":0"; }
+		obj += "}";
+		ASSERT(!p.parse(obj, h)); // MAX_OBJECT_SIZE exceeded
+	}
+	// boundary: exactly MAX_* units is accepted (parity with stream parser)
+	{
+		struct : JsonSaxHandler {} h;
+		JsonSaxParser p;
+		std::string arr = "[";
+		for (size_t i = 0; i < asvJSONValue::MAX_ARRAY_SIZE; i++) { if (i) arr += ','; arr += '0'; }
+		arr += "]";
+		ASSERT(p.parse(arr, h));
+	}
+	{
+		struct : JsonSaxHandler {} h;
+		JsonSaxParser p;
+		std::string obj = "{";
+		for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE; i++) { if (i) obj += ','; obj += "\"a\":0"; }
+		obj += "}";
+		ASSERT(p.parse(obj, h));
+	}
 }
 
 TEST(testJsonStream) {

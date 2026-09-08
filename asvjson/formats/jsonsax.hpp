@@ -5,7 +5,7 @@
 //   - Chunk-based incremental/streaming parsing (JsonStreamParser)
 //   - SAX-to-DOM conversion adapter (JsonSaxToDom)
 //   - Comments (//, /* */, #), NaN/Infinity, same options as DOM parser
-//   - Resource limits: MAX_NESTING_DEPTH, MAX_STRING_LEN
+//   - Resource limits: MAX_NESTING_DEPTH, MAX_STRING_LEN, MAX_ARRAY_SIZE, MAX_OBJECT_SIZE
 
 #include "../core.hpp"
 #include <string>
@@ -61,6 +61,8 @@ public:
     pos_ = 0;
     depth_ = 0;
     lastError_.clear();
+    std::fill(std::begin(cntObject_), std::end(cntObject_), size_t(0));
+    std::fill(std::begin(cntArray_), std::end(cntArray_), size_t(0));
 
     if (input_.empty()) { handler_->onError("empty input"); return false; }
 
@@ -104,6 +106,10 @@ private:
   int depth_ = 0;
   JsonSaxHandler* handler_ = nullptr;
   std::string lastError_;
+  // Per-container element/key counters (indexed by depth_) for the
+  // MAX_ARRAY_SIZE / MAX_OBJECT_SIZE limits in the stateless parser.
+  size_t cntObject_[asvJSONValue::MAX_NESTING_DEPTH + 2] = {};
+  size_t cntArray_[asvJSONValue::MAX_NESTING_DEPTH + 2] = {};
 
   char cur() const { return pos_ < input_.size() ? input_[pos_] : 0; }
   void advance() { pos_++; }
@@ -180,6 +186,8 @@ private:
       if (cur() != ':') throw std::runtime_error("Expected ':'");
       advance();
       if (!parseValue()) return false;
+      if (++cntObject_[depth_] > asvJSONValue::MAX_OBJECT_SIZE)
+        throw std::runtime_error("Object too large");
       skip();
       if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
       if (cur() == ',') { advance(); continue; }
@@ -200,6 +208,8 @@ private:
       // or duplicate comma ([,], [1,,2]) still fails inside parseValue().
       if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
       if (!parseValue()) return false;
+      if (++cntArray_[depth_] > asvJSONValue::MAX_ARRAY_SIZE)
+        throw std::runtime_error("Array too large");
       skip();
       if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
       if (cur() == ',') { advance(); continue; }
