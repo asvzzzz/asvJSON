@@ -14943,6 +14943,64 @@ TEST(testSaxToDom) {
 	}
 }
 
+TEST(testSchemaValidate) {
+	// Regression: `$ref: "#"` (root pointer) must resolve to the root schema.
+	// Previously the early `ref.size() < 2` guard rejected the bare `"#"`
+	// fragment, so any `$ref:"#"` failed with "Unresolved $ref".
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("{\"wrap\":{}}"));
+		ASSERT(s.parse("{\"type\":\"object\",\"properties\":{\"wrap\":{\"$ref\":\"#\"}}}"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("{\"wrap\":5}"));
+		ASSERT(s.parse("{\"type\":\"object\",\"properties\":{\"wrap\":{\"$ref\":\"#\"}}}"));
+		std::string err;
+		ASSERT(!v.validate(s, err)); // inner value must be an object
+	}
+	{
+		// A bare `{"$ref":"#"}` is genuinely self-referential -> circular.
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse("{\"$ref\":\"#\"}"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+	// Schema-only self loop is detected (guard fires, no stack overflow).
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("{}"));
+		ASSERT(s.parse("{\"definitions\":{\"a\":{\"$ref\":\"#/definitions/a\"}},\"$ref\":\"#/definitions/a\"}"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+	// Core keywords sanity checks
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("{\"a\":1}"));
+		ASSERT(s.parse("{\"properties\":{\"a\":{\"type\":\"integer\"}}}"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("\"hello\""));
+		ASSERT(s.parse("{\"minLength\":5,\"maxLength\":5}"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("[1,2,1]"));
+		ASSERT(s.parse("{\"uniqueItems\":true}"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+}
+
 TEST(testReadWriteFileAny) {
 	// Helper: write a temp file, read it back, verify, clean up
 	auto tmpFile = [](const std::string& ext) -> std::string {
@@ -16707,6 +16765,9 @@ RUN(testCBORFloat16);
 	RUN(testJsonSaxStrict);
 	RUN(testJsonStreamStrict);
 	RUN(testSaxToDom);
+
+	std::cout << "\n--- JSON Schema Validation Tests ---\n";
+	RUN(testSchemaValidate);
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
 	RUN(testReadWriteFileAny);

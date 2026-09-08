@@ -153,7 +153,7 @@ private:
   }
 
   const asvJSONValue* resolveRef(std::string_view ref) const {
-    if (ref.size() < 2 || ref[0] != '#') return nullptr;
+    if (ref.empty() || ref[0] != '#') return nullptr;
     ref.remove_prefix(1);
     if (ref.empty()) return rootSchema_;
     if (ref[0] != '/') return nullptr;
