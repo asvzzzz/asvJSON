@@ -9749,6 +9749,154 @@ TEST(testTOONSpecialTypes) {
   }
 }
 
+TEST(testToonExtras) {
+  // Strings that look like JSON numbers stay strings (used to decode as INT/DOUBLE).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":"007","b":"3.14","c":"1e5","d":"-5","e":"-"})")));
+    std::string s = j.toTOON();
+    ASSERT(s.find(R"("007")") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a")), "007");
+    ASSERT_EQ(std::string(j2.getString("b")), "3.14");
+    ASSERT_EQ(std::string(j2.getString("c")), "1e5");
+    ASSERT_EQ(std::string(j2.getString("d")), "-5");
+    ASSERT_EQ(std::string(j2.getString("e")), "-");
+  }
+  // Strings that look like JSON containers stay strings ("[]" was an array before).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":"[1,2]","b":"[]","c":"[x]","d":"{x:1}","e":"{}"})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a")), "[1,2]");
+    ASSERT_EQ(std::string(j2.getString("b")), "[]");
+    ASSERT_EQ(std::string(j2.getString("c")), "[x]");
+    ASSERT_EQ(std::string(j2.getString("d")), "{x:1}");
+    ASSERT_EQ(std::string(j2.getString("e")), "{}");
+  }
+  // Keys containing '[' round-trip (they used to collide with key[N]: headers).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a[3]":"v","b[2]":[1,2]})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a[3]")), "v");
+    auto* arr = j2.getRoot()->getConst("b[2]");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->get(1)->getInt(), int64_t(2));
+  }
+  // Number-shaped and colon-bearing keys round-trip.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"123":"v","1e5":"v","a:b":"v"})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("123")), "v");
+    ASSERT_EQ(std::string(j2.getString("1e5")), "v");
+    ASSERT_EQ(std::string(j2.getString("a:b")), "v");
+  }
+  // A quoted key containing a real newline is not double-escaped on decode.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\\nb\":\"v\"}")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a\nb")), "v");
+  }
+  // Hyphen-prefixed keys round-trip (leading '-' was read as a list/root array).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"-":"a","-x":"b","-y":[1,2]})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("-")), "a");
+    ASSERT_EQ(std::string(j2.getString("-x")), "b");
+    auto* arr = j2.getRoot()->getConst("-y");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->size(), size_t(2));
+  }
+  // An empty-string key round-trips (it was dropped as if it were the root).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"":"v"})")));
+    std::string s = j.toTOON();
+    ASSERT(s.find(R"("": v)") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    auto* sv = j2.getRoot()->getConst("");
+    ASSERT(sv != nullptr && sv->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(sv->str_data), "v");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"":[1,2]})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    auto* arr = j2.getRoot()->getConst("");
+    ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(arr->get(1)->getInt(), int64_t(2));
+  }
+  // Colon-bearing string values round-trip.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":"b:c","h":"http://x"})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("a")), "b:c");
+    ASSERT_EQ(std::string(j2.getString("h")), "http://x");
+  }
+  // Inline arrays of tricky strings round-trip.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"k":["007","-","3.5","[]","a:b"]})")));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    auto* k = j2.getRoot()->getConst("k");
+    ASSERT(k != nullptr && k->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(k->size(), size_t(5));
+    ASSERT_EQ(std::string(k->get(0)->getString()), "007");
+    ASSERT_EQ(std::string(k->get(1)->getString()), "-");
+    ASSERT_EQ(std::string(k->get(2)->getString()), "3.5");
+    ASSERT_EQ(std::string(k->get(3)->getString()), "[]");
+    ASSERT_EQ(std::string(k->get(4)->getString()), "a:b");
+  }
+  // Quoted tabular field names decode without literal quote characters.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOON("k[2]{\"f1\",\"f2\"}:\n x,2\n y,3\n"));
+    auto* k = j.getRoot()->getConst("k");
+    ASSERT(k != nullptr && k->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(k->size(), size_t(2));
+    ASSERT_EQ(k->get(0)->getConst("f1")->getString(), std::string("x"));
+    ASSERT_EQ(k->get(1)->getConst("f2")->getInt(), int64_t(3));
+  }
+  // DATETIME keeps its UTC offset instead of being flattened to Z.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1599999999, 123, 120));
+    std::string s = j.toTOON();
+    ASSERT(s.find("+02:00") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    auto* dt = j2.getRoot()->getConst("dt");
+    ASSERT(dt != nullptr && dt->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt->timestamp, int64_t(1599999999));
+    ASSERT_EQ(dt->datetime_ms, 123);
+    ASSERT_EQ(dt->tz_offset_min, 120);
+  }
+}
+
 TEST(testTRONSpecialTypes) {
   // Special types used to be serialized without a recoverable marker (ObjectId
   // as a bare hex string -> STRING, Regex as "pattern|opts" -> STRING, Timestamp
@@ -16076,6 +16224,7 @@ RUN(testCBORFloat16);
 	RUN(testToTOONSpecListForm);
 	RUN(testToTOONHeadersStrict);
 	RUN(testTOONSpecialTypes);
+	RUN(testToonExtras);
 	
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);

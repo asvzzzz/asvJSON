@@ -24,28 +24,39 @@ inline std::string toonJsonEscape(const std::string& s) {
 inline bool toonIsJsonValue(std::string_view s) {
   if (s.empty()) return false;
   if (s.front() == '"' || s.front() == '{' || s.front() == '[') return true;
-  if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) {
-    // Validate full number -- reject e.g. "1.12.0" (two dots)
-    bool hasDot = false, hasExp = false;
-    for (size_t i = (s.front() == '-' || s.front() == '+') ? 1 : 0; i < s.size(); i++) {
-      if (s[i] >= '0' && s[i] <= '9') continue;
-      if (s[i] == '.') { if (hasDot || hasExp) return false; hasDot = true; continue; }
-      if (s[i] == 'e' || s[i] == 'E') { if (hasExp) return false; hasExp = true; continue; }
-      if ((s[i] == '+' || s[i] == '-') && hasExp && i + 1 < s.size() && s[i-1] != '.' && (i == 0 || (s[i-1] != '+' && s[i-1] != '-'))) continue;
-      return false;
-    }
-    return true;
-  }
   if (s == "true" || s == "false" || s == "null") return true;
+  if (s.front() == '-' || (s.front() >= '0' && s.front() <= '9')) {
+    // Validate the full JSON number grammar so we never emit/keep text (e.g.
+    // bare "-", "1.", "1e", "-.5") that the JSON parser would reject.
+    size_t i = (s.front() == '-') ? 1 : 0;
+    if (i >= s.size()) return false;               // bare '-'
+    bool hasIntDigit = false;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { i++; hasIntDigit = true; }
+    if (i < s.size() && s[i] == '.') {
+      if (!hasIntDigit) return false;              // '.x', '-.x' are not valid JSON
+      i++;
+      if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;  // a '.' must be followed by a digit
+      while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+    }
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+      i++;
+      if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+      if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;  // exponent digits required
+      while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+    }
+    return i == s.size();
+  }
   return false;
 }
 
 inline bool toonValNeedsQuotes(const std::string& s) {
   if (s.empty()) return true;
-  if (s.front() == '"') return true;
-  for (char c : s) if (c == ',' || c == '\n' || c == '\r') return true;
+  if (toonIsJsonValue(s)) return true;             // number-shaped / true / false / null / "{...}" / "[...]"
+  if (s.front() == '-') return true;               // leading '-' could be misread as a list item / root array
+  for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
-  if (s == "null" || s == "true" || s == "false") return true;
+  if (s.find('[') != std::string::npos) return true;  // keys like a[3] collide with key[N]: headers
+  if (s.find('"') != std::string::npos) return true;  // embedded quotes must not break quote-aware key parsing
   return false;
 }
 
@@ -134,7 +145,7 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
     }
     case asvJSONValue::DATETIME: {
       std::string r = "\"";
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, r);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, r, v->tz_offset_min);
       r += '"';
       return r;
     }
@@ -195,20 +206,24 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
 inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
+  // An EMPTY key is only the document root when nothing wraps it; an object
+  // member whose key is the empty string ("" ) must still be emitted as a
+  // quoted key or the round-trip loses it.
+  const bool isRoot = key.empty() && depth == 0;
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   if (v->type == asvJSONValue::OBJECT) {
     if (v->obj->empty()) {
-      if (!key.empty()) out += pad + toonQuoteVal(key) + ": {}\n";
+      if (!isRoot) out += pad + toonQuoteVal(key) + ": {}\n";
       else out += pad + "{}\n";
       return;
     }
-    if (!key.empty()) out += pad + toonQuoteVal(key) + ":\n";
-    int childIndent = indent + (key.empty() ? 0 : 1);
+    if (!isRoot) out += pad + toonQuoteVal(key) + ":\n";
+    int childIndent = indent + (isRoot ? 0 : 1);
     for (const auto& [k, child] : *(v->obj))
       valToToon(child.get(), out, childIndent, k, depth + 1);
   } else if (v->type == asvJSONValue::ARRAY) {
     if (v->size() == 0) {
-      if (!key.empty()) out += pad + toonQuoteVal(key) + ": []\n";
+      if (!isRoot) out += pad + toonQuoteVal(key) + ": []\n";
       else out += "[]\n";
       return;
     }
@@ -223,7 +238,7 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
                 e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
                 e->type == asvJSONValue::TIMESTAMP)) { allPrim = false; break; }
     }
-    std::string head = pad + (key.empty() ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
+    std::string head = pad + (isRoot ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
     if (allPrim) {
       out += head + " ";
       for (size_t i = 0; i < v->size(); i++) {
@@ -249,7 +264,7 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       }
     }
   } else {
-    if (!key.empty())
+    if (!isRoot)
       out += pad + toonQuoteVal(key) + ": " + toonLeafVal(v) + "\n";
     else
       out += pad + toonLeafVal(v) + "\n";
@@ -323,10 +338,14 @@ inline size_t toonFindFirstUnquoted(std::string_view s, char target) {
   return std::string_view::npos;
 }
 
-// Decodes a TOON key token (optionally double-quoted) into a JSON-escaped string.
+// Decodes a TOON key token (optionally double-quoted) into the JSON-escaped
+// text BETWEEN quotes. A quoted token's inner text is already JSON-escaped
+// (the encoder wrote it verbatim via appendJsonEscaped), so it is passed
+// through unchanged -- re-escaping would double-escape \n, \" etc. into
+// literal backslashes. Bare tokens are JSON-escaped here.
 inline std::string toonDecodeKey(std::string_view key) {
   if (key.size() >= 2 && key.front() == '"' && key.back() == '"')
-    return toonJsonEscape(std::string(key.substr(1, key.size() - 2)));
+    return std::string(key.substr(1, key.size() - 2));
   return toonJsonEscape(std::string(key));
 }
 
@@ -436,7 +455,7 @@ inline std::string toonToJson(std::string_view input) {
                 out += '{';
                 for (size_t fi = 0; fi < fields.size() && fi < vals.size(); fi++) {
                   if (fi > 0) out += ',';
-                  out += '"' + toonJsonEscape(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi]);
+                  out += '"' + toonDecodeKey(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi]);
                 }
                 out += '}';
                 rowCount++;
@@ -530,18 +549,14 @@ inline std::string toonToJson(std::string_view input) {
       continue;
     }
 
-    // key: value
-    size_t colonPos = content.find(':');
+    // key: value  (first ':' OUTSIDE any quoted key is the separator)
+    size_t colonPos = toonFindFirstUnquoted(content, ':');
+    if (colonPos == std::string_view::npos) colonPos = content.find(':');
     if (colonPos != std::string_view::npos) {
       std::string_view key = content.substr(0, colonPos);
       while (!key.empty() && key.back() == ' ') key = key.substr(0, key.size() - 1);
 
-      std::string keyStr;
-      if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
-        keyStr = toonJsonEscape(std::string(key.substr(1, key.size() - 2)));
-      } else {
-        keyStr = toonJsonEscape(std::string(key));
-      }
+      std::string keyStr = toonDecodeKey(key);
 
       std::string_view valPart = content.substr(colonPos + 1);
       while (!valPart.empty() && valPart.front() == ' ') valPart = valPart.substr(1);
