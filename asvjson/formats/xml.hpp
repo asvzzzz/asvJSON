@@ -310,12 +310,16 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				for (const auto& item : *arr) {
 					item->toXML(out, name, indent);
 				}
-			} else {
+} else {
 				out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
 				for (const auto& item : *arr) {
 					if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))
 						out += pad + "  <item type=\"string\">" + xmlEscapeContent(item->str_data) + "</item>\n";
 					else if (item->type == asvJSONValue::OBJECT || item->type == asvJSONValue::ARRAY) {
+						item->toXML(out, "item", indent + 1);
+					} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
+					           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
+					           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
 						item->toXML(out, "item", indent + 1);
 					} else {
 						out += pad + "  <item";

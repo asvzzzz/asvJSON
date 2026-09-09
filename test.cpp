@@ -4116,6 +4116,80 @@ TEST(testXMLMixedContentTypedScalars) {
 	}
 }
 
+TEST(testXMLArrayTypedItems) {
+	// Typed scalar items in a primitive array used to serialize as empty
+	// <item></item> (silent data loss). They must carry their type="" tag so
+	// a toXML -> fromXML round trip restores the node.
+	{
+		asvJSON json;
+		json.setValue("bin", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			const uint8_t bytes[] = {1, 2, 3};
+			arr->arr->push_back(asvJSONValue::makeBinary(bytes, 3));
+			arr->arr->push_back(asvJSONValue::makeInt(42));
+			return arr;
+		}(nullptr));
+		json.setValue("rx", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(asvJSONValue::makeRegex("a.b", "i"));
+			arr->arr->push_back(asvJSONValue::makeInt(7));
+			return arr;
+		}(nullptr));
+		json.setValue("dt", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(asvJSONValue::makeDateTime(1700000000, 250));
+			arr->arr->push_back(asvJSONValue::makeBool(true));
+			return arr;
+		}(nullptr));
+		json.setValue("oid", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			char oid12[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+			arr->arr->push_back(asvJSONValue::makeObjectId(std::string_view(oid12, 12)));
+			arr->arr->push_back(asvJSONValue::makeNull());
+			return arr;
+		}(nullptr));
+		json.setValue("ts", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(asvJSONValue::makeTimestamp(1234567890123LL));
+			arr->arr->push_back(asvJSONValue::makeInt(9));
+			return arr;
+		}(nullptr));
+		json.setValue("ext", [](asvJSON*) {
+			auto arr = asvJSONValue::makeArray();
+			const uint8_t bytes[] = {9, 8, 7};
+			arr->arr->push_back(asvJSONValue::makeExtension(5, bytes, 3));
+			arr->arr->push_back(asvJSONValue::makeInt(1));
+			return arr;
+		}(nullptr));
+
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<item type=\"binary\">AQID</item>") != std::string::npos);
+		ASSERT(xml.find("<item type=\"regex\">a.b|i</item>") != std::string::npos);
+		ASSERT(xml.find("<item type=\"datetime\">") != std::string::npos);
+		ASSERT(xml.find("<item type=\"objectid\">0102030405060708090a0b0c</item>") != std::string::npos);
+		ASSERT(xml.find("<item type=\"timestamp\">1234567890123</item>") != std::string::npos);
+		ASSERT(xml.find("<item type=\"extension\" exttype=\"5\">CQgH</item>") != std::string::npos);
+		ASSERT(xml.find("<item></item>") == std::string::npos);
+
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto typed = [&](const char* key, asvJSONValue::Type want) {
+			auto* v = json2.getRoot()->get(key);
+			ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY);
+			if (!v || v->type != asvJSONValue::ARRAY) return;
+			ASSERT(v->arr->size() == size_t(2));
+			if (v->arr->size() != 2) return;
+			ASSERT((*v->arr)[0]->type == want);
+		};
+		typed("bin", asvJSONValue::BINARY);
+		typed("rx", asvJSONValue::REGEX);
+		typed("dt", asvJSONValue::DATETIME);
+		typed("oid", asvJSONValue::OBJECTID);
+		typed("ts", asvJSONValue::TIMESTAMP);
+		typed("ext", asvJSONValue::EXTENSION);
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -17027,6 +17101,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLElementNameSanitization);
 	RUN(testXMLEmptyContainerTypeMarkers);
 	RUN(testXMLMixedContentTypedScalars);
+	RUN(testXMLArrayTypedItems);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
