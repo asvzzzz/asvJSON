@@ -2237,6 +2237,81 @@ TEST(testAPICoverage) {
 	}
 }
 
+TEST(testUTF8StrictValidation) {
+	// overlong encodings, surrogates, and code points above U+10FFFF
+	// must be rejected, not passed through.
+	{
+		uint8_t overlong2[] = {0xC0, 0x80};
+		uint8_t overlong3[] = {0xE0, 0x80, 0x80};
+		uint8_t overlong4[] = {0xF0, 0x80, 0x80, 0x80};
+		uint8_t surrogate[] = {0xED, 0xA0, 0x80};
+		uint8_t overlimit[] = {0xF4, 0x90, 0x80, 0x80};
+		uint8_t badLead[] = {0xF5, 0x80, 0x80, 0x80};
+		ASSERT(!isValidUTF8(overlong2, 2));
+		ASSERT(!isValidUTF8(overlong3, 3));
+		ASSERT(!isValidUTF8(overlong4, 4));
+		ASSERT(!isValidUTF8(surrogate, 3));
+		ASSERT(!isValidUTF8(overlimit, 4));
+		ASSERT(!isValidUTF8(badLead, 4));
+	}
+	{
+		uint8_t c2[] = {0xC2, 0xA0};
+		uint8_t e0[] = {0xE0, 0xA0, 0x80};
+		uint8_t f0[] = {0xF0, 0x90, 0x80, 0x80};
+		uint8_t f4[] = {0xF4, 0x8F, 0xBF, 0xBF};
+		ASSERT(isValidUTF8(c2, 2));
+		ASSERT(isValidUTF8(e0, 3));
+		ASSERT(isValidUTF8(f0, 4));
+		ASSERT(isValidUTF8(f4, 4));
+	}
+	// the parse gate must reject an overlong sequence in input
+	{
+		asvJSON json;
+		json.validateUTF8 = true;
+		std::string s("\"\xC0\x80\"");
+		ASSERT(!json.parse(s));
+	}
+}
+
+TEST(testTrimmedUnicodeEscapeRejected) {
+	// truncated \u escapes must be parse errors, not silent truncation
+	asvJSON json;
+	ASSERT(!json.parse(std::string("\"ab\\u12\"")));
+	ASSERT(!json.parse(std::string("\"ab\\u\"")));
+	ASSERT(!json.parse(std::string("\"ab\\\"")));
+	ASSERT(json.parse(std::string("\"ab\\u1234\"")));
+	ASSERT(json.parse(std::string("\"ab\\u0000\"")));
+}
+
+TEST(testYamlControlKeyRoundTrip) {
+	// keys containing newlines / tabs must be emitted double-quoted so the
+	// YAML output re-parses to the identical object
+	asvJSON j;
+	ASSERT(j.parse(std::string("{\"a\\nb\":1,\"a\\tb\":2}")));
+	std::string y = j.toYAML(true);
+	asvJSON back;
+	ASSERT(back.fromYAML(y));
+	ASSERT(back.serialize() == j.serialize());
+}
+
+TEST(testDateTimeDayValidity) {
+	// non-existent calendar days are rejected (fall back to plain string)
+	// instead of silently normalizing into the following month
+	asvJSON j;
+	ASSERT(j.parse("\"2024-02-29T10:00:00Z\""));
+	ASSERT(j.getRoot()->type == asvJSONValue::DATETIME);
+	ASSERT(j.parse("\"2024-02-30T10:00:00Z\""));
+	ASSERT(j.getRoot()->type != asvJSONValue::DATETIME);
+	ASSERT(j.parse("\"2023-02-29T10:00:00Z\""));
+	ASSERT(j.getRoot()->type != asvJSONValue::DATETIME);
+	ASSERT(j.parse("\"2024-04-31T10:00:00Z\""));
+	ASSERT(j.getRoot()->type != asvJSONValue::DATETIME);
+	ASSERT(j.parse("\"2021-02-29T10:00:00Z\""));
+	ASSERT(j.getRoot()->type != asvJSONValue::DATETIME);
+	ASSERT(j.parse("\"2000-02-29T10:00:00Z\""));
+	ASSERT(j.getRoot()->type == asvJSONValue::DATETIME);
+}
+
 TEST(testParseEmptyString) {
 	asvJSON json;
 	bool ok = json.parse(std::string("\"\""));
@@ -16723,6 +16798,10 @@ int main() {
 	RUN(testParseStringView);
 	
 	std::cout << "\n--- Empty String / Lone Surrogate / MsgPack Types ---\n";
+	RUN(testUTF8StrictValidation);
+	RUN(testTrimmedUnicodeEscapeRejected);
+	RUN(testYamlControlKeyRoundTrip);
+	RUN(testDateTimeDayValidity);
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
 	RUN(testMessagePackObjectIdRegexTimestamp);

@@ -123,7 +123,14 @@ inline std::string yamlDQuote(std::string_view s) {
 }
 
 inline std::string yamlQuoteKey(std::string_view s) {
-	if (yamlNeedsQuotes(s)) return yamlQuote(s);
+	if (yamlNeedsQuotes(s)) {
+		// Single quotes cannot represent control characters or line breaks
+		// safely (a literal '\n' would fold to a space on reparse, corrupting
+		// the key), so fall back to double quotes which escape them.
+		for (unsigned char c : s)
+			if (c < 0x20 || c == 0x7F) return yamlDQuote(s);
+		return yamlQuote(s);
+	}
 	return std::string(s);
 }
 

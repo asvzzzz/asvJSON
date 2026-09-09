@@ -32,9 +32,18 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int*
 	int tzOffsetMin = 0;
 
 	if (!parse2(sv.data(), year)) return false;
+	if (sv[2] < '0' || sv[2] > '9' || sv[3] < '0' || sv[3] > '9') return false;
 	year = year * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
 	if (!parse2(sv.data() + 5, month) || month < 1 || month > 12) return false;
 	if (!parse2(sv.data() + 8, day) || day < 1 || day > 31) return false;
+	// Reject dates that do not exist (e.g. Feb 30) instead of silently
+	// normalizing them via timegm into the following month.
+	{
+		static const int dims[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+		int dim = dims[month - 1];
+		if (month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) dim = 29;
+		if (day > dim) return false;
+	}
 	if (!parse2(sv.data() + 11, hour) || hour > 23) return false;
 	if (sv[13] != ':') return false;
 	if (!parse2(sv.data() + 14, min) || min > 59) return false;
@@ -145,7 +154,7 @@ inline std::string unescapeJsonString(std::string_view raw, bool allowNull) {
 	out.reserve(raw.size());
 	for (size_t i = 0; i < raw.size(); i++) {
 		if (raw[i] != '\\') { out += raw[i]; continue; }
-		if (i + 1 >= raw.size()) break;
+		if (i + 1 >= raw.size()) throw std::runtime_error("Invalid escape in string");
 		switch (raw[++i]) {
 			case '"': out += '"'; break;
 			case '\\': out += '\\'; break;
@@ -156,7 +165,7 @@ inline std::string unescapeJsonString(std::string_view raw, bool allowNull) {
 			case 'r': out += '\r'; break;
 			case 't': out += '\t'; break;
 			case 'u': {
-				if (i + 4 >= raw.size()) break;
+				if (i + 4 >= raw.size()) throw std::runtime_error("Invalid unicode escape in string");
 				auto hex = [&](size_t off) -> int {
 					char c = raw[i + off];
 					if (c >= '0' && c <= '9') return c - '0';
