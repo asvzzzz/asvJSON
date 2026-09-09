@@ -167,7 +167,7 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
       out += std::to_string(v->num);
       break;
     case T::DOUBLE:
-      out += std::to_string(v->dbl);
+      fmtDoubleVal(v->dbl, out);
       break;
     case T::BOOL_VAL:
       out += v->flag ? "true" : "false";
@@ -217,7 +217,14 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     // Try double
     errno = 0;
     double d = std::strtod(s.c_str(), &end);
-    if (end && *end == 0) return asvJSONValue::makeDouble(d);
+    if (end && *end == 0) {
+      if (errno == ERANGE) {
+        // Out-of-range double (e.g. "1e999"): preserve the literal as text
+        // instead of silently degrading it to +inf/-inf/0 on the round-trip.
+        return asvJSONValue::makeStringView(std::string_view(s));
+      }
+      return asvJSONValue::makeDouble(d);
+    }
   }
   return asvJSONValue::makeString(s.data(), s.size());
 }

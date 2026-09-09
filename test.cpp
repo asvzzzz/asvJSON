@@ -11716,6 +11716,83 @@ TEST(testIniExtras) {
   }
 }
 
+TEST(testINIDoublePrecision) {
+  // Doubles must keep full precision through the INI round-trip. The old
+  // std::to_string (%f, 6 decimals) destroyed small values ("0.000000" -> 0.0)
+  // and truncated long fractionals ("0.30000000000000004" -> "0.3").
+  // Subtle underflow -> zero used to be silently dropped
+  {
+    auto v = asvJSONValue::makeDouble(1e-7);
+    asvJSON j;
+    j.setValue("eps", std::move(v));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("0.000000") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* r = j2.getRoot()->get("eps");
+    ASSERT(r != nullptr && r->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(r->getDouble(), 1e-7);
+  }
+  // 0.1+0.2 keeps its exact binary literal
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"x\":0.30000000000000004}")));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("0.300000\n") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* r = j2.getRoot()->get("x");
+    ASSERT(r != nullptr && r->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(r->getDouble(), 0.30000000000000004);
+  }
+  // Very large doubles use compact scientific notation, not a giant decimal
+  {
+    auto v = asvJSONValue::makeDouble(1e300);
+    asvJSON j;
+    j.setValue("x", std::move(v));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("e+300") != std::string::npos);
+    ASSERT(ini.size() < 80);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* r = j2.getRoot()->get("x");
+    ASSERT(r != nullptr && r->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(r->getDouble(), 1e300);
+  }
+  // Exponent-form doubles decode to DOUBLE, not INT ("1e+05" stays numeric)
+  {
+    auto v = asvJSONValue::makeDouble(100000.0);
+    asvJSON j;
+    j.setValue("x", std::move(v));
+    asvJSON j2;
+    ASSERT(j2.fromINI(j.toINI()));
+    auto* r = j2.getRoot()->get("x");
+    ASSERT(r != nullptr && r->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(r->getDouble(), 100000.0);
+  }
+}
+
+TEST(testINIOverflowExtended) {
+  // A double literal out of double range is kept as text (like the INT
+  // overflow convention), instead of silently becoming +inf.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("x = 1e999\n")));
+    auto* r = j.getRoot()->get("x");
+    ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r->getString()), "1e999");
+  }
+  // Round-trip of the overflow literal stays lossless
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromINI(std::string("x = -1e999\n")));
+    ASSERT(j2.fromINI(j.toINI()));
+    auto* r = j2.getRoot()->get("x");
+    ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r->getString()), "-1e999");
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -17170,6 +17247,8 @@ RUN(testCBORFloat16);
 	RUN(testFromINIIntOverflow);
 	RUN(testINIRoundTrip);
 	RUN(testIniExtras);
+	RUN(testINIDoublePrecision);
+	RUN(testINIOverflowExtended);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
