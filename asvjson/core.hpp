@@ -1783,7 +1783,9 @@ public:
 	}
 
 	// Diff: returns a JSON array of change objects describing how to transform 'this' into 'other'
-	// Each element: {"op":"add|remove|replace","path":"a.b.c","value":...} or {"op":"remove","path":"a.b.c"}
+	// Each element is an RFC 6902 JSON Patch op with an RFC 6901 JSON Pointer path:
+	// {"op":"add|remove|replace","path":"/a/b/c","value":...} or {"op":"remove","path":"/a/b/c"}.
+	// The output can be fed back into applyPatch() to reproduce 'other' from 'this'.
 	[[nodiscard]] asvJSON diff(const asvJSON& other) const {
 		asvJSON result;
 		auto patch = asvJSONValue::makeArray();
@@ -2479,6 +2481,19 @@ inline bool operator!=(const asvJSONValue& a, const asvJSONValue& b) noexcept {
 	return !(a == b);
 }
 
+// JSON Pointer (RFC 6901) escaping for a single reference token: per the spec,
+// '~' -> "~0" and '/' -> "~1" (escape order: '~' first, then '/').
+inline std::string jsonPointerEscaped(std::string_view seg) {
+	std::string out;
+	out.reserve(seg.size());
+	for (char c : seg) {
+		if (c == '~') { out += "~0"; }
+		else if (c == '/') { out += "~1"; }
+		else out += c;
+	}
+	return out;
+}
+
 // Diff implementation: records operations needed to transform 'a' into 'b'
 inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch) {
 	if (a == b) return;
@@ -2489,7 +2504,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 		for (const auto& [k, v] : *a.obj) {
 			auto it = mapFind(*b.obj, k);
 			if (it == b.obj->end()) {
-				std::string removePath = path.empty() ? k : path + "." + k;
+				std::string removePath = path + "/" + jsonPointerEscaped(k);
 				auto op = asvJSONValue::makeObject();
 				op->emplace("op", asvJSONValue::makeStringView("remove"));
 				op->emplace("path", asvJSONValue::makeString(removePath.data(), removePath.size()));
@@ -2500,7 +2515,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 		for (const auto& [k, v] : *b.obj) {
 			if (!v) continue;
 			auto it = mapFind(*a.obj, k);
-			std::string childPath = path.empty() ? k : path + "." + k;
+			std::string childPath = path + "/" + jsonPointerEscaped(k);
 			if (it == a.obj->end() || !it->second) {
 				auto op = asvJSONValue::makeObject();
 				op->emplace("op", asvJSONValue::makeStringView("add"));
@@ -2670,7 +2685,19 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			auto [p, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
 			if (ec != std::errc()) return false;
 			if (isLast) {
-				if (idx >= cur->arr->size()) cur->arr->resize(idx + 1);
+				if (idx >= cur->arr->size()) {
+					if (idx >= asvJSONValue::MAX_ARRAY_SIZE) return false;
+					// Growing an array via a JSON Pointer leaves a gap that JSON
+					// cannot represent; pad the missing slots with real null values
+					// so serializers and traversals never encounter empty elements.
+					size_t old = cur->arr->size();
+					cur->arr->resize(idx + 1);
+					for (size_t gi = old; gi < idx; ++gi) {
+						auto nv = asvJSONValue::makeNull();
+						if (!nv) return false;
+						(*cur->arr)[gi] = std::move(nv);
+					}
+				}
 				(*cur->arr)[idx] = std::move(value);
 				dirty_ = true;
 				return true;

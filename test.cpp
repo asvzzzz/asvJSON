@@ -15828,7 +15828,7 @@ TEST(testDiff) {
 		auto d = a.diff(b);
 		ASSERT_EQ(d.getRoot()->size(), size_t(1));
 		auto* path = (*d.getRoot()->arr)[0]->get("path");
-		ASSERT(std::string(path->getString()) == "a.x");
+		ASSERT(std::string(path->getString()) == "/a/x");
 	}
 	// Array diff
 	{
@@ -15862,6 +15862,80 @@ TEST(testDiff) {
 		asvJSON a, b;
 		auto d = a.diff(b);
 		ASSERT_EQ(d.getRoot()->size(), size_t(0));
+	}
+}
+
+TEST(testSetByPointerArrayGapSerialize) {
+	// Growing an array via a JSON Pointer pads the gap with real JSON nulls;
+	// serializers must not crash and must round-trip the nulls.
+	asvJSON j;
+	ASSERT(j.parse(R"({"arr":[5]})"));
+	ASSERT(j.setByPointer("/arr/5", asvJSONValue::makeInt(2)));
+	ASSERT(j.serialize() == R"({"arr":[5,null,null,null,null,2]})");
+	auto* arr = j.getArray("arr");
+	ASSERT(arr && arr->size() == size_t(6));
+	asvJSON k;
+	ASSERT(k.parse(R"({"arr":[5,null,null,null,null,2]})"));
+	ASSERT(j.getRoot() && k.getRoot() && *j.getRoot() == *k.getRoot());
+}
+
+TEST(testApplyPatchArrayExpandPadsNulls) {
+	// RFC 6902: adding past the end of an array pads intermediate slots with null.
+	asvJSON j;
+	ASSERT(j.parse(R"([1,2])"));
+	asvJSON patch;
+	ASSERT(patch.parse(R"([{"op":"add","path":"/4","value":9}])"));
+	ASSERT(j.applyPatch(patch));
+	ASSERT(j.serialize() == R"([1,2,null,null,9])");
+}
+
+TEST(testDiffAppliesAsPatch) {
+	// diff() paths are RFC 6901 JSON Pointers, so the result round-trips through applyPatch().
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1})");
+		b.parse(R"({"x":2,"y":3})");
+		auto d = a.diff(b);
+		asvJSON ap = a;
+		ASSERT(ap.applyPatch(d));
+		ASSERT(ap.serialize() == b.serialize());
+	}
+	{
+		asvJSON a, b;
+		a.parse(R"({"a":[1]})");
+		b.parse(R"({"a":[2]})");
+		auto d = a.diff(b);
+		asvJSON ap = a;
+		ASSERT(ap.applyPatch(d));
+		ASSERT(ap.serialize() == b.serialize());
+	}
+	{
+		asvJSON a, b;
+		a.parse(R"({"x":1,"y":2})");
+		b.parse(R"({"x":1})");
+		auto d = a.diff(b);
+		asvJSON ap = a;
+		ASSERT(ap.applyPatch(d));
+		ASSERT(ap.serialize() == R"({"x":1})");
+	}
+	// Keys containing RFC 6901 specials ('/' and '~') round-trip too.
+	{
+		asvJSON a, b;
+		a.parse(R"({"a/b":1})");
+		b.parse(R"({"a/b":2,"m~n":7})");
+		auto d = a.diff(b);
+		asvJSON ap = a;
+		ASSERT(ap.applyPatch(d));
+		ASSERT(ap.serialize() == b.serialize());
+	}
+	{
+		asvJSON a, b;
+		a.parse(R"({"a":{"b":1,"rem":2}})"); 
+		b.parse(R"({"a":{"b":9},"add":{"z":1}})");
+		auto d = a.diff(b);
+		asvJSON ap = a;
+		ASSERT(ap.applyPatch(d));
+		ASSERT(ap.serialize() == b.serialize());
 	}
 }
 
@@ -16839,6 +16913,9 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- Diff Tests ---\n";
 	RUN(testDiff);
+	RUN(testDiffAppliesAsPatch);
+	RUN(testSetByPointerArrayGapSerialize);
+	RUN(testApplyPatchArrayExpandPadsNulls);
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
 	RUN(testPrettyPrint);
