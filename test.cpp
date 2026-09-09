@@ -14054,6 +14054,56 @@ TEST(testJSONPathExtras) {
 		ASSERT_EQ(r.size(), size_t(1));
 		ASSERT(r[0]->obj->find("a")->second->type == asvJSONValue::ARRAY);
 	}
+	// -- isValidPath accepts function-call segments (consistent with query) --
+	{
+		ASSERT(asvJSON::isValidPath("$.name.length()"));
+		ASSERT(asvJSON::isValidPath("$.values.min()"));
+		ASSERT(asvJSON::isValidPath("$.values.max()"));
+		ASSERT(asvJSON::isValidPath("$.values.sum()"));
+		ASSERT(asvJSON::isValidPath("$.values.avg()"));
+		ASSERT(asvJSON::isValidPath("$.x.value()"));
+		ASSERT(asvJSON::isValidPath("$..books[0].title.length()"));
+	}
+	// -- filter wildcard/recursive-descent select nothing when unsupported
+	//    (no longer silently selects the current node) --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		auto r = doc.query("$[?(@.*)]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"x":1},{"y":2}])")));
+		auto r = doc.query("$[?(@..x)]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"x":1},{"y":2}])")));
+		auto r = doc.query("$[?(@.*)]");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":[1,2]},{"a":[]},{"b":1}])")));
+		auto r = doc.query("$[?(@.a[*])]");
+		ASSERT_EQ(r.size(), size_t(1));
+		ASSERT(r[0]->obj->find("a")->second->type == asvJSONValue::ARRAY);
+	}
+	// -- bare zero-arg functions in filters apply to the current node --
+	{
+		ASSERT(asvJSON::isValidPath("$[?(length() == 2)]"));
+		ASSERT(asvJSON::isValidPath("$[?(count() > 0)]"));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":2},{"a":1}])")));
+		auto r = doc.query("$[?(length() == 2)]");
+		ASSERT_EQ(r.size(), size_t(1));
+		auto r2 = doc.query("$[?(count() == 1)]");
+		ASSERT_EQ(r2.size(), size_t(2));
+	}
 }
 
 TEST(testJsonSax) {

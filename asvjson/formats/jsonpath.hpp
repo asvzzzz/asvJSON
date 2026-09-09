@@ -656,11 +656,18 @@ class JPFilterEval {
     if (t.type == TokType::IDENT && t.val == "@") node = cur_;
     else if (t.type == TokType::IDENT && t.val == "$") node = root_;
     else return nullptr;
+    if (lex_.peek().type == TokType::DOTDOT) return nullptr; // recursive descent not supported in filters
 
     while (lex_.peek().type == TokType::DOT) {
       lex_.next();
       Tok p = lex_.next();
-      if (p.type != TokType::IDENT) break;
+      if (p.type != TokType::IDENT) {
+        if (p.type == TokType::STAR) {
+          // wildcard: the node is selected iff it has at least one child
+          return jpAllChildren(node).empty() ? nullptr : node;
+        }
+        break;
+      }
       if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
         lex_.next();
         if (lex_.peek().type == TokType::RPAREN) lex_.next();
@@ -702,6 +709,9 @@ class JPFilterEval {
         }
         auto it = node->obj->find(idx.val);
         node = (it != node->obj->end()) ? it->second.get() : nullptr;
+      } else if (idx.type == TokType::STAR && node) {
+        // wildcard: the node is selected iff it has at least one child
+        if (jpAllChildren(node).empty()) return nullptr;
       }
       if (lex_.peek().type == TokType::RBRACKET) lex_.next();
     }
@@ -783,7 +793,13 @@ class JPFilterEval {
         return v;
       }
 
-      const asvJSONValue* arg = resolvePath();
+      const asvJSONValue* arg = nullptr;
+      if (lex_.peek().type == TokType::RPAREN && jpIsZeroArgFunc(fn)) {
+        // zero-arg form: the function applies to the current node
+        arg = cur_;
+      } else {
+        arg = resolvePath();
+      }
       if (lex_.peek().type == TokType::RPAREN) lex_.next();
 
       if (fn == "length") {
@@ -1255,7 +1271,11 @@ inline bool jpValidateOperand(PathLexer& lex) {
     if (s.type != TokType::STRING || !s.ok) return false;
     lex.next();
   } else {
-    if (!jpValidateQueryPath(lex)) return false;
+    if (jpIsZeroArgFunc(t.val) && lex.peek().type == TokType::RPAREN) {
+      // zero-arg function (length(), count(), ...): no argument
+    } else {
+      if (!jpValidateQueryPath(lex)) return false;
+    }
   }
   if (lex.peek().type != TokType::RPAREN) return false;
   lex.next();
@@ -1395,6 +1415,12 @@ inline bool jpIsValid(std::string_view path) {
       Tok seg = lex.next();
       if (!seg.ok) return false;
       if (seg.type != TokType::IDENT && seg.type != TokType::STAR) return false;
+      if (seg.type == TokType::IDENT && jpIsFuncName(seg.val) &&
+          lex.peek().type == TokType::LPAREN) {
+        lex.next(); // consume '('
+        if (lex.peek().type == TokType::RPAREN) lex.next();
+        else if (!jpValidateQueryPath(lex)) return false;
+      }
     } else if (t.type == TokType::DOTDOT) {
       lex.next();
       Tok seg = lex.peek();
