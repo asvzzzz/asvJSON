@@ -3953,6 +3953,169 @@ TEST(testXmlExtras) {
 	}
 }
 
+TEST(testXMLElementNameSanitization) {
+	// Element keys that fall outside the XML name grammar are mapped to '_'
+	// so the emitted XML always re-parses (chars like '$','!','~','\','(',
+	// ')','[' etc. were passed through verbatim and broke fromXML).
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"a$b":1,"a!b":2,"a~b":3,"a\b":4,"x(y)z[k]":5})"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<a$b>") == std::string::npos);
+		ASSERT(xml.find("<a!b>") == std::string::npos);
+		ASSERT(xml.find("<a~b>") == std::string::npos);
+		ASSERT(xml.find("<a\\b>") == std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		ASSERT(json2.getRoot()->get("a_b")->getInt() == 1);
+		ASSERT(json2.getRoot()->get("x_y_z_k_")->getInt() == 5);
+	}
+	// Attribute names (@-keys) get the same treatment. (A bare attribute is
+	// only a real attribute when the object carries child content too; the
+	// root-object path emits standalone @-keys as elements instead.)
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"w":{"@a$b":"5","k":1}})"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("@a$b") == std::string::npos);
+		ASSERT(xml.find("a_b=\"5\"") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		ASSERT_EQ(std::string(json2.getRoot()->get("w")->get("@a_b")->getString()), "5");
+	}
+	// UTF-8 (non-ASCII) element names are legal XML names and round-trip
+	// verbatim (this was broken: xmlParseName rejected bytes >= 0x80).
+	{
+		asvJSON json;
+		json.parse(std::string(u8R"({"привет":42})"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		ASSERT(json2.getRoot()->get(std::string(u8"привет"))->getInt() == 42);
+	}
+	// UTF-8 (non-ASCII) element names are legal XML names and round-trip
+	// verbatim (this was broken: xmlParseName rejected bytes >= 0x80).
+	{
+		asvJSON json;
+		json.parse(std::string(u8R"({"привет":42})"));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		ASSERT(json2.getRoot()->get(std::string(u8"привет"))->getInt() == 42);
+	}
+	// Numeric/'-'-leading keys keep their "item" prefix policy
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"1abc":1,"-pqr":2})"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<item1abc>") != std::string::npos);
+		ASSERT(xml.find("<item-pqr>") != std::string::npos);
+	}
+}
+
+TEST(testXMLEmptyContainerTypeMarkers) {
+	// Empty arrays/objects used to collapse into "" on an XML round-trip.
+	// They now carry a type="array"/type="object" marker.
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"x":[],"y":{}})"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<x type=\"array\"></x>") != std::string::npos);
+		ASSERT(xml.find("<y type=\"object\"></y>") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* x = json2.getRoot()->get("x");
+		auto* y = json2.getRoot()->get("y");
+		ASSERT(x != nullptr && x->type == asvJSONValue::ARRAY && x->arr->empty());
+		ASSERT(y != nullptr && y->type == asvJSONValue::OBJECT && y->obj->empty());
+		ASSERT_EQ(json2.serialize(), std::string(R"({"x":[],"y":{}})"));
+	}
+	// Empty containers nested inside an object round-trip too
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"c":{"a":[],"b":{}}})"));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<a type=\"array\"></a>") != std::string::npos);
+		ASSERT(xml.find("<b type=\"object\"></b>") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* a = json2.getRoot()->get("c")->get("a");
+		auto* b = json2.getRoot()->get("c")->get("b");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY && a->arr->empty());
+		ASSERT(b != nullptr && b->type == asvJSONValue::OBJECT && b->obj->empty());
+		ASSERT_EQ(json2.serialize(), std::string(R"({"c":{"a":[],"b":{}}})"));
+	}
+	// The marker must not disturb an attribute-only object at all: a sole
+	// type="array"/type="object" attribute builds an EMPTY container, while
+	// any additional attribute keeps the element an attribute-only object.
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<z type=\"array\"></z>"));
+		ASSERT(json.getRoot()->get("z")->type == asvJSONValue::ARRAY);
+		ASSERT(json.getRoot()->get("z")->arr->empty());
+		asvJSON j2;
+		ASSERT(j2.fromXML("<z type=\"object\"></z>"));
+		ASSERT(j2.getRoot()->get("z")->type == asvJSONValue::OBJECT);
+		ASSERT(j2.getRoot()->get("z")->obj->empty());
+		asvJSON j3;
+		ASSERT(j3.fromXML("<z type=\"array\" other=\"1\"></z>"));
+		ASSERT(j3.getRoot()->get("z")->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(j3.getRoot()->get("z")->get("@other")->getString()), "1");
+		// A nested object whose sole @-attr is type="array" keeps its shape
+		asvJSON j4;
+		j4.parse(std::string(R"({"w":{"@type":"array","k":1}})"));
+		std::string xml = j4.toXML();
+		ASSERT(xml.find("<w type=\"array\">") != std::string::npos);
+		asvJSON j5;
+		ASSERT(j5.fromXML(xml));
+		ASSERT_EQ(std::string(j5.getRoot()->get("w")->get("@type")->getString()), "array");
+		ASSERT(j5.getRoot()->get("w")->get("k")->getInt() == 1);
+	}
+}
+
+TEST(testXMLMixedContentTypedScalars) {
+	// Regex/binary/datetime/etc. items inside #content used to be silently
+	// dropped by the encoder. They now serialize as typed <item ...> elements
+	// and round-trip through the $regex/$binary conventions.
+	{
+		asvJSON json;
+		json.setValue("root", asvJSONValue::makeObject());
+		asvJSONValue* root = json.getRoot()->get("root");
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeString("hello ", 6));
+		arr->arr->push_back(asvJSONValue::makeRegex("^a$", "i"));
+		const uint8_t bytes[] = {'a', 'b', 'c'};
+		arr->arr->push_back(asvJSONValue::makeBinary(bytes, 3));
+		arr->arr->push_back(asvJSONValue::makeString(" tail", 5));
+		root->obj->emplace("#content", std::move(arr));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("<item type=\"regex\">") != std::string::npos);
+		ASSERT(xml.find("<item type=\"binary\">YWJj</item>") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* c = json2.getRoot()->get("root")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(c->arr->size(), size_t(4));
+		ASSERT_EQ(std::string((*c->arr)[0]->getString()), "hello ");
+		// The typed <item> elements come back as real REGEX/BINARY nodes
+		// (the $regex/$binary conventions are reconstructed, not stored as
+		// plain objects with those keys).
+		auto* rx = (*c->arr)[1]->get("item");
+		ASSERT(rx != nullptr && rx->type == asvJSONValue::REGEX);
+		auto expectedRegex = asvJSONValue::makeRegex("^a$", "i");
+		ASSERT(rx->str_data == expectedRegex->str_data);
+		auto* bn = (*c->arr)[2]->get("item");
+		ASSERT(bn != nullptr && bn->type == asvJSONValue::BINARY);
+		ASSERT_EQ(std::string(reinterpret_cast<const char*>(bn->bin_data.data()), bn->bin_data.size()), "abc");
+		ASSERT_EQ(std::string((*c->arr)[3]->getString()), "tail");
+		// And the round-trip is stable: re-encoding the re-parsed tree yields
+		// the same typed elements.
+		std::string xml2 = json2.toXML();
+		ASSERT(xml2.find("<item type=\"regex\">") != std::string::npos);
+		ASSERT(xml2.find("<item type=\"binary\">YWJj</item>") != std::string::npos);
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -16861,6 +17024,9 @@ RUN(testCBORFloat16);
 	RUN(testXMLArrayStringRoundTrip);
 	RUN(testXMLTextContentRoundTrip);
 	RUN(testXmlExtras);
+	RUN(testXMLElementNameSanitization);
+	RUN(testXMLEmptyContainerTypeMarkers);
+	RUN(testXMLMixedContentTypedScalars);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);

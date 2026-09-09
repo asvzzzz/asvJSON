@@ -167,7 +167,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			break;
 		}
 		case T::OBJECT: {
-			if (!obj) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
+			if (!obj || obj->empty()) { out += pad + "<" + xmlSanitizeElementName(name) + " type=\"object\"></" + xmlSanitizeElementName(name) + ">\n"; break; }
 			// Check for #content array (mixed content from fromXML)
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
@@ -227,6 +227,11 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 						}
 					} else if (item->type == asvJSONValue::BOOL_VAL) {
 						out += item->flag ? "true" : "false";
+					} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
+					           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
+					           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
+						item->toXML(out, "item", 0);
+						if (!out.empty() && out.back() == '\n') out.pop_back();
 					} else if (item->type == asvJSONValue::NULL_VAL) {
 						// null in mixed content -> skip
 					}
@@ -296,8 +301,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			break;
 		}
 		case T::ARRAY: {
-			if (!arr) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
-			if (arr->empty()) { out += pad + "<" + xmlSanitizeElementName(name) + "/>\n"; break; }
+			if (!arr || arr->empty()) { out += pad + "<" + xmlSanitizeElementName(name) + " type=\"array\"></" + xmlSanitizeElementName(name) + ">\n"; break; }
 			bool allObjects = true;
 			for (const auto& item : *arr) {
 				if (item->type != asvJSONValue::OBJECT) { allObjects = false; break; }
@@ -348,8 +352,15 @@ inline void xmlSkipSpaces(std::string_view s, size_t& pos) {
 
 inline std::string xmlParseName(std::string_view s, size_t& pos) {
 	std::string name;
-	while (pos < s.size() && (std::isalnum(static_cast<unsigned char>(s[pos])) || s[pos] == '-' || s[pos] == '_' || s[pos] == ':' || s[pos] == '.'))
-		name += s[pos++];
+	while (pos < s.size()) {
+		unsigned char c = static_cast<unsigned char>(s[pos]);
+		// ASCII alnum plus '-', '_', ':', '.' and any byte >= 0x80 (UTF-8
+		// characters). Anything else terminates the name.
+		if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		    c == '-' || c == '_' || c == ':' || c == '.' || c >= 0x80)
+			name += static_cast<char>(s[pos++]);
+		else break;
+	}
 	return name;
 }
 
@@ -623,6 +634,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (onlyTyped) {
 				if (t == "string") return asvJSONValue::makeString("", 0);
 				if (t == "binary") return asvJSONValue::makeBinary(nullptr, 0);
+				if (t == "array") return asvJSONValue::makeArray();
+				if (t == "object") return asvJSONValue::makeObject();
 				if (t == "extension") {
 					int8_t et = 0;
 					auto eit = attrs.find("exttype");

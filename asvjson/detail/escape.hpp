@@ -27,14 +27,16 @@ inline std::string xmlEscapeContent(std::string_view s) {
 inline std::string xmlSanitizeElementName(std::string_view key) {
 	std::string name;
 	name.reserve(key.size());
-	for (auto c : key) {
-		// Spaces and markup chars map to '_'. '#' and '@' are also mapped:
-		// the XML name grammar (and this parser's xmlParseName) reject them,
-		// so a user key like "#foo" or "a@b" must not produce an
-		// un-parseable <#foo>/<a@b> element.
-		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') name += '_';
-		else if (c == '"' || c == '\'' || c == '<' || c == '>' || c == '&' || c == '#' || c == '@') name += '_';
-		else name += c;
+	for (unsigned char c : key) {
+		// The XML name grammar (and this parser's xmlParseName) accept only
+		// alnum, '-', '_', ':', '.' plus UTF-8 characters (bytes >= 0x80).
+		// Everything else -- spaces, markup chars, '#', '@', '$', '!', '~',
+		// backslashes, punctuation, control bytes -- maps to '_' so a user
+		// key never produces an un-parseable <a$b>/<a\x01b> element.
+		bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		          c == '-' || c == '_' || c == ':' || c == '.' || c >= 0x80;
+		if (ok) name += static_cast<char>(c);
+		else name += '_';
 	}
 	if (name.empty() || (name[0] >= '0' && name[0] <= '9') || name[0] == '-')
 		name = "item" + name;
