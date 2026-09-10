@@ -9196,6 +9196,120 @@ TEST(testCsvSpecialTypesStayText) {
 	}
 }
 
+TEST(testCsvJsonNumberShapes) {
+	// JSON-invalid number shapes that lenient strtod/from_chars accept must stay
+	// STRING (a bare "1." or "-.5" would silently re-form as a DOUBLE otherwise).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n1.")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->get("a")->getString()), "1.");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n-.5")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->get("a")->getString()), "-.5");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n+.5")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->get("a")->getString()), "+.5");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n1.e5")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->get("a")->getString()), "1.e5");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n0.")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a\n1e")));
+		ASSERT(j.getRoot()->get(static_cast<size_t>(0))->get("a")->type == asvJSONValue::STRING);
+	}
+	// Well-formed numbers (and the '+' extension) still type-detect.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a,b,c,d,e\n1.5,-1.5,1e5,-0.5,0.5")));
+		auto* r = j.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("a")->type == asvJSONValue::DOUBLE);
+		ASSERT(r->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(r->get("c")->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(r->get("c")->getDouble(), 100000.0);
+		ASSERT(r->get("d")->type == asvJSONValue::DOUBLE);
+		ASSERT(r->get("e")->type == asvJSONValue::DOUBLE);
+	}
+	// STRING "1." round-trips through toCSV/fromCSV as STRING.
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"x":"1."})")));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		auto* v = j2.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "1.");
+	}
+}
+
+TEST(testCsvPlusOverflowLiteral) {
+	// An int64-overflow literal keeps its exact text; a '-' version may be a
+	// raw_number, but a '+' version must not (leading '+' is invalid JSON, so a
+	// bare "+..." would corrupt the document on re-serialization).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n+99999999999999999999")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(!v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "+99999999999999999999");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n-99999999999999999999")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "-99999999999999999999");
+	}
+	// Round-trip keeps both forms stable.
+	{
+		asvJSON j, j2;
+		ASSERT(j.fromCSV(std::string_view("p,n\n+99999999999999999999,-99999999999999999999")));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("p")->type == asvJSONValue::STRING);
+		ASSERT(!r->get("p")->raw_number);
+		ASSERT_EQ(std::string(r->get("p")->getString()), "+99999999999999999999");
+		ASSERT(r->get("n")->type == asvJSONValue::STRING);
+		ASSERT(r->get("n")->raw_number);
+		ASSERT_EQ(std::string(r->get("n")->getString()), "-99999999999999999999");
+	}
+}
+
+TEST(testCsvOversizedCell) {
+	// A cell larger than MAX_STRING_LEN must fail cleanly instead of planting a
+	// null value into the tree (which would crash on later access).
+	{
+		std::string big(asvJSONValue::MAX_STRING_LEN + 1, 'a');
+		asvJSON j;
+		ASSERT(!j.fromCSV(std::string_view("a\n" + big)));
+		ASSERT(j.getRoot() == nullptr);
+	}
+	{
+		std::string big(asvJSONValue::MAX_STRING_LEN + 1, 'a');
+		asvJSON j;
+		ASSERT(!j.fromCSV(std::string_view("a\n\"" + big + "\"")));
+		ASSERT(j.getRoot() == nullptr);
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -17702,6 +17816,9 @@ RUN(testCBORFloat16);
 	RUN(testCsvFlattenCollision);
 	RUN(testCsvHexLiteralIsString);
 	RUN(testCsvSpecialTypesStayText);
+	RUN(testCsvJsonNumberShapes);
+	RUN(testCsvPlusOverflowLiteral);
+	RUN(testCsvOversizedCell);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);

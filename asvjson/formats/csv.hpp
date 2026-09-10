@@ -68,6 +68,31 @@ inline std::vector<std::pair<std::string, bool>> csvSplitLineQ(std::string_view 
 /**
  * @brief Detect JSON value type from CSV cell string
  */
+inline bool csvNumberShapeOk(std::string_view s, size_t nfirst) {
+	// JSON number shape gate: rejects forms a lenient strtod/from_chars accepts
+	// but JSON forbids ("1.", "-.5", "1.e5", "1e", trailing junk, ...) so they
+	// stay STRING instead of silently changing form. A leading '+' is an
+	// intentional CSV extension (mirrors "+42" handling); leading zeros are
+	// rejected by csvDetectType before this point.
+	size_t p = nfirst;
+	if (p >= s.size() || s[p] < '0' || s[p] > '9') return false;
+	while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+	if (p < s.size() && s[p] == '.') {
+		p++;
+		size_t fs = p;
+		while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+		if (p == fs) return false; // "." must be followed by at least one digit
+	}
+	if (p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
+		p++;
+		if (p < s.size() && (s[p] == '+' || s[p] == '-')) p++;
+		size_t es = p;
+		while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+		if (p == es) return false; // "e" / "e+" must be followed by digits
+	}
+	return p == s.size();
+}
+
 inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
@@ -97,9 +122,13 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 				if (*p < '0' || *p > '9') { allDigits = false; break; }
 			if (allDigits) {
 				auto r = asvJSONValue::makeString(s.data(), s.size());
-				if (r) r->raw_number = true;
+				// A leading '+' is not valid JSON number syntax, so a '+'-prefixed
+				// overflow literal must not serialize bare (raw_number emits the
+				// text unquoted); keep it a plain STRING instead.
+				if (r && s[0] != '+') r->raw_number = true;
 				return r;
 			}
+			if (!csvNumberShapeOk(s, nfirst)) return asvJSONValue::makeString(s.data(), s.size());
 			double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 			auto [ptr2, ec2] = std::from_chars(b, s.data() + s.size(), d);
@@ -199,6 +228,9 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 					text = csvStripInjection(text);
 					val = csvDetectType(text);
 				}
+				// makeString returns nullptr when the cell exceeds MAX_STRING_LEN;
+				// storing a null value would crash on later access.
+				if (!val) throw asvJSONError("CSV: string too long");
 				obj->obj->emplace(headers[fi], std::move(val));
 			}
 			arr->arr->push_back(std::move(obj));
