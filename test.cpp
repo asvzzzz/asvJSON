@@ -11880,6 +11880,163 @@ TEST(testININullInValue) {
   }
 }
 
+TEST(testINIEmptyContainers) {
+  // Empty objects round-trip through the {} marker
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":{}}")));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("= {}") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT(j2.getRoot()->get("a") != nullptr);
+    ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::OBJECT);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":{}}")));
+    std::string ini = j.toINI(false);
+    ASSERT(ini.find("= {}") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT(j2.getRoot()->get("a") != nullptr);
+    ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::OBJECT);
+  }
+  // Empty arrays round-trip through the [] marker
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[]}")));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("= []") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT(j2.getRoot()->get("a") != nullptr);
+    ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::ARRAY);
+  }
+  // Nested empty containers
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":{\"b\":{}}}")));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT(j2.getRoot()->get("a") != nullptr);
+    ASSERT(j2.getRoot()->get("a")->get("b") != nullptr);
+    ASSERT(j2.getRoot()->get("a")->get("b")->type == asvJSONValue::OBJECT);
+  }
+  // A STRING "{}" is preserved (not decoded as empty object)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"k\":\"{}\"}")));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT(j2.getRoot()->get("k") != nullptr);
+    ASSERT(j2.getRoot()->get("k")->type == asvJSONValue::STRING);
+  }
+}
+
+TEST(testINIMixedArray) {
+  // A mixed array (objects + scalars) must be rejected on encode
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[{\"x\":1},5]}")));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[5,{\"x\":1}]}")));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[[],5]}")));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[[],[1]]}")));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  // A pure primitive array round-trips fine
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[1,2,3]}")));
+    std::string ini = j.toINI();
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    auto* a = j2.getRoot()->get("a");
+    ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(a->arr->size(), size_t(3));
+  }
+}
+
+TEST(testINITableOrder) {
+  // Scalars must appear BEFORE [[...]] tables in the output so the decoder
+  // does not swallow them into the array element.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[{\"x\":1}],\"b\":2}")));
+    std::string ini = j.toINI();
+    size_t bpos = ini.find("b = 2");
+    size_t tpos = ini.find("[[a]]");
+    ASSERT(bpos != std::string::npos && tpos != std::string::npos);
+    ASSERT(bpos < tpos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT_EQ(j2.getRoot()->get("b")->getInt(), int64_t(2));
+    auto* a = j2.getRoot()->get("a");
+    ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(a->arr->size(), size_t(1));
+    ASSERT_EQ(a->get(size_t(0))->get("x")->getInt(), int64_t(1));
+  }
+  // Compact mode: scalar siblings also come before [[...]] tables
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":[{\"x\":1}],\"b\":2}")));
+    std::string ini = j.toINI(false);
+    size_t bpos = ini.find("b = 2");
+    size_t tpos = ini.find("[[a]]");
+    ASSERT(bpos != std::string::npos && tpos != std::string::npos);
+    ASSERT(bpos < tpos);
+  }
+}
+
+TEST(testINIKeyLeadingBracket) {
+  // A key starting with '[' cannot be represented in INI (it collides with
+  // the section-header syntax). The encoder must throw.
+  {
+    asvJSON j;
+    auto obj = asvJSONValue::makeObject();
+    auto child = asvJSONValue::makeInt(1);
+    obj->obj->emplace("[x", std::move(child));
+    j.setValue("", std::move(obj));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    auto obj = asvJSONValue::makeObject();
+    auto inner = asvJSONValue::makeObject();
+    auto child = asvJSONValue::makeInt(1);
+    inner->obj->emplace("[x", std::move(child));
+    obj->obj->emplace("a", std::move(inner));
+    j.setValue("", std::move(obj));
+    bool threw = false;
+    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -17339,6 +17496,10 @@ RUN(testCBORFloat16);
 	RUN(testININonObjectTarget);
 	RUN(testINIQuotedTrailing);
 	RUN(testININullInValue);
+	RUN(testINIEmptyContainers);
+	RUN(testINIMixedArray);
+	RUN(testINITableOrder);
+	RUN(testINIKeyLeadingBracket);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

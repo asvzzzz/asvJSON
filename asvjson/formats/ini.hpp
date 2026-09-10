@@ -180,6 +180,12 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
     case T::NULL_VAL:
       out += "null";
       break;
+    case T::OBJECT:
+      out += "{}";
+      break;
+    case T::ARRAY:
+      out += "[]";
+      break;
     default:
       break;
   }
@@ -194,6 +200,10 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
   // Bare "null" decodes to the null type (encoder emits the literal, and a
   // STRING "null" is quoted so it stays text -- see iniFormatVal).
   if (s == "null") return asvJSONValue::makeNull();
+  // Bare "{}" / "[]" represent empty containers (the encoder emits them for
+  // object/array values that have no children).
+  if (s == "{}") return asvJSONValue::makeObject();
+  if (s == "[]") return asvJSONValue::makeArray();
   // Case-insensitive bool
   if (s == "true" || s == "True" || s == "TRUE") return asvJSONValue::makeBool(true);
   if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
@@ -253,17 +263,41 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
   }
 }
 
+// Encoder classification of one child value: returns true when the child is
+// emitted as bare `key = value` lines (scalar, primitive array, empty
+// container), false when it becomes a [[...]] table (array of objects) or a
+// dotted section (non-empty object). Arrays that cannot be represented at all
+// (mixed object/scalar contents, or nested array elements) throw.
+inline bool iniIsBareChild(const asvJSONValue* v) {
+  if (v->type == asvJSONValue::ARRAY && v->arr) {
+    if (v->arr->empty()) return true;
+    bool hasObj = false, hasPrim = false;
+    for (const auto& e : *v->arr) {
+      if (e->type == asvJSONValue::ARRAY)
+        throw asvJSONError("nested array cannot be represented in INI");
+      if (e->type == asvJSONValue::OBJECT) hasObj = true;
+      else hasPrim = true;
+    }
+    if (hasObj && hasPrim)
+      throw asvJSONError("mixed array cannot be represented in INI");
+    return !hasObj; // all primitives -> repeated key = value lines
+  }
+  if (v->type == asvJSONValue::OBJECT)
+    return !v->obj || v->obj->empty();
+  return true;
+}
+
 // Recursively emit object contents for a given section path (prefix).
 // prefix == current section path; emitHeader controls whether to emit a section header.
 inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix);
 inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
-                          bool emitHeader, bool pretty = true) {
+                           bool emitHeader, bool pretty = true) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
 
-  // Check if this level has direct (non-object) keys
+  // Check if this level has direct (bare-line-producing) keys
   bool hasDirectKeys = false;
   for (const auto& [key, val] : *obj->obj) {
-    if (val->type != asvJSONValue::OBJECT) {
+    if (iniIsBareChild(val.get())) {
       hasDirectKeys = true; break;
     }
   }
@@ -273,34 +307,21 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
     out += '[' + prefix + "]\n";
   }
 
+  // Pass 1: bare-line producers (scalars, primitive arrays, empty containers).
+  // These MUST precede [[...]] table headers so the decoder does not assign
+  // them to a currentArrayElement opened by a preceding table.
   for (const auto& [key, val] : *obj->obj) {
     std::string dottedKey = prefix.empty() ? key : prefix + "." + key;
+    if (!key.empty() && key[0] == '[')
+      throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
-      std::string escKey = iniEscapeSectionKey(key);
-      std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
-      bool subHasDirect = false;
-      if (val->obj) {
-        for (const auto& [sk, sv] : *val->obj) {
-          if (sv->type != asvJSONValue::OBJECT) { subHasDirect = true; break; }
-        }
+      if (val->obj && val->obj->empty()) {
+        out += (pretty ? key : dottedKey) + " = {}\n";
       }
-      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
-      bool allObjects = true;
-      for (const auto& elem : *val->arr) {
-        if (elem->type != asvJSONValue::OBJECT) { allObjects = false; break; }
-      }
-      if (allObjects && !val->arr->empty()) {
-        std::string escKey = iniEscapeSectionKey(key);
-        for (const auto& elem : *val->arr) {
-          std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
-          if (!out.empty() && out.back() != '\n') out += '\n';
-          out += "[[" + newPrefix + "]]\n";
-          if (elem->type == asvJSONValue::OBJECT) {
-            iniEmitElement(elem.get(), out, newPrefix);
-          }
-        }
-      } else {
+      if (val->arr->empty()) {
+        out += (pretty ? key : dottedKey) + " = []\n";
+      } else if (iniIsBareChild(val.get())) {
         for (const auto& elem : *val->arr) {
           out += (pretty ? key : dottedKey) + " = ";
           iniFormatVal(elem.get(), out);
@@ -311,6 +332,37 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
       out += (pretty ? key : dottedKey) + " = ";
       iniFormatVal(val.get(), out);
       out += '\n';
+    }
+  }
+
+  // Pass 2: objects and object-arrays (produce section headers / [[...]] tables).
+  for (const auto& [key, val] : *obj->obj) {
+    if (val->type == asvJSONValue::OBJECT) {
+      std::string escKey = iniEscapeSectionKey(key);
+      std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
+      bool subHasDirect = false;
+      if (val->obj) {
+        for (const auto& [sk, sv] : *val->obj) {
+          if (iniIsBareChild(sv.get())) { subHasDirect = true; break; }
+        }
+      }
+      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty);
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      bool isObj = true;
+      for (const auto& elem : *val->arr) {
+        if (elem->type != asvJSONValue::OBJECT) { isObj = false; break; }
+      }
+      if (isObj && !val->arr->empty()) {
+        std::string escKey = iniEscapeSectionKey(key);
+        for (const auto& elem : *val->arr) {
+          std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
+          if (!out.empty() && out.back() != '\n') out += '\n';
+          out += "[[" + newPrefix + "]]\n";
+          if (elem->type == asvJSONValue::OBJECT) {
+            iniEmitElement(elem.get(), out, newPrefix);
+          }
+        }
+      }
     }
   }
 }
@@ -327,6 +379,32 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 // arrays-of-objects become [[prefix.dotted]] headers resolved back into the
 // element by the array-aware decoder.
 inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, std::string& out, const std::string& prefix) {
+  // Pass 1: bare-line producers
+  for (const auto& [key, val] : *obj->obj) {
+    std::string full = dk.empty() ? key : dk + "." + key;
+    if (!key.empty() && key[0] == '[')
+      throw asvJSONError("cannot represent key starting with '[' in INI");
+    if (val->type == asvJSONValue::OBJECT) {
+      if (val->obj && val->obj->empty()) {
+        out += full + " = {}\n";
+      }
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      if (val->arr->empty()) {
+        out += full + " = []\n";
+      } else if (iniIsBareChild(val.get())) {
+        for (const auto& e : *val->arr) {
+          out += full + " = ";
+          iniFormatVal(e.get(), out);
+          out += '\n';
+        }
+      }
+    } else {
+      out += full + " = ";
+      iniFormatVal(val.get(), out);
+      out += '\n';
+    }
+  }
+  // Pass 2: objects and object-arrays
   for (const auto& [key, val] : *obj->obj) {
     std::string full = dk.empty() ? key : dk + "." + key;
     if (val->type == asvJSONValue::OBJECT && val->obj) {
@@ -341,23 +419,38 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np);
         }
-      } else {
-        for (const auto& e : *val->arr) {
-          out += full + " = ";
-          iniFormatVal(e.get(), out);
-          out += '\n';
-        }
       }
-    } else {
-      out += full + " = ";
-      iniFormatVal(val.get(), out);
-      out += '\n';
     }
   }
 }
 
 inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix) {
   if (!elem || elem->type != asvJSONValue::OBJECT || !elem->obj) return;
+  // Pass 1: bare-line producers
+  for (const auto& [key, val] : *elem->obj) {
+    if (!key.empty() && key[0] == '[')
+      throw asvJSONError("cannot represent key starting with '[' in INI");
+    if (val->type == asvJSONValue::OBJECT) {
+      if (val->obj && val->obj->empty()) {
+        out += key + " = {}\n";
+      }
+    } else if (val->type == asvJSONValue::ARRAY && val->arr) {
+      if (val->arr->empty()) {
+        out += key + " = []\n";
+      } else if (iniIsBareChild(val.get())) {
+        for (const auto& e : *val->arr) {
+          out += key + " = ";
+          iniFormatVal(e.get(), out);
+          out += '\n';
+        }
+      }
+    } else {
+      out += key + " = ";
+      iniFormatVal(val.get(), out);
+      out += '\n';
+    }
+  }
+  // Pass 2: objects and object-arrays
   for (const auto& [key, val] : *elem->obj) {
     if (val->type == asvJSONValue::OBJECT && val->obj) {
       iniEmitElementFlat(val.get(), key, out, prefix);
@@ -371,17 +464,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np);
         }
-      } else {
-        for (const auto& e : *val->arr) {
-          out += key + " = ";
-          iniFormatVal(e.get(), out);
-          out += '\n';
-        }
       }
-    } else {
-      out += key + " = ";
-      iniFormatVal(val.get(), out);
-      out += '\n';
     }
   }
 }
@@ -393,22 +476,19 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
   if (type == T::OBJECT) {
     if (obj) {
       if (!pretty) {
-        // Compact: flat dotted keys, no section headers
+        // Compact: dotted keys for scalars/objects, [[...]] headers for
+        // arrays-of-objects.  Bare lines must precede tables.
         for (const auto& [key, val] : *obj) {
-          std::string dottedKey = key;
+          if (!key.empty() && key[0] == '[')
+            throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
-            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), false, false);
+            if (val->obj && val->obj->empty()) {
+              out += key + " = {}\n";
+            }
           } else if (val->type == T::ARRAY && val->arr) {
-            bool allObjects = true;
-            for (const auto& elem : *val->arr)
-              if (elem->type != T::OBJECT) { allObjects = false; break; }
-            if (allObjects && !val->arr->empty()) {
-              for (const auto& elem : *val->arr) {
-                std::string dk = iniEscapeSectionKey(key);
-                if (elem->type == T::OBJECT)
-                  iniEmitObject(elem.get(), out, dk, false, false);
-              }
-            } else {
+            if (val->arr->empty()) {
+              out += key + " = []\n";
+            } else if (iniIsBareChild(val.get())) {
               for (const auto& elem : *val->arr) {
                 out += key + " = ";
                 iniFormatVal(elem.get(), out);
@@ -421,22 +501,57 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             out += '\n';
           }
         }
-      } else {
-        // First pass: non-object, non-array keys
+        // Pass 2: objects and object-arrays
         for (const auto& [key, val] : *obj) {
-          if (val->type != T::OBJECT && val->type != T::ARRAY) {
+          if (val->type == T::OBJECT) {
+            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), false, false);
+          } else if (val->type == T::ARRAY && val->arr) {
+            bool allObjects = true;
+            for (const auto& elem : *val->arr)
+              if (elem->type != T::OBJECT) { allObjects = false; break; }
+            if (allObjects && !val->arr->empty()) {
+              std::string escKey = iniEscapeSectionKey(key);
+              for (const auto& elem : *val->arr) {
+                if (!out.empty() && out.back() != '\n') out += '\n';
+                out += "[[" + escKey + "]]\n";
+                if (elem->type == T::OBJECT)
+                  iniEmitElement(elem.get(), out, escKey);
+              }
+            }
+          }
+        }
+      } else {
+        // Pretty: first pass -- bare-line producers
+        for (const auto& [key, val] : *obj) {
+          if (!key.empty() && key[0] == '[')
+            throw asvJSONError("cannot represent key starting with '[' in INI");
+          if (val->type == T::OBJECT) {
+            if (val->obj && val->obj->empty()) {
+              out += key + " = {}\n";
+            }
+          } else if (val->type == T::ARRAY && val->arr) {
+            if (val->arr->empty()) {
+              out += key + " = []\n";
+            } else if (iniIsBareChild(val.get())) {
+              for (const auto& elem : *val->arr) {
+                out += key + " = ";
+                iniFormatVal(elem.get(), out);
+                out += '\n';
+              }
+            }
+          } else {
             out += key + " = ";
             iniFormatVal(val.get(), out);
             out += '\n';
           }
         }
-        // Second pass: object/array keys
+        // Second pass: objects and object-arrays
         for (const auto& [key, val] : *obj) {
           if (val->type == T::OBJECT) {
             bool hasDirect = false;
             if (val->obj) {
               for (const auto& [sk, sv] : *val->obj) {
-                if (sv->type != T::OBJECT) { hasDirect = true; break; }
+                if (iniIsBareChild(sv.get())) { hasDirect = true; break; }
               }
             }
             iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty(), true);
@@ -453,12 +568,6 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (elem->type == T::OBJECT) {
                   iniEmitElement(elem.get(), out, escKey);
                 }
-              }
-            } else {
-              for (const auto& elem : *val->arr) {
-                out += key + " = ";
-                iniFormatVal(elem.get(), out);
-                out += '\n';
               }
             }
           }
@@ -606,10 +715,9 @@ inline bool asvJSON::fromINI(std::string_view input) {
             currentArrayElement = newObj.get();
             arrPtr->arr->push_back(std::move(newObj));
           } else if (it->second->type == asvJSONValue::ARRAY) {
-            asvJSONValue* arrVal = it->second.get();
             auto newObj = asvJSONValue::makeObject();
             currentArrayElement = newObj.get();
-            arrVal->arr->push_back(std::move(newObj));
+            it->second->arr->push_back(std::move(newObj));
           } else {
             // Reject instead of silently overwriting the existing value.
             throw asvJSONError("array section conflicts with existing value for \"" + arrKey + "\"");
