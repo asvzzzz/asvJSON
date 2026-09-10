@@ -9257,6 +9257,77 @@ TEST(testCsvJsonNumberShapes) {
 	}
 }
 
+TEST(testCsvDoubleRange) {
+	auto row = [](asvJSON& j) -> asvJSONValue* { return j.getRoot()->get(static_cast<size_t>(0)); };
+	// Subnormal values are representable doubles: they must decode to DOUBLE,
+	// not flip to STRING (an over-strict strtod-path ERANGE check used to treat
+	// any underflow result as unparsable and silently change the type).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("v\n5e-324")));
+		auto* v = row(j)->get("v");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(v->getDouble(), 4.9406564584124654e-324);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("v\n2.2250738585072014e-308")));
+		auto* v = row(j)->get("v");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(v->getDouble(), 2.2250738585072014e-308);
+	}
+	// A double overflow must stay STRING (not become +Inf) and a total
+	// underflow must stay STRING too (not masquerade as 0).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("v\n1e400")));
+		auto* v = row(j)->get("v");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "1e400");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("v\n1e-400")));
+		auto* v = row(j)->get("v");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "1e-400");
+	}
+	// A high-precision double must survive toCSV/fromCSV with its exact value.
+	// fmtDoubleVal falls back to %.16g without to_chars, which used to lose the
+	// last digit (0.30000000000000004 -> "0.3" -> 0.29999999999999999) and even
+	// mis-shaped subnormal-boundary values so much they came back as STRING.
+	{
+		asvJSON j, j2;
+		j.setValue("x", asvJSONValue::makeDouble(0.30000000000000004));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(v->getDouble(), 0.30000000000000004);
+	}
+	{
+		asvJSON j, j2;
+		j.setValue("x", asvJSONValue::makeDouble(2.2250738585072014e-308));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(v->getDouble(), 2.2250738585072014e-308);
+	}
+	// But a strict-shape 16-digit literal ("2.225073858507201e-308") still
+	// parses to a valid representable double, never to a STRING.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("v\n2.225073858507201e-308")));
+		auto* v = row(j)->get("v");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::DOUBLE);
+		ASSERT(v->getDouble() > 0.0);
+	}
+}
+
 TEST(testCsvPlusOverflowLiteral) {
 	// An int64-overflow literal keeps its exact text; a '-' version may be a
 	// raw_number, but a '+' version must not (leading '+' is invalid JSON, so a
@@ -17819,6 +17890,7 @@ RUN(testCBORFloat16);
 	RUN(testCsvJsonNumberShapes);
 	RUN(testCsvPlusOverflowLiteral);
 	RUN(testCsvOversizedCell);
+	RUN(testCsvDoubleRange);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);

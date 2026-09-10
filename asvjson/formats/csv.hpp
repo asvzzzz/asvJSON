@@ -93,6 +93,36 @@ inline bool csvNumberShapeOk(std::string_view s, size_t nfirst) {
 	return p == s.size();
 }
 
+// Format a double for a CSV cell so the value round-trips EXACTLY through
+// csvDetectType on every platform. fmtDoubleVal is shortest-form when to_chars
+// exists, but on toolchains without it falls back to %.16g, which drops the
+// last digit of 17-digit doubles ("0.30000000000000004" -> "0.3") and mis-shapes
+// subnormal-boundary values so a re-parse silently loses value or type. We keep
+// the terse %.16g output whenever it demonstrably round-trips (strtod re-parse
+// returns the identical double) and escalate to %.17g (DBL_DECIMAL_DIG, exact)
+// only when it would not. This preserves compact cells ("1e+300", "0.1") while
+// making the exact-value cases correct.
+inline std::string fmtDoubleValPrecise(double d) {
+	std::string s;
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+		fmtDoubleVal(d, s);
+	#else
+		char buf[40];
+		int n = snprintf(buf, sizeof(buf), "%.16g", d);
+		if (n > 0) {
+			s.assign(buf, static_cast<size_t>(n));
+			errno = 0;
+			char* end = nullptr;
+			double back = std::strtod(buf, &end);
+			if (!(errno == ERANGE && back == 0.0) && end == buf + n && back == d)
+				return s; // terse form is exact, keep it
+			n = snprintf(buf, sizeof(buf), "%.17g", d);
+			if (n > 0) s.assign(buf, static_cast<size_t>(n));
+		}
+	#endif
+	return s;
+}
+
 inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
@@ -137,7 +167,14 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 			std::string tmp(s);
 			char* end; errno = 0;
 			d = std::strtod(tmp.c_str(), &end);
-			if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return asvJSONValue::makeDouble(d);
+			// strtod signals ERANGE for overflow (-> +/-HUGE_VAL) and for
+			// underflow (0 when the value is gone entirely, or a subnormal
+			// when it merely got smaller). Overflow and total underflow must
+			// stay STRING, but a subnormal result is a real representable
+			// value -- rejecting it would flip a valid number to a string.
+			if (end == tmp.c_str() + tmp.size() && !std::isinf(d) &&
+			    !(errno == ERANGE && d == 0.0))
+				return asvJSONValue::makeDouble(d);
 #endif
 		}
 	}
@@ -261,7 +298,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			case T2::INT: return std::to_string(v->num);
 			case T2::DOUBLE: {
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return {};
-				std::string s; fmtDoubleVal(v->dbl, s);
+				std::string s = fmtDoubleValPrecise(v->dbl);
 				// An integral double must round-trip as a float, otherwise
 				// "1" would re-decode as an INT (mirror the UDE/INI convention).
 				if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
