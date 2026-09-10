@@ -125,6 +125,11 @@ inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
       cur = it->second.get();
     }
   }
+  // The final segment must also be an object: a section header (or dotted key)
+  // targeting an existing scalar or array would otherwise silently drop every
+  // following key-value pair.
+  if (!cur || cur->type != asvJSONValue::OBJECT)
+    throw asvJSONError("cannot navigate through non-object");
   return cur;
 }
 
@@ -203,7 +208,7 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     errno = 0;
     char* end = nullptr;
     long long ll = std::strtoll(s.c_str(), &end, 10);
-    if (end && *end == 0) {
+    if (end && *end == 0 && end == s.c_str() + s.size()) {
       if (errno == ERANGE) {
         // Out-of-range integer: preserve the exact literal so the round-trip is
         // lossless (same convention as core JSON and UDE) instead of silently
@@ -217,7 +222,7 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     // Try double
     errno = 0;
     double d = std::strtod(s.c_str(), &end);
-    if (end && *end == 0) {
+    if (end && *end == 0 && end == s.c_str() + s.size()) {
       if (errno == ERANGE) {
         // Out-of-range double (e.g. "1e999"): preserve the literal as text
         // instead of silently degrading it to +inf/-inf/0 on the round-trip.
@@ -659,6 +664,13 @@ inline bool asvJSON::fromINI(std::string_view input) {
           if (valView[i] == '"') { closeQuote = i; break; }
         }
         if (closeQuote != std::string_view::npos) {
+          // Only whitespace and an optional ;/# comment may follow the closing
+          // quote; anything else is rejected instead of being silently dropped
+          // (a "k = \"a\"b" line would otherwise lose the "b").
+          size_t t = closeQuote + 1;
+          while (t < valView.size() && (valView[t] == ' ' || valView[t] == '\t')) t++;
+          if (t < valView.size() && valView[t] != ';' && valView[t] != '#')
+            throw asvJSONError("unexpected content after quoted value");
           valueStr = iniUnescape(valView.substr(1, closeQuote - 1));
         } else {
           // Multi-line quoted value: gather lines until closing quote

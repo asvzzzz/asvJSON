@@ -11793,6 +11793,93 @@ TEST(testINIOverflowExtended) {
   }
 }
 
+TEST(testININonObjectTarget) {
+  // A section header (or the parent of a dotted key) that resolves down onto
+  // an existing scalar or array must error instead of silently dropping every
+  // following key-value pair.
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("a = 1\n[a]\nx = 2\n")));
+    ASSERT(j.getLastError().find("navigate through non-object") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("a = 1\na.b = 2\n")));
+    ASSERT(j.getLastError().find("navigate through non-object") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("[[a]]\nx = 1\n[a]\ny = 2\n")));
+    ASSERT(j.getLastError().find("navigate through non-object") != std::string::npos);
+  }
+  // A longer dotted path over an existing scalar still errors (intermediate check)
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("a = 1\na.b.c = 2\n")));
+    ASSERT(j.getLastError().find("navigate through non-object") != std::string::npos);
+  }
+  // A section over an existing object merges normally (no error)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("a.x = 1\n[a]\ny = 2\n")));
+    ASSERT_EQ(j.getRoot()->get("a")->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->get("a")->get("y")->getInt(), int64_t(2));
+  }
+}
+
+TEST(testINIQuotedTrailing) {
+  // Junk after the closing quote is rejected, not silently dropped
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("k = \"a\" garbage\n")));
+    ASSERT(j.getLastError().find("unexpected content after quoted value") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI(std::string("k = \"a\"b\n")));
+    ASSERT(j.getLastError().find("unexpected content after quoted value") != std::string::npos);
+  }
+  // A ;/# comment after the closing quote stays legal
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = \"a\" ; note\n")));
+    ASSERT_EQ(std::string(j.getRoot()->get("k")->getString()), "a");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = \"a\" # note\n")));
+    ASSERT_EQ(std::string(j.getRoot()->get("k")->getString()), "a");
+  }
+}
+
+TEST(testININullInValue) {
+  // An embedded NUL inside a numeric-looking literal must not truncate the
+  // value ("42\0x" used to silently become INT 42). It stays text.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = 42\0x\n", 11)));
+    auto* r = j.getRoot()->get("k");
+    ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r->getString(), 4), std::string("42\0x", 4));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = 1.5\0y\n", 11)));
+    auto* r = j.getRoot()->get("k");
+    ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r->getString(), 4), std::string("1.5\0y", 4));
+  }
+  // Round-trip preserves the NUL byte exactly
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromINI(std::string("k = 42\0x\n", 11)));
+    ASSERT(j2.fromINI(j.toINI()));
+    auto* r = j2.getRoot()->get("k");
+    ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r->getString(), 4), std::string("42\0x", 4));
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -17249,6 +17336,9 @@ RUN(testCBORFloat16);
 	RUN(testIniExtras);
 	RUN(testINIDoublePrecision);
 	RUN(testINIOverflowExtended);
+	RUN(testININonObjectTarget);
+	RUN(testINIQuotedTrailing);
+	RUN(testININullInValue);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
