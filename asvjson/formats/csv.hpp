@@ -224,7 +224,13 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			case T2::INT: return std::to_string(v->num);
 			case T2::DOUBLE: {
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return {};
-				std::string s; fmtDoubleVal(v->dbl, s); return s;
+				std::string s; fmtDoubleVal(v->dbl, s);
+				// An integral double must round-trip as a float, otherwise
+				// "1" would re-decode as an INT (mirror the UDE/INI convention).
+				if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+				    s.find('E') == std::string::npos)
+					s += ".0";
+				return s;
 			}
 			case T2::STRING: return v->str_data;
 			case T2::DATETIME: {
@@ -271,7 +277,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			if (!v) return;
 			if (vis.count(v)) return;
 			vis.insert(v);
-			if (v->type == T::OBJECT && v->obj) {
+			if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 				for (const auto& [k, val] : *v->obj)
 					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
 			} else { keyMap[prefix.empty() ? "value" : prefix] = true; }
@@ -289,10 +295,16 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				if (!v) return;
 				if (vis.count(v)) return;
 				vis.insert(v);
-				if (v->type == T::OBJECT && v->obj) {
+				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
-				} else { flat[prefix.empty() ? "value" : prefix] = csvCell(v); }
+				} else {
+					std::string key = prefix.empty() ? "value" : prefix;
+					// Two different paths flattening onto one column would
+					// silently drop one value; reject instead of losing data.
+					if (!flat.emplace(key, csvCell(v)).second)
+						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
+				}
 			};
 			fill(fill, item.get(), "", fillVisited);
 			for (size_t i = 0; i < keys.size(); i++) {
@@ -307,15 +319,6 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 	switch (type) {
 		case T::OBJECT: {
 			if (!obj || obj->empty()) return;
-			if (obj->size() == 1) {
-				const auto& [onlyKey, onlyVal] = *obj->begin();
-				if (onlyVal->type == T::ARRAY && onlyVal->arr && !onlyVal->arr->empty()) {
-					bool allObjs = true;
-					for (const auto& v : *onlyVal->arr)
-						if (v->type != T::OBJECT) { allObjs = false; break; }
-					if (allObjs) { writeArrayOfObjects(*onlyVal->arr); break; }
-				}
-			}
 			std::map<std::string, std::string> flat;
 			std::unordered_set<const asvJSONValue*> flattenVisited;
 			auto flatten = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
@@ -323,10 +326,16 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				if (!v) return;
 				if (vis.count(v)) return;
 				vis.insert(v);
-				if (v->type == T::OBJECT && v->obj) {
+				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
-				} else { flat[prefix.empty() ? "value" : prefix] = csvCell(v); }
+				} else {
+					std::string key = prefix.empty() ? "value" : prefix;
+					// Two different paths flattening onto one column would
+					// silently drop one value; reject instead of losing data.
+					if (!flat.emplace(key, csvCell(v)).second)
+						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
+				}
 			};
 			flatten(flatten, this, "", flattenVisited);
 			bool first = true;

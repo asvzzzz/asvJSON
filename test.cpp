@@ -8934,6 +8934,157 @@ TEST(testCsvExtras) {
 	}
 }
 
+TEST(testCsvEmptyObjects) {
+	auto row = [](asvJSON& j) -> asvJSONValue* { return j.getRoot()->get(static_cast<size_t>(0)); };
+	// A nested empty object must keep its column (encoded as a "{}" cell),
+	// instead of silently dropping the whole key chain from the output.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"a":{"b":{}}})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("a.b") != std::string::npos);
+		ASSERT(csv.find("{}") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("a.b");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(std::string(v->getString()), "{}");
+	}
+	// Deeply nested empty object with a sibling key.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"a":{"b":{"c":{}}},"d":1})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("a.b.c") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("a.b.c");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(std::string(v->getString()), "{}");
+		ASSERT_EQ(row(j2)->get("d")->getInt(), int64_t(1));
+	}
+	// Bare empty object value keeps its column.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"a":{}})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("a\n{}") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("a");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(std::string(v->getString()), "{}");
+	}
+	// An empty object nested inside an array-of-objects member keeps its column.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([{"a":{"b":1},"e":{}},{"a":2}])"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("e") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* r2 = j2.getRoot();
+		ASSERT(r2->get(static_cast<size_t>(1))->get("e")->type == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(std::string(r2->get(static_cast<size_t>(0))->get("e")->getString()), "{}");
+	}
+	// A wholly-empty object as an array element must not produce empty output.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([{}])"));
+		std::string csv = j.toCSV();
+		ASSERT(!csv.empty());
+		ASSERT(j2.fromCSV(csv));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 1U);
+	}
+}
+
+TEST(testCsvSingleKeyArrayOfObjects) {
+	// A single-key object holding an array of objects must keep the key as a
+	// regular column (JSON text), instead of destructuring away the wrapper and
+	// turning the root OBJECT into an ARRAY on re-parse.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"items":[{"x":1},{"x":2}]})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("items") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->hasKey("items"));
+		ASSERT_EQ(std::string(r->get("items")->getString()), "[{\"x\":1},{\"x\":2}]");
+	}
+	// The root-level array-of-objects two-pass layout still works.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([{"x":1},{"y":2}])"));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), 2U);
+	}
+}
+
+TEST(testCsvIntegralDouble) {
+	// A double with an integral value must round-trip as a DOUBLE, not become
+	// an INT through the bare "1"/"100000" literal (to_chars vs %g divergence).
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"x":1.0})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("1.0") != std::string::npos);
+		ASSERT(csv.find("\n1\n") == std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = j2.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+	}
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([100000.0,2.5,3.0])"));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("value")->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->get("value")->getDouble(), 100000.0);
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(1))->get("value")->type == asvJSONValue::DOUBLE);
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(2))->get("value")->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(2))->get("value")->getDouble(), 3.0);
+	}
+	// Exponent-form doubles are untouched (no ".0" appended to "1e+300").
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"x":1e300})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("e+300") != std::string::npos);
+		ASSERT(csv.find(".0") == std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("x")->type == asvJSONValue::DOUBLE);
+	}
+}
+
+TEST(testCsvFlattenCollision) {
+	// A literal dotted key colliding with a nested path would silently overwrite
+	// one value ("a.b" from both sources map to the same column); reject instead.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string(R"({"a.b":1,"a":{"b":2}})")));
+		bool threw = false;
+		try { std::string csv = j.toCSV(); (void)csv; } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string(R"([{"a.b":1,"a":{"b":2}}])")));
+		bool threw = false;
+		try { std::string csv = j.toCSV(); (void)csv; } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// Non-conflicting nested paths still flatten fine.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string(R"({"a":{"b":1,"c":2}})")));
+		bool threw = false;
+		std::string csv;
+		try { csv = j.toCSV(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(!threw);
+		ASSERT(csv.find("a.b") != std::string::npos);
+		ASSERT(csv.find("a.c") != std::string::npos);
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -17434,6 +17585,10 @@ RUN(testCBORFloat16);
 	RUN(testFromCSVIntOverflow);
 	RUN(testCSVRoundTrip);
 	RUN(testCsvExtras);
+	RUN(testCsvEmptyObjects);
+	RUN(testCsvSingleKeyArrayOfObjects);
+	RUN(testCsvIntegralDouble);
+	RUN(testCsvFlattenCollision);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
