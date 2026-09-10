@@ -77,6 +77,11 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 		// those literals must stay STRINGs (otherwise the value silently changes
 		// to 42 on a re-parse). "0", "-0", "0.5" and "-0.5" are still numbers.
 		size_t nfirst = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+		// "0x"/"0X" literals are C-style hex floats, not JSON numbers. strtod and
+		// from_chars would happily parse "0x10" as 16.0, silently changing the
+		// cell's form; JSON has no hex syntax, so keep the literal as text.
+		if (s.size() > nfirst + 1 && s[nfirst] == '0' && (s[nfirst + 1] == 'x' || s[nfirst + 1] == 'X'))
+			return asvJSONValue::makeString(s.data(), s.size());
 		bool leadZero = s.size() > nfirst + 1 && s[nfirst] == '0' &&
 		                s[nfirst + 1] >= '0' && s[nfirst + 1] <= '9';
 		if (!leadZero) {
@@ -242,7 +247,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			}
 			case T2::REGEX: {
 				size_t sep = v->str_data.rfind('\0');
-				return (sep != std::string_view::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
+				return (sep != std::string::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
 			}
 			case T2::TIMESTAMP: return std::to_string(v->num);
 			case T2::EXTENSION: return encodeBase64(v->bin_data.data(), v->bin_data.size());
@@ -256,16 +261,30 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 
 	// Fully-escaped cell. A STRING whose text would decode as a different type
 	// (number/bool/null/empty) is quoted so the round-trip preserves STRING.
-	// The formula-injection guard applies only to STRING cells and headers.
+	// The non-native types (REGEX/BINARY/EXTENSION/OBJECTID/DATETIME) have no
+	// CSV cell syntax: their text is emitted bare except when it would be mis-read
+	// as a number/bool/null on decode, in which case it is quoted as an explicit
+	// text literal (a REGEX pattern "123" must not come back as INT 123). TIMESTAMP
+	// stays bare -- an epoch number is its natural CSV form -- and ARRAY/OBJECT
+	// cells use their JSON text (already detected as STRING on decode). The
+	// formula-injection guard applies to STRING and the special text types, and
+	// to headers.
 	auto csvCell = [&](const asvJSONValue* v) -> std::string {
 		std::string s = cellValue(v);
-		bool forceQuote = v && v->type == T::STRING;
-		if (forceQuote) {
+		bool textGuard = false;
+		bool quote = false;
+		if (v) {
 			auto d = csvDetectType(s);
-			forceQuote = !d || d->type != T::STRING;
-			return csvEscape(s, forceQuote, true);
+			switch (v->type) {
+				case T::STRING:
+				case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID: case T::DATETIME:
+					textGuard = true;
+					quote = !d || d->type != T::STRING;
+					break;
+				default: break;
+			}
 		}
-		return csvEscape(s, false, v && v->type == T::STRING);
+		return csvEscape(s, quote, textGuard);
 	};
 
 	auto writeArrayOfObjects = [&](const std::vector<std::unique_ptr<asvJSONValue>>& items) {

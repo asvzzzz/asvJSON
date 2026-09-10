@@ -9085,6 +9085,117 @@ TEST(testCsvFlattenCollision) {
 	}
 }
 
+TEST(testCsvHexLiteralIsString) {
+	// "0x"/"0X" literals are not valid JSON numbers; the double parse (strtod /
+	// from_chars) would re-read "0x10" as 16.0, silently changing the cell's
+	// form. Hex has no JSON syntax, so a numbered literal must stay STRING.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n0x10")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "0x10");
+		ASSERT(!v->raw_number);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n-0x1A")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "-0x1A");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n+0X10")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "+0X10");
+	}
+	// A hex float literal ("0x1.8p3" = 12.0) is text, not a DOUBLE.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n0x1.8p3")));
+		auto* v = j.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "0x1.8p3");
+	}
+	// A STRING "0x10" still round-trips as STRING through toCSV/fromCSV.
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"x":"0x10"})")));
+		std::string csv = j.toCSV();
+		ASSERT(j2.fromCSV(csv));
+		auto* v = j2.getRoot()->get(static_cast<size_t>(0))->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "0x10");
+	}
+}
+
+TEST(testCsvSpecialTypesStayText) {
+	// Special-type cells have no CSV syntax. Emitted bare, a REGEX pattern "123"
+	// would be re-read as INT 123; it must be quoted as an explicit text literal
+	// so the round-trip preserves the exact text.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("rx", asvJSONValue::makeRegex("123", nullptr));
+		j.getRoot()->obj->emplace("rxok", asvJSONValue::makeRegex("abc", "i"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("\"123\"") != std::string::npos);
+		ASSERT(csv.find("abc") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("rx")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("rx")->getString()), "123");
+		ASSERT(r->get("rxok")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("rxok")->getString()), "abc");
+	}
+	// A BINARY value whose base64 text happens to be all digits must not become
+	// an INT on re-parse (bytes {0xD7,0x6D,0xF8} encode as "1234").
+	{
+		const uint8_t b[] = {0xD7, 0x6D, 0xF8};
+		ASSERT_EQ(encodeBase64(b, 3), std::string("1234"));
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(b, 3));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("\"1234\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("bin")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("bin")->getString()), "1234");
+	}
+	// Formula-injection guard applies to special-type text too: a REGEX pattern
+	// starting with '=' must not be executed by a spreadsheet on open.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("rx", asvJSONValue::makeRegex("=SUM(A1)", nullptr));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("'=SUM(A1)") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("rx")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(r->get("rx")->getString()), "=SUM(A1)");
+	}
+	// A TIMESTAMP stays a bare epoch number (INT is its intended CSV form).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("ts", asvJSONValue::makeTimestamp(1710000000));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("1710000000") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("ts")->type == asvJSONValue::INT);
+		ASSERT_EQ(r->get("ts")->getInt(), int64_t(1710000000));
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -17589,6 +17700,8 @@ RUN(testCBORFloat16);
 	RUN(testCsvSingleKeyArrayOfObjects);
 	RUN(testCsvIntegralDouble);
 	RUN(testCsvFlattenCollision);
+	RUN(testCsvHexLiteralIsString);
+	RUN(testCsvSpecialTypesStayText);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
