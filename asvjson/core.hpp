@@ -2206,9 +2206,23 @@ inline void fmtDoubleVal(double d, std::string& out) {
 		auto [ptr, ec] = std::to_chars(tmp.data(), tmp.data() + tmp.size(), d);
 		if (ec == std::errc()) { out.append(tmp.data(), ptr - tmp.data()); return; }
 	#endif
+	// %.16g drops the last digit of 17-digit doubles (e.g.
+	// 0.30000000000000004 becomes "0.3"), breaking round-trips.  Try the
+	// terse form first; if strtod does not recover the exact same value,
+	// escalate to %.17g (DBL_DECIMAL_DIG), which is always lossless.
 	char buf[64];
 	int n = snprintf(buf, sizeof(buf), "%.16g", d);
-	if (n > 0) out.append(buf, static_cast<size_t>(n));
+	if (n > 0) {
+		errno = 0;
+		char* end = nullptr;
+		double back = std::strtod(buf, &end);
+		if (end == buf + n && !(errno == ERANGE && back == 0.0) && back == d) {
+			out.append(buf, static_cast<size_t>(n));
+			return;
+		}
+		n = snprintf(buf, sizeof(buf), "%.17g", d);
+		if (n > 0) out.append(buf, static_cast<size_t>(n));
+	}
 }
 
 inline bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
