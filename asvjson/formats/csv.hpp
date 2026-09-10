@@ -267,7 +267,10 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			case T2::BOOL_VAL: return v->flag ? "true" : "false";
 			case T2::INT: return std::to_string(v->num);
 			case T2::DOUBLE: {
-				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return {};
+				// JSON serialization maps NaN/Inf to "null"; mirror that here so
+				// a NaN/Inf cell keeps its row (an empty cell would vanish, and a
+				// sole NaN column would leave a header-only CSV that fails to parse).
+				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return "null";
 				std::string s; fmtDoubleVal(v->dbl, s);
 				// An integral double must round-trip as a float, otherwise
 				// "1" would re-decode as an INT (mirror the UDE/INI convention).
@@ -318,7 +321,12 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				case T::STRING:
 				case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID: case T::DATETIME:
 					textGuard = true;
-					quote = !d || d->type != T::STRING;
+					// Quote when re-detection would change the type, and when it
+					// would promote a plain STRING to a raw_number (an int64-overflow
+					// literal like "99999999999999999999" decodes bare with the
+					// raw_number flag set, which alters JSON output). A source that
+					// already IS raw_number must stay bare so it keeps its flag.
+					quote = !d || d->type != T::STRING || (d->raw_number && !v->raw_number);
 					break;
 				default: break;
 			}

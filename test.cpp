@@ -9196,6 +9196,59 @@ TEST(testCsvSpecialTypesStayText) {
 	}
 }
 
+TEST(testCsvNanInfAsNull) {
+	// NaN/Inf doubles serialize as JSON "null"; CSV must follow suit so the row
+	// and document survive the round trip instead of collapsing to an empty line
+	// (a sole NaN column used to emit "x\n\n", a header-only CSV that fails to parse).
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("nan", asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+		j.getRoot()->obj->emplace("k", asvJSONValue::makeDouble(1.5));
+		ASSERT(j2.fromCSV(j.toCSV()));
+		auto* r = j2.getRoot()->get(static_cast<size_t>(0));
+		ASSERT(r->get("nan")->type == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(r->get("k")->getDouble(), 1.5);
+	}
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("x", asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+		ASSERT(j2.fromCSV(j.toCSV()));
+		ASSERT(j2.getRoot()->get(static_cast<size_t>(0))->get("x")->type == asvJSONValue::NULL_VAL);
+	}
+}
+
+TEST(testCsvNoRawNumberDrift) {
+	// A plain STRING holding an int64-overflow literal must not acquire the
+	// raw_number flag through a CSV round trip (its JSON output would silently
+	// change from a quoted string to a bare number literal).
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"big":"99999999999999999999"})")));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("\"99999999999999999999\"") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = j2.getRoot()->get(static_cast<size_t>(0))->get("big");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(!v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
+	}
+	// A genuine raw_number STRING (overflow literal parsed from bare text) must
+	// still round-trip bare and keep its raw_number flag.
+	{
+		asvJSON j, j2;
+		ASSERT(j.fromCSV(std::string_view("big\n99999999999999999999")));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("big\n99999999999999999999") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		auto* v = j2.getRoot()->get(static_cast<size_t>(0))->get("big");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT_EQ(std::string(v->getString()), "99999999999999999999");
+	}
+}
+
 TEST(testCsvJsonNumberShapes) {
 	// JSON-invalid number shapes that lenient strtod/from_chars accept must stay
 	// STRING (a bare "1." or "-.5" would silently re-form as a DOUBLE otherwise).
@@ -17891,6 +17944,8 @@ RUN(testCBORFloat16);
 	RUN(testCsvPlusOverflowLiteral);
 	RUN(testCsvOversizedCell);
 	RUN(testCsvDoubleRange);
+	RUN(testCsvNanInfAsNull);
+	RUN(testCsvNoRawNumberDrift);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
