@@ -172,7 +172,18 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
       out += std::to_string(v->num);
       break;
     case T::DOUBLE:
-      fmtDoubleVal(v->dbl, out);
+      {
+        // A double with an integral value must round-trip as a float
+        // (otherwise "100000" would re-decode as an INT on compilers whose
+        // fmtDoubleVal falls back to %g; to_chars already emits "1e+05" there).
+        // Mirror the UDE convention of appending ".0" to a plain integer literal.
+        std::string tmp;
+        fmtDoubleVal(v->dbl, tmp);
+        if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
+            tmp.find('E') == std::string::npos)
+          tmp += ".0";
+        out += tmp;
+      }
       break;
     case T::BOOL_VAL:
       out += v->flag ? "true" : "false";
