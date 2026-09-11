@@ -2,6 +2,7 @@
 // CBOR (RFC 8949) serialization/parsing for asvJSON++
 
 #include "../core.hpp"
+#include <limits>
 
 namespace asvJSONInternal {
 
@@ -335,6 +336,11 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (val->type == asvJSONValue::DOUBLE) {
           double sec = val->dbl;
           double fl = std::floor(sec);
+          // Casting an out-of-range double to time_t is UB on some platforms.
+          if (fl < static_cast<double>(std::numeric_limits<time_t>::min()) ||
+              fl > static_cast<double>(std::numeric_limits<time_t>::max())) {
+            throw asvJSONError("CBOR tag 1: seconds out of time_t range");
+          }
           time_t t = static_cast<time_t>(fl);
           int ms = static_cast<int>(std::floor((sec - fl) * 1000.0 + 0.5));
           if (ms > 999) ms = 999;

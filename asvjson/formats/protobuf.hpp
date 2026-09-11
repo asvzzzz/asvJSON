@@ -54,7 +54,16 @@ inline void protoWriteTag(std::vector<uint8_t>& out, int fieldNum, int wireType)
 inline int protoReadTag(const uint8_t* data, size_t size, size_t& pos, int& fieldNum) {
   if (pos >= size) return -1;
   uint64_t tag = protoReadVarint(data, size, pos);
-  fieldNum = static_cast<int>(tag >> 3);
+  uint64_t rawNum = tag >> 3;
+  // A field number that does not fit in int is invalid (max protobuf field
+  // number is 2^29-1); rejecting it prevents forged truncation to a small
+  // legitimate-looking field number.
+  if (rawNum > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+      rawNum == 0) {
+    fieldNum = -1;
+    return -2;
+  }
+  fieldNum = static_cast<int>(rawNum);
   return static_cast<int>(tag & 7);
 }
 
@@ -863,7 +872,18 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
 }
 
 inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth = 0) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) return;
+  if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
+    // Skip to the matching closing brace so the parent frame does not
+    // mis-parse this body's fields as its own.
+    int d = 1;
+    while (pos < text.size() && d > 0) {
+      if (text[pos] == '{' || text[pos] == '<') d++;
+      else if (text[pos] == '}' || text[pos] == '>') d--;
+      if (d > 0) pos++;
+    }
+    if (pos < text.size()) pos++;
+    return;
+  }
   while (pos < text.size()) {
     protoTextSkipWS(text, pos);
     if (pos >= text.size()) return;

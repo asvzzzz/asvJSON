@@ -1329,7 +1329,8 @@ TEST(testGetObject) {
 TEST(testGetConst) {
 	asvJSON json;
 	json.parse(std::string("{\"key\": \"value\", \"num\": 42, \"arr\": [1,2,3]}"));
-	asvJSONValue* root = json.get("");
+	asvJSONValue* root = json.getRoot();
+	ASSERT(root != nullptr);
 	
 	const asvJSONValue* val = root->getConst("key");
 	ASSERT(val != nullptr);
@@ -17763,6 +17764,10 @@ int main() {
 	
 	std::cout << "\n--- Clone Direct Test ---\n";
 	RUN(testCloneValueDirect);
+
+	std::cout << "\n--- Get Object / Get Const Tests ---\n";
+	RUN(testGetObject);
+	RUN(testGetConst);
 	
 	std::cout << "\n--- Stress Tests ---\n";
 	RUN(testStressLargeArray);

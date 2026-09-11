@@ -57,6 +57,8 @@
 
 #include <iostream>
 #include <fstream>
+#include <cstring>
+#include <sstream>
 #include <atomic>
 #include <ctime>
 #include <chrono>
@@ -497,7 +499,7 @@ private:
     {
       asvJSON check;
       if (check.parse(result)) {
-        success = check.getBool("ok");
+        success = check.getBool("success");
         if (!success) error = check.getString("error");
       }
     }
@@ -541,6 +543,8 @@ private:
     auto pathEnd = firstLine.find(' ', methodEnd + 1);
     if (pathEnd == std::string::npos) return;
     std::string path = urlDecode(firstLine.substr(methodEnd + 1, pathEnd - methodEnd - 1));
+    auto qpos = path.find('?');
+    if (qpos != std::string::npos) path = path.substr(0, qpos);
 
     // Extract body
     auto hdrEnd = raw.find("\r\n\r\n");

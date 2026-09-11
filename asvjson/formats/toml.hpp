@@ -736,7 +736,10 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
             throw asvJSONError("invalid underscore in hex integer");
         } else {
           prevDigit = true;
-          hv = hv * 16 + ((c <= '9') ? (c - '0') : (std::tolower(static_cast<unsigned char>(c)) - 'a' + 10)); pos++;
+          uint64_t digit = (c <= '9') ? static_cast<uint64_t>(c - '0')
+                                      : static_cast<uint64_t>(std::tolower(static_cast<unsigned char>(c)) - 'a' + 10);
+          if (hv > (UINT64_MAX - digit) / 16) throw asvJSONError("hex integer out of range");
+          hv = hv * 16 + digit; pos++;
         }
         idx++;
       }
@@ -756,7 +759,9 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
             throw asvJSONError("invalid underscore in octal integer");
         } else {
           prevDigit = true;
-          ov = ov * 8 + (c - '0'); pos++;
+          uint64_t digit = static_cast<uint64_t>(c - '0');
+          if (ov > (UINT64_MAX - digit) / 8) throw asvJSONError("octal integer out of range");
+          ov = ov * 8 + digit; pos++;
         }
         idx++;
       }
@@ -776,7 +781,9 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
             throw asvJSONError("invalid underscore in binary integer");
         } else {
           prevDigit = true;
-          bv = bv * 2 + (c - '0'); pos++;
+          uint64_t digit = static_cast<uint64_t>(c - '0');
+          if (bv > (UINT64_MAX - digit) / 2) throw asvJSONError("binary integer out of range");
+          bv = bv * 2 + digit; pos++;
         }
         idx++;
       }

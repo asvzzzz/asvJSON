@@ -897,10 +897,11 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 				long long n = 0;
 				bool valid = true;
 				for (size_t bi = start; bi < val.size(); bi++) {
-					if (val[bi] == '0') n *= 2;
-					else if (val[bi] == '1') n = n * 2 + 1;
+					if (val[bi] == '0') { if (n > LLONG_MAX / 2) { valid = false; break; } n *= 2; }
+					else if (val[bi] == '1') { if (n > (LLONG_MAX - 1) / 2) { valid = false; break; } n = n * 2 + 1; }
 					else { valid = false; break; }
 				}
+				if (!valid) throw asvJSONError("YAML: !!int binary overflow");
 				if (valid && (n > 0 || val.find_first_not_of("01", start) == std::string::npos))
 					return std::to_string(sign * n);
 			}
@@ -2469,6 +2470,10 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 }
 
 inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) {
+	// Recursion guard: yamlParseDocImpl recurses via tagged block values,
+	// explicit keys, block sets and anchored blocks (each passing depth+1).
+	if (depth > static_cast<int>(MAX_YAML_DEPTH))
+		throw asvJSONError("YAML: maximum nesting depth exceeded");
 	// Restore the previous tag-map state on exit (even on exception).
 	YamlDocTagMapGuard tagGuard;
 
@@ -3587,11 +3592,13 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 
 inline bool asvJSON::fromYAML(std::string_view input) {
 	formatType = FormatType::Unknown;
+	bool prevNaN = allowNaNInfinity;
+	allowNaNInfinity = true;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 		std::string json = yamlToJson(input);
-		allowNaNInfinity = true;
 		bool ok = parse(std::string_view(json));
+		allowNaNInfinity = prevNaN;
 		if (ok) {
 			formatType = FormatType::YAML;
 			// Attach comments for round-trip fidelity (YAML -> YAML).
@@ -3599,6 +3606,7 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 		}
 		return ok;
 	} catch (const asvJSONError& e) {
+		allowNaNInfinity = prevNaN;
 		lastError = e.what();
 		return false;
 	}

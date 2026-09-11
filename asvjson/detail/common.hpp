@@ -1,5 +1,10 @@
 #pragma once
 
+#include <string>
+#include <string_view>
+#include <vector>
+#include <limits>
+
 // Shared internal utilities for asvJSON++
 // StringViewLess, SafeHash, keyForLookup, mapFind, mapCount
 // FormatFrame, splitLines, countIndent, stripIndent, closeFrames, addComma
@@ -119,13 +124,13 @@ inline std::vector<std::string> splitLines(std::string_view input) {
 }
 
 inline int countIndent(const std::string& s) {
-	int n = 0;
+	size_t n = 0;
 	for (auto c : s) {
 		if (c == ' ') n++;
 		else if (c == '\t') n += 2;
 		else break;
 	}
-	return n;
+	return static_cast<int>(n < static_cast<size_t>(std::numeric_limits<int>::max()) ? n : static_cast<size_t>(std::numeric_limits<int>::max()));
 }
 
 inline std::string_view stripIndent(const std::string& s) {

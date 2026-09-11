@@ -97,17 +97,43 @@ inline bool asvJSON::fromAny(std::string_view input) {
     input.remove_prefix(3);
 
   // --- Binary detection ---
-  // If any of the first 256 bytes is >0x7F or a control char (not \n\r\t),
-  // treat as binary.
+  // Control chars (<0x20, excluding \n\r\t) → binary.
+  // Bytes >=0x80 are validated as UTF-8; non-UTF-8 byte sequences → binary.
   bool isBinary = false;
   {
     size_t n = std::min(input.size(), size_t(256));
-    for (size_t i = 0; i < n; i++) {
+    size_t i = 0;
+    while (i < n) {
       auto c = static_cast<unsigned char>(input[i]);
-      if (c > 0x7F || (c < 0x20 && c != '\n' && c != '\r' && c != '\t')) {
-        isBinary = true;
-        break;
+      if (c < 0x80) {
+        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+          isBinary = true;
+        }
+        i++;
+        continue;
       }
+      int len = 0;
+      if ((c & 0xE0) == 0xC0) len = 2;
+      else if ((c & 0xF0) == 0xE0) len = 3;
+      else if ((c & 0xF8) == 0xF0) len = 4;
+      else { isBinary = true; break; }
+      // Truncated sequence at the scan boundary — do not flag as binary.
+      if (i + len > n) break;
+      bool valid = true;
+      for (int j = 1; j < len; j++) {
+        if ((static_cast<unsigned char>(input[i+j]) & 0xC0) != 0x80) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid) { isBinary = true; break; }
+      if (len == 3) {
+        uint32_t cp = (static_cast<uint32_t>(c) & 0x0F) << 12 |
+                      (static_cast<uint32_t>(input[i+1]) & 0x3F) << 6 |
+                      (static_cast<uint32_t>(input[i+2]) & 0x3F);
+        if (cp >= 0xD800 && cp <= 0xDFFF) { isBinary = true; break; }
+      }
+      i += len;
     }
   }
 
@@ -340,7 +366,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
   else content = serialize(pretty);
 
-  std::ofstream out(filename);
+  std::ofstream out(filename, std::ios::binary);
   if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
   out << content;
   return out.good();

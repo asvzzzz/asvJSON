@@ -595,9 +595,16 @@ inline std::string goonToJson(std::string_view input) {
   if (firstLine >= lines.size()) return "{}";
 
   std::string_view firstContent = stripIndent(lines[firstLine]);
+  // A leading '-' marks a root sequence ONLY when it is a list marker ("-",
+  // "- item"); negative-number scalars ("-5", "-1.5", "-Infinity", "-NaN")
+  // must not be mistaken for an array root.
+  bool minusScalar = (firstContent.size() >= 2 && firstContent[0] == '-') &&
+    ((firstContent[1] >= '0' && firstContent[1] <= '9') ||
+     firstContent[1] == '.' || firstContent[1] == 'i' || firstContent[1] == 'I' ||
+     firstContent[1] == 'n' || firstContent[1] == 'N');
   bool rootIsArr = (firstContent.size() >= 2 && firstContent[0] == '[') ||
     (firstContent.size() >= 2 && firstContent.compare(0, 2, "[]") == 0) ||
-    (firstContent.size() >= 1 && firstContent[0] == '-');
+    (firstContent.size() >= 1 && firstContent[0] == '-' && !minusScalar);
 
   std::string out;
   std::vector<FormatFrame> stack;
@@ -724,7 +731,7 @@ inline std::string goonToJson(std::string_view input) {
       }
     }
     bool looksScalar = !hasColon &&
-      !firstContent.empty() && firstContent[0] != '-' &&
+      !firstContent.empty() && (firstContent[0] != '-' || minusScalar) &&
       firstContent[0] != '{' && firstContent[0] != '[' && firstContent[0] != ']' &&
       firstContent[0] != '}';
     if (looksScalar) {

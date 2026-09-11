@@ -900,6 +900,9 @@ struct JsonSaxHandler; // forward declaration for parseSax()
 // forward declarations for diff
 inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch);
 
+// forward declaration for getDateTimeString() (defined at the bottom of this file)
+inline void fmtDateTimeVal(time_t ts, int ms, std::string& out, int tzOffsetMin = 0);
+
 class asvJSON {
 public:
 	mutable std::string lastError;
@@ -1309,13 +1312,26 @@ public:
 	asvJSON() = default;
 	~asvJSON() = default;
 
-	asvJSON(const asvJSON& other) {
+	asvJSON(const asvJSON& other)
+		: lastError(other.lastError),
+		  allowNaNInfinity(other.allowNaNInfinity),
+		  validateUTF8(other.validateUTF8),
+		  customTagTransform(other.customTagTransform),
+		  formatType(other.formatType) {
 		root = cloneValue(other.root.get());
 		dirty_ = false;
 	}
 
 	asvJSON& operator=(const asvJSON& other) {
-		if (this != &other) { root = cloneValue(other.root.get()); dirty_ = false; }
+		if (this != &other) {
+			lastError = other.lastError;
+			allowNaNInfinity = other.allowNaNInfinity;
+			validateUTF8 = other.validateUTF8;
+			customTagTransform = other.customTagTransform;
+			root = cloneValue(other.root.get());
+			formatType = other.formatType;
+			dirty_ = false;
+		}
 		return *this;
 	}
 
@@ -1323,14 +1339,17 @@ public:
 		: lastError(std::move(other.lastError)),
 		  allowNaNInfinity(other.allowNaNInfinity),
 		  validateUTF8(other.validateUTF8),
+		  customTagTransform(std::move(other.customTagTransform)),
 		  root(std::move(other.root)),
 		  jsonBuf(std::move(other.jsonBuf)),
 		  json(jsonBuf),
 		  pos(other.pos),
 		  parseDepth(other.parseDepth),
+		  formatType(other.formatType),
 		  dirty_(other.dirty_) {
 		other.pos = 0;
 		other.parseDepth = 0;
+		other.formatType = FormatType::Unknown;
 		other.json = std::string_view();
 		other.dirty_ = false;
 	}
@@ -1345,9 +1364,12 @@ public:
 			lastError = std::move(other.lastError);
 			allowNaNInfinity = other.allowNaNInfinity;
 			validateUTF8 = other.validateUTF8;
+			customTagTransform = std::move(other.customTagTransform);
+			formatType = other.formatType;
 			dirty_ = other.dirty_;
 			other.pos = 0;
 			other.parseDepth = 0;
+			other.formatType = FormatType::Unknown;
 			other.json = std::string_view();
 			other.dirty_ = false;
 		}
@@ -1980,21 +2002,11 @@ public:
 		if (!root) return "";
 		auto* v = getNested(key);
 		if (!v || v->type != asvJSONValue::DATETIME) return "";
-		// Dates gmtimeSafe cannot convert (e.g. before 1970) return "".
-		char buf[32];
-		std::tm tm{};
-		if (!gmtimeSafe(&tm, &v->timestamp)) return "";
-		if (v->datetime_ms > 0)
-			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
-		else
-			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-		std::string out(buf);
-		if (v->datetime_ms > 0) {
-			char msbuf[16];
-			snprintf(msbuf, sizeof(msbuf), ".%03dZ", v->datetime_ms);
-			out += msbuf;
-		}
-		return out;
+		// Dates gmtimeSafe cannot convert (e.g. before 1970) render "null"
+		// (the serializer formatter); keep the historical "" return here.
+		std::string out;
+		fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
+		return (out == "null") ? std::string() : out;
 	}
 
 	int getDateTimeMs(std::string_view key) const {
@@ -2233,7 +2245,7 @@ inline bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 	return false;
 }
 
-inline void fmtDateTimeVal(time_t ts, int ms, std::string& out, int tzOffsetMin = 0) {
+inline void fmtDateTimeVal(time_t ts, int ms, std::string& out, int tzOffsetMin) {
 	// Timestamps that gmtimeSafe cannot convert to UTC (e.g. before 1970 or
 	// beyond the platform's supported range) render as the literal text "null"
 	// (the serializer wraps this in quotes, producing the JSON string "null").
@@ -2421,7 +2433,11 @@ inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int d
 			if (!a) return nullptr;
 			if (v->arr) {
 				a->arr->reserve(v->arr->size());
-				for (const auto& elem : *v->arr) { auto cloned = cloneValueImpl(elem.get(), depth + 1, nodes); if (cloned) a->arr->push_back(std::move(cloned)); }
+				for (const auto& elem : *v->arr) {
+					auto cloned = cloneValueImpl(elem.get(), depth + 1, nodes);
+					if (!cloned) return nullptr;
+					a->arr->push_back(std::move(cloned));
+				}
 			}
 			return a;
 		}
@@ -2435,7 +2451,8 @@ inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int d
 #endif
 				for (const auto& [k, val] : *v->obj) {
 					auto cloned = cloneValueImpl(val.get(), depth + 1, nodes);
-					if (cloned) o->obj->emplace(k, std::move(cloned));
+					if (!cloned) return nullptr;
+					o->obj->emplace(k, std::move(cloned));
 				}
 			}
 			return o;
@@ -2465,7 +2482,11 @@ inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
 		case asvJSONValue::REGEX: return a.str_data == b.str_data;
 		case asvJSONValue::TIMESTAMP: return a.num == b.num;
 		case asvJSONValue::EXTENSION: return a.ext_type == b.ext_type && a.bin_data == b.bin_data;
-		case asvJSONValue::CUSTOM_TAG: return a.str_data == b.str_data && a.custom_value && b.custom_value && *a.custom_value == *b.custom_value;
+		case asvJSONValue::CUSTOM_TAG:
+			if (a.str_data != b.str_data) return false;
+			if (static_cast<bool>(a.custom_value) != static_cast<bool>(b.custom_value)) return false;
+			if (a.custom_value) return *a.custom_value == *b.custom_value;
+			return true;
 		case asvJSONValue::ARRAY: {
 			if (!a.arr || !b.arr) return a.arr == b.arr;
 			if (a.arr->size() != b.arr->size()) return false;

@@ -643,11 +643,16 @@ class JPFilterEval {
   }
 
   bool parseNot() {
-    if (lex_.peek().type == TokType::NOT) {
+    // Iterative: a chain of NOT prefixes just toggles the negation of the
+    // following comparison. No recursion, so `!!!!...` cannot overflow the
+    // stack regardless of length.
+    bool negate = false;
+    while (lex_.peek().type == TokType::NOT) {
       lex_.next();
-      return !parseNot();
+      negate = !negate;
     }
-    return parseComparison();
+    bool r = parseComparison();
+    return negate ? !r : r;
   }
 
   const asvJSONValue* resolvePath() {

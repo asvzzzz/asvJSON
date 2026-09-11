@@ -518,10 +518,13 @@ asvJSONValue* TronParseState::parseValue(int depth) {
       }
       // Check __OID__ prefix (ObjectId stored as a 24-char hex string)
       if (raw.size() == 31 && raw.compare(0, 7, "__OID__") == 0) {
+        // Index the RAW token text (length-31) for the hex pairs: the
+        // unescaped `s` may be shorter than raw when escapes were present,
+        // which would read past its end. Hex digits never need escaping.
         uint8_t bytes[12];
         bool hexOk = true;
         for (int i = 0; i < 12; i++) {
-          char buf[3] = {s[i * 2 + 7], s[i * 2 + 8], 0};
+          char buf[3] = {raw[i * 2 + 7], raw[i * 2 + 8], 0};
           char* end = nullptr;
           long byte = std::strtol(buf, &end, 16);
           if (end != buf + 2) { hexOk = false; break; }

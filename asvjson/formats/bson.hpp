@@ -240,11 +240,11 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		pos++;
 		if (pos > docEnd) throw asvJSONError("BSON element past end");
 		switch (elemType) {
-			case 0x01: { if (pos + 8 > dataLen) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
+			case 0x01: { if (pos + 8 > docEnd + 1) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
 			case 0x02: {
-				if (pos + 4 > dataLen) throw asvJSONError("BSON string");
+				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON string");
 				uint32_t slen; readLE32(data, pos, slen);
-				if (slen < 1 || pos + slen > dataLen) throw asvJSONError("BSON string invalid");
+				if (slen < 1 || pos + slen > docEnd + 1) throw asvJSONError("BSON string invalid");
 				auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen - 1);
 				pos += slen;
 				if (!val) throw asvJSONError("BSON string too long");
@@ -289,21 +289,21 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x05: {
-				if (pos + 4 > dataLen) throw asvJSONError("BSON binary");
+				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary");
 				uint32_t blen; readLE32(data, pos, blen);
-				if (pos >= dataLen) throw asvJSONError("BSON binary subtype");
+				if (pos >= docEnd + 1) throw asvJSONError("BSON binary subtype");
 				uint8_t subtype = data[pos++];
-				if (pos + blen > dataLen) throw asvJSONError("BSON binary overflow");
+				if (pos + blen > docEnd + 1) throw asvJSONError("BSON binary overflow");
 				if (subtype == 0x05 || subtype == 0) {
 					auto val = asvJSONValue::makeBinary(data + pos, blen);
 					pos += blen;
 					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->emplace(key, std::move(val));
 				} else if (subtype == 0x03) {
-					if (blen >= 4) {
-						if (pos + 4 > dataLen) throw asvJSONError("BSON binary subtype 0x03 truncated");
-						uint32_t oldLen; readLE32(data, pos, oldLen);
-						if (pos + oldLen > dataLen) throw asvJSONError("BSON binary subtype 0x03 overflow");
+if (blen >= 4) {
+					if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 truncated");
+					uint32_t oldLen; readLE32(data, pos, oldLen);
+					if (pos + oldLen > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 overflow");
 						auto val = asvJSONValue::makeBinary(data + pos, oldLen);
 						pos += oldLen;
 						if (!val) throw asvJSONError("BSON binary too large");
@@ -324,19 +324,19 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 			}
 			case 0x06: obj->obj->emplace(key, asvJSONValue::makeNull()); break;
 			case 0x07: {
-				if (pos + 12 > dataLen) throw asvJSONError("BSON objectid");
+				if (pos + 12 > docEnd + 1) throw asvJSONError("BSON objectid");
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += 12;
 				obj->obj->emplace(key, std::move(val));
 				break;
 			}
 			case 0x08: {
-				if (pos >= dataLen) throw asvJSONError("BSON bool");
+				if (pos >= docEnd + 1) throw asvJSONError("BSON bool");
 				obj->obj->emplace(key, asvJSONValue::makeBool(data[pos++] != 0));
 				break;
 			}
 			case 0x09: {
-				if (pos + 8 > dataLen) throw asvJSONError("BSON datetime");
+				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON datetime");
 				uint64_t ms = 0;
 				for (int i = 0; i < 8; i++) ms |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
@@ -369,13 +369,13 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x10: {
-				if (pos + 4 > dataLen) throw asvJSONError("BSON int32");
+				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON int32");
 				uint32_t v; readLE32(data, pos, v);
 				obj->obj->emplace(key, asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(v))));
 				break;
 			}
 			case 0x11: {
-				if (pos + 8 > dataLen) throw asvJSONError("BSON timestamp");
+				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON timestamp");
 				uint32_t ts; readLE32(data, pos, ts);
 				uint32_t inc; readLE32(data, pos, inc);
 				// BSON timestamp = {t: uint32, i: uint32 increment}.
@@ -388,7 +388,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x12: {
-				if (pos + 8 > dataLen) throw asvJSONError("BSON int64");
+				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON int64");
 				uint64_t v = 0;
 				for (int i = 0; i < 8; i++) v |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
@@ -396,7 +396,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x13: {
-				if (pos + 16 > dataLen) throw asvJSONError("BSON decimal128: unexpected end");
+				if (pos + 16 > docEnd + 1) throw asvJSONError("BSON decimal128: unexpected end");
 				pos += 16;
 				// Decimal128 is a 128-bit IEEE-754 decimal float that cannot be
 				// represented losslessly by this library; fail rather than silently

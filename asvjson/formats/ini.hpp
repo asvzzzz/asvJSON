@@ -66,6 +66,7 @@ inline std::string iniEscape(std::string_view s) {
       case '\t': out += "\\t"; break;
       case '\r': out += "\\r"; break;
       case '\\': out += "\\\\"; break;
+      case '"': out += "\\\""; break;
       case ';': out += "\\;"; break;
       case '#': out += "\\#"; break;
       case '=': out += "\\="; break;

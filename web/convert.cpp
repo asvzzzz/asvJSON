@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.15.0\n"
+        << "asvJSON++ Format Converter v1.16.1\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
@@ -196,10 +196,10 @@ int main(int argc, char** argv) {
       if (toFmt.empty() || toFmt == "JSON") result = req.optBool("pretty", true) ? j.serialize(true) : j.serialize();
       else if (toFmt == "JSON5") result = req.optBool("pretty", true) ? j.toJSON5(true) : j.toJSON5(false);
       else if (toFmt == "XML") result = j.toXML();
-      else if (toFmt == "YAML") result = j.toYAML();
+      else if (toFmt == "YAML") result = j.toYAML(req.optBool("pretty", true));
       else if (toFmt == "CSV") result = j.toCSV();
-      else if (toFmt == "TOML") result = j.toTOML();
-      else if (toFmt == "INI") result = j.toINI();
+      else if (toFmt == "TOML") result = j.toTOML(req.optBool("pretty", true));
+      else if (toFmt == "INI") result = j.toINI(req.optBool("pretty", true));
       else if (toFmt == "UDE") result = j.toUDE();
       else if (toFmt == "JSONLines") result = j.toJSONLines();
       else if (toFmt == "Sexpr") result = j.toSexpr();
