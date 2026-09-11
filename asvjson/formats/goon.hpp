@@ -48,8 +48,7 @@ inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0)
     case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); return;
     case asvJSONValue::INT: out += std::to_string(v->num); return;
     case asvJSONValue::DOUBLE:
-      if (std::isnan(v->dbl) || std::isinf(v->dbl)) out += "null";
-      else fmtDoubleVal(v->dbl, out);
+      if (!fmtNaNInfVal(v->dbl, true, out)) fmtDoubleVal(v->dbl, out);
       return;
     case asvJSONValue::STRING:
       out += '"';
@@ -353,8 +352,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
           else if (child->type == asvJSONValue::INT) cell = std::to_string(child->num);
           else if (child->type == asvJSONValue::DOUBLE) {
             double d = child->dbl;
-            if (std::isnan(d) || std::isinf(d)) cell = "_";
-            else { fmtDoubleVal(d, cell); }
+            if (!fmtNaNInfVal(d, true, cell)) fmtDoubleVal(d, cell);
           } else if (child->type == asvJSONValue::STRING) {
             goonWriteString(child->str_data, cell, dict);
           } else {
@@ -427,7 +425,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       out += pad + "  - ";
       if (child->type == asvJSONValue::INT) out += std::to_string(child->num);
       else if (child->type == asvJSONValue::DOUBLE) {
-        fmtDoubleVal(child->dbl, out);
+        if (!fmtNaNInfVal(child->dbl, true, out)) fmtDoubleVal(child->dbl, out);
       } else {
         std::string spec = goonFormatSpecial(child);
         if (!spec.empty()) out += spec;
@@ -465,24 +463,15 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
       break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
-      if (std::isnan(d) || std::isinf(d)) {
-        if (!key.empty() || depth > 0) {
-          out += pad;
-          goonWriteKey(key, out);
-          out += ": _\n";
-        }
-        else out += pad + "_\n";
-        break;
-      }
+      std::string dv;
+      if (!fmtNaNInfVal(d, true, dv)) fmtDoubleVal(d, dv);
       if (!key.empty() || depth > 0) {
         out += pad;
         goonWriteKey(key, out);
-        out += ": ";
-        fmtDoubleVal(d, out);
+        out += ": " + dv + "\n";
       } else {
-        fmtDoubleVal(d, out);
+        out += dv + '\n';
       }
-      out += '\n';
       break;
     }
     case asvJSONValue::STRING: {
@@ -655,7 +644,7 @@ inline std::string goonToJson(std::string_view input) {
       }
     }
     // NaN/Infinity
-    if (s == "NaN" || s == "Infinity" || s == "-Infinity") return s;
+    if (s == "NaN" || s == "-NaN" || s == "Infinity" || s == "-Infinity") return s;
     // GOON special prefixes → JSON convention. Applied ONLY to unquoted cells:
     // a quoted value is literal text, so a string like "__TS__42" (which the
     // encoder now quotes) stays a string instead of becoming a timestamp.
@@ -1149,13 +1138,17 @@ inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
 
 inline bool asvJSON::fromGOON(std::string_view input) {
   formatType = FormatType::Unknown;
+  if (input.empty()) { lastError = "empty input"; return false; }
+  bool prevNaN = allowNaNInfinity;
+  allowNaNInfinity = true;
   try {
-    if (input.empty()) throw asvJSONError("empty input");
     std::string json = goonToJson(input);
     bool ok = parse(std::string_view(json));
+    allowNaNInfinity = prevNaN;
     if (ok) formatType = FormatType::GOON;
     return ok;
   } catch (const asvJSONError& e) {
+    allowNaNInfinity = prevNaN;
     lastError = e.what();
     return false;
   }

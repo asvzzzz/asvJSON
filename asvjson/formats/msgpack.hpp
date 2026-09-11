@@ -240,8 +240,15 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				for (int i = 3; i >= 0; i--) ns = (ns << 8) | data[pos++];
 				uint64_t sec = 0;
 				for (int i = 7; i >= 0; i--) sec = (sec << 8) | data[pos++];
-				if (ns >= 1000000000) throw asvJSONError("MsgPack ext datetime ns overflow");
-				return asvJSONValue::makeDateTime(static_cast<time_t>(sec), ns / 1000000);
+				if (ns >= 1000000000)
+					throw asvJSONError("MsgPack ext datetime ns overflow");
+				// Wire seconds are signed (two's complement): a negative timestamp
+				// lands here as a huge uint64 and must round-trip through time_t.
+				int64_t ssec = static_cast<int64_t>(sec);
+				if (ssec > static_cast<int64_t>(std::numeric_limits<time_t>::max()) ||
+				    ssec < static_cast<int64_t>(std::numeric_limits<time_t>::min()))
+					throw asvJSONError("MsgPack ext datetime seconds out of time_t range");
+				return asvJSONValue::makeDateTime(static_cast<time_t>(ssec), ns / 1000000);
 			}
 			if (extType == 1) {
 				if (len != 12 || pos + 12 > dataLen) { pos += len; return asvJSONValue::makeNull(); }

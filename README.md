@@ -857,6 +857,19 @@ On decoding, all values are stored as strings. On encoding, types are formatted 
 
 ## Changelog
 
+### 1.16.1 (2026-09-11)
+
+- **Fix - CBOR negative-integer encoding:** Compute `-1 - n` in `uint64` to avoid signed-overflow UB at the `INT64_MIN` boundary.
+- **Fix - GOON NaN/Infinity round-trip:** Non-finite doubles serialize as `NaN`/`-NaN`/`Infinity`/`-Infinity` instead of collapsing to `null`/`_` across plain values, table cells and list items.
+- **Fix - TOON table rows:** Row field-count mismatch now throws instead of producing a malformed row.
+- **Fix - JSON5 `\u{...}`:** Codepoint escapes longer than 6 hex digits are rejected before the accumulation can overflow.
+- **Fix - MsgPack ext datetime:** Seconds are range-checked against `time_t` after signed reinterpretation so negative timestamps round-trip and out-of-range seconds are rejected.
+- **Fix - XML:** Element-name sanitization uses a strict whitelist; empty arrays/objects emit `type` markers; typed scalars are preserved in mixed content and primitive arrays.
+- **Fix - CSV:** JSON number-shape gate keeps malformed numbers as strings; `0x` hex literals stay text; NaN/Inf cells emit `null`; integral doubles append `.0`; flattened-column collisions and oversized cells throw.
+- **Fix - INI:** Two-pass emission keeps bare lines ahead of `[[...]]` tables; empty containers round-trip as `{}`/`[]`; full double precision; out-of-range integers/doubles and trailing quoted garbage throw; leading-bracket keys and mixed/nested arrays rejected.
+- **Fix - fmtDoubleVal:** `%.16g` output is verified via `strtod` round-trip and escalates to `%.17g` when it would lose the last digit, fixing 17-digit doubles on weak toolchains.
+- **Version bump:** 1.16.0 → 1.16.1
+
 ### 1.16.0 (2026-08-30)
 
 - **New - Custom tag dispatch hook:** Added `asvJSON::customTagTransform`, an optional user callback invoked at parse time whenever a custom-tag annotation (`{"$customTag":{"name":...,"value":...}}`) is recognized. It applies uniformly across YAML, GOON, UDE, and plain JSON (all funnel through the JSON object parser). The callback receives the resolved tag name and the tag's value and returns a replacement `std::unique_ptr<asvJSONValue>` (or `nullptr` to keep the default `CUSTOM_TAG` node). This closes the last remaining YAML/GOON known-gap item.

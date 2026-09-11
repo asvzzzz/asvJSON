@@ -70,6 +70,7 @@ inline std::string json5ToJson(std::string_view input) {
             while (hexEnd < input.size() && std::isxdigit(static_cast<unsigned char>(input[hexEnd]))) hexEnd++;
             if (hexEnd == hexStart || hexEnd >= input.size() || input[hexEnd] != '}')
               throw asvJSONError("invalid \\u{...} escape in JSON5");
+            if (hexEnd - hexStart > 6) throw asvJSONError("codepoint too large in \\u{...} escape");
             unsigned long long cp = 0;
             for (size_t k = hexStart; k < hexEnd; k++) cp = (cp << 4) | static_cast<unsigned>(hexVal(input[k]));
             if (cp > 0x10FFFF) throw asvJSONError("codepoint too large in \\u{...} escape");
@@ -133,6 +134,7 @@ inline std::string json5ToJson(std::string_view input) {
             while (hexEnd < input.size() && std::isxdigit(static_cast<unsigned char>(input[hexEnd]))) hexEnd++;
             if (hexEnd == hexStart || hexEnd >= input.size() || input[hexEnd] != '}')
               throw asvJSONError("invalid \\u{...} escape in JSON5");
+            if (hexEnd - hexStart > 6) throw asvJSONError("codepoint too large in \\u{...} escape");
             unsigned long long cp = 0;
             for (size_t k = hexStart; k < hexEnd; k++) cp = (cp << 4) | static_cast<unsigned>(hexVal(input[k]));
             if (cp > 0x10FFFF) throw asvJSONError("codepoint too large in \\u{...} escape");

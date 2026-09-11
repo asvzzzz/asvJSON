@@ -42,7 +42,9 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       if (n >= 0) {
         cborWriteUint(out, 0, static_cast<uint64_t>(n));
       } else {
-        cborWriteUint(out, 1, static_cast<uint64_t>(-1 - n));
+        // CBOR negative-integer encoding: -1 - n. Compute in uint64 to avoid
+        // signed overflow UB when n == INT64_MIN (whose negation is undefined).
+        cborWriteUint(out, 1, static_cast<uint64_t>(-1) - static_cast<uint64_t>(n));
       }
       break;
     }
@@ -139,7 +141,9 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       if (num >= 0) {
         cborWriteUint(out, 0, static_cast<uint64_t>(num));
       } else {
-        cborWriteUint(out, 1, static_cast<uint64_t>(-1 - num));
+        // CBOR negative-integer encoding: -1 - num. Compute in uint64 to avoid
+        // signed overflow UB when num == INT64_MIN (whose negation is undefined).
+        cborWriteUint(out, 1, static_cast<uint64_t>(-1) - static_cast<uint64_t>(num));
       }
       break;
     }

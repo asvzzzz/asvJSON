@@ -450,6 +450,8 @@ inline std::string toonToJson(std::string_view input) {
                 if (rindent <= indent) break;
                 std::string_view rcont = stripIndent(rline);
                 auto vals = toonSplitCommas(rcont);
+                if (vals.size() != fields.size())
+                  throw asvJSONError("TOON: row " + std::to_string(rl) + " has " + std::to_string(vals.size()) + " values, expected " + std::to_string(fields.size()));
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
                 out += '{';
