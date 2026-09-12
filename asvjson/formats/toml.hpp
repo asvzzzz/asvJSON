@@ -965,9 +965,36 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
         if (val->type == T::OBJECT) {
           tomlEmitVal(val.get(), fullKey, true, out, true);
         } else {
-          for (const auto& elem : *val->arr) {
-            emitHeader(fullKey, true);
-            tomlEmitVal(elem.get(), fullKey, false, out, true);
+          // Array of tables: emitting `[[path]]` for every element is only
+          // well-formed when the elements' own subtables do not collide on the
+          // same name -- TOML forbids redefining a [path.sub] header (e.g.
+          // {"items":[{"s":{"x":1}},{"s":{"y":2}}]} cannot use [items.s] twice).
+          // On a collision, fall back to the inline-table form so the value
+          // still round-trips through fromTOML.
+          bool subtableNameCollision = false;
+          {
+            std::vector<std::string> seen;
+            for (const auto& elem : *val->arr) {
+              if (elem->type != T::OBJECT || !elem->obj) continue;
+              for (const auto& [sk, sv] : *elem->obj) {
+                if (!isSubtable(sv.get())) continue;
+                bool dup = false;
+                for (const auto& s2 : seen)
+                  if (s2 == sk) { dup = true; break; }
+                if (dup) { subtableNameCollision = true; break; }
+                seen.push_back(sk);
+              }
+              if (subtableNameCollision) break;
+            }
+          }
+          if (subtableNameCollision) {
+            std::string vs = tomlVal(val.get());
+            if (!vs.empty()) out += qk + " = " + vs + "\n";
+          } else {
+            for (const auto& elem : *val->arr) {
+              emitHeader(fullKey, true);
+              tomlEmitVal(elem.get(), fullKey, false, out, true);
+            }
           }
         }
       }

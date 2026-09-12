@@ -614,6 +614,7 @@ class JPFilterEval {
   const asvJSONValue* root_;
   std::vector<std::unique_ptr<asvJSONValue>> temp_vals_;
   bool lastOperandFromQuery_ = false;
+  int filterDepth_ = 0;
 
   const asvJSONValue* hold(std::unique_ptr<asvJSONValue> val) {
     temp_vals_.push_back(std::move(val));
@@ -868,7 +869,12 @@ class JPFilterEval {
     Tok t = lex_.peek();
     if (t.type == TokType::LPAREN) {
       lex_.next();
+      // Depth-cap the '('...')' recursion so nested paren filters cannot
+      // overflow the stack on hand-crafted inputs.
+      if (filterDepth_ >= 64) return false;
+      ++filterDepth_;
       bool r = parseOr();
+      --filterDepth_;
       if (lex_.peek().type == TokType::RPAREN) lex_.next();
       return r;
     }
@@ -1288,10 +1294,8 @@ inline bool jpValidateOperand(PathLexer& lex) {
 }
 
 inline bool jpValidateNotExpr(PathLexer& lex) {
-  if (lex.peek().type == TokType::NOT) {
-    lex.next();
-    return jpValidateNotExpr(lex);
-  }
+  // Consume a run of NOT prefixes iteratively so `!!!!...` cannot overflow the stack.
+  while (lex.peek().type == TokType::NOT) lex.next();
   if (lex.peek().type == TokType::LPAREN) {
     lex.next();
     if (!jpValidateExpr(lex)) return false;
@@ -1320,6 +1324,15 @@ inline bool jpValidateAndExpr(PathLexer& lex) {
 }
 
 inline bool jpValidateExpr(PathLexer& lex) {
+  // Paren nesting revisits this function recursively; cap the depth so deeply
+  // nested '('...')' filters cannot overflow the stack.
+  static thread_local int jpValidateExprDepth = 0;
+  if (jpValidateExprDepth >= 64) return false;
+  struct JpValidateGuard {
+    int& d;
+    explicit JpValidateGuard(int& depth) : d(depth) { ++d; }
+    ~JpValidateGuard() { --d; }
+  } jpValidateGuard(jpValidateExprDepth);
   if (!jpValidateAndExpr(lex)) return false;
   while (lex.peek().type == TokType::OR) {
     lex.next();

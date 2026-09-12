@@ -5069,16 +5069,16 @@ TEST(testFromYAML) {
 		ASSERT_EQ(lst->arr->size(), size_t(2));
 		ASSERT_EQ(std::string(lst->arr->at(1)->getString()), "beta");
 	}
-	// A comment-prefixed line inside a block-scalar body is treated as a
-	// comment by the decoder, so it is dropped from the content (and never
-	// collected as a node comment) -- the body round-trips the remainder
+	// A line beginning with '#' at content indent inside a block-scalar body is
+	// literal content per YAML 1.2 Ex 8.5 (block scalars have no comments);
+	// the encoder quotes the whole string so round-trips are lossless.
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("s: |\n  # data not comment\n  more\n"));
-		ASSERT_EQ(std::string(json.getString("s")), "more\n");
+		ASSERT_EQ(std::string(json.getString("s")), "# data not comment\nmore\n");
 		asvJSON j2;
 		ASSERT(j2.fromYAML(json.toYAML()));
-		ASSERT_EQ(std::string(j2.getString("s")), "more\n");
+		ASSERT_EQ(std::string(j2.getString("s")), "# data not comment\nmore\n");
 	}
 	// Comments are YAML-only metadata: they do not leak into the JSON
 	// output, and a JSON round-trip yields a comment-free YAML document
@@ -17627,6 +17627,95 @@ TEST(testKeyOrder) {
 	}
 }
 
+TEST(testReauditRegression) {
+	// YAML: tag-chain recursion is capped (a: !!int !!int ... 5) instead of
+	// overflowing the stack.
+	{
+		asvJSON j;
+		std::string doc = "a: ";
+		for (int i = 0; i < 700; i++) doc += "!!int ";
+		doc += "5";
+		ASSERT(!j.fromYAML(doc));
+	}
+	// YAML: quoted !!binary / !objectid values parse.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("x: !!binary \"aGVsbG8=\"\n"));
+		ASSERT_EQ(j.getRoot()->get("x")->type, asvJSONValue::BINARY);
+		auto b = j.getBinary("x");
+		ASSERT_EQ(b.size(), size_t(5)); // "hello"
+		ASSERT_EQ(b[0], uint8_t('h'));
+		asvJSON j2;
+		ASSERT(j2.fromYAML("id: !objectid \"507f1f77bcf86cd799439011\"\n"));
+		ASSERT_EQ(j2.getRoot()->get("id")->type, asvJSONValue::OBJECTID);
+		ASSERT_EQ(j2.getObjectId("id").size(), size_t(12));
+	}
+	// Protobuf text: a garbage array element must not hang the parser (the
+	// historic bug spun forever over the unconsumed character) -- the lenient
+	// text-format parser skips it and moves on.
+	{
+		asvJSON j;
+		(void)j.fromProtobufText("{a:[;]}"); // must complete promptly
+		ASSERT(true);
+	}
+	// TOML pretty: array-of-objects with same-named subtables round-trips via
+	// the inline fallback instead of emitting duplicate [path.sub] headers.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"items":[{"s":{"x":1}},{"s":{"y":2}}]})"));
+		std::string toml = j.toTOML(true);
+		asvJSON j2;
+		ASSERT(j2.fromTOML(toml));
+		ASSERT_EQ(j.serialize(), j2.serialize());
+	}
+	// UDE: out-of-range positive hex/octal/binary literals stay raw instead of
+	// silently wrapping to a negative int64.
+	{
+		asvJSON j;
+		ASSERT(j.fromUDE("z: 0xFFFFFFFFFFFFFFFF\n"));
+		asvJSONValue* v = j.getRoot()->get("z");
+		ASSERT(v != nullptr);
+		ASSERT(v->raw_number);
+	}
+	// GOON: '*' inside a tabular cell must survive (encoder quotes it; RLE is
+	// only an explicit user shorthand).
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"users":[{"x":"a*b"}]})"));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(goon));
+		ASSERT_EQ(std::string(j2.getRoot()->get("users")->get(0)->get("x")->getString()), "a*b");
+	}
+	// GOON: inline list header + following '- item' lines must not double-emit.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON("items[]: 10,20\n  - 30\n"));
+		asvJSONValue* arr = j.getRoot()->get("items");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT(arr->arr->size() == 3);
+	}
+	// TOON: root scalars survive the round-trip.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("-42"));
+		ASSERT_EQ(j.getRoot()->num, int64_t(-42));
+		ASSERT(j.fromTOON("\"hello\""));
+		ASSERT_EQ(std::string(j.getRoot()->getString()), "hello");
+		asvJSON r;
+		ASSERT(r.fromTOON(r.toTOON()));
+	}
+	// JSONPath: nested-paren filters are rejected instead of overflowing the stack.
+	{
+		std::string deep = "$[?(";
+		for (int i = 0; i < 200; i++) deep += "(";
+		deep += "@.a";
+		for (int i = 0; i < 200; i++) deep += ")";
+		deep += ")]";
+		ASSERT(!asvJSON::isValidPath(deep));
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -18098,6 +18187,9 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- Key Order Tests ---\n";
 	RUN(testKeyOrder);
+
+	std::cout << "\n--- Re-audit Regression Tests ---\n";
+	RUN(testReauditRegression);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

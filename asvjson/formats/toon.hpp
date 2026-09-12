@@ -361,6 +361,20 @@ inline std::string toonToJson(std::string_view input) {
   std::string_view firstContent = stripIndent(lines[firstNonEmpty]);
   bool rootIsArr = (firstContent.size() >= 2 && firstContent[0] == '[') || (firstContent.size() >= 1 && firstContent[0] == '-');
 
+  // Bare root scalar (no ':', no array header, no '- value' list form): the
+  // encoder emits such roots as a single token line, so parse it directly
+  // instead of treating it as an empty object/array.
+  {
+    size_t colon = toonFindFirstUnquoted(firstContent, ':');
+    size_t lb = toonFindFirstUnquoted(firstContent, '[');
+    bool listForm = (firstContent.size() >= 2 && firstContent[0] == '-' && firstContent[1] == ' ') || firstContent == "-";
+    bool onlyScalarLine = true;
+    for (size_t sli = firstNonEmpty + 1; sli < lines.size() && onlyScalarLine; sli++)
+      if (!lines[sli].empty()) onlyScalarLine = false;
+    if (onlyScalarLine && colon == std::string_view::npos && lb == std::string_view::npos && !listForm)
+      return toonJsonQuoteBare(firstContent);
+  }
+
   std::string out;
   std::vector<FormatFrame> stack;
   int rootIndent = countIndent(lines[firstNonEmpty]);

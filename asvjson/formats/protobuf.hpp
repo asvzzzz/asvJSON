@@ -863,8 +863,12 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
       if (elem && elem->arr) { protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
       else { int d = 1; while (pos < text.size() && d > 0) { if (text[pos] == '[') d++; else if (text[pos] == ']') d--; if (d > 0) pos++; } if (pos < text.size()) pos++; }
     } else {
+      size_t before = pos;
       auto elem = protoTextParseScalar(text, pos);
       if (elem) arr->arr->push_back(std::move(elem));
+      // A scalar that consumed nothing (garbage element like ';') must still
+      // advance or the loop below spins forever.
+      if (pos == before && pos < text.size()) pos++;
     }
     protoTextSkipWS(text, pos);
     if (pos < text.size() && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }

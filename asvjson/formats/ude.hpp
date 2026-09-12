@@ -244,7 +244,7 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
         if (v > (std::numeric_limits<unsigned long long>::max() - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) { overflow = true; break; }
         v = v * static_cast<unsigned long long>(base) + static_cast<unsigned long long>(d);
       }
-      if (overflow || (neg && v > static_cast<unsigned long long>(INT64_MAX))) {
+      if (overflow || v > static_cast<unsigned long long>(INT64_MAX)) {
         auto s = asvJSONValue::makeStringView(tok);
         if (s) s->raw_number = true;
         return s;

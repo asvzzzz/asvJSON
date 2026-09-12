@@ -185,7 +185,7 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
 inline bool goonNeedsQuotes(const std::string& s) {
   if (s.empty()) return true;
   if (s.front() == '"') return true;
-  for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
+  for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':' || c == '*') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
   if (s.front() == '$' || s.front() == '#' || s.front() == '^' || (s.front() >= '0' && s.front() <= '9') || s.front() == '-')
     return true;
@@ -566,7 +566,8 @@ inline std::string goonToJson(std::string_view input) {
             raw += dline[pos]; pos++;
           }
         }
-        val = unescapeJsonString(raw, false);
+        try { val = unescapeJsonString(raw, false); }
+        catch (const std::runtime_error&) { throw asvJSONError("GOON: invalid escape in string"); }
         if (pos < dline.size()) pos++; // closing quote
       } else {
         while (pos < dline.size() && dline[pos] != ',' && dline[pos] != ' ' && dline[pos] != '\t') {
@@ -941,17 +942,22 @@ inline std::string goonToJson(std::string_view input) {
               out += expandCell(v);
             }
             // Read subsequent list items from indented lines
+            size_t lastConsumedRl = li;
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
-              auto& rline = lines[rl];
-              if (rline.empty()) continue;
-              int rindent = countIndent(rline);
-              if (rindent <= indent) break;
-              std::string_view rcont = stripIndent(rline);
-              if (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ') {
+              auto& rline2 = lines[rl];
+              if (rline2.empty()) continue;
+              int rindent2 = countIndent(rline2);
+              if (rindent2 <= indent) break;
+              std::string_view rcont2 = stripIndent(rline2);
+              if (rcont2.size() >= 2 && rcont2[0] == '-' && rcont2[1] == ' ') {
                 out += ',';
-                out += expandCell(rcont.substr(2));
+                out += expandCell(rcont2.substr(2));
+                lastConsumedRl = rl;
               }
             }
+            // Advance past the consumed list items so the outer loop does not
+            // re-emit them as list headers.
+            if (lastConsumedRl > li) li = lastConsumedRl;
             if (!rootArr) {
               out += ']';
               if (!stack.empty()) stack.pop_back();
@@ -1100,7 +1106,10 @@ inline std::string goonToJson(std::string_view input) {
       if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
         // Quoted key content is JSON-escaped text; decode it first so that
         // `\"`/`\\`/`\uXXXX` sequences are not escaped a second time.
-        keyStr = goonEscKey(unescapeJsonString(key.substr(1, key.size() - 2), false));
+        std::string decoded;
+        try { decoded = unescapeJsonString(key.substr(1, key.size() - 2), false); }
+        catch (const std::runtime_error&) { throw asvJSONError("GOON: invalid escape in string"); }
+        keyStr = goonEscKey(decoded);
       } else {
         keyStr = goonEscKey(key);
       }

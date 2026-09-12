@@ -352,7 +352,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   if (ext == "json")  content = serialize(pretty);
   else if (ext == "json5" || ext == "jsonc") content = toJSON5(pretty);
   else if (ext == "jsonl" || ext == "ndjson") content = toJSONLines();
-  else if (ext == "yaml" || ext == "yml") content = toYAML();
+  else if (ext == "yaml" || ext == "yml") content = toYAML(pretty);
   else if (ext == "xml")  content = toXML();
   else if (ext == "csv")  content = toCSV();
   else if (ext == "tsv")  content = toCSV();

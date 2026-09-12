@@ -844,6 +844,17 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 
 // Parse tagged YAML value -- handles all !!word / !word tags
 inline std::string yamlParseTaggedValue(std::string_view s) {
+	// Guard the tag-chain cycle (yamlParseTaggedValue <-> yamlParseInlineValue):
+	// "!!int !!int ... 5" chains must not overflow the stack.
+	static thread_local int yamlTagNestDepth = 0;
+	if (yamlTagNestDepth >= static_cast<int>(MAX_YAML_DEPTH))
+		throw asvJSONError("YAML: maximum tag nesting depth exceeded");
+	struct YamlTagDepthGuard {
+		int& d;
+		explicit YamlTagDepthGuard(int& depth) : d(depth) { ++d; }
+		~YamlTagDepthGuard() { --d; }
+	} yamlTagDepthGuard(yamlTagNestDepth);
+
 	// Extract tag name
 	size_t tagEnd = 0;
 	if (s.size() >= 2 && s[0] == '!') {
@@ -916,7 +927,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		}
 		std::string parsed = yamlParseInlineValue(val);
 		if (parsed.size() >= 2 && parsed[0] == '"' && parsed.back() == '"') {
-			std::string inner = unescapeJsonString(parsed.substr(1, parsed.size() - 2), true);
+			std::string inner;
+			try { inner = unescapeJsonString(parsed.substr(1, parsed.size() - 2), true); }
+			catch (const std::runtime_error&) { throw asvJSONError("YAML: invalid escape in string"); }
 			char* e = nullptr;
 			errno = 0;
 			long long n = std::strtoll(inner.c_str(), &e, 0);
@@ -961,7 +974,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		}
 		std::string parsed = yamlParseInlineValue(val);
 		if (parsed.size() >= 2 && parsed[0] == '"' && parsed.back() == '"') {
-			std::string inner = unescapeJsonString(parsed.substr(1, parsed.size() - 2), true);
+			std::string inner;
+			try { inner = unescapeJsonString(parsed.substr(1, parsed.size() - 2), true); }
+			catch (const std::runtime_error&) { throw asvJSONError("YAML: invalid escape in string"); }
 			char* e = nullptr;
 			errno = 0;
 			double d = std::strtod(inner.c_str(), &e);
@@ -1033,10 +1048,22 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 
 	// Special type tags (Extended JSON)
 	if (tag == "!!binary") {
-		return "{\"$binary\":{\"base64\":\"" + std::string(val) + "\",\"subType\":\"00\"}}";
+		std::string resolved = yamlParseInlineValue(val);
+		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
+			resolved = resolved.substr(1, resolved.size() - 2);
+		std::string raw;
+		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
+		if (raw.empty() && !val.empty() && val != "\"\"") raw = std::string(val);
+		return "{\"$binary\":{\"base64\":\"" + raw + "\",\"subType\":\"00\"}}";
 	}
 	if (tag == "!objectid") {
-		return "{\"$oid\":\"" + std::string(val) + "\"}";
+		std::string resolved = yamlParseInlineValue(val);
+		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
+			resolved = resolved.substr(1, resolved.size() - 2);
+		std::string raw;
+		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
+		if (raw.empty() && !val.empty() && val != "\"\"") raw = std::string(val);
+		return "{\"$oid\":\"" + raw + "\"}";
 	}
 	if (tag == "!regex") {
 		std::string resolved = yamlParseInlineValue(val);
@@ -1943,7 +1970,11 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
 		std::string_view sc = stripIndent(lines[ci]);
 		if (sc.empty()) { entries.push_back({"", 0, true}); ci++; continue; }
-		if (sc[0] == '#') { ci++; continue; }
+		// A '#'-prefixed line is only a trailing comment when it sits BELOW the
+		// block scalar's content indent; at (or above) content indent it is
+		// literal content (YAML 1.2.2 Ex 8.5). Before the content indent is
+		// known the first non-empty line establishes it and is data too.
+		if (sc[0] == '#' && contentIndent >= 0 && si < contentIndent) { ci++; continue; }
 		if (parentIndent >= 0 && si <= parentIndent) break;
 		if (contentIndent < 0) contentIndent = si;
 		if (si >= contentIndent) {
