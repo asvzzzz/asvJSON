@@ -711,7 +711,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				sobj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
 				return sobj;
 			}
-if (t == "datetime" && !combinedText.empty()) {
+			if (t == "datetime" && !combinedText.empty()) {
 				time_t ts = 0; int ms = 0; int tz = 0;
 				if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
 			}
