@@ -418,6 +418,12 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       bool commaBreak = false;
       bool inBasic = false, inLiteral = false, escape = false;
       while (!s.empty()) {
+        // A depth-0 '}' right at the current position (also immediately after
+        // a closing quote -- the quote toggles below continue past it) is the
+        // table closer: leave it for the outer loop, never swallow it into
+        // the raw value text that parseTomlValue() will re-parse.
+        if (!inBasic && !inLiteral && !escape && !valStr.empty() && s[0] == '}' && bracketDepth == 0)
+          break;
         char c = s[0]; s.remove_prefix(1);
         if (escape) { escape = false; valStr += c; continue; }
         if (c == '\\' && inBasic) { escape = true; valStr += c; continue; }
@@ -431,10 +437,6 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
           if (c == ',' && bracketDepth == 0) { commaBreak = true; break; }
         }
         valStr += c;
-        // The value ends when an unquoted '}' at depth 0 follows; leave that
-        // table closer for the outer loop (it must not be swallowed here).
-        if (!inBasic && !inLiteral && !escape && !s.empty() && s[0] == '}' && bracketDepth == 0)
-          break;
       }
       std::string valJson = parseTomlValue(trimSV(std::string_view(valStr)), depth + 1, true);
       if (!keys.empty()) {

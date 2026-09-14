@@ -9726,6 +9726,29 @@ key = "value" # inline comment)")));
     ASSERT_EQ(j.getInt("point.x.y"), int64_t(1));
     ASSERT_EQ(j.getInt("point.x.z"), int64_t(2));
   }
+  // Quoted string directly followed by the table closer (no space between)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(metadata = {author = "asv", license = "MIT"})")));
+    ASSERT_EQ(std::string(j.getString("metadata.author")), "asv");
+    ASSERT_EQ(std::string(j.getString("metadata.license")), "MIT");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("lit = {a = 'x'}")));
+    ASSERT_EQ(std::string(j.getString("lit.a")), "x");
+  }
+  // Quoted string in a nested inline table / inline array right before a closer
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("n = {inner = {a = \"b\"}}")));
+    ASSERT_EQ(std::string(j.getString("n.inner.a")), "b");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("m = {a = [1, \"s\"]}")));
+    ASSERT(j.serialize().find("\"s\"") != std::string::npos);
+  }
   // Local time HH:MM:SS (with optional fractional seconds)
   {
     asvJSON j;
