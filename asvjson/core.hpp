@@ -116,9 +116,13 @@ private:
 	// Flat open-addressing key index. Only one allocation per inserted key (the
 	// order_ Node); the table itself grows geometrically (a handful of reallocs
 	// per map). Tombstone deletion + rebuild-on-erase keeps the algorithm simple.
+	// Objects with <= kSmallObjectMax entries stay in linear-scan mode (no
+	// table allocation), which eliminates table allocs for tiny maps common in
+	// YAML/TOML metadata.
 	static constexpr std::uint64_t kEmptyHash = 0;
 	static constexpr std::uint64_t kTombHash = std::numeric_limits<std::uint64_t>::max();
 	static constexpr std::size_t kInitCap = 8; // power of two
+	static constexpr std::size_t kSmallObjectMax = 8;
 	struct Slot {
 		std::uint64_t hash;
 		std::uint32_t pos;
@@ -128,8 +132,6 @@ private:
 
 	static std::uint64_t hashOf(std::string_view s) noexcept {
 		std::uint64_t h = asvJSONInternal::SafeHash{}(s);
-		// fmix64 (MurmurHash3) finalizer: scatters low bits so power-of-two
-		// table masks don't cluster strings that differ only at the end.
 		h ^= h >> 33;
 		h *= 0xff51afd7ed558ccdULL;
 		h ^= h >> 33;
@@ -234,27 +236,27 @@ public:
 	void emplace(std::string&& k, mapped_type&& v) { insertNew(std::move(k), std::move(v)); }
 
 	void insert_or_assign(const std::string& k, mapped_type&& v) {
-		auto s = findSlotOf(k);
-		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return; }
+		auto p = findPosOf(k);
+		if (p != npos) { order_[p]->kv.second = std::move(v); return; }
 		insertNew(k, std::move(v));
 	}
 	void insert_or_assign(std::string_view k, mapped_type&& v) {
-		auto s = findSlotOf(k);
-		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return; }
+		auto p = findPosOf(k);
+		if (p != npos) { order_[p]->kv.second = std::move(v); return; }
 		insertNew(std::string(k), std::move(v));
 	}
 	// Move-in variant: one hash lookup, then either replace in place or insert.
 	// Returns true when a new entry was inserted (callers count new members).
 	bool insert_or_assign(std::string&& k, mapped_type&& v) {
-		auto s = findSlotOf(std::string_view(k));
-		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return false; }
+		auto p = findPosOf(std::string_view(k));
+		if (p != npos) { order_[p]->kv.second = std::move(v); return false; }
 		insertNew(std::move(k), std::move(v));
 		return true;
 	}
 
-	size_type count(const std::string& k) const { return findSlotOf(k) == npos ? 0 : 1; }
-	size_type count(std::string_view k) const { return findSlotOf(k) == npos ? 0 : 1; }
-	size_type count(const char* k) const { return findSlotOf(k) == npos ? 0 : 1; }
+	size_type count(const std::string& k) const { return findPosOf(k) == npos ? 0 : 1; }
+	size_type count(std::string_view k) const { return findPosOf(k) == npos ? 0 : 1; }
+	size_type count(const char* k) const { return findPosOf(k) == npos ? 0 : 1; }
 
 	iterator erase(iterator pos) {
 		std::ptrdiff_t p = pos.it_ - order_.begin();
@@ -262,29 +264,36 @@ public:
 		return iterator(order_.begin() + p);
 	}
 	size_type erase(const std::string& k) {
-		auto s = findSlotOf(k);
-		if (s == npos) return 0;
-		eraseAt(slots_[s].pos);
+		auto p = findPosOf(k);
+		if (p == npos) return 0;
+		eraseAt(p);
 		return 1;
 	}
 
 private:
 	static constexpr std::size_t npos = std::numeric_limits<std::size_t>::max();
 
-	// Linear probe for key k; returns slot index or npos.
-	std::size_t findSlotOf(std::string_view k) const {
-		if (slots_.empty()) return npos;
-		const std::uint64_t h = hashOf(k);
-		const std::size_t mask = slots_.size() - 1;
-		const std::size_t klen = k.size();
-		std::size_t i = static_cast<std::size_t>(h) & mask;
-		for (;;) {
-			const Slot& e = slots_[i];
-			if (e.hash == kEmptyHash) return npos;
-			if (e.hash == h && e.keyLen == klen &&
-				(klen == 0 || std::memcmp(e.keyData, k.data(), klen) == 0)) return i;
-			i = (i + 1) & mask;
+	// Locate key k: returns its position in order_ or npos. Objects below the
+	// small-object threshold are scanned linearly (no table); larger ones use
+	// the flat open-addressing slots_ table.
+	std::size_t findPosOf(std::string_view k) const {
+		if (!slots_.empty()) {
+			const std::uint64_t h = hashOf(k);
+			const std::size_t mask = slots_.size() - 1;
+			const std::size_t klen = k.size();
+			std::size_t i = static_cast<std::size_t>(h) & mask;
+			for (;;) {
+				const Slot& e = slots_[i];
+				if (e.hash == kEmptyHash) return npos;
+				if (e.hash == h && e.keyLen == klen &&
+					(klen == 0 || std::memcmp(e.keyData, k.data(), klen) == 0)) return e.pos;
+				i = (i + 1) & mask;
+			}
 		}
+		for (std::size_t i = 0; i < order_.size(); i++) {
+			if (order_[i]->kv.first == k) return i;
+		}
+		return npos;
 	}
 
 	// First free (empty or tombstone) slot for a new key. Caller has already
@@ -301,7 +310,10 @@ private:
 	}
 
 	void growIfNeeded() {
-		if (slots_.empty()) { slots_.resize(kInitCap); return; }
+		if (slots_.empty()) {
+			if (order_.size() >= kSmallObjectMax) rebuildIndex(); // materialize existing nodes
+			return;
+		}
 		if ((used_ + 1) * 10 > slots_.size() * 7) {
 			std::vector<Slot> next(slots_.size() * 2);
 			const std::size_t mask2 = next.size() - 1;
@@ -335,26 +347,28 @@ private:
 	}
 
 	iterator findImpl(std::string_view k) {
-		auto s = findSlotOf(k);
-		if (s == npos) return end();
-		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(slots_[s].pos));
+		auto p = findPosOf(k);
+		if (p == npos) return end();
+		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(p));
 	}
 	const_iterator findImpl(std::string_view k) const {
-		auto s = findSlotOf(k);
-		if (s == npos) return end();
-		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(slots_[s].pos));
+		auto p = findPosOf(k);
+		if (p == npos) return end();
+		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(p));
 	}
 
 	template <typename K>
 	void insertNew(K&& k, mapped_type&& v) {
 		std::string_view look(std::forward<K>(k));
-		if (findSlotOf(look) != npos) return; // duplicate key: keep existing (std semantics)
-		growIfNeeded(); // may rehash; slot target recomputed below
+		if (findPosOf(look) != npos) return; // duplicate key: keep existing (std semantics)
 		const std::uint64_t h = hashOf(look);
-		const std::size_t slot = insertSlotFor(h);
+		if (slots_.empty() && order_.size() >= kSmallObjectMax) rebuildIndex(); // materialize existing
 		auto node = std::make_unique<Node>(std::forward<K>(k), std::move(v));
 		const std::size_t pos = order_.size();
 		order_.push_back(std::move(node));
+		if (slots_.empty()) return; // still small-object mode: no table yet
+		growIfNeeded(); // may rehash; slot target recomputed below
+		const std::size_t slot = insertSlotFor(h);
 		const std::string& kk = order_.back()->kv.first;
 		const bool wasEmpty = (slots_[slot].hash == kEmptyHash);
 		slots_[slot] = Slot{h, static_cast<std::uint32_t>(pos),
@@ -363,15 +377,15 @@ private:
 	}
 
 	mapped_type& atImpl(std::string_view k) {
-		auto s = findSlotOf(k);
-		if (s != npos) return order_[slots_[s].pos]->kv.second;
+		auto p = findPosOf(k);
+		if (p != npos) return order_[p]->kv.second;
 		insertNew(std::string(k), nullptr);
 		return order_.back()->kv.second;
 	}
 
 	void eraseAt(std::size_t pos) {
 		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
-		rebuildIndex();
+		if (!slots_.empty()) rebuildIndex();
 	}
 };
 
@@ -835,7 +849,15 @@ inline int hexDigitValue(char c) {
 }
 
 inline void appendJsonEscaped(std::string& out, std::string_view s) {
-	for (auto c : s) {
+	// Bulk-copy clean runs; escape only the special characters.
+	const char* p = s.data();
+	const char* const end = p + s.size();
+	const char* run = p;
+	static constexpr char HEX[] = "0123456789abcdef";
+	while (p < end) {
+		unsigned char c = static_cast<unsigned char>(*p);
+		if (c >= 0x20 && c != '"' && c != '\\') { p++; continue; }
+		if (p > run) out.append(run, static_cast<size_t>(p - run));
 		switch (c) {
 			case '"': out += "\\\""; break;
 			case '\\': out += "\\\\"; break;
@@ -844,17 +866,16 @@ inline void appendJsonEscaped(std::string& out, std::string_view s) {
 			case '\n': out += "\\n"; break;
 			case '\r': out += "\\r"; break;
 			case '\t': out += "\\t"; break;
-			default:
-				if (static_cast<unsigned char>(c) < 0x20) {
-					char buf[8];
-					snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-					out += buf;
-				} else {
-					out += c;
-				}
+			default: {
+				char buf[6] = {'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 0xF]};
+				out.append(buf, 6);
 				break;
+			}
 		}
+		p++;
+		run = p;
 	}
+	if (run < end) out.append(run, static_cast<size_t>(end - run));
 }
 
 void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity);
