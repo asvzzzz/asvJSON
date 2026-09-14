@@ -300,10 +300,10 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->emplace(key, std::move(val));
 				} else if (subtype == 0x03) {
-if (blen >= 4) {
-					if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 truncated");
-					uint32_t oldLen; readLE32(data, pos, oldLen);
-					if (pos + oldLen > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 overflow");
+					if (blen >= 4) {
+						if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 truncated");
+						uint32_t oldLen; readLE32(data, pos, oldLen);
+						if (pos + oldLen > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 overflow");
 						auto val = asvJSONValue::makeBinary(data + pos, oldLen);
 						pos += oldLen;
 						if (!val) throw asvJSONError("BSON binary too large");

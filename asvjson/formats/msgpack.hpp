@@ -319,12 +319,12 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				pos += len;
 				return re;
 			}
-if (extType == 3) {
-			if (len != 8 || pos + 8 > dataLen) { pos += len; return asvJSONValue::makeNull(); }
-			int64_t ts = 0;
-			for (int i = 7; i >= 0; i--) ts = (ts << 8) | static_cast<int64_t>(data[pos++]);
-			return asvJSONValue::makeTimestamp(ts);
-		}
+			if (extType == 3) {
+				if (len != 8 || pos + 8 > dataLen) { pos += len; return asvJSONValue::makeNull(); }
+				int64_t ts = 0;
+				for (int i = 7; i >= 0; i--) ts = (ts << 8) | static_cast<int64_t>(data[pos++]);
+				return asvJSONValue::makeTimestamp(ts);
+			}
 			auto val = asvJSONValue::makeExtension(extType, data + pos, len);
 			pos += len;
 			if (!val) throw asvJSONError("MsgPack extension too large");

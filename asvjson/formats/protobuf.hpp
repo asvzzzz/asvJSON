@@ -639,7 +639,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
       } else {
         // Packed repeated field -- decode according to element type
         if (static_cast<size_t>(end - pos) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("Protobuf packed field too large");
-auto arr = asvJSONValue::makeArray();
+        auto arr = asvJSONValue::makeArray();
         if (arr && arr->arr) {
           if (type == "float" || type == "fixed32" || type == "sfixed32") {
             while (pos + 4 <= end) {
@@ -899,7 +899,7 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
     std::string fname;
     if (c == '[') {
       pos++;
-while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
+      while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
       if (pos < text.size()) pos++;
     } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || (c >= '0' && c <= '9')) {
       fname = protoTextParseIdent(text, pos);
@@ -910,12 +910,12 @@ while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
     if (hasColon) { pos++; protoTextSkipWS(text, pos); }
     if (pos >= text.size()) break;
 
-if (text[pos] == '{' || text[pos] == '<') {
+    if (text[pos] == '{' || text[pos] == '<') {
       pos++;
       auto obj = asvJSONValue::makeObject();
       if (!obj) { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } if (pos<text.size()) pos++; continue; }
       protoTextParseBody(text, pos, obj.get(), depth + 1);
-protoSetField(parent, fname, std::move(obj));
+      protoSetField(parent, fname, std::move(obj));
       protoTextSkipWS(text, pos);
       if (pos < text.size() && (text[pos] == ';' || text[pos] == ',')) pos++;
     } else if (text[pos] == '[') {

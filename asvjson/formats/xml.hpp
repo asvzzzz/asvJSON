@@ -318,7 +318,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				for (const auto& item : *arr) {
 					item->toXML(out, name, indent);
 				}
-} else {
+			} else {
 				out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
 				for (const auto& item : *arr) {
 					if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))

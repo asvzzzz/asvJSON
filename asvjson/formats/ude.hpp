@@ -1724,34 +1724,34 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       break;
     }
     case T::REGEX: {
-        os << "!regex ";
-        std::string r;
-        fmtRegexVal(v->str_data, r);
-        os << r;
-        break;
-      }
-      case T::CUSTOM_TAG: {
-        // str_data holds the tag name; custom_value holds the value. Unknown
-        // tags are emitted in the canonical "!<name> <value>" form so that a
-        // name containing special characters still round-trips exactly.
-        bool verbatim = false;
-        if (!v->str_data.empty())
-          for (char ch : v->str_data)
-            if (!udeIsTagChar(ch)) { verbatim = true; break; }
-        if (verbatim) os << "!<" << v->str_data << "> ";
-        else os << '!' << v->str_data << ' ';
-        if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent, true, strict);
-        else os << "null";
-        break;
-      }
-case T::TIMESTAMP: {
-        char buf[32];
-        auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-        os << "!timestamp ";
-        if (ec == std::errc()) os.write(buf, ptr - buf);
-        else os << '0';
-        break;
-      }
+      os << "!regex ";
+      std::string r;
+      fmtRegexVal(v->str_data, r);
+      os << r;
+      break;
+    }
+    case T::CUSTOM_TAG: {
+      // str_data holds the tag name; custom_value holds the value. Unknown
+      // tags are emitted in the canonical "!<name> <value>" form so that a
+      // name containing special characters still round-trips exactly.
+      bool verbatim = false;
+      if (!v->str_data.empty())
+        for (char ch : v->str_data)
+          if (!udeIsTagChar(ch)) { verbatim = true; break; }
+      if (verbatim) os << "!<" << v->str_data << "> ";
+      else os << '!' << v->str_data << ' ';
+      if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent, true, strict);
+      else os << "null";
+      break;
+    }
+    case T::TIMESTAMP: {
+      char buf[32];
+      auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
+      os << "!timestamp ";
+      if (ec == std::errc()) os.write(buf, ptr - buf);
+      else os << '0';
+      break;
+    }
     case T::EXTENSION: {
       os << "!ext \"" << static_cast<int>(v->ext_type) << ':' << encodeBase64(v->bin_data.data(), v->bin_data.size()) << '"';
       break;

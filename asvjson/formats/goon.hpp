@@ -1138,16 +1138,16 @@ inline std::string goonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
 
-if (valPart.empty()) {
-  out += '"' + keyStr + "\":{";
-  stack.push_back({'O', true, indent, true, false});
-} else if (valPart == "{}") {
-  out += '"' + keyStr + "\":{}";
-} else if (valPart == "[]") {
-  out += '"' + keyStr + "\":[]";
-} else {
-  out += '"' + keyStr + "\":" + expandCell(valPart);
-}
+      if (valPart.empty()) {
+        out += '"' + keyStr + "\":{";
+        stack.push_back({'O', true, indent, true, false});
+      } else if (valPart == "{}") {
+        out += '"' + keyStr + "\":{}";
+      } else if (valPart == "[]") {
+        out += '"' + keyStr + "\":[]";
+      } else {
+        out += '"' + keyStr + "\":" + expandCell(valPart);
+      }
     }
   }
 

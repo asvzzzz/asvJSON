@@ -215,7 +215,7 @@ inline std::string_view stripComment(std::string_view line, bool& inBasic, bool&
     char c = line[i];
     if (escape) { escape = false; continue; }
     if (c == '\\' && inBasic) { escape = true; continue; }
-if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
+    if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
     if (c == '\'' && !inBasic) { inLiteral = !inLiteral; continue; }
     if (!inBasic && !inLiteral && c == '#') return line.substr(0, i);
   }
@@ -1149,7 +1149,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           char c = line[i];
           if (escape) { escape = false; continue; }
           if (c == '\\' && inBasic) { escape = true; continue; }
-if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
+          if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
           if (c == '\'' && !inBasic) { inLiteral = !inLiteral; continue; }
           if (!inBasic && !inLiteral && c == ']') { end = i; break; }
         }
