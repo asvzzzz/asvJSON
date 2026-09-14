@@ -674,7 +674,7 @@ auto arr = asvJSONValue::makeArray();
       if (pos + 4 > size) return nullptr;
       uint32_t raw = 0;
       for (int i = 0; i < 4; i++) raw |= static_cast<uint32_t>(data[pos++]) << (i * 8);
-if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); return asvJSONValue::makeDouble(static_cast<double>(f)); }
+      if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); return asvJSONValue::makeDouble(static_cast<double>(f)); }
       else if (type == "sfixed32") return asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)));
       return asvJSONValue::makeInt(static_cast<uint64_t>(raw));
     }

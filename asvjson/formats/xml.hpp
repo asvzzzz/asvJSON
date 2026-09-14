@@ -712,9 +712,9 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				return sobj;
 			}
 if (t == "datetime" && !combinedText.empty()) {
-			time_t ts = 0; int ms = 0; int tz = 0;
-			if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
-		}
+				time_t ts = 0; int ms = 0; int tz = 0;
+				if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
+			}
 			if (t == "binary" && !combinedText.empty()) {
 				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
 				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
