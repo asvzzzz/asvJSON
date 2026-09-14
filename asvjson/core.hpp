@@ -113,8 +113,44 @@ private:
 		Node& operator=(const Node&) = delete;
 	};
 
+	// Flat open-addressing key index. Only one allocation per inserted key (the
+	// order_ Node); the table itself grows geometrically (a handful of reallocs
+	// per map). Tombstone deletion + rebuild-on-erase keeps the algorithm simple.
+	static constexpr std::uint64_t kEmptyHash = 0;
+	static constexpr std::uint64_t kTombHash = std::numeric_limits<std::uint64_t>::max();
+	static constexpr std::size_t kInitCap = 8; // power of two
+	struct Slot {
+		std::uint64_t hash;
+		std::uint32_t pos;
+		std::uint32_t keyLen;
+		const char* keyData; // stable: points into the Node's const std::string
+	};
+
+	static std::uint64_t hashOf(std::string_view s) noexcept {
+		std::uint64_t h = asvJSONInternal::SafeHash{}(s);
+		// fmix64 (MurmurHash3) finalizer: scatters low bits so power-of-two
+		// table masks don't cluster strings that differ only at the end.
+		h ^= h >> 33;
+		h *= 0xff51afd7ed558ccdULL;
+		h ^= h >> 33;
+		h *= 0xc4ceb9fe1a85ec53ULL;
+		h ^= h >> 33;
+		if (h == kEmptyHash) return h + 1;
+		if (h == kTombHash) return h - 1;
+		return h;
+	}
+
 	std::vector<std::unique_ptr<Node>> order_;
-	std::unordered_map<std::string_view, std::size_t, SafeHash, std::equal_to<>> index_;
+	std::vector<Slot> slots_;
+	std::size_t used_ = 0; // non-empty slots (live + tombstones)
+
+	static std::size_t nextPow2(std::size_t n) noexcept {
+		if (n < kInitCap) n = kInitCap;
+		n--;
+		n |= n >> 1; n |= n >> 2; n |= n >> 4; n |= n >> 8; n |= n >> 16; n |= n >> 32;
+		n++;
+		return n;
+	}
 
 public:
 	class iterator {
@@ -180,8 +216,8 @@ public:
 
 	size_type size() const noexcept { return order_.size(); }
 	bool empty() const noexcept { return order_.empty(); }
-	void reserve(size_type n) { order_.reserve(n); index_.reserve(n); }
-	void clear() { order_.clear(); index_.clear(); }
+	void reserve(size_type n) { order_.reserve(n); }
+	void clear() { order_.clear(); slots_.clear(); used_ = 0; }
 
 	iterator find(const std::string& k) { return findImpl(std::string_view(k)); }
 	iterator find(std::string_view k) { return findImpl(k); }
@@ -198,27 +234,27 @@ public:
 	void emplace(std::string&& k, mapped_type&& v) { insertNew(std::move(k), std::move(v)); }
 
 	void insert_or_assign(const std::string& k, mapped_type&& v) {
-		auto it = index_.find(k);
-		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return; }
+		auto s = findSlotOf(k);
+		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return; }
 		insertNew(k, std::move(v));
 	}
 	void insert_or_assign(std::string_view k, mapped_type&& v) {
-		auto it = index_.find(k);
-		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return; }
+		auto s = findSlotOf(k);
+		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return; }
 		insertNew(std::string(k), std::move(v));
 	}
 	// Move-in variant: one hash lookup, then either replace in place or insert.
 	// Returns true when a new entry was inserted (callers count new members).
 	bool insert_or_assign(std::string&& k, mapped_type&& v) {
-		auto it = index_.find(std::string_view(k));
-		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return false; }
+		auto s = findSlotOf(std::string_view(k));
+		if (s != npos) { order_[slots_[s].pos]->kv.second = std::move(v); return false; }
 		insertNew(std::move(k), std::move(v));
 		return true;
 	}
 
-	size_type count(const std::string& k) const { return index_.count(k); }
-	size_type count(std::string_view k) const { return index_.count(k); }
-	size_type count(const char* k) const { return index_.count(k); }
+	size_type count(const std::string& k) const { return findSlotOf(k) == npos ? 0 : 1; }
+	size_type count(std::string_view k) const { return findSlotOf(k) == npos ? 0 : 1; }
+	size_type count(const char* k) const { return findSlotOf(k) == npos ? 0 : 1; }
 
 	iterator erase(iterator pos) {
 		std::ptrdiff_t p = pos.it_ - order_.begin();
@@ -226,52 +262,116 @@ public:
 		return iterator(order_.begin() + p);
 	}
 	size_type erase(const std::string& k) {
-		auto it = index_.find(k);
-		if (it == index_.end()) return 0;
-		eraseAt(it->second);
+		auto s = findSlotOf(k);
+		if (s == npos) return 0;
+		eraseAt(slots_[s].pos);
 		return 1;
 	}
 
 private:
+	static constexpr std::size_t npos = std::numeric_limits<std::size_t>::max();
+
+	// Linear probe for key k; returns slot index or npos.
+	std::size_t findSlotOf(std::string_view k) const {
+		if (slots_.empty()) return npos;
+		const std::uint64_t h = hashOf(k);
+		const std::size_t mask = slots_.size() - 1;
+		const std::size_t klen = k.size();
+		std::size_t i = static_cast<std::size_t>(h) & mask;
+		for (;;) {
+			const Slot& e = slots_[i];
+			if (e.hash == kEmptyHash) return npos;
+			if (e.hash == h && e.keyLen == klen &&
+				(klen == 0 || std::memcmp(e.keyData, k.data(), klen) == 0)) return i;
+			i = (i + 1) & mask;
+		}
+	}
+
+	// First free (empty or tombstone) slot for a new key. Caller has already
+	// verified the key is absent. Load is kept below 0.7, so this always finds
+	// a slot.
+	std::size_t insertSlotFor(std::uint64_t h) const {
+		const std::size_t mask = slots_.size() - 1;
+		std::size_t i = static_cast<std::size_t>(h) & mask;
+		for (;;) {
+			const Slot& e = slots_[i];
+			if (e.hash != kEmptyHash && e.hash != kTombHash) { i = (i + 1) & mask; continue; }
+			return i;
+		}
+	}
+
+	void growIfNeeded() {
+		if (slots_.empty()) { slots_.resize(kInitCap); return; }
+		if ((used_ + 1) * 10 > slots_.size() * 7) {
+			std::vector<Slot> next(slots_.size() * 2);
+			const std::size_t mask2 = next.size() - 1;
+			std::size_t n = 0;
+			for (const Slot& e : slots_) {
+				if (e.hash == kEmptyHash || e.hash == kTombHash) continue;
+				std::size_t j = static_cast<std::size_t>(e.hash) & mask2;
+				while (next[j].hash != kEmptyHash) j = (j + 1) & mask2;
+				next[j] = e;
+				n++;
+			}
+			slots_ = std::move(next);
+			used_ = n;
+		}
+	}
+
+	void rebuildIndex() {
+		const std::size_t cap = nextPow2(order_.size() * 2);
+		slots_.assign(cap, Slot{kEmptyHash, 0, 0, nullptr});
+		std::size_t n = 0;
+		for (std::size_t i = 0; i < order_.size(); i++) {
+			const std::string& kk = order_[i]->kv.first;
+			const std::uint64_t h = hashOf(std::string_view(kk));
+			std::size_t j = static_cast<std::size_t>(h) & (cap - 1);
+			while (slots_[j].hash != kEmptyHash) j = (j + 1) & (cap - 1);
+			slots_[j] = Slot{h, static_cast<std::uint32_t>(i),
+				static_cast<std::uint32_t>(kk.size()), kk.data()};
+			n++;
+		}
+		used_ = n;
+	}
+
 	iterator findImpl(std::string_view k) {
-		auto it = index_.find(k);
-		if (it == index_.end()) return end();
-		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(it->second));
+		auto s = findSlotOf(k);
+		if (s == npos) return end();
+		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(slots_[s].pos));
 	}
 	const_iterator findImpl(std::string_view k) const {
-		auto it = index_.find(k);
-		if (it == index_.end()) return end();
-		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(it->second));
+		auto s = findSlotOf(k);
+		if (s == npos) return end();
+		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(slots_[s].pos));
 	}
 
 	template <typename K>
 	void insertNew(K&& k, mapped_type&& v) {
 		std::string_view look(std::forward<K>(k));
-		if (index_.find(look) != index_.end()) return; // duplicate key: keep existing (std semantics)
+		if (findSlotOf(look) != npos) return; // duplicate key: keep existing (std semantics)
+		growIfNeeded(); // may rehash; slot target recomputed below
+		const std::uint64_t h = hashOf(look);
+		const std::size_t slot = insertSlotFor(h);
 		auto node = std::make_unique<Node>(std::forward<K>(k), std::move(v));
 		const std::size_t pos = order_.size();
 		order_.push_back(std::move(node));
-		try {
-			index_.emplace(order_.back()->kv.first, pos);
-		} catch (...) {
-			order_.pop_back();
-			throw;
-		}
+		const std::string& kk = order_.back()->kv.first;
+		const bool wasEmpty = (slots_[slot].hash == kEmptyHash);
+		slots_[slot] = Slot{h, static_cast<std::uint32_t>(pos),
+			static_cast<std::uint32_t>(kk.size()), kk.data()};
+		if (wasEmpty) used_++;
 	}
 
 	mapped_type& atImpl(std::string_view k) {
-		auto it = index_.find(k);
-		if (it != index_.end()) return order_[it->second]->kv.second;
+		auto s = findSlotOf(k);
+		if (s != npos) return order_[slots_[s].pos]->kv.second;
 		insertNew(std::string(k), nullptr);
 		return order_.back()->kv.second;
 	}
 
 	void eraseAt(std::size_t pos) {
-		index_.erase(std::string_view(order_[pos]->kv.first));
 		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
-		for (std::size_t i = pos; i < order_.size(); i++) {
-			index_[std::string_view(order_[i]->kv.first)] = i;
-		}
+		rebuildIndex();
 	}
 };
 
@@ -310,6 +410,10 @@ struct asvJSONValue {
 	Type type = NULL_VAL;
 
 	int8_t ext_type = 0;
+	bool flag = false;
+	bool is_float32 = false;
+	bool raw_number = false;   // true when value is a string holding an exact numeric literal
+	bool yaml_set = false;     // YAML !!set marker for OBJECT values (round-trips as {"$set":[...]})
 
 #ifdef ASVJSON_USE_ORDERED_MAP
 	using ObjectMap = std::map<std::string, std::unique_ptr<asvJSONValue>, asvJSONInternal::StringViewLess>;
@@ -319,42 +423,46 @@ struct asvJSONValue {
 	std::unique_ptr<ObjectMap> obj;
 	std::unique_ptr<std::vector<std::unique_ptr<asvJSONValue>>> arr;
 
+	// Scalar payload. INT -> num, DOUBLE -> dbl, DATETIME/TIMESTAMP -> timestamp.
+	// Only one member is active (selected by type); all three are 8 bytes.
+	union {
+		int64_t num;
+		double dbl;
+		int64_t timestamp;
+	};
+
 	std::string str_data;
 	std::vector<uint8_t> bin_data;
 	std::unique_ptr<asvJSONValue> custom_value;  // value of a CUSTOM_TAG (name kept in str_data)
-	int64_t num = 0;
-	bool flag = false;
-	bool is_float32 = false;
-	double dbl = 0;
-	int64_t timestamp = 0;
 	int datetime_ms = 0;
 	int tz_offset_min = 0;  // DATETIME display offset in minutes from UTC (0 = Z)
-	bool raw_number = false;  // true when value is a string holding an exact numeric literal
-	bool yaml_set = false;    // YAML !!set marker for OBJECT values (round-trips as {"$set":[...]})
 	std::unique_ptr<YAMLComments> yaml_comments;  // YAML comment metadata (round-trip only)
 
-	asvJSONValue() : type(NULL_VAL), ext_type(0), obj(), arr(), num(0), flag(false), is_float32(false), dbl(0), timestamp(0), datetime_ms(0), tz_offset_min(0), raw_number(false), yaml_set(false) {}
+	asvJSONValue() : type(NULL_VAL), ext_type(0), flag(false), is_float32(false), raw_number(false), yaml_set(false), obj(), arr(), num(0), datetime_ms(0), tz_offset_min(0) {}
 	~asvJSONValue() { destroy(); }
 
 	asvJSONValue(const asvJSONValue&) = delete;
 	asvJSONValue& operator=(const asvJSONValue&) = delete;
 
+	static void copyScalar(asvJSONValue& dst, const asvJSONValue& src) noexcept {
+		std::memcpy(&dst.num, &src.num, sizeof(dst.num));
+	}
+
 	asvJSONValue(asvJSONValue&& other) noexcept : type(NULL_VAL) {
 		type = other.type;
-		str_data = std::move(other.str_data);
-		obj = std::move(other.obj);
-		arr = std::move(other.arr);
-		custom_value = std::move(other.custom_value);
-		num = other.num;
-		flag = other.flag;
-		dbl = other.dbl;
-		timestamp = other.timestamp;
-		bin_data = std::move(other.bin_data);
-		datetime_ms = other.datetime_ms;
-		is_float32 = other.is_float32;
 		ext_type = other.ext_type;
+		flag = other.flag;
+		is_float32 = other.is_float32;
 		raw_number = other.raw_number;
 		yaml_set = other.yaml_set;
+		obj = std::move(other.obj);
+		arr = std::move(other.arr);
+		copyScalar(*this, other);
+		str_data = std::move(other.str_data);
+		bin_data = std::move(other.bin_data);
+		custom_value = std::move(other.custom_value);
+		datetime_ms = other.datetime_ms;
+		tz_offset_min = other.tz_offset_min;
 		yaml_comments = std::move(other.yaml_comments);
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
@@ -369,21 +477,19 @@ struct asvJSONValue {
 		if (this != &other) {
 			destroy();
 			type = other.type;
-			str_data = std::move(other.str_data);
-			obj = std::move(other.obj);
-			arr = std::move(other.arr);
-			custom_value = std::move(other.custom_value);
-			num = other.num;
-			flag = other.flag;
-			dbl = other.dbl;
-			timestamp = other.timestamp;
-			bin_data = std::move(other.bin_data);
-			datetime_ms = other.datetime_ms;
-			tz_offset_min = other.tz_offset_min;
-			is_float32 = other.is_float32;
 			ext_type = other.ext_type;
+			flag = other.flag;
+			is_float32 = other.is_float32;
 			raw_number = other.raw_number;
 			yaml_set = other.yaml_set;
+			obj = std::move(other.obj);
+			arr = std::move(other.arr);
+			copyScalar(*this, other);
+			str_data = std::move(other.str_data);
+			bin_data = std::move(other.bin_data);
+			custom_value = std::move(other.custom_value);
+			datetime_ms = other.datetime_ms;
+			tz_offset_min = other.tz_offset_min;
 			yaml_comments = std::move(other.yaml_comments);
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
