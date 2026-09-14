@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -105,6 +106,8 @@ struct FormatFrame {
 inline std::vector<std::string> splitLines(std::string_view input) {
 	std::vector<std::string> lines;
 	if (input.empty()) return lines;
+	// Pre-count newlines to pre-allocate the vector (avoids reallocs during push_back).
+	lines.reserve(std::count(input.begin(), input.end(), '\n') + 1);
 	size_t start = 0;
 	for (size_t i = 0; i < input.size(); i++) {
 		if (input[i] == '\n') {
