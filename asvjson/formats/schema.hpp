@@ -311,7 +311,10 @@ private:
       case asvJSONValue::NULL_VAL: return t == "null";
       case asvJSONValue::BOOL_VAL: return t == "boolean";
       case asvJSONValue::INT: return t == "integer" || t == "number";
-      case asvJSONValue::DOUBLE: return t == "number";
+      case asvJSONValue::DOUBLE:
+        if (t == "number") return true;
+        if (t == "integer") return std::isfinite(v->dbl) && std::trunc(v->dbl) == v->dbl;
+        return false;
       case asvJSONValue::STRING: return t == "string";
       case asvJSONValue::ARRAY: return t == "array";
       case asvJSONValue::OBJECT: return t == "object";

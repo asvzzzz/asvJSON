@@ -646,7 +646,8 @@ auto arr = asvJSONValue::makeArray();
               uint32_t raw = 0;
               for (int i = 0; i < 4; i++) raw |= static_cast<uint32_t>(data[pos++]) << (i * 8);
               if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); arr->arr->push_back(asvJSONValue::makeDouble(static_cast<double>(f))); }
-              else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)))); }
+              else if (type == "sfixed32") { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)))); }
+              else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<uint64_t>(raw))); }
             }
             if (pos != end) throw asvJSONError("Protobuf packed fixed-size field has trailing data");
           } else if (type == "double" || type == "fixed64" || type == "sfixed64") {
@@ -673,8 +674,9 @@ auto arr = asvJSONValue::makeArray();
       if (pos + 4 > size) return nullptr;
       uint32_t raw = 0;
       for (int i = 0; i < 4; i++) raw |= static_cast<uint32_t>(data[pos++]) << (i * 8);
-      if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); return asvJSONValue::makeDouble(static_cast<double>(f)); }
-      return asvJSONValue::makeInt(static_cast<int64_t>(raw));
+if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); return asvJSONValue::makeDouble(static_cast<double>(f)); }
+      else if (type == "sfixed32") return asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)));
+      return asvJSONValue::makeInt(static_cast<uint64_t>(raw));
     }
   }
   return nullptr;

@@ -179,6 +179,25 @@ inline std::string json5ToJson(std::string_view input) {
       continue;
     }
 
+    // Comments outside strings (JSON5: //, /* */, #) are skipped.
+    if (c == '#') {
+      radixJustEnded = false;
+      while (i + 1 < input.size() && input[i + 1] != '\n') i++;
+      continue; // outer loop advances past the newline
+    }
+    if (c == '/' && i + 1 < input.size() && input[i + 1] == '/') {
+      radixJustEnded = false;
+      while (i + 1 < input.size() && input[i + 1] != '\n') i++;
+      continue;
+    }
+    if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
+      radixJustEnded = false;
+      i += 2;
+      while (i + 1 < input.size() && !(input[i] == '*' && input[i + 1] == '/')) i++;
+      if (i < input.size()) i += 2;
+      continue;
+    }
+
     if (c == '"') { radixJustEnded = false; out += c; str = DOUBLE; continue; }
     if (c == '\'') { radixJustEnded = false; out += '"'; str = SINGLE; continue; }
 

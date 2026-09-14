@@ -664,62 +664,70 @@ class JPFilterEval {
     else return nullptr;
     if (lex_.peek().type == TokType::DOTDOT) return nullptr; // recursive descent not supported in filters
 
-    while (lex_.peek().type == TokType::DOT) {
-      lex_.next();
-      Tok p = lex_.next();
-      if (p.type != TokType::IDENT) {
-        if (p.type == TokType::STAR) {
-          // wildcard: the node is selected iff it has at least one child
-          return jpAllChildren(node).empty() ? nullptr : node;
+    while (true) {
+      if (lex_.peek().type == TokType::DOT) {
+        lex_.next();
+        Tok p = lex_.next();
+        if (p.type != TokType::IDENT) {
+          if (p.type == TokType::STAR) {
+            // wildcard: the node is selected iff it has at least one child
+            if (jpAllChildren(node).empty()) node = nullptr;
+          } else {
+            break;
+          }
+        } else if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
+          lex_.next();
+          if (lex_.peek().type == TokType::RPAREN) lex_.next();
+          auto r = jpApplyFunc(p.val, node);
+          if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
+          else node = nullptr;
+        } else {
+          node = jpGetProp(node, p.val);
+          if (!node) node = nullptr;
         }
+      } else if (lex_.peek().type == TokType::LBRACKET) {
+        lex_.next();
+        Tok idx = lex_.next();
+        if (idx.type == TokType::NUMBER && node &&
+            node->type == asvJSONValue::ARRAY && node->arr) {
+          int64_t i;
+          if (!idx.ok || !jpParseIntStrict(idx.val, i)) {
+            if (lex_.peek().type == TokType::RBRACKET) lex_.next();
+            node = nullptr;
+          } else {
+            size_t ai;
+            if (i < 0) {
+              size_t mag = static_cast<size_t>(-i);
+              if (mag > node->arr->size()) {
+                if (lex_.peek().type == TokType::RBRACKET) lex_.next();
+                node = nullptr;
+              } else {
+                ai = node->arr->size() - mag;
+                node = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
+              }
+            } else {
+              ai = static_cast<size_t>(i);
+              node = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
+            }
+          }
+        } else if (idx.type == TokType::STRING && node &&
+                   node->type == asvJSONValue::OBJECT && node->obj) {
+          if (!idx.ok) {
+            if (lex_.peek().type == TokType::RBRACKET) lex_.next();
+            node = nullptr;
+          } else {
+            auto it = node->obj->find(idx.val);
+            node = (it != node->obj->end()) ? it->second.get() : nullptr;
+          }
+        } else if (idx.type == TokType::STAR && node) {
+          // wildcard: the node is selected iff it has at least one child
+          if (jpAllChildren(node).empty()) node = nullptr;
+        }
+        if (lex_.peek().type == TokType::RBRACKET) lex_.next();
+      } else {
         break;
       }
-      if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
-        lex_.next();
-        if (lex_.peek().type == TokType::RPAREN) lex_.next();
-        auto r = jpApplyFunc(p.val, node);
-        if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
-        else return nullptr;
-      } else {
-        node = jpGetProp(node, p.val);
-        if (!node) return nullptr;
-      }
-    }
-    while (lex_.peek().type == TokType::LBRACKET) {
-      lex_.next();
-      Tok idx = lex_.next();
-      if (idx.type == TokType::NUMBER && node &&
-          node->type == asvJSONValue::ARRAY && node->arr) {
-        int64_t i;
-        if (!idx.ok || !jpParseIntStrict(idx.val, i)) {
-          if (lex_.peek().type == TokType::RBRACKET) lex_.next();
-          return nullptr;
-        }
-        size_t ai;
-        if (i < 0) {
-          size_t mag = static_cast<size_t>(-i);
-          if (mag > node->arr->size()) {
-            if (lex_.peek().type == TokType::RBRACKET) lex_.next();
-            return nullptr;
-          }
-          ai = node->arr->size() - mag;
-        } else {
-          ai = static_cast<size_t>(i);
-        }
-        node = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
-      } else if (idx.type == TokType::STRING && node &&
-                 node->type == asvJSONValue::OBJECT && node->obj) {
-        if (!idx.ok) {
-          if (lex_.peek().type == TokType::RBRACKET) lex_.next();
-          return nullptr;
-        }
-        auto it = node->obj->find(idx.val);
-        node = (it != node->obj->end()) ? it->second.get() : nullptr;
-      } else if (idx.type == TokType::STAR && node) {
-        // wildcard: the node is selected iff it has at least one child
-        if (jpAllChildren(node).empty()) return nullptr;
-      }
-      if (lex_.peek().type == TokType::RBRACKET) lex_.next();
+      if (!node) return nullptr;
     }
     return node;
   }

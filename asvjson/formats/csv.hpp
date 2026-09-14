@@ -97,6 +97,19 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
 	if (s == "false" || s == "FALSE" || s == "F") return asvJSONValue::makeBool(false);
+	// ISO-8601 datetime detection: a bare cell matching the datetime form is
+	// reconstructed as a DATETIME (preserving the UTC instant AND the displayed
+	// tz offset), so toCSV/fromCSV round-trips datetimes exactly as the other
+	// formats do. Checked first: the numeric path below would otherwise eat the
+	// leading digits and fall through to a STRING ("2020-09-13T..." has digits,
+	// '-' and ':' and fails the number-shape check). Plain STRING cells that
+	// merely look like datetimes are quoted by the encoder (csvCell textGuard)
+	// and never reach this path.
+	{
+		time_t ts = 0; int ms = 0; int tz = 0;
+		if (tryParseDateTime(s, ts, &ms, &tz))
+			return asvJSONValue::makeDateTime(ts, ms, tz);
+	}
 	if (!s.empty() && (s[0] == '+' || s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
 		// JSON numbers never carry leading zeros ("042", "-042", "+042"), so
 		// those literals must stay STRINGs (otherwise the value silently changes
@@ -281,7 +294,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			}
 			case T2::STRING: return v->str_data;
 			case T2::DATETIME: {
-				std::string s; fmtDateTimeVal(v->timestamp, v->datetime_ms, s); return s;
+				std::string s; fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min); return s;
 			}
 			case T2::BINARY: return encodeBase64(v->bin_data.data(), v->bin_data.size());
 			case T2::OBJECTID: {
@@ -303,10 +316,12 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 
 	// Fully-escaped cell. A STRING whose text would decode as a different type
 	// (number/bool/null/empty) is quoted so the round-trip preserves STRING.
-	// The non-native types (REGEX/BINARY/EXTENSION/OBJECTID/DATETIME) have no
+	// The non-native types (REGEX/BINARY/EXTENSION/OBJECTID) have no
 	// CSV cell syntax: their text is emitted bare except when it would be mis-read
 	// as a number/bool/null on decode, in which case it is quoted as an explicit
-	// text literal (a REGEX pattern "123" must not come back as INT 123). TIMESTAMP
+	// text literal (a REGEX pattern "123" must not come back as INT 123). DATETIME
+	// has a native bare cell form (ISO-8601 with optional offset) that detects
+	// back as DATETIME on decode, so it is never quoted. TIMESTAMP
 	// stays bare -- an epoch number is its natural CSV form -- and ARRAY/OBJECT
 	// cells use their JSON text (already detected as STRING on decode). The
 	// formula-injection guard applies to STRING and the special text types, and
@@ -319,7 +334,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			auto d = csvDetectType(s);
 			switch (v->type) {
 				case T::STRING:
-				case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID: case T::DATETIME:
+				case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID:
 					textGuard = true;
 					// Quote when re-detection would change the type, and when it
 					// would promote a plain STRING to a raw_number (an int64-overflow

@@ -1252,6 +1252,7 @@ private:
 				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					// Precision would be lost - store as raw number string
 					auto v = asvJSONValue::makeString(buf, numLen);
+					if (!v) throw asvJSONError("Number literal too large");
 					v->raw_number = true;
 					return v;
 				}
@@ -1288,6 +1289,7 @@ private:
 				}
 				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					auto v = asvJSONValue::makeString(buf, numLen);
+					if (!v) throw asvJSONError("Number literal too large");
 					v->raw_number = true;
 					return v;
 				}
@@ -1301,6 +1303,7 @@ private:
 			if (ec != std::errc() || ptr != buf + numLen) {
 				// Integer too large for int64 - store as raw number string
 				auto v = asvJSONValue::makeString(buf, numLen);
+				if (!v) throw asvJSONError("Number literal too large");
 				v->raw_number = true;
 				return v;
 			}
@@ -1389,6 +1392,7 @@ public:
 		jsonBuf.assign(s.data(), s.size());
 		json = jsonBuf;
 		pos = 0;
+		parseDepth = 0;
 		try {
 			root = parseValue();
 			skip();
@@ -2211,7 +2215,7 @@ public:
 // ======================= Type Formatting Helpers =======================
 
 inline void fmtDoubleVal(double d, std::string& out) {
-	if (d == 0.0) { out += '0'; return; }
+	if (d == 0.0) { out += (std::signbit(d) ? "-0" : "0"); return; }
 	std::string tmp;
 	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
 		tmp.resize(64);
@@ -2475,7 +2479,7 @@ inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
 		case asvJSONValue::BOOL_VAL: return a.flag == b.flag;
 		case asvJSONValue::INT: return a.num == b.num;
 		case asvJSONValue::DOUBLE: return a.dbl == b.dbl;
-		case asvJSONValue::STRING: return a.str_data == b.str_data;
+		case asvJSONValue::STRING: return a.str_data == b.str_data && a.raw_number == b.raw_number;
 		case asvJSONValue::DATETIME: return a.timestamp == b.timestamp && a.datetime_ms == b.datetime_ms && a.tz_offset_min == b.tz_offset_min;
 		case asvJSONValue::BINARY: return a.bin_data == b.bin_data;
 		case asvJSONValue::OBJECTID: return a.str_data == b.str_data;
@@ -2652,6 +2656,16 @@ inline asvJSONValue* asvJSON::getByPointer(std::string_view ptr) {
 			cur = (*cur->arr)[idx].get();
 		} else return nullptr;
 		start = (slash == std::string_view::npos) ? ptr.size() : slash + 1;
+	}
+	// RFC 6901: a trailing '/' is an empty reference token (object member ""
+	// in objects, invalid for arrays/scalars).
+	if (cur && start >= ptr.size() && !ptr.empty() && ptr.back() == '/') {
+		if (cur->type == asvJSONValue::OBJECT && cur->obj) {
+			auto it = mapFind(*cur->obj, "");
+			cur = (it != cur->obj->end()) ? it->second.get() : nullptr;
+		} else {
+			cur = nullptr;
+		}
 	}
 	return cur;
 }
@@ -3112,11 +3126,11 @@ inline std::string asvJSON::toJSONLines() const {
 	if (!root) return out;
 	if (root->type == asvJSONValue::ARRAY && root->arr) {
 		for (const auto& elem : *root->arr) {
-			elem->serialize(out, false);
+			elem->serialize(out, allowNaNInfinity);
 			out += '\n';
 		}
 	} else {
-		root->serialize(out, false);
+		root->serialize(out, allowNaNInfinity);
 		out += '\n';
 	}
 	return out;

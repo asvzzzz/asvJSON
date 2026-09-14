@@ -227,6 +227,11 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     size_t i0 = (s[0] == '+' || s[0] == '-') ? 1 : 0;
     if (s.size() > i0 + 1 && s[i0] == '0' && s[i0 + 1] >= '0' && s[i0 + 1] <= '9')
       return asvJSONValue::makeString(s.data(), s.size());
+    // "0x"/"0X" literals are hex floats to strtod, not INI numbers. INI has no
+    // hex syntax, so keep the literal as text (else "k = 0x10" silently
+    // becomes 16 on a re-parse).
+    if (s.size() > i0 + 1 && s[i0] == '0' && (s[i0 + 1] == 'x' || s[i0 + 1] == 'X'))
+      return asvJSONValue::makeString(s.data(), s.size());
     errno = 0;
     char* end = nullptr;
     long long ll = std::strtoll(s.c_str(), &end, 10);

@@ -10142,7 +10142,7 @@ TEST(testToSexpr) {
     asvJSON j;
     ASSERT(j.parse(std::string_view("{}")));
     std::string s = j.toSexpr();
-    ASSERT_EQ(s, "(() #t)");
+    ASSERT_EQ(s, "(() {})");
     asvJSON j2;
     ASSERT(j2.fromSexpr(std::string_view(s)));
     ASSERT_EQ(j2.getRoot()->type, asvJSONValue::OBJECT);
@@ -13791,7 +13791,7 @@ TEST(testUDEAnchors) {
 
 TEST(testUDERawNumberRoundTrip) {
   // High-precision decimal stored as raw_number string by JSON parser
-  // must round-trip through UDE as a string (quoted), not a double.
+  // must round-trip through UDE as a string, not a double.
   {
     asvJSON j;
     ASSERT(j.parse("{\"d\":0.42857142857142855}"));
@@ -17716,6 +17716,211 @@ TEST(testReauditRegression) {
 	}
 }
 
+TEST(testReauditRegression2) {
+	// C4: -0.0 round-trips with its sign bit (previously [0]).
+	{
+		asvJSON j;
+		ASSERT(j.parse("[-0.0]"));
+		ASSERT(j.serialize() != "[0]");
+	}
+	// C5: toJSONLines honors allowNaNInfinity (previously emitted null).
+	{
+		asvJSON j;
+		j.allowNaNInfinity = true;
+		ASSERT(j.parse("[NaN]"));
+		ASSERT_EQ(j.toJSONLines(), std::string("NaN\n"));
+	}
+	// J2: SAX integer overflow -> Infinity is rejected when allowNaNInfinity=false.
+	{
+		struct H : asvJSONInternal::JsonSaxHandler {
+			bool gotInf = false;
+			void onDoubleValue(double) override {}
+			void onError(std::string_view) override {}
+		};
+		H h;
+		asvJSONInternal::JsonSaxParser p; // allowNaNInfinity defaults to false
+		std::string big = "[" + std::string(400, '9') + "]";
+		ASSERT(!p.parse(big, h));
+	}
+	// J5: -NaN parses as a negative NaN (not an error / not -Infinity).
+	{
+		asvJSON j;
+		j.allowNaNInfinity = true;
+		ASSERT(j.parse("[-NaN]"));
+		ASSERT(std::isnan(j.getRoot()->get(0)->dbl));
+	}
+	// J4: JSON5 comments containing apostrophes must not be mistaken for string delimiters.
+	{
+		asvJSON j;
+		ASSERT(j.fromJSON5("[1, // it's a comment\n2]"));
+		ASSERT(j.fromJSON5("[1, /* don't */ 2]"));
+		ASSERT(j.fromJSON5("[1, # don't\n2]"));
+	}
+	// G1: GOON tabular rows with REGEX-valued cells must not be re-read as extra rows.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"users":[{"re":{"$regex":"a:b"},"n":1},{"re":{"$regex":"c:d"},"n":2}]})"));
+		asvJSON j2;
+		ASSERT(j2.fromGOON(j.toGOON()));
+		auto* u = j2.getRoot()->get("users");
+		ASSERT(u != nullptr && u->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(u->size(), size_t(2));
+		ASSERT_EQ(u->get(0)->get("n")->getInt(), int64_t(1));
+		ASSERT_EQ(u->get(1)->get("n")->getInt(), int64_t(2));
+		ASSERT(u->get(0)->get("re")->type == asvJSONValue::REGEX);
+		ASSERT(u->get(1)->get("re")->type == asvJSONValue::REGEX);
+		ASSERT_EQ(std::string(u->get(0)->get("re")->getString()),
+		          std::string(j.getRoot()->get("users")->get(0)->get("re")->getString()));
+		ASSERT_EQ(std::string(u->get(1)->get("re")->getString()),
+		          std::string(j.getRoot()->get("users")->get(1)->get("re")->getString()));
+	}
+	// G2: GOON tabular detection falls back to list form for nested OBJECT cells.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"([{"a":{"b":1}},{"a":{"b":2}}])"));
+		asvJSON j2;
+		ASSERT(j2.fromGOON(j.toGOON()));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// G3: '*' inside a quoted GOON cell with \" escapes is data, not RLE.
+	{
+		asvJSON j;
+		ASSERT(j.parse("[{\"x\":\"a\\\"b*2\"}]"));
+		asvJSON j2;
+		ASSERT(j2.fromGOON(j.toGOON()));
+		ASSERT_EQ(std::string(j2.getRoot()->get(0)->get("x")->getString()), "a\"b*2");
+	}
+	// G4: >10000 RLE rows are no longer silently truncated.
+	{
+		std::string json = "[";
+		for (int i = 0; i < 11000; i++) json += i ? ",{\"x\":1}" : "{\"x\":1}";
+		json += "]";
+		asvJSON j;
+		ASSERT(j.parse(json));
+		asvJSONInternal::GoonWriteOptions opts;
+		opts.mode = asvJSONInternal::GoonWriteOptions::Mode::Compact;
+		asvJSON j2;
+		ASSERT(j2.fromGOON(j.toGOON(opts)));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), size_t(11000));
+	}
+	// G6: UDE -0x8000000000000000 decodes as INT64_MIN (not raw_number).
+	{
+		asvJSON j;
+		ASSERT(j.fromUDE("z: -0x8000000000000000\n"));
+		asvJSONValue* v = j.getRoot()->get("z");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->type, asvJSONValue::INT);
+		ASSERT_EQ(v->num, std::numeric_limits<int64_t>::min());
+	}
+	// S1: S-Expr empty-object marker "(() {})" round-trips; no collision with [[],true].
+	{
+		asvJSON a;
+		ASSERT(a.parse(R"({"k":{}})"));
+		asvJSON a2;
+		ASSERT(a2.fromSexpr(a.toSexpr()));
+		ASSERT_EQ(a2.serialize(), a.serialize());
+		asvJSON b;
+		ASSERT(b.parse(R"({"a":[[],true]})"));
+		asvJSON b2;
+		ASSERT(b2.fromSexpr(b.toSexpr()));
+		ASSERT_EQ(b2.serialize(), std::string(R"({"a":[[],true]})"));
+	}
+	// S2: S-Expr quoted "\u0002" (SOH) string element is data, not an array marker.
+	{
+		asvJSON j;
+		ASSERT(j.parse("[\"\\u0002\",2]"));
+		ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT(j.getRoot()->get(0)->type == asvJSONValue::STRING);
+		asvJSON j2;
+		ASSERT(j2.fromSexpr(j.toSexpr()));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+		ASSERT_EQ(std::string(j2.getRoot()->get(0)->getString()), std::string("\x02", 1));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// S3: XML pure-text #content arrays round-trip via the asv:xc marker.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"x":{"#content":["123"]}})"));
+		asvJSON j2;
+		ASSERT(j2.fromXML(j.toXML()));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// S4: INI "0x10" stays a string (hex is not a number literal here).
+	{
+		asvJSON j;
+		ASSERT(j.fromINI("k = 0x10\n"));
+		ASSERT_EQ(j.getRoot()->get("k")->type, asvJSONValue::STRING);
+	}
+	// S5: TOML multiline strings accept a trailing # comment.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOML("s = \"\"\"\nabc\"\"\" # note\n"));
+		ASSERT_EQ(std::string(j.getRoot()->get("s")->getString()), "abc");
+		asvJSON j2;
+		ASSERT(j2.fromTOML("s = '''\nabc''' # note\n"));
+		ASSERT_EQ(std::string(j2.getRoot()->get("s")->getString()), "abc");
+	}
+	// S6: XML and CSV preserve the datetime tz offset.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOML("d = 2020-09-13T00:26:39+02:00\n"));
+		asvJSON jx;
+		ASSERT(jx.fromXML(j.toXML()));
+		ASSERT_EQ(jx.getRoot()->get("d")->tz_offset_min, 120);
+		asvJSON jc;
+		ASSERT(jc.fromCSV(j.toCSV()));
+		asvJSONValue* cd = jc.getRoot()->type == asvJSONValue::ARRAY ? jc.getRoot()->get(0)->get("d") : jc.getRoot()->get("d");
+		ASSERT(cd != nullptr && cd->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(cd->tz_offset_min, 120);
+	}
+	// S7: XML numeric entity &#0; keeps the NUL byte (previously deleted).
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x>a&#0;b</x>"));
+		auto v = j.getRoot()->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(v->getStringLen(), size_t(3));
+		ASSERT(v->getString()[0] == 'a' && v->getString()[1] == '\0' && v->getString()[2] == 'b');
+	}
+	// P1: protobuf fixed32 is unsigned; sfixed32 is signed.
+	{
+		asvJSON a1;
+		ASSERT(a1.parse(R"({"vals":[4294967295]})"));
+		auto pb1 = a1.toProtobuf(R"({"vals":{"id":1,"type":"fixed32","repeated":true,"packed":true}})");
+		asvJSON d1;
+		ASSERT(d1.fromProtobuf(pb1.data(), pb1.size(), R"({"vals":{"id":1,"type":"fixed32","repeated":true,"packed":true}})"));
+		ASSERT_EQ(d1.getRoot()->get("vals")->get(0)->num, int64_t(4294967295LL));
+		asvJSON a2;
+		ASSERT(a2.parse(R"({"vals":[-5]})"));
+		auto pb2 = a2.toProtobuf(R"({"vals":{"id":1,"type":"sfixed32","repeated":true,"packed":false}})");
+		asvJSON d2;
+		ASSERT(d2.fromProtobuf(pb2.data(), pb2.size(), R"({"vals":{"id":1,"type":"sfixed32","repeated":true,"packed":false}})"));
+		ASSERT_EQ(d2.getRoot()->get("vals")->get(0)->num, int64_t(-5));
+	}
+	// P2: CBOR tag 1 with NaN is rejected (previously silently became null).
+	{
+		asvJSON j;
+		unsigned char nan8 = 0x7c; // half-float NaN
+		std::vector<uint8_t> cbor = {0xc1, nan8};
+		std::string s((const char*)cbor.data(), cbor.size());
+		ASSERT(!j.fromCBOR(s));
+	}
+	// Y1: YAML clip chomping keeps one trailing break even for blank-only content.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: |\n\n"));
+		ASSERT_EQ(std::string(j.getRoot()->get("k")->getString()), "\n");
+	}
+	// Y3: an anchor on a block-scalar header aliases the block scalar value ("|" no longer leaks).
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("x: &x |\n  hello\nb: *x\n"));
+		ASSERT_EQ(std::string(j.getRoot()->get("b")->getString()), "hello\n");
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -18190,6 +18395,7 @@ RUN(testCBORFloat16);
 
 	std::cout << "\n--- Re-audit Regression Tests ---\n";
 	RUN(testReauditRegression);
+	RUN(testReauditRegression2);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

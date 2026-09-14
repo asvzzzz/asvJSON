@@ -244,11 +244,16 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
         if (v > (std::numeric_limits<unsigned long long>::max() - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) { overflow = true; break; }
         v = v * static_cast<unsigned long long>(base) + static_cast<unsigned long long>(d);
       }
-      if (overflow || v > static_cast<unsigned long long>(INT64_MAX)) {
+      // '-' can represent exactly one extra magnitude (e.g. -0x8000000000000000 == INT64_MIN)
+      unsigned long long maxV = neg ? (static_cast<unsigned long long>(INT64_MAX) + 1ULL)
+                                    : static_cast<unsigned long long>(INT64_MAX);
+      if (overflow || v > maxV) {
         auto s = asvJSONValue::makeStringView(tok);
         if (s) s->raw_number = true;
         return s;
       }
+      if (neg && v == static_cast<unsigned long long>(INT64_MAX) + 1ULL)
+        return asvJSONValue::makeInt(std::numeric_limits<int64_t>::min());
       int64_t iv = neg ? -static_cast<int64_t>(v) : static_cast<int64_t>(v);
       return asvJSONValue::makeInt(iv);
     }
@@ -281,6 +286,19 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
     errno = 0;
     double d = std::strtod(t.c_str(), &end);
     if (!end || *end != 0 || errno == ERANGE || !std::isfinite(d)) return nullptr;
+    // Mirror the JSON parser: a literal with more significant digits than a
+    // double can hold exactly is stored as a raw_number STRING so the value
+    // round-trips losslessly instead of silently losing precision.
+    size_t sigDigits = 0;
+    for (size_t q = neg ? 1 : 0; q < t.size(); q++) {
+      char c = t[q];
+      if (c != '.' && c != 'e' && c != 'E' && c != '+' && c != '-') sigDigits++;
+    }
+    if (sigDigits > static_cast<size_t>(asvJSONValue::MAX_DOUBLE_SIG_DIGITS)) {
+      auto s = asvJSONValue::makeStringView(tok);
+      if (s) s->raw_number = true;
+      return s;
+    }
     return asvJSONValue::makeDouble(d);
   }
   errno = 0;

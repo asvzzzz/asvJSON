@@ -15,7 +15,7 @@
 
 namespace asvJSONInternal {
 
-const size_t MAX_REPEAT_COUNT = 10000;
+const size_t MAX_REPEAT_COUNT = 1000000;
 
 class GoonDecodeError : public asvJSONError {
 public:
@@ -305,6 +305,19 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       for (const auto& [k, _] : *(obj->obj)) rowKeys.push_back(k);
       std::sort(rowKeys.begin(), rowKeys.end());
       if (rowKeys != cols) { tabular = false; break; }
+    }
+  }
+  // A tabular cell cannot represent a nested OBJECT/ARRAY value (the flat
+  // `val1,val2` cell syntax has no container encoding), so fall back to list
+  // format which serializes object/array items robustly.
+  if (tabular) {
+    for (size_t r = 0; r < arr->size() && tabular; r++) {
+      auto* obj = arr->get(r);
+      if (!obj || !obj->obj) { tabular = false; break; }
+      for (const auto& c : cols) {
+        auto* ch = obj->getConst(c);
+        if (ch && (ch->type == asvJSONValue::OBJECT || ch->type == asvJSONValue::ARRAY)) { tabular = false; break; }
+      }
     }
   }
   // A tabular header cannot represent column names containing separators
@@ -838,18 +851,23 @@ inline std::string goonToJson(std::string_view input) {
             // ROW's cell values so a `^` reference resolves across rows (the
             // encoder emits `^` between consecutive rows, not within one).
             std::vector<std::string> prevValues(fields.size(), "");
+            size_t lastRl = li;
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
               auto& rline = lines[rl];
               if (rline.empty()) continue;
               int rindent = countIndent(rline);
               if (rindent <= indent) break;
+              lastRl = rl;
               std::string_view rcont = stripIndent(rline);
-              // Check for RLE: value*N (respecting quotes)
+              // Check for RLE: value*N (respecting quotes and \" escapes)
               size_t asterisk = std::string_view::npos;
               {
                 bool inQAst = false;
+                bool escAst = false;
                 for (size_t ci = 0; ci < rcont.size(); ci++) {
                   char c_char = rcont[ci];
+                  if (escAst) { escAst = false; continue; }
+                  if (c_char == '\\') { escAst = true; continue; }
                   if (c_char == '"') { inQAst = !inQAst; }
                   else if (c_char == '*' && ci > 0 && !inQAst) { asterisk = ci; break; }
                 }
@@ -860,8 +878,8 @@ inline std::string goonToJson(std::string_view input) {
                 std::string countStr(rcont.substr(asterisk + 1));
                 repeat = atoi(countStr.c_str());
                 if (repeat < 1) repeat = 1;
-                else if (repeat > 10000) {
-                  throw GoonDecodeError("RLE repeat count exceeds limit of 10000 at line " + std::to_string(li + 1));
+                else if (static_cast<size_t>(repeat) > MAX_REPEAT_COUNT) {
+                  throw GoonDecodeError("RLE repeat count exceeds limit of " + std::to_string(MAX_REPEAT_COUNT) + " at line " + std::to_string(li + 1));
                 }
                 rowStr = rcont.substr(0, asterisk);
               }
@@ -906,6 +924,7 @@ inline std::string goonToJson(std::string_view input) {
                 out += '}';
               }
             }
+            if (lastRl > li) li = lastRl;
             if (!rootArr) {
               out += ']';
               if (!stack.empty()) stack.pop_back();

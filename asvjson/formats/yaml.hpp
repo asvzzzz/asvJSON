@@ -590,6 +590,9 @@ inline std::string yamlScalarToJson(std::string_view s) {
 
 inline std::string yamlParseInlineValue(std::string_view s, int depth = 0);
 
+// Forward declaration for the block-scalar parser (used by the anchor pre-scan)
+inline std::string yamlParseBlockScalar(const std::string& header, const std::vector<std::string>& lines, size_t& li, bool isFolded, int parentIndent);
+
 // Forward declaration for embedded "!!yaml ..." documents (nested parse)
 inline std::string yamlToJson(std::string_view input);
 
@@ -1867,7 +1870,27 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 				// the anchored line's own value.
 				std::string_view rv = yamlStripComment(rest);
 				while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
-				anchors[name] = yamlParseInlineValue(rv);
+				if (!rv.empty() && (rv[0] == '|' || rv[0] == '>')) {
+					// Anchor on a block-scalar header ("&x |"): the anchored
+					// value is the block scalar built from the following deep
+					// lines, JSON-quoted exactly like the main pass emits it.
+					size_t aLi = li;
+					bool aFolded = (rv[0] == '>');
+					std::string atext = yamlParseBlockScalar(std::string(rv), lines, aLi, aFolded, indent);
+					std::string aesc;
+					for (auto c : atext) {
+						switch (c) {
+							case '"': aesc += "\\\""; break;
+							case '\\': aesc += "\\\\"; break;
+							case '\n': aesc += "\\n"; break;
+							case '\t': aesc += "\\t"; break;
+							default: aesc += c;
+						}
+					}
+					anchors[name] = "\"" + aesc + "\"";
+				} else {
+					anchors[name] = yamlParseInlineValue(rv);
+				}
 			}
 		} else {
 			// Block anchor -- collect child lines (content only, like before)
@@ -2030,8 +2053,13 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	if (chomp == '-') {
 		text.erase(text.size() - trailing);
 	} else if (chomp == 0) {
+		// Clip removes the extra trailing line breaks but keeps one whenever
+		// the scalar is non-empty (per YAML 1.2), including a content made
+		// only of blank lines (e.g. "k: |\n<blank>" yields "\n", not "") and
+		// content whose last line does not end in a break (folded ">"); an
+		// empty scalar stays empty ("k: |" with no content lines -> "").
 		text.erase(text.size() - trailing);
-		if (!text.empty()) text += '\n';
+		if (!text.empty() || trailing > 0) text += '\n';
 	}
 	return text;
 }

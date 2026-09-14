@@ -25,9 +25,10 @@ enum SexprTokenType { SEXPR_LPAREN, SEXPR_RPAREN, SEXPR_STRING, SEXPR_NUMBER, SE
 static const char SEXPR_KEY_MARK = '\x01';
 // S-Expression internal marker token for arrays whose elements would be
 // misread as an object by the object/list heuristic (an even-length group of
-// scalars). The encoder emits a single literal SEXPR_ARRAY_MARK string token
-// as the first element of such arrays; values that merely contain this byte
-// are escaped as "\u0002..." so a literal marker never collides with data.
+// scalars). The encoder emits a single literal SEXPR_ARRAY_MARK bare-symbol
+// token as the first element of such arrays; the write is UNQUOTED, so it can
+// never collide with a quoted string value that merely contains this byte
+// (those are escaped as "\u0002..." and decode to a STRING token).
 static const char SEXPR_ARRAY_MARK = '\x02';
 
 struct SexprToken {
@@ -252,9 +253,11 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   pos++; // skip '('
   // A leading literal ARRAY marker forces array interpretation, overriding
   // the object/list heuristic (the encoder emits it for even-length scalar
-  // arrays that would otherwise decode as key/value objects).
+  // arrays that would otherwise decode as key/value objects). It is a bare
+  // symbol (unquoted), so a real string value that merely contains the byte
+  // is a STRING token and never matches this.
   bool forceArray = false;
-  if (pos < tokens.size() && tokens[pos].type == SEXPR_STRING && !tokens[pos].marked &&
+  if (pos < tokens.size() && tokens[pos].type == SEXPR_SYMBOL &&
       tokens[pos].value.size() == 1 && static_cast<unsigned char>(tokens[pos].value[0]) == SEXPR_ARRAY_MARK) {
     forceArray = true;
     pos++;
@@ -321,9 +324,13 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // object/list distinction, so ambiguous forms may not round-trip exactly.
   bool isObj = false;
 
-  // Empty object marker: (() #t) -- empty group + true sentinel
-  if (!forceArray && items.size() == 2 && items[0] == "[]" && items[1] == "true"
-      && itemTypes[0] == -1 && itemTypes[1] == SEXPR_TRUE) {
+  // Empty object marker: (() {}) -- empty group + bare {} symbol sentinel.
+  // A data string "{}" is always quoted by the encoder, and a nested empty
+  // object value is itself a parenthesized group, so the bare {} symbol can
+  // only denote this marker (unlike the old (() #t) form, which collided with
+  // the real data value [[], true]).
+  if (!forceArray && items.size() == 2 && items[0] == "[]" && items[1] == "\"{}\""
+      && itemTypes[0] == -1 && itemTypes[1] == SEXPR_SYMBOL) {
     return "{}";
   }
 
@@ -417,9 +424,10 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::OBJECT: {
       out += '(';
       if (v->obj->empty()) {
-        // Empty object: encode as (() #t) so parser can distinguish from
-        // empty array ().
-        out += "() #t)";
+        // Empty object: encode as (() {}) so the decoder can tell it apart
+        // from the empty array (). The bare {} symbol cannot be a quoted
+        // string value, so this marker never collides with real data.
+        out += "() {})";
         break;
       }
       bool first = true;
@@ -470,7 +478,7 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
         }
       }
       out += '(';
-      if (ambiguous) { out += '"'; out += SEXPR_ARRAY_MARK; out += '"'; }
+      if (ambiguous) { out += SEXPR_ARRAY_MARK; out += ' '; }
       for (size_t i = 0; i < v->size(); i++) {
         if (i > 0) out += ' ';
         sexprSerializeVal(v->get(i), out, depth + 1);

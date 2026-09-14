@@ -29,7 +29,7 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 					const char* last = ent.data() + ent.size();
 					unsigned long cp = 0;
 					auto [ptr, ec] = std::from_chars(first, last, cp, 16);
-					if (ec == std::errc() && ptr > first && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+					if (ec == std::errc() && ptr > first && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
 						if (cp <= 0x7F) out += static_cast<char>(cp);
 						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
@@ -40,7 +40,7 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 					const char* last = ent.data() + ent.size();
 					unsigned long cp = 0;
 					auto [ptr, ec] = std::from_chars(first, last, cp, 10);
-					if (ec == std::errc() && ptr > first && cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+					if (ec == std::errc() && ptr > first && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
 						if (cp <= 0x7F) out += static_cast<char>(cp);
 						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
@@ -138,7 +138,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				out += pad + "<" + xmlSanitizeElementName(name) + ">" + xmlEscapeContent(str_data) + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		case T::DATETIME: {
-			std::string dt; fmtDateTimeVal(timestamp, datetime_ms, dt);
+			std::string dt; fmtDateTimeVal(timestamp, datetime_ms, dt, tz_offset_min);
 			out += pad + "<" + xmlSanitizeElementName(name) + " type=\"datetime\">" + dt + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		}
@@ -171,7 +171,15 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			// Check for #content array (mixed content from fromXML)
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
+				// A pure-text #content array would re-parse as a typed scalar,
+				// so pin it with an asv:xc marker that the decoder turns back
+				// into the exact #content array (raw strings, no type detect).
+				bool pureText = true;
+				for (const auto& it2 : *(contentIt->second->arr)) {
+					if (it2->type != asvJSONValue::STRING) { pureText = false; break; }
+				}
 				out += pad + "<" + xmlSanitizeElementName(name);
+				if (pureText) out += " asv:xc=\"1\"";
 				for (const auto& [k, v] : *obj) {
 					if (k == "#content") continue;
 					if (!k.empty() && k[0] == '@') {
@@ -582,6 +590,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	std::vector<XmlSegment> segments;
 	xmlParseChildrenSegments(s, pos, segments, depth + 1, nsMap);
 
+	// asv:xc marker (from toXML) pins an object as a #content array so pure
+	// text round-trips back to {"#content":[raw strings]} instead of being
+	// collapsed into a typed scalar. Consumed here; never becomes a @attr.
+	bool forceMixed = false;
+	auto xcIt = attrs.find("asv:xc");
+	if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
+
 	// Closing tag
 	xmlSkipSpaces(s, pos);
 	if (pos + 1 < s.size() && s[pos] == '<' && s[pos + 1] == '/') {
@@ -626,6 +641,14 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		// empty value. A lone type="..." attribute pins the parsed type so
 		// empty typed values (STRING, BINARY, EXTENSION) round-trip instead of
 		// collapsing into an attribute-only object.
+		if (forceMixed && segments.empty()) {
+			// <x asv:xc="1"></x>: marker with no content -- empty #content array
+			auto xobj = asvJSONValue::makeObject();
+			auto xarr = asvJSONValue::makeArray();
+			xobj->obj->emplace("#content", std::move(xarr));
+			for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+			return xobj;
+		}
 		auto tit = attrs.find("type");
 		if (tit != attrs.end()) {
 			const std::string& t = tit->second;
@@ -660,6 +683,18 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// No elements, only text - simple case
 	if (elemCount == 0) {
+		if (forceMixed) {
+			// <x asv:xc="1">text</x>: pure-text marker -- restore the original
+			// #content array of strings (do not value-detect).
+			auto xobj = asvJSONValue::makeObject();
+			auto xarr = asvJSONValue::makeArray();
+			for (size_t i = 0; i < segments.size(); i++)
+				if (!segments[i].isElement && !segments[i].text.empty())
+					xarr->arr->push_back(asvJSONValue::makeString(segments[i].text.data(), segments[i].text.size()));
+			xobj->obj->emplace("#content", std::move(xarr));
+			for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+			return xobj;
+		}
 		if (attrs.empty()) return xmlDetectValue(combinedText);
 		// Check for special type attribute (from toXML)
 		auto tit = attrs.find("type");
@@ -676,10 +711,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				sobj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
 				return sobj;
 			}
-			if (t == "datetime" && !combinedText.empty()) {
-				time_t ts = 0; int ms = 0;
-				if (tryParseDateTime(combinedText, ts, &ms)) return asvJSONValue::makeDateTime(ts, ms);
-			}
+if (t == "datetime" && !combinedText.empty()) {
+			time_t ts = 0; int ms = 0; int tz = 0;
+			if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
+		}
 			if (t == "binary" && !combinedText.empty()) {
 				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
 				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
@@ -743,7 +778,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Add attributes
 	for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
 
-	if (hasInterleaving) {
+	if (hasInterleaving || forceMixed) {
 		// Mixed content: preserve interleaved order as #content array
 		auto arr = asvJSONValue::makeArray();
 		for (auto& seg : segments) {
@@ -752,7 +787,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
 				arr->arr->push_back(std::move(wrapper));
 			} else {
-				arr->arr->push_back(xmlDetectValue(seg.text));
+				// Marker-pinned content keeps raw strings (no type detection),
+				// so {"#content":["123"]} round-trips instead of becoming [123].
+				if (forceMixed) {
+					arr->arr->push_back(asvJSONValue::makeString(seg.text.data(), seg.text.size()));
+				} else {
+					arr->arr->push_back(xmlDetectValue(seg.text));
+				}
 			}
 		}
 		obj->obj->emplace("#content", std::move(arr));

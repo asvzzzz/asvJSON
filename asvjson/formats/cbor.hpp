@@ -335,6 +335,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         // date parser would: floor towards -inf, keep ms in [0, 1000).
         if (val->type == asvJSONValue::DOUBLE) {
           double sec = val->dbl;
+          // NaN/Infinity cannot be a date/time; reject loudly instead of
+          // casting to time_t (which is UB on MSVC and yielded null).
+          if (!std::isfinite(sec)) throw asvJSONError("CBOR tag 1: NaN/Infinity is not a valid date");
           double fl = std::floor(sec);
           // Casting an out-of-range double to time_t is UB on some platforms.
           if (fl < static_cast<double>(std::numeric_limits<time_t>::min()) ||

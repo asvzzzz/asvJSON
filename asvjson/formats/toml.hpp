@@ -364,13 +364,33 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   s = trimSV(s);
   if (depth > MAX_TOML_DEPTH) throw asvJSONError("TOML value nesting too deep");
   if (s.empty()) return "null";
+  auto stripCommentTail = [&]() {
+    // A '#' after a closed value (ml strings, inline tables, arrays) is a
+    // comment; everything to end of line is dropped. Only applied to trailing
+    // junk, never inside a value or string.
+    s = trimSV(s);
+    if (!s.empty() && s[0] == '#') {
+      size_t e = s.find_first_of("\r\n");
+      s = (e == std::string_view::npos) ? std::string_view{} : s.substr(e);
+    }
+  };
   auto rejectTrailing = [&]() {
-    if (strictTail && !trimSV(s).empty())
-      throw asvJSONError("trailing content after value");
+    if (strictTail) {
+      stripCommentTail();
+      if (!trimSV(s).empty())
+        throw asvJSONError("trailing content after value");
+    }
   };
   auto checkTailLen = [&](size_t n) {
-    if (strictTail && !trimSV(s.substr(n)).empty())
-      throw asvJSONError("trailing content after value");
+    if (strictTail) {
+      std::string_view t = trimSV(s.substr(n));
+      if (!t.empty() && t[0] == '#') {
+        size_t e = t.find_first_of("\r\n");
+        t = (e == std::string_view::npos) ? std::string_view{} : t.substr(e);
+      }
+      if (!trimSV(t).empty())
+        throw asvJSONError("trailing content after value");
+    }
   };
 
   // Inline table

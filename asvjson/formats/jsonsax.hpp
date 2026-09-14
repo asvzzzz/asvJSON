@@ -158,7 +158,7 @@ private:
     if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'I')
       return parseInfinity(true);
     if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'N')
-      return parseNaN();
+      return parseNaN(true);
     if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
     throw std::runtime_error(std::string("Unexpected: '") + c + "'");
   }
@@ -317,9 +317,14 @@ private:
       long long l = 0;
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, l);
       if (ec != std::errc() || ptr != buf + numLen) {
-        // Too large for int64 -- emit as double if possible, else as raw string
+        // Too large for int64 -- emit as double if possible, else fail
         std::string numStr(buf, numLen);
-        double d = std::strtod(numStr.c_str(), nullptr);
+        errno = 0;
+        char* end = nullptr;
+        double d = std::strtod(numStr.c_str(), &end);
+        if (end != numStr.c_str() + numLen) throw std::runtime_error("Invalid number");
+        if ((std::isnan(d) || std::isinf(d)) && !allowNaNInfinity)
+          throw std::runtime_error("NaN or Infinity not allowed");
         handler_->onDoubleValue(d);
       } else {
         handler_->onIntegerValue(l);
@@ -363,11 +368,14 @@ private:
     return true;
   }
 
-  bool parseNaN() {
+  bool parseNaN(bool negative = false) {
+    if (negative) advance(); // skip '-'
     if (input_.compare(pos_, 3, "NaN") != 0) throw std::runtime_error("Expected NaN");
     pos_ += 3;
     if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid NaN");
-    handler_->onDoubleValue(std::numeric_limits<double>::quiet_NaN());
+    double v = std::numeric_limits<double>::quiet_NaN();
+    if (negative) v = -v;
+    handler_->onDoubleValue(v);
     return true;
   }
 
