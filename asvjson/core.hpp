@@ -207,6 +207,14 @@ public:
 		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return; }
 		insertNew(std::string(k), std::move(v));
 	}
+	// Move-in variant: one hash lookup, then either replace in place or insert.
+	// Returns true when a new entry was inserted (callers count new members).
+	bool insert_or_assign(std::string&& k, mapped_type&& v) {
+		auto it = index_.find(std::string_view(k));
+		if (it != index_.end()) { order_[it->second]->kv.second = std::move(v); return false; }
+		insertNew(std::move(k), std::move(v));
+		return true;
+	}
 
 	size_type count(const std::string& k) const { return index_.count(k); }
 	size_type count(std::string_view k) const { return index_.count(k); }
@@ -410,6 +418,15 @@ struct asvJSONValue {
 
 	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeStringView(std::string_view sv) {
 		return makeString(sv.data(), sv.size());
+	}
+
+	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeString(std::string&& s) {
+		if (!asvJSONValue::checkStringLen(s.size())) return nullptr;
+		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
+		if (!v) return nullptr;
+		v->type = STRING;
+		v->str_data = std::move(s);
+		return v;
 	}
 
 	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeObject() {
@@ -799,13 +816,21 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 	}
 }
 
+// Width-limited view into a shared pool of spaces, used for pretty-print
+// indentation. Avoids a per-node std::string allocation (a 16/20-char prefix
+// escapes SSO at depth >= 4, and pretty printing hits every nested node).
+inline std::string_view indentSpaces(size_t n) {
+	static const std::string spaces(256, ' ');
+	return std::string_view(spaces).substr(0, std::min(n, spaces.size()));
+}
+
 inline void asvJSONValue::serializePretty(std::string& out, int indent, bool allowNaNInfinity) const {
 	size_t est = 256;
 	if (type == OBJECT && obj && obj->size() < SIZE_MAX / 80) est = obj->size() * 80;
 	else if (type == ARRAY && arr && arr->size() < SIZE_MAX / 32) est = arr->size() * 32;
 	out.reserve(out.size() + est);
-	std::string prefix(indent * 4, ' ');
-	std::string indentNext((indent + 1) * 4, ' ');
+	std::string_view prefix = indentSpaces(static_cast<size_t>(indent) * 4);
+	std::string_view indentNext = indentSpaces(static_cast<size_t>(indent + 1) * 4);
 	switch (type) {
 		case NULL_VAL:
 		case STRING:
@@ -991,6 +1016,10 @@ private:
 	std::string parseStringKey() {
 		std::string_view raw = parseStringRaw();
 		if (!asvJSONValue::checkStringLen(raw.size())) throw asvJSONError("Object key too long");
+		if (raw.find('\\') == std::string_view::npos) {
+			// No escape sequences: the raw slice IS the decoded key.
+			return std::string(raw);
+		}
 		try { return unescapeJsonString(raw, true); }
 		catch (const std::runtime_error&) { throw asvJSONError("Invalid escape in string"); }
 	}
@@ -1059,10 +1088,15 @@ private:
 				return asvJSONValue::makeDateTime(ts, ms, tz);
 			}
 		}
-		std::string unescaped;
-		try { unescaped = unescapeJsonString(raw, true); }
+		if (raw.find('\\') == std::string_view::npos) {
+			// No escape sequences: build the value straight from the input
+			// slice, skipping the intermediate unescape copy.
+			return asvJSONValue::makeString(raw.data(), raw.size());
+		}
+		try {
+			return asvJSONValue::makeString(unescapeJsonString(raw, true));
+		}
 		catch (const std::runtime_error&) { throw asvJSONError("Invalid escape in string"); }
-		return asvJSONValue::makeString(unescaped.c_str(), unescaped.size());
 	}
 
 	std::unique_ptr<asvJSONValue> parseObject() {
@@ -1082,9 +1116,10 @@ private:
 				next();
 				auto val = parseValue();
 				if (!val) { --parseDepth; throw asvJSONError("Failed to parse object value"); }
-				auto it = mapFind(*(obj->obj), key);
-				if (it != obj->obj->end()) { it->second = std::move(val); }
-				else { obj->obj->emplace(std::move(key), std::move(val)); objSize++; }
+				// One hash lookup: replace in place on duplicate keys (last
+				// wins), insert otherwise. insert_or_assign reports whether a
+				// new member was added so objSize stays the unique-count.
+				if (obj->obj->insert_or_assign(std::move(key), std::move(val))) objSize++;
 				skip();
 				if (cur() == '}') { next(); break; }
 				if (cur() == ',') next();
@@ -1225,7 +1260,7 @@ private:
 
 	std::unique_ptr<asvJSONValue> parseNumber() {
 		size_t start = pos;
-		auto isDigit = [](char c) { return std::isdigit(static_cast<unsigned char>(c)); };
+		auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
 		if (cur() == '-') next();
 		size_t intStart = pos;
 		while (isDigit(cur())) next();
@@ -2216,17 +2251,15 @@ public:
 
 inline void fmtDoubleVal(double d, std::string& out) {
 	if (d == 0.0) { out += (std::signbit(d) ? "-0" : "0"); return; }
-	std::string tmp;
+	char buf[64];
 	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
-		tmp.resize(64);
-		auto [ptr, ec] = std::to_chars(tmp.data(), tmp.data() + tmp.size(), d);
-		if (ec == std::errc()) { out.append(tmp.data(), ptr - tmp.data()); return; }
+		auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
+		if (ec == std::errc()) { out.append(buf, ptr - buf); return; }
 	#endif
 	// %.16g drops the last digit of 17-digit doubles (e.g.
 	// 0.30000000000000004 becomes "0.3"), breaking round-trips.  Try the
 	// terse form first; if strtod does not recover the exact same value,
 	// escalate to %.17g (DBL_DECIMAL_DIG), which is always lossless.
-	char buf[64];
 	int n = snprintf(buf, sizeof(buf), "%.16g", d);
 	if (n > 0) {
 		errno = 0;
