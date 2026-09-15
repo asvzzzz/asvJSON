@@ -4108,7 +4108,9 @@ TEST(testXMLMixedContentTypedScalars) {
 		auto* bn = (*c->arr)[2]->get("item");
 		ASSERT(bn != nullptr && bn->type == asvJSONValue::BINARY);
 		ASSERT_EQ(std::string(reinterpret_cast<const char*>(bn->bin_data.data()), bn->bin_data.size()), "abc");
-		ASSERT_EQ(std::string((*c->arr)[3]->getString()), "tail");
+		// Leading whitespace in mixed-content text is significant and
+		// preserved through the round trip (" tail", not "tail").
+		ASSERT_EQ(std::string((*c->arr)[3]->getString()), " tail");
 		// And the round-trip is stable: re-encoding the re-parsed tree yields
 		// the same typed elements.
 		std::string xml2 = json2.toXML();
@@ -4188,6 +4190,116 @@ TEST(testXMLArrayTypedItems) {
 		typed("oid", asvJSONValue::OBJECTID);
 		typed("ts", asvJSONValue::TIMESTAMP);
 		typed("ext", asvJSONValue::EXTENSION);
+	}
+}
+
+TEST(testXMLAuditFixes) {
+	// BUG 1: xmlSkipSpaces ate leading whitespace in mixed-content text
+	// nodes.  "<p>  hello world  </p>" must preserve leading spaces.
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<p>  hello world  </p>"));
+		auto* t = json.getRoot()->get("p");
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(t->getString()), "  hello world  ");
+	}
+	// BUG 1b: whitespace before tail in mixed content preserved.
+	// "<root><a>x</a> tail</root>" must keep " tail".
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<root><a>x</a> tail</root>"));
+		auto* root = json.getRoot()->get("root");
+		ASSERT(root != nullptr && root->type == asvJSONValue::OBJECT);
+		auto* tc = root->get("#content");
+		ASSERT(tc != nullptr && tc->type == asvJSONValue::ARRAY);
+		ASSERT(tc->arr->size() == size_t(2));
+		// The text after the element: " tail" (leading space preserved)
+		ASSERT_EQ(std::string((*tc->arr)[1]->getString()), " tail");
+	}
+	// BUG 2: INT/DOUBLE/BOOL in #content were emitted as bare inline
+	// text ("a42b") destroying types and structure.  They must now
+	// wrap in <item> so types survive the round trip.
+	{
+		asvJSON json;
+		json.setValue("root", asvJSONValue::makeObject());
+		auto* root = json.getRoot()->get("root");
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeString("a", 1));
+		arr->arr->push_back(asvJSONValue::makeInt(42));
+		arr->arr->push_back(asvJSONValue::makeDouble(3.14));
+		arr->arr->push_back(asvJSONValue::makeBool(true));
+		arr->arr->push_back(asvJSONValue::makeString("b", 1));
+		root->obj->emplace("#content", std::move(arr));
+		std::string xml = json.toXML();
+		// Serialisation must have <item> wrappers for non-string values
+		ASSERT(xml.find("<item>42</item>") != std::string::npos);
+		ASSERT(xml.find("<item>3.14</item>") != std::string::npos);
+		ASSERT(xml.find("<item>true</item>") != std::string::npos);
+		// Round-trip: #content array has 5 items (strings + wrappers)
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* c = json2.getRoot()->get("root")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(c->arr->size(), size_t(5));
+		ASSERT_EQ(std::string((*c->arr)[0]->getString()), "a");
+		ASSERT_EQ(std::string((*c->arr)[4]->getString()), "b");
+	}
+	// BUG 3: NULL in #content was silently dropped.
+	// It must now round-trip as xsi:nil="true" -> {"item": null}.
+	{
+		asvJSON json;
+		json.setValue("root", asvJSONValue::makeObject());
+		auto* root = json.getRoot()->get("root");
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeString("a", 1));
+		arr->arr->push_back(asvJSONValue::makeNull());
+		arr->arr->push_back(asvJSONValue::makeString("b", 1));
+		root->obj->emplace("#content", std::move(arr));
+		std::string xml = json.toXML();
+		ASSERT(xml.find("xsi:nil=\"true\"") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* c = json2.getRoot()->get("root")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(c->arr->size(), size_t(3));
+		ASSERT((*c->arr)[0]->type == asvJSONValue::STRING);
+		// The null item survives as a named wrapper ({item: null}) just
+		// like the other typed scalars in mixed content.
+		auto* ni = (*c->arr)[1]->get("item");
+		ASSERT(ni != nullptr && ni->type == asvJSONValue::NULL_VAL);
+		ASSERT_EQ(std::string((*c->arr)[2]->getString()), "b");
+	}
+	// BUG 4: NULL single-key object <item/> parsed as "" (empty string)
+	// instead of null.  <item xsi:nil="true"/> must parse as null.
+	{
+		asvJSON json;
+		ASSERT(json.fromXML("<item xsi:nil=\"true\"/>"));
+		auto* v = json.getRoot()->get("item");
+		ASSERT(v != nullptr && v->type == asvJSONValue::NULL_VAL);
+		// Empty tag (no xsi:nil) still parses as empty string
+		asvJSON json2;
+		ASSERT(json2.fromXML("<item/>"));
+		auto* v2 = json2.getRoot()->get("item");
+		ASSERT(v2 != nullptr && v2->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v2->getString()), "");
+	}
+	// BUG 5: base64 with line-breaks (PEM-style) was rejected.
+	// Whitespace inside base64 must be stripped before decoding.
+	{
+		asvJSON json;
+		// "abcdef" = base64 "YWJjZGVm"; wrapped across two lines
+		ASSERT(json.fromXML("<d type=\"binary\">YWJj\nZGVm</d>"));
+		auto* v = json.getRoot()->get("d");
+		ASSERT(v != nullptr && v->type == asvJSONValue::BINARY);
+		std::string dec(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
+		ASSERT_EQ(dec, "abcdef");
+		// Multi-line with CRLF
+		asvJSON json2;
+		ASSERT(json2.fromXML("<d type=\"binary\">YWJj\r\nZGVm</d>"));
+		auto* v2 = json2.getRoot()->get("d");
+		ASSERT(v2 != nullptr && v2->type == asvJSONValue::BINARY);
+		std::string dec2(reinterpret_cast<const char*>(v2->bin_data.data()), v2->bin_data.size());
+		ASSERT_EQ(dec2, "abcdef");
 	}
 }
 
@@ -18920,6 +19032,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLEmptyContainerTypeMarkers);
 	RUN(testXMLMixedContentTypedScalars);
 	RUN(testXMLArrayTypedItems);
+	RUN(testXMLAuditFixes);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);

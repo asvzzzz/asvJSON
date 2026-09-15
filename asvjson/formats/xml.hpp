@@ -199,8 +199,10 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 					} else if (item->type == asvJSONValue::OBJECT && item->obj && item->obj->size() == 1) {
 						const auto& [childName, childVal] = *item->obj->begin();
 						std::string safeChildName = xmlSanitizeElementName(childName);
-						if (!childVal || childVal->type == asvJSONValue::NULL_VAL) {
+						if (!childVal) {
 							out += "<" + safeChildName + "/>";
+						} else if (childVal->type == asvJSONValue::NULL_VAL) {
+							out += "<" + safeChildName + " xsi:nil=\"true\"/>";
 						} else if (childVal->type == asvJSONValue::STRING && childVal->str_data.empty()) {
 							out += "<" + safeChildName + "/>";
 						} else if (childVal->type == asvJSONValue::STRING) {
@@ -229,23 +231,13 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 					} else if (item->type == asvJSONValue::ARRAY) {
 						item->toXML(out, "item", 0);
 						if (!out.empty() && out.back() == '\n') out.pop_back();
-					} else if (item->type == asvJSONValue::INT) {
-						char buf[32];
-						auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num);
-						if (ec == std::errc()) out += std::string(buf, ptr);
-					} else if (item->type == asvJSONValue::DOUBLE) {
-						if (!std::isnan(item->dbl) && !std::isinf(item->dbl)) {
-							std::string val; fmtDoubleVal(item->dbl, val); out += val;
-						}
-					} else if (item->type == asvJSONValue::BOOL_VAL) {
-						out += item->flag ? "true" : "false";
-					} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
+					} else if (item->type == asvJSONValue::INT || item->type == asvJSONValue::DOUBLE ||
+					           item->type == asvJSONValue::BOOL_VAL || item->type == asvJSONValue::NULL_VAL ||
+					           item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
 					           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
 					           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
 						item->toXML(out, "item", 0);
 						if (!out.empty() && out.back() == '\n') out.pop_back();
-					} else if (item->type == asvJSONValue::NULL_VAL) {
-						// null in mixed content -> skip
 					} else {
 						// CUSTOM_TAG (and any future unhandled type) used to fall
 						// through silently; reject instead of dropping the item.
@@ -444,6 +436,16 @@ inline bool xmlNeedsStringType(std::string_view s) {
 	return detected && detected->type != asvJSONValue::STRING;
 }
 
+// Remove XML whitespace (space, tab, CR, LF) from base64 text so PEM-style
+// line-wrapped payloads decode instead of silently degrading to an object.
+inline std::string xmlStripWs(std::string_view s) {
+	std::string out;
+	out.reserve(s.size());
+	for (char c : s)
+		if (c != ' ' && c != '\t' && c != '\n' && c != '\r') out += c;
+	return out;
+}
+
 // Forward declaration
 inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap);
 
@@ -461,8 +463,6 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 	std::unordered_map<std::string, std::string>& nsMap)
 {
 	while (pos < s.size()) {
-		xmlSkipSpaces(s, pos);
-		if (pos >= s.size()) break;
 		if (s[pos] == '<') {
 			if (pos + 1 < s.size() && s[pos + 1] == '/') break;
 			if (pos + 1 < s.size() && s[pos + 1] == '!') {
@@ -728,7 +728,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
 			}
 			if (t == "binary" && !combinedText.empty()) {
-				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
+				std::string clean = xmlStripWs(combinedText);
+				auto decoded = decodeBase64Fast(clean.data(), clean.size());
 				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
 			}
 			if (t == "objectid" && !combinedText.empty()) {
@@ -764,7 +765,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				if (ec == std::errc()) return asvJSONValue::makeTimestamp(v);
 			}
 			if (t == "extension" && !combinedText.empty()) {
-				auto decoded = decodeBase64Fast(combinedText.data(), combinedText.size());
+				std::string clean = xmlStripWs(combinedText);
+				auto decoded = decodeBase64Fast(clean.data(), clean.size());
 				if (!decoded.empty()) {
 					auto eit = attrs.find("exttype");
 					int8_t et = 0;
