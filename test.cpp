@@ -3988,21 +3988,21 @@ TEST(testXMLElementNameSanitization) {
 	// verbatim (this was broken: xmlParseName rejected bytes >= 0x80).
 	{
 		asvJSON json;
-		json.parse(std::string(u8R"({"привет":42})"));
+		json.parse(std::string(u8"{\"\u043F\u0440\u0438\u0432\u0435\u0442\":42}"));
 		std::string xml = json.toXML();
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
-		ASSERT(json2.getRoot()->get(std::string(u8"привет"))->getInt() == 42);
+		ASSERT(json2.getRoot()->get(std::string(u8"\u043F\u0440\u0438\u0432\u0435\u0442"))->getInt() == 42);
 	}
 	// UTF-8 (non-ASCII) element names are legal XML names and round-trip
 	// verbatim (this was broken: xmlParseName rejected bytes >= 0x80).
 	{
 		asvJSON json;
-		json.parse(std::string(u8R"({"привет":42})"));
+		json.parse(std::string(u8"{\"\u043F\u0440\u0438\u0432\u0435\u0442\":42}"));
 		std::string xml = json.toXML();
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
-		ASSERT(json2.getRoot()->get(std::string(u8"привет"))->getInt() == 42);
+		ASSERT(json2.getRoot()->get(std::string(u8"\u043F\u0440\u0438\u0432\u0435\u0442"))->getInt() == 42);
 	}
 	// Numeric/'-'-leading keys keep their "item" prefix policy
 	{
@@ -6733,7 +6733,6 @@ TEST(testYamlExtras) {
 		asvJSON json;
 		ASSERT(json.fromYAML("emoji: \"\\uD83D\\uDE00\""));
 		ASSERT_EQ(std::string(json.getString("emoji")), std::string("\xF0\x9F\x98\x80"));
-		ASSERT_EQ(std::string(json.getString("emoji")), std::string("😀"));
 	}
 	// A surrogate pair must survive a YAML round-trip.
 	{
@@ -6922,7 +6921,7 @@ TEST(testToTOONAdvanced) {
 		ASSERT_EQ(empty->size(), size_t(0));
 	}
 	// Root array of nested arrays round-trip (structural preservation)
-	// Spec (toon-format/spec §9.2/§9.4): primitive nested arrays render as
+	// Spec (toon-format/spec Sec. 9.2/Sec. 9.4): primitive nested arrays render as
 	// "- [M]: v1,v2" headers, NOT the flattened or inline-JSON "[1,2]" forms.
 	{
 		asvJSON j;
@@ -6987,7 +6986,7 @@ TEST(testToTOONAdvanced) {
 }
 
 TEST(testToTOONSpecListForm) {
-	// Decoder accepts the spec list-form nested-array headers (§9.2/§9.4):
+	// Decoder accepts the spec list-form nested-array headers (Sec. 9.2/Sec. 9.4):
 	// "- [M]: v1,v2" (primitive), "- [M]:" + deeper items (non-uniform),
 	// and "- [0]:" (empty inner array).
 	{
@@ -7049,7 +7048,7 @@ TEST(testToTOONSpecListForm) {
 }
 
 TEST(testToTOONHeadersStrict) {
-	// Named "key[N]:" length-bearing headers (§9.1) -- encoder emits them and
+	// Named "key[N]:" length-bearing headers (Sec. 9.1) -- encoder emits them and
 	// the decoder round-trips them for primitive arrays.
 	{
 		asvJSON j;
@@ -10037,11 +10036,11 @@ key = "value" # inline comment)")));
   // Non-ASCII bare keys are accepted
   {
     asvJSON j;
-    ASSERT(j.fromTOML(std::string_view("ключ = \"значение\"")));
-    ASSERT_EQ(std::string(j.getString("ключ")), "значение");
+    ASSERT(j.fromTOML(std::string_view("\u043A\u043B\u044E\u0447 = \"\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435\"")));
+    ASSERT_EQ(std::string(j.getString("\u043A\u043B\u044E\u0447")), "\u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435");
     asvJSON j2;
-    ASSERT(j2.fromTOML(std::string_view("[раздел]\nключ = 1")));
-    ASSERT_EQ(j2.getInt("раздел.ключ"), int64_t(1));
+    ASSERT(j2.fromTOML(std::string_view("[\u0440\u0430\u0437\u0434\u0435\u043B]\n\u043A\u043B\u044E\u0447 = 1")));
+    ASSERT_EQ(j2.getInt("\u0440\u0430\u0437\u0434\u0435\u043B.\u043A\u043B\u044E\u0447"), int64_t(1));
   }
   // Strict floats: dot-leading, dot-trailing, empty exponent are errons
   {
@@ -10439,7 +10438,7 @@ TEST(testFromSexpr) {
     ASSERT(j2.fromSexpr(std::string_view(in3)));
     ASSERT_EQ(std::string(j2.getRoot()->getString()), "x\xF0\x9F\x98\x80");
 
-    // é = U+00E9, 3-byte UTF-8
+    // e-acute (U+00E9), 3-byte UTF-8
     asvJSON j3;
     std::string in4 = R"("x\u00e9")";
     ASSERT(j3.fromSexpr(std::string_view(in4)));
@@ -11405,7 +11404,7 @@ TEST(testFromJSON5) {
     ASSERT(j.fromJSON5(std::string_view("[\xC2\xA0 1]")));
     ASSERT_EQ(j.getRoot()->get(static_cast<size_t>(0))->getInt(), int64_t(1));
   }
-  // Unicode identifier key (Japanese: 日本語)
+  // Unicode identifier key (Japanese: \u65E5\u672C\u8A9E)
   {
     asvJSON j;
     const char json5src[] = "{'hello':{" "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e" ":'val'}}";
@@ -12065,7 +12064,7 @@ TEST(testFromINI) {
     ASSERT(x2 != nullptr && x2->type == asvJSONValue::INT);
     ASSERT_EQ(x2->getInt(), int64_t(2));
   }
-// Duplicate keys → arrays (repeated key = value lines are the primitive-array
+// Duplicate keys  ->  arrays (repeated key = value lines are the primitive-array
   // encoding, so the decoder merges duplicates into an ARRAY)
   {
     asvJSON j;
@@ -17204,7 +17203,7 @@ TEST(testEquality) {
 }
 
 TEST(testMergeDeep) {
-	// Basic object merge — other overrides
+	// Basic object merge  -  other overrides
 	{
 		asvJSON base, overlay;
 		base.parse(R"({"a":1,"b":2})");
@@ -17214,7 +17213,7 @@ TEST(testMergeDeep) {
 		ASSERT_EQ(base.get("b")->getInt(), int64_t(3));
 		ASSERT_EQ(base.get("c")->getInt(), int64_t(4));
 	}
-	// Deep merge — nested objects recurse
+	// Deep merge  -  nested objects recurse
 	{
 		asvJSON base, overlay;
 		base.parse(R"({"a":{"x":1,"y":2}})");
@@ -17251,7 +17250,7 @@ TEST(testMergeDeep) {
 }
 
 TEST(testDiff) {
-	// Identical — empty diff
+	// Identical  -  empty diff
 	{
 		asvJSON a, b;
 		a.parse(R"({"x":1})");
@@ -17306,7 +17305,7 @@ TEST(testDiff) {
 		a.parse(R"([1,2,3])");
 		b.parse(R"([1,9,3,4])");
 		auto d = a.diff(b);
-		// index 1: replace 2→9, index 3: add 4
+		// index 1: replace 2 -> 9, index 3: add 4
 		ASSERT_EQ(d.getRoot()->size(), size_t(2));
 	}
 	// Type change

@@ -1384,7 +1384,7 @@ inline std::string udeHeaderVersion() {
 // ignored so that forward-compatible minor versions keep working.
 inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict) {
   std::string_view sv(text);
-  // §2.1: the first non-empty line may be an optional "# UDE vX.Y" header.
+  // Sec. 2.1: the first non-empty line may be an optional "# UDE vX.Y" header.
   size_t scan = 0;
   size_t headEnd = std::string_view::npos;
   std::string_view t;

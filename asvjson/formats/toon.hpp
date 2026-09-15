@@ -5,8 +5,8 @@
 //   key: value            -- object member (value may be a bare token or JSON)
 //   - item                -- array element
 //   key:                  -- nested object / array (children indented)
-//   key[N]: v1,v2         -- inline primitive array with length header (§9.1)
-//   key[N]: / - items     -- list-form array with length header (§9.4)
+//   key[N]: v1,v2         -- inline primitive array with length header (Sec. 9.1)
+//   key[N]: / - items     -- list-form array with length header (Sec. 9.4)
 //   key[N]{"f1","f2"}:    -- tabular array; subsequent indented lines are rows
 // Strings are quoted only when required; full round-trip via toTOON()/fromTOON().
 
@@ -156,11 +156,11 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
 inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int indent, int depth);
 inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth);
 
-// Spec (toon-format/spec) §9.2/§9.4: a nested array rendered as a list item.
+// Spec (toon-format/spec) Sec. 9.2/Sec. 9.4: a nested array rendered as a list item.
 //   - empty inner array:  "- [0]:"
-//   - primitive inner array: "- [M]: v1,v2,..."  (§9.2)
+//   - primitive inner array: "- [M]: v1,v2,..."  (Sec. 9.2)
 //   - non-uniform / array of objects: "- [M]:" header, then nested items at
-//     depth +1 relative to the hyphen line (§9.4). Tabular form is not
+//     depth +1 relative to the hyphen line (Sec. 9.4). Tabular form is not
 //     available in list-item position, so nested objects/arrays use list form.
 inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int indent, int depth) {
   if (!v || v->type != asvJSONValue::ARRAY || v->size() == 0) {
@@ -227,9 +227,9 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       else out += "[]\n";
       return;
     }
-    // Spec §9.1: length-bearing header "key[N]:" for non-empty arrays. All
+    // Spec Sec. 9.1: length-bearing header "key[N]:" for non-empty arrays. All
     // primitive members render inline on the header line ("key[N]: v1,v2");
-    // otherwise the header opens a list whose items nest at indent + 1 (§9.4).
+    // otherwise the header opens a list whose items nest at indent + 1 (Sec. 9.4).
     bool allPrim = true;
     for (size_t i = 0; i < v->size(); i++) {
       auto* e = v->get(i);
@@ -392,7 +392,7 @@ inline std::string toonToJson(std::string_view input) {
     if (stack.empty()) break;
     auto& curFrame = stack.back();
 
-    // array header: [optional key][N][{fields}]:  (spec §9.1-§9.4, §10)
+    // array header: [optional key][N][{fields}]:  (spec Sec. 9.1-Sec. 9.4, Sec. 10)
     // The header's first unquoted ':' must occur after the [N]{fields} segment,
     // and an unquoted '[' must appear before any such ':'. This generalizes the
     // old root-only "content[0]=='['" check to also cover named "key[N]:" headers.
@@ -517,7 +517,7 @@ inline std::string toonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
       std::string_view val = content.substr(2);
-      // nested array header form "- [M]: ..." / "- [M]" (spec §9.2/§9.4)
+      // nested array header form "- [M]: ..." / "- [M]" (spec Sec. 9.2/Sec. 9.4)
       size_t arrLen = 0;
       if (toonParseListArrayHeader(val, arrLen)) {
         std::string_view rest = val;

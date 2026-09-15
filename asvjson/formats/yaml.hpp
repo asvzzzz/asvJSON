@@ -497,7 +497,7 @@ inline std::string_view yamlStripComment(std::string_view s) {
 			if (s[i] == '\'') inSQ = false;
 		} else {
 			// A '#' begins a comment only at the start of a line or after white
-			// space (YAML §5.1); "a#b" is a plain scalar, "value # note" comments.
+			// space (YAML Sec. 5.1); "a#b" is a plain scalar, "value # note" comments.
 			if (s[i] == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t'))
 				return s.substr(0, i);
 			if (s[i] == '"') inDQ = true;

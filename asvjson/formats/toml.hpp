@@ -260,7 +260,7 @@ inline std::string parseTomlKey(std::string_view& s) {
     }
   } else {
     // Bare key: ASCII alnum, '_', '-' (a leading/trailing high-bit byte is
-    // tolerated so non-ASCII UTF-8 keys like `ключ` parse leniently)
+    // tolerated so non-ASCII UTF-8 keys (e.g. Cyrillic) parse leniently)
     while (!s.empty() &&
            (std::isalnum(static_cast<unsigned char>(s[0])) || s[0] == '_' || s[0] == '-' ||
             (static_cast<unsigned char>(s[0]) & 0x80))) {
@@ -291,8 +291,8 @@ inline std::vector<std::string> parseTomlKeyPath(std::string_view& s) {
         throw asvJSONError("empty key segment in dotted key path");
       continue;
     }
-    // Keys may be followed only by a separating '=', a table/array closer, or
-    // a comma/brace in an inline table -- anything else is junk like `aé` or
+    // Key may be followed only by a separating '=', a table/array closer, or
+    // a comma/brace in an inline table -- anything else is junk like `ae` or
     // `"a"x` (previously such lines were silently dropped).
     if (!s.empty() && s[0] != '=' && s[0] != ']' && s[0] != ',' && s[0] != '}')
       throw asvJSONError("invalid character after key");

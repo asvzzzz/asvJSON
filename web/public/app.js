@@ -162,7 +162,7 @@ function updateFormatInfo() {
   const parts = [];
   if (FORMAT_INFO[inFmt]) parts.push('In: ' + FORMAT_INFO[inFmt]);
   if (FORMAT_INFO[outFmt]) parts.push('Out: ' + FORMAT_INFO[outFmt]);
-  infoEl.textContent = parts.join('  ·  ');
+  infoEl.textContent = parts.join(' - ');
 }
 updateFormatInfo();
 
@@ -264,7 +264,7 @@ async function convert() {
 
   const isBinaryInput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'].includes(fromOpt.name);
 
-  // Strip binary preamble if present (e.g., "[Binary data — base64 encoded]\n\n...")
+  // Strip binary preamble if present (e.g., "[Binary data - base64 encoded]\n\n...")
   let data = text;
   if (isBinaryInput && text.startsWith('[Binary data')) {
     const idx = text.indexOf('\n\n');
@@ -291,7 +291,7 @@ async function convert() {
           outputStatus.textContent = 'Binary output (base64)';
         } else {
           outputArea.value = result.data;
-          outputStatus.textContent = `Converted: ${fromOpt.name} → ${toOpt.name}`;
+          outputStatus.textContent = `Converted: ${fromOpt.name} -> ${toOpt.name}`;
         }
       }
       setStatus('Conversion successful', 'success');
@@ -306,7 +306,7 @@ async function convert() {
   }
 
   convertBtn.disabled = false;
-  convertBtn.textContent = 'Convert →';
+  convertBtn.textContent = 'Convert  -> ';
 }
 
 function setStatus(msg, type) {

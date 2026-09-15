@@ -282,7 +282,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 						subArr->arr = std::move(newArr);
 					}
 				} else if (subArr && subArr->type == asvJSONValue::OBJECT) {
-					// Empty BSON array document → empty asvJSON array
+					// Empty BSON array document  ->  empty asvJSON array
 					subArr->type = asvJSONValue::ARRAY;
 					subArr->obj.reset();
 					subArr->arr = std::make_unique<std::vector<std::unique_ptr<asvJSONValue>>>();

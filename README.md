@@ -6,7 +6,7 @@ A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack
 
 ## Online Converter
 
-Try it online: **https://jx8.ru/** — browser-based converter supporting all 18 formats plus RFC 9535 JSONPath queries, with file upload/download.
+Try it online: **https://jx8.ru/**  -  browser-based converter supporting all 18 formats plus RFC 9535 JSONPath queries, with file upload/download.
 
 ## License
 
@@ -44,7 +44,7 @@ MIT license - see the `LICENSE` file for details.
 
 ### Serialization Formats
 - JSON (compact and pretty print)
-- BSON (binary) — MongoDB document format; duplicate keys follow last-wins; string elements must be NUL-terminated; unsupported types (e.g. `CUSTOM_TAG`) are rejected with an error
+- BSON (binary)  -  MongoDB document format; duplicate keys follow last-wins; string elements must be NUL-terminated; unsupported types (e.g. `CUSTOM_TAG`) are rejected with an error
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
 - YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`/`!!value`/`!!yaml`), block-style `!!set` (`- key` / `? key` items), explicit tags on block nodes (`!!map`/`!!seq`/`!!binary`/custom at root, mapping values, sequence items, explicit keys), complex (flow-collection) mapping keys stringified to JSON string keys, user-defined tags preserved as `CUSTOM_TAG` (with an optional `customTagTransform` hook to dispatch them to custom types at parse time), configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
@@ -109,7 +109,7 @@ bool valid = asvJSON::isValidPath("$.users[*].name"); // true
 
 Supports: `$`, `.member`, `['member']`, `[index]`, `[start:end:step]` slices, `..` recursive descent, `[*]` wildcard, `?(filter)` with `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`, `!` operators, and functions: `length()`, `count()`, `min()`, `max()`, `sum()`, `avg()`, `match()`, `search()`, `value()`.
 
-`query()` is inherently lenient (RFC 9535): a selector it cannot evaluate (e.g. an unterminated bracket, arguments passed to a function, or a filter expression containing unsupported constructs) never throws — it contributes no matches, so a malformed path yields an empty result rather than a partial one. Function arguments are only allowed on the parenthesized right-hand side of filter operators (e.g. `[?(@.price ..)]`).
+`query()` is inherently lenient (RFC 9535): a selector it cannot evaluate (e.g. an unterminated bracket, arguments passed to a function, or a filter expression containing unsupported constructs) never throws  -  it contributes no matches, so a malformed path yields an empty result rather than a partial one. Function arguments are only allowed on the parenthesized right-hand side of filter operators (e.g. `[?(@.price ..)]`).
 
 Disable with `#define ASVJSON_DISABLE_JSONPATH`.
 
@@ -157,7 +157,7 @@ Disable with `#define ASVJSON_DISABLE_SAX`.
 - **Reading:** Fully thread-safe - multiple threads can read the same `asvJSON` instance simultaneously.
 - **Writing:** Not thread-safe - a single `asvJSON` instance must not be written to concurrently from multiple threads, and reads must not overlap a write.
 - **Distinct instances:** Separate `asvJSON` instances can be used concurrently from different threads; format parsers use `thread_local` state (e.g. YAML tag maps), so no global mutable state is shared.
-- **Base64 custom charset:** `encodeBase64()` and `decodeBase64Fast()` are thread-safe (they snapshot the charset under a lock). `setBase64Chars()` is **not** thread-safe — call it before starting concurrent encoding/decoding.
+- **Base64 custom charset:** `encodeBase64()` and `decodeBase64Fast()` are thread-safe (they snapshot the charset under a lock). `setBase64Chars()` is **not** thread-safe  -  call it before starting concurrent encoding/decoding.
 
 ## Limits
 
@@ -466,7 +466,7 @@ Factory methods return `std::unique_ptr<asvJSONValue>`. Automatic lifetime manag
 |----------|-------------|
 | `cloneValue(const asvJSONValue* v)` | Deep-clone any value (returns new allocation). |
 | `valuesEqual(const asvJSONValue* a, const asvJSONValue* b)` | Deep value comparison. |
-| `setBase64Chars(const std::string& chars)` | Set custom Base64 alphabet (64 chars). **Not thread-safe** — call before concurrent use. |
+| `setBase64Chars(const std::string& chars)` | Set custom Base64 alphabet (64 chars). **Not thread-safe**  -  call before concurrent use. |
 | `getBase64Chars()` | Get current Base64 alphabet. Thread-safe. |
 | `base64_encode(const uint8_t* data, size_t len)` | Encode to Base64 string. |
 | `base64_decode_fast(const char* str, size_t len, bool* error)` | Decode Base64 to bytes. |
@@ -521,9 +521,9 @@ o.alwaysQuoteKeys = true;                // quote every mapping key
 o.doubleQuotes = true;                   // prefer "..." over '...'
 std::string yaml = json.toYAML(o);
 ```
-- `Style::Block` — pure indentation-based output (matches `toYAML(true)`, the default).
-- `Style::Auto` — flow style with automatic block fallback for values longer than `flowMaxLen` (matches `toYAML(false)`).
-- `Style::Flow` — flow style everywhere with no length limit; multiline strings are inlined as double-quoted scalars.
+- `Style::Block`  -  pure indentation-based output (matches `toYAML(true)`, the default).
+- `Style::Auto`  -  flow style with automatic block fallback for values longer than `flowMaxLen` (matches `toYAML(false)`).
+- `Style::Flow`  -  flow style everywhere with no length limit; multiline strings are inlined as double-quoted scalars.
 
 Input:
 ```json
@@ -805,19 +805,19 @@ j2.fromSexpr(sexpr);
 S-Expression features:
 - **Objects**: alternating key-value pairs in a list, e.g., `(name "John" age 30)`
 - **Arrays**: plain list of values, e.g., `(1 2 3)`
-- **Heuristic detection**: even-length list with string/symbol keys → object; otherwise → array
+- **Heuristic detection**: even-length list with string/symbol keys  ->  object; otherwise  ->  array
 - **Nested structures**: `(person (name "Alice" age 25))`
 - **Booleans**: `#t` (true), `#f` (false)
 - **Null**: `nil`
 - **Strings**: `"quoted"` with C-style escapes (`\n`, `\t`, `\"`, `\\`)
 - **Comments**: `;` to end of line
 - **Number handling**: tokens shaped like numbers but invalid as JSON (leading `+`, leading zeros, `1.e5`) decode as strings rather than failing the whole document
-- **Non-finite doubles**: `NaN`/`Infinity` cannot be serialized — `toSexpr()` throws instead of emitting `nil`
+- **Non-finite doubles**: `NaN`/`Infinity` cannot be serialized  -  `toSexpr()` throws instead of emitting `nil`
 - **Full round-trip**: `toSexpr()` then `fromSexpr()` returns the original data
 
-### JSON5 — Extended JSON superset
+### JSON5  -  Extended JSON superset
 
-`toJSON5()` / `fromJSON5()` — JSON5 with MongoDB Extended JSON for special types.
+`toJSON5()` / `fromJSON5()`  -  JSON5 with MongoDB Extended JSON for special types.
 
 **JSON5 features:** unquoted keys (Unicode identifiers), single-quoted strings, trailing commas, hex (`0x`), octal (`0o`), binary (`0b`) numbers, leading decimal (`.5`), plus sign (`+42`), `//`/`/* */`/`#` comments, `NaN`/`Infinity`/`-Infinity`/`-NaN` literals, `\u{...}` code point escapes (surrogate pairs for supplementary), ES5 escape sequences (`\v`, `\0`, `\xHH`), extended whitespace (Zs Unicode spaces, BOM), control character validation outside strings, locale-independent identifier parsing.
 
@@ -836,9 +836,9 @@ S-Expression features:
 | EXTENSION | `{"$binary":{"base64":"3q0=","subType":"2a"}}` |
 | DATETIME | `"2026-07-20T00:21:57Z"` (ISO 8601) |
 
-### INI — Classic initialization file format
+### INI  -  Classic initialization file format
 
-`toINI()` / `fromINI()` — the classic initialization file format with dot-notation section nesting for hierarchical data.
+`toINI()` / `fromINI()`  -  the classic initialization file format with dot-notation section nesting for hierarchical data.
 
 ```
 ; Sample configuration
@@ -878,9 +878,9 @@ On decoding, all values are stored as strings. On encoding, types are formatted 
 - **Fix - BSON:** Duplicate keys now follow last-wins (the first value used to win); string elements whose declared length does not end in a NUL byte are rejected; serializing unsupported types (e.g. `CUSTOM_TAG`) throws instead of writing BSON null.
 - **Fix - XML parser/serializer:** Unterminated comments, CDATA sections, DOCTYPE/PI constructs and attribute values are rejected; duplicate attributes throw; attribute values whose type cannot be represented (datetime, binary, regex, compound) throw instead of being silently emptied; a `CUSTOM_TAG` in mixed `#content` is rejected instead of dropped.
 - **Fix - JSONPath:** `query()` stays lenient per RFC 9535 and returns empty for constructs it cannot evaluate (unterminated bracket segments, arguments passed to path-segment functions, filters with unsupported descent) instead of partially evaluating them.
-- **Fix - DateTime parsing:** ISO-8601 strings with more than 3 fractional-second digits parse successfully (extra digits are consumed, milliseconds truncated) instead of failing; timezone offsets are range-validated (hours ≤ 23, minutes ≤ 59), so `+99:99` no longer produces a bogus DATETIME.
+- **Fix - DateTime parsing:** ISO-8601 strings with more than 3 fractional-second digits parse successfully (extra digits are consumed, milliseconds truncated) instead of failing; timezone offsets are range-validated (hours  <=  23, minutes  <=  59), so `+99:99` no longer produces a bogus DATETIME.
 - **Web - JSONPath query mode:** The online converter accepts an optional `path` request field that evaluates an RFC 9535 JSONPath against any parsed input and returns the matches as a JSON array.
-- **Version bump:** 1.16.0 → 1.16.1
+- **Version bump:** 1.16.0  ->  1.16.1
 
 ### 1.16.0 (2026-08-30)
 
@@ -903,36 +903,36 @@ On decoding, all values are stored as strings. On encoding, types are formatted 
 - **Fix - JSONPath thread_local aliasing:** Replaced `static thread_local asvJSONValue` with owned `unique_ptr` via `hold()` method and `PathResult::owned` to fix incorrect filter comparisons when both sides are literals.
 - **Fix - JSONPath OOB slice:** Added bounds checking in `jpSlice` for `step > 0` (previously could read past array end for large slice bounds).
 - **Fix - Schema regex pre-compilation:** `patternProperties` regexes now compiled once before the object property loop instead of O(N*M) times.
-- **Fix - Schema $ref JSON Pointer decoding:** `$ref` path segments now decode `~0` → `~` and `~1` → `/` per RFC 6901.
+- **Fix - Schema $ref JSON Pointer decoding:** `$ref` path segments now decode `~0`  ->  `~` and `~1`  ->  `/` per RFC 6901.
 - **Fix - Unicode cleanup:** Replaced em dashes and non-ASCII characters with ASCII equivalents in source comments.
-- **Version bump:** 1.14.0 → 1.15.0
+- **Version bump:** 1.14.0  ->  1.15.0
 
 ### 1.14.0 (2026-08-20)
 
 - **UDE format additions:** Custom tags with canonical name/value split, namespaces (`!ns:tag`) and verbatim (`!<uri>`), Extended JSON representation, YAML-style `---`/`...` document separators, versioned header, merge keys (`<<: *default`), digit separators (`1_000_000`), lossless big-integer literals, `!datetime` with timezone offsets, non-finite float literals (`.nan`/`/.inf`), type-coercion tags (`!int`/`!float`/`!string`/`!bool`/`!null`), `!schema`, bare `!null`, folded block scalar (`>`), single-quoted strings, full string escapes.
 - **UDE spec conformance:** Documented resource limits (alias depth 100, anchors 1M), YAML-style tab prohibition in block scalar indentation.
 - **Parser hardening:** Fixed OOB, UB and malformed input across YAML, S-Expression, TOML, XML, Base64, BSON, CSV, JSON5. Integer overflow detection, binary parser bounds checks, `cloneValue` node count limit (100M), YAML tag map RAII safety, `splitLines` phantom EOF removal.
-- **Version bump:** 1.13.0 → 1.14.0
+- **Version bump:** 1.13.0  ->  1.14.0
 
 ### 1.13.0 (2026-08-04)
 
-- **New format - UDE:** Added `toUDE()` / `fromUDE()` — Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens.
+- **New format - UDE:** Added `toUDE()` / `fromUDE()`  -  Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); strict mode rejects duplicate keys and special characters in bare tokens.
 - **UDE spec conformance:** default chomping now clips (keeps one trailing newline) instead of stripping; block scalars handle a blank first line, and empty lines are preserved as paragraph breaks (they never terminate the scalar by themselves, Section 6) with a single trailing line break captured; the serializer falls back to quoted strings whenever a value cannot round-trip as a block scalar; quoted dotted keys (`"a.b.c"`) are literal while unquoted ones nest; document separators match exactly (no accidental splits on comments); anchors store deep copies (no dangling pointers) with cycle detection; strict mode requires quoted keys; a leading `+` is no longer accepted as a numeric sign.
 - **Version bump:** 1.12.0 -> 1.13.0
 
 ### 1.12.0 (2026-07-20)
 
-- **New format - INI:** Added `toINI()` / `fromINI()` — classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting for hierarchical data (e.g. `[network.server]` → nested JSON `{"network":{"server":{...}}}`).
+- **New format - INI:** Added `toINI()` / `fromINI()`  -  classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting for hierarchical data (e.g. `[network.server]`  ->  nested JSON `{"network":{"server":{...}}}`).
 - **Version bump:** 1.11.1 -> 1.12.0
 
 ### 1.11.1 (2026-07-20)
 
-- **JSON5 spec conformance:** Full compliance with JSON5 specification (https://spec.json5.org/). Added `\u{...}` code point escapes (BMP → `\uHHHH`, supplementary → surrogate pairs), ES5 escape sequences (`\v` → `\u000B`, `\0` → `\u0000`, `\xHH` → `\u00HH`), invalid escape validation (octal, malformed `\x`/`\u`). Control characters outside strings now correctly rejected; raw control chars in strings escaped. Extended whitespace (U+2000–U+200A, U+205F, U+3000 Zs spaces; U+FEFF BOM) in all whitespace-skip positions. Unicode identifier keys with locale-independent `isIdStart`/`isIdCont`. `-NaN` literal preserved as `-NaN`. `\'` in double-quoted strings and `\"` in single-quoted strings handled correctly.
+- **JSON5 spec conformance:** Full compliance with JSON5 specification (https://spec.json5.org/). Added `\u{...}` code point escapes (BMP  ->  `\uHHHH`, supplementary  ->  surrogate pairs), ES5 escape sequences (`\v`  ->  `\u000B`, `\0`  ->  `\u0000`, `\xHH`  ->  `\u00HH`), invalid escape validation (octal, malformed `\x`/`\u`). Control characters outside strings now correctly rejected; raw control chars in strings escaped. Extended whitespace (U+2000 - U+200A, U+205F, U+3000 Zs spaces; U+FEFF BOM) in all whitespace-skip positions. Unicode identifier keys with locale-independent `isIdStart`/`isIdCont`. `-NaN` literal preserved as `-NaN`. `\'` in double-quoted strings and `\"` in single-quoted strings handled correctly.
 - **Version bump:** 1.11.0 -> 1.11.1
 
 ### 1.11.0 (2026-07-20)
 
-- **New format - JSON5:** Added `toJSON5()` / `fromJSON5()` — JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, plus sign, leading decimal, comments. Uses MongoDB Extended JSON (`$oid`, `$regex`+`$options`, `$timestamp`, `$binary` with subType) for special data types (OBJECTID, REGEX, TIMESTAMP, BINARY, EXTENSION), replacing legacy `__OID__`/`__REGEX__`/`__BASE64__`/`__EXT__` prefix convention.
+- **New format - JSON5:** Added `toJSON5()` / `fromJSON5()`  -  JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, plus sign, leading decimal, comments. Uses MongoDB Extended JSON (`$oid`, `$regex`+`$options`, `$timestamp`, `$binary` with subType) for special data types (OBJECTID, REGEX, TIMESTAMP, BINARY, EXTENSION), replacing legacy `__OID__`/`__REGEX__`/`__BASE64__`/`__EXT__` prefix convention.
 - **Extended JSON parser:** JSON parser now detects `$oid`, `$regex`+`$options`, `$timestamp`, `$binary` objects and converts them to native special types. Legacy custom prefix strings (`__BASE64__`, `__OID__`, `__REGEX__`, `__EXT__`) are no longer recognized.
 - **YAML decoder updated:** YAML `!objectid`/`!regex`/`!!binary`/`!ext` tags now emit Extended JSON format instead of legacy prefixes, ensuring full round-trip fidelity.
 - **NaN/Infinity in JSON5:** `NaN`, `Infinity`, `-Infinity` literals supported (enabled automatically in `fromJSON5`).

@@ -363,7 +363,7 @@ struct TronParseState {
 
   // A property name is a bare identifier or a quoted string. Per the spec, an
   // unquoted identifier immediately followed by '(' is a class *instantiation*
-  // (the start of the data section), not a property — even when it follows a
+  // (the start of the data section), not a property  -  even when it follows a
   // newline separator. Without this guard the data identifier would be
   // swallowed into the preceding class's property list.
   bool propAhead() const {

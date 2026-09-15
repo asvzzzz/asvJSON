@@ -2699,7 +2699,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 
 	// If both are objects, recurse into shared keys
 	if (a.type == asvJSONValue::OBJECT && b.type == asvJSONValue::OBJECT && a.obj && b.obj) {
-		// Keys in a but not in b → remove
+		// Keys in a but not in b  ->  remove
 		for (const auto& [k, v] : *a.obj) {
 			auto it = mapFind(*b.obj, k);
 			if (it == b.obj->end()) {
@@ -2710,7 +2710,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				patch.push(std::move(op));
 			}
 		}
-		// Keys in b — add or replace or recurse
+		// Keys in b  -  add or replace or recurse
 		for (const auto& [k, v] : *b.obj) {
 			if (!v) continue;
 			auto it = mapFind(*a.obj, k);
@@ -2733,7 +2733,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 		}
 		return;
 	}
-	// Both arrays — recurse by index
+	// Both arrays  -  recurse by index
 	if (a.type == asvJSONValue::ARRAY && b.type == asvJSONValue::ARRAY && a.arr && b.arr) {
 		size_t maxLen = a.arr->size() > b.arr->size() ? a.arr->size() : b.arr->size();
 		for (size_t i = 0; i < maxLen; i++) {
@@ -2765,7 +2765,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 		}
 		return;
 	}
-	// Different types or scalars → replace
+	// Different types or scalars  ->  replace
 	{
 		auto op = asvJSONValue::makeObject();
 		op->emplace("op", asvJSONValue::makeStringView("replace"));

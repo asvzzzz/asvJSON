@@ -97,8 +97,8 @@ inline bool asvJSON::fromAny(std::string_view input) {
     input.remove_prefix(3);
 
   // --- Binary detection ---
-  // Control chars (<0x20, excluding \n\r\t) → binary.
-  // Bytes >=0x80 are validated as UTF-8; non-UTF-8 byte sequences → binary.
+  // Control chars (<0x20, excluding \n\r\t)  ->  binary.
+  // Bytes >=0x80 are validated as UTF-8; non-UTF-8 byte sequences  ->  binary.
   bool isBinary = false;
   {
     size_t n = std::min(input.size(), size_t(256));
@@ -117,7 +117,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
       else if ((c & 0xF0) == 0xE0) len = 3;
       else if ((c & 0xF8) == 0xF0) len = 4;
       else { isBinary = true; break; }
-      // Truncated sequence at the scan boundary — do not flag as binary.
+      // Truncated sequence at the scan boundary  -  do not flag as binary.
       if (i + len > n) break;
       bool valid = true;
       for (int j = 1; j < len; j++) {

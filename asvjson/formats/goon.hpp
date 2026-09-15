@@ -392,7 +392,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
     // Spec minimalIndent: rows of llm/compact tables sit at the header's own
     // indentation, so the table stays aligned to its header ("minimal"). That
     // layout is only unambiguous while no bare cell contains ':' (a regex
-    // pattern with a colon, etc.) — the decoder would mistake such a cell for a
+    // pattern with a colon, etc.)  -  the decoder would mistake such a cell for a
     // `key: value` sibling. Balanced mode always keeps rows one level past the
     // header, and ambiguous tables fall back to the same one-level layout.
     bool minimalRows = (opts.mode != GoonWriteOptions::Mode::Balanced) && !bareColon;
@@ -802,7 +802,7 @@ inline std::string goonToJson(std::string_view input) {
 
   auto expandCell = [&](std::string_view raw) -> std::string {
     // A bare $N dictionary reference always denotes the dict *string* value,
-    // so the resolved text must stay a quoted string — never reinterpreted as
+    // so the resolved text must stay a quoted string  -  never reinterpreted as
     // a number/bool/special prefix (e.g. a repeated string "42" or "__TS__1").
     bool wasDictRef = raw.size() > 1 && raw[0] == '$';
     if (wasDictRef) {
@@ -842,7 +842,7 @@ inline std::string goonToJson(std::string_view input) {
     }
     // NaN/Infinity
     if (s == "NaN" || s == "-NaN" || s == "Infinity" || s == "-Infinity") return s;
-    // GOON special prefixes → JSON convention. Applied ONLY to unquoted cells:
+    // GOON special prefixes  ->  JSON convention. Applied ONLY to unquoted cells:
     // a quoted value is literal text, so a string like "__TS__42" (which the
     // encoder now quotes) stays a string instead of becoming a timestamp.
     if (s.size() >= 1 && s.front() != '"') {
@@ -1061,8 +1061,8 @@ inline std::string goonToJson(std::string_view input) {
                 // minimalIndent tables put rows at the header's own
                 // indentation; end the table at the first structured line
                 // there. A mapping sibling has its first `:` before any
-                // unquoted `,` (a row *cell* that contains `:` — e.g. a regex
-                // `__REGEX__a:b` — only appears after its column separator),
+                // unquoted `,` (a row *cell* that contains `:`  -  e.g. a regex
+                // `__REGEX__a:b`  -  only appears after its column separator),
                 // and a `- ` item could never be a row cell emitted bare.
                 std::string_view rc3 = stripIndent(rline);
                 bool structured = false;
