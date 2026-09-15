@@ -14197,6 +14197,63 @@ TEST(testUDEExtras) {
   }
 }
 
+TEST(testUDEHeaderBlockScalarFixes) {
+  // F2: the "# UDE vX.Y" header is recognized on the FIRST NON-EMPTY line
+  // (leading blank lines must not hide it / disable strict mode).
+  {
+    // duplicate quoted keys are rejected in strict mode even when the header
+    // sits after leading blank lines
+    asvJSON j;
+    ASSERT(!j.fromUDE("\n# UDE v1.1 strict\n\"a\": 1\n\"a\": 2\n"));
+  }
+  {
+    // header after blank lines, non-strict: parses normally
+    asvJSON j;
+    ASSERT(j.fromUDE("\n\n# UDE v1.0\nname: test\n"));
+    ASSERT_EQ(std::string(j.getString("name")), "test");
+  }
+  {
+    // a leading non-header comment is NOT a header (spec: first non-empty line)
+    asvJSON j;
+    ASSERT(j.fromUDE("# some comment\nb: 2\n"));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // F1: block scalar headers reject junk after the indicators
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("msg: |12\n  a\n"));
+    ASSERT(std::string(j.lastError).find("unexpected content after block scalar header") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("msg: |-2\n  a\n"));
+    ASSERT(std::string(j.lastError).find("unexpected content after block scalar header") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("msg: | x\n  a\n"));
+    ASSERT(std::string(j.lastError).find("unexpected content after block scalar header") != std::string::npos);
+  }
+  {
+    // valid: comment after indicators
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |2 # comment\n  a\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a");
+  }
+  {
+    // valid: chomp + comment after indicators
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |- # comment\n  a\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a");
+  }
+  {
+    // valid: no indicators
+    asvJSON j;
+    ASSERT(j.fromUDE("msg: |\n  a\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "a");
+  }
+}
+
 TEST(testByteSizeNullRoot) {
 	asvJSON j;
 	ASSERT_EQ(j.byteSize(), 0);
@@ -18973,9 +19030,11 @@ RUN(testCBORFloat16);
 	RUN(testUDEAnchors);
 	RUN(testUDERawNumberRoundTrip);
 	RUN(testUDECommentPrefixStrings);
-	RUN(testUDEBlockScalarKeepChomping);
-	RUN(testUDEExtras);
+RUN(testUDEBlockScalarKeepChomping);
 
+	RUN(testUDEHeaderBlockScalarFixes);
+
+	RUN(testUDEExtras);
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
 

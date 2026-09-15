@@ -801,7 +801,16 @@ private:
     char chomp = 0;
     if (!eof() && text_[pos_] >= '0' && text_[pos_] <= '9') { explicitIndent = text_[pos_] - '0'; pos_++; }
     if (!eof() && (text_[pos_] == '+' || text_[pos_] == '-')) { chomp = text_[pos_]; pos_++; }
-    // skip the rest of the header line
+    // Only whitespace, a comment (# or //), or end-of-line may follow the indicators.
+    while (!eof() && (text_[pos_] == ' ' || text_[pos_] == '\t')) pos_++;
+    if (!eof() && text_[pos_] == '#') {
+      while (!eof() && text_[pos_] != '\n') pos_++;
+    } else if (!eof() && text_[pos_] == '/' && pos_ + 1 < text_.size() && text_[pos_ + 1] == '/') {
+      while (!eof() && text_[pos_] != '\n') pos_++;
+    } else if (!eof() && text_[pos_] != '\n' && text_[pos_] != '\r') {
+      throw asvJSONError("UDE: unexpected content after block scalar header at line " + std::to_string(lineNum_));
+    }
+    // consume the rest of the header line (newline)
     while (!eof() && text_[pos_] != '\n') pos_++;
     if (!eof()) { pos_++; lineNum_++; }
 
@@ -1374,11 +1383,26 @@ inline std::string udeHeaderVersion() {
 // recognized flags (currently "strict") update `strict`. Unknown flags are
 // ignored so that forward-compatible minor versions keep working.
 inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict) {
-  size_t lineEnd = text.find('\n');
-  std::string_view first = (lineEnd == std::string_view::npos)
-    ? std::string_view(text) : std::string_view(text).substr(0, lineEnd);
-  std::string_view t = udeTrim(first);
-  if (t.size() < 6 || t.substr(0, 6) != "# UDE ") return text;
+  std::string_view sv(text);
+  // §2.1: the first non-empty line may be an optional "# UDE vX.Y" header.
+  size_t scan = 0;
+  size_t headEnd = std::string_view::npos;
+  std::string_view t;
+  while (scan < sv.size()) {
+    size_t eol = sv.find('\n', scan);
+    std::string_view line = (eol == std::string_view::npos)
+      ? sv.substr(scan) : sv.substr(scan, eol - scan);
+    std::string_view lt = udeTrim(line);
+    if (!lt.empty()) {
+      if (lt.size() < 6 || lt.substr(0, 6) != "# UDE ") return text;
+      t = lt;
+      headEnd = (eol == std::string_view::npos) ? sv.size() : eol + 1;
+      break;
+    }
+    if (eol == std::string_view::npos) break;
+    scan = eol + 1;
+  }
+  if (headEnd == std::string_view::npos) return text;
   // t = "# UDE v1.1 [flags]"
   std::string_view rest = t.substr(6); // "v1.1 [flags]"
   if (rest.empty() || rest[0] != 'v') return text;
@@ -1408,9 +1432,9 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
     if (flag == "strict") strict = true;
     // Unknown flags are ignored for forward compatibility.
   }
-  // Strip the header line from the document text.
-  if (lineEnd == std::string_view::npos) return "";
-  return std::string(text.substr(lineEnd + 1));
+  // Strip the header line (and any leading blank lines) from the document text.
+  if (headEnd >= sv.size()) return "";
+  return std::string(text.substr(headEnd));
 }
 
 inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool strict) {
