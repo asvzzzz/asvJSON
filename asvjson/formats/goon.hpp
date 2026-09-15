@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // GOON (Greatly Optimized Object Notation) serialization/parsing for asvJSON++
 //
 // JSON superset with YAML-like indentation:
