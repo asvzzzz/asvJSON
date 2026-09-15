@@ -7293,13 +7293,45 @@ TEST(testToTRONAdvanced) {
 		ASSERT_EQ(j.getInt("x"), int64_t(10));
 		ASSERT_EQ(j.getInt("y"), int64_t(20));
 	}
-	// TRON parsing: mixed positional + named (missing y -> null)
+	// TRON parsing: mixed positional + named (arg count must match props)
 	{
 		asvJSON j;
-		ASSERT(j.fromTRON(std::string_view("class A: x,y,z\nA(1, z=30)\n")));
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y,z\nA(1, z=30)\n")));
+	}
+	// TRON parsing: fewer args than properties -> SyntaxError (spec)
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1)\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA()\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(x=1)\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(y=2)\n")));
+	}
+	// TRON parsing: all props supplied still parses (positional / named / mixed)
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(1,2)\n")));
 		ASSERT_EQ(j.getInt("x"), int64_t(1));
-		ASSERT(j.isNull("y"));
-		ASSERT_EQ(j.getInt("z"), int64_t(30));
+		ASSERT_EQ(j.getInt("y"), int64_t(2));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(x=1,y=2)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(1));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(1,y=2)\n")));
+		ASSERT_EQ(j.getInt("x"), int64_t(1));
+		ASSERT_EQ(j.getInt("y"), int64_t(2));
 	}
 	// TRON parsing: comments (#)
 	{
@@ -18320,6 +18352,217 @@ TEST(testAuditMedLow) {
 	}
 }
 
+TEST(testAuditGoonTronSpec) {
+	// GOON: a quoted "^" is an ordinary literal string (not a caret reference).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"c":"p","n":1},{"c":"^","n":2},{"c":"p","n":3}])")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 3);
+		ASSERT_EQ(std::string(j2.getRoot()->get(1)->getConst("c")->getString()), "^");
+		ASSERT_EQ(std::string(j2.getRoot()->get(0)->getConst("c")->getString()), "p");
+	}
+	// GOON: caret cross-row references still work in Compact mode.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"a":1,"b":1},{"a":2,"b":2}])")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 2);
+		ASSERT_EQ(j2.getRoot()->get(1)->getConst("b")->getInt(), int64_t(2));
+	}
+	// GOON: bare '^' with no previous value (first row) is a decode error.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("t[2]{a}:\n^\n1\n")));
+		asvJSON j2;
+		ASSERT(!j2.fromGOON(std::string_view("t[1]{a}:\n^\n")));
+	}
+	// GOON: out-of-bounds $N dictionary references throw instead of leaking literal text.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("$:$0=admin\nv: $1\n")));
+		asvJSON j2;
+		ASSERT(!j2.fromGOON(std::string_view("t[1]{a}:\n$3\n")));
+		// a non-numeric suffix is a plain string per spec
+		asvJSON j3;
+		ASSERT(j3.fromGOON(std::string_view("v: $x\n")));
+		ASSERT_EQ(std::string(j3.getString("v")), "$x");
+	}
+	// GOON: RLE counts must be pure digit runs; trailing cells after *N fail.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("t[2]{a,b}:\n1,2*3,9\n")));
+		asvJSON j2;
+		ASSERT(!j2.fromGOON(std::string_view("t[1]{a}:\n1*x\n")));
+		asvJSON j3;
+		ASSERT(!j3.fromGOON(std::string_view("t[1]{a}:\n1*\n")));
+	}
+	// GOON: RLE is emitted in the default (llm) mode and round-trips.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"e":true},{"e":true},{"e":true}])")));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("*3") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 3);
+		ASSERT(j2.getRoot()->get(2)->getConst("e")->getBool());
+	}
+	// GOON: RLE runs above MAX_REPEAT_COUNT are chunked, never truncated.
+	{
+		std::string big("[");
+		for (int k = 0; k < 20000; k++) big += "{\"v\":7},";
+		big.pop_back();
+		big += "]";
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(big)));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		ASSERT(goon.find("*10000") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 20000);
+		ASSERT_EQ(j2.getRoot()->get(19999)->getConst("v")->getInt(), int64_t(7));
+	}
+	// GOON: llm (default) mode emits no dictionary; compact emits one.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"r":"admin","n":1},{"r":"admin","n":2}])")));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("$:") == std::string::npos);
+		ASSERT(goon.find("\n  ") == std::string::npos); // minimal rows start at column 0
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->size() == 2);
+		ASSERT_EQ(std::string(j2.getRoot()->get(1)->getConst("r")->getString()), "admin");
+		GoonWriteOptions copts;
+		copts.mode = GoonWriteOptions::Mode::Compact;
+		std::string g2 = j.toGOON(copts);
+		ASSERT(g2.find("$:") != std::string::npos);
+		asvJSON j3;
+		ASSERT(j3.fromGOON(std::string_view(g2)));
+		ASSERT_EQ(std::string(j3.getRoot()->get(0)->getConst("r")->getString()), "admin");
+	}
+	// GOON: dictionary is sorted by savings and excludes 1-2 char strings.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"s":"x","n":1},{"s":"x","n":2}])")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		ASSERT(goon.find("$:") == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.getRoot()->get(0)->getConst("s")->getString()), "x");
+		asvJSON j3;
+		ASSERT(j3.parse(std::string_view(R"({"a":"longstring","b":"longstring"})")));
+		std::string g3 = j3.toGOON(opts);
+		ASSERT(g3.find("$:") != std::string::npos);
+		ASSERT(g3.find("$0=") != std::string::npos);
+		ASSERT(g3.find("$: $0") == std::string::npos); // no leading-space header
+		asvJSON j4;
+		ASSERT(j4.fromGOON(std::string_view(g3)));
+		ASSERT_EQ(std::string(j4.getString("a")), "longstring");
+	}
+	// GOON: balanced mode uses one-level-indented rows and respects indentWidth.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"t":[{"a":1},{"a":2}]})")));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Balanced;
+		opts.indentWidth = 4;
+		std::string goon = j.toGOON(opts);
+		ASSERT(goon.find("\n    1\n") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->getConst("t")->size() == 2);
+		ASSERT_EQ(j2.getRoot()->getConst("t")->get(1)->getConst("a")->getInt(), int64_t(2));
+		asvJSON j3;
+		ASSERT(j3.parse(std::string_view(R"({"x":{"y":1}})")));
+		GoonWriteOptions o3;
+		o3.mode = GoonWriteOptions::Mode::Balanced;
+		o3.indentWidth = 4;
+		std::string o2 = j3.toGOON(o3);
+		ASSERT(o2.find("\n    y: 1") != std::string::npos);
+		asvJSON j4;
+		ASSERT(j4.fromGOON(std::string_view(o2)));
+		ASSERT_EQ(j4.getInt("x.y"), int64_t(1));
+	}
+	// GOON: alwaysQuoteStrings / alwaysQuoteKeys are honored.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"name":"abc"})")));
+		GoonWriteOptions opts;
+		opts.alwaysQuoteKeys = true;
+		std::string g1 = j.toGOON(opts);
+		ASSERT(g1.find("\"name\": abc") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(g1)));
+		ASSERT_EQ(std::string(j2.getString("name")), "abc");
+		GoonWriteOptions opts2;
+		opts2.alwaysQuoteStrings = true;
+		std::string g2 = j.toGOON(opts2);
+		ASSERT(g2.find("name: \"abc\"") != std::string::npos);
+	}
+	// GOON: inline {a:1} cells with unquoted keys parse as JSON objects.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("v: {a:1, b:\"x\"}\n")));
+		ASSERT(j.getRoot()->getConst("v")->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(j.getInt("v.a"), int64_t(1));
+		ASSERT_EQ(std::string(j.getString("v.b")), "x");
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view("v: {a:{b:2}}\nw: [{a:3},4]\n")));
+		ASSERT_EQ(j2.getInt("v.a.b"), int64_t(2));
+		ASSERT(j2.getRoot()->getConst("w")->get(0)->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(j2.getRoot()->getConst("w")->get(0)->getConst("a")->getInt(), int64_t(3));
+	}
+	// GOON: root null/true/false decode as real values; strings still round-trip.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("null")));
+		ASSERT(j.getRoot()->type == asvJSONValue::NULL_VAL);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view("true")));
+		ASSERT(j2.getRoot()->getBool());
+		asvJSON j3;
+		ASSERT(j3.fromGOON(std::string_view("false")));
+		ASSERT(!j3.getRoot()->getBool());
+		asvJSON j4;
+		ASSERT(j4.fromGOON(std::string_view("hello")));
+		ASSERT_EQ(std::string(j4.getRoot()->getString()), "hello");
+	}
+	// GOON: a tabular key containing spaces/brackets round-trips (header-key unescape).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"my key":[{"a":1},{"a":2}],"a[2]":[{"b":3}]})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT(j2.getRoot()->getConst("my key")->size() == 2);
+		ASSERT_EQ(j2.getRoot()->getConst("my key")->get(1)->getConst("a")->getInt(), int64_t(2));
+		ASSERT(j2.getRoot()->getConst("a[2]")->size() == 1);
+		ASSERT_EQ(j2.getRoot()->getConst("a[2]")->get(0)->getConst("b")->getInt(), int64_t(3));
+	}
+	// TRON: missing a property and -class lookups in round-trips are unchanged.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":1,"b":"two"})")));
+		std::string tron = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(std::string_view(tron)));
+		ASSERT_EQ(j2.getInt("a"), int64_t(1));
+		ASSERT_EQ(std::string(j2.getString("b")), "two");
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -18797,6 +19040,7 @@ RUN(testCBORFloat16);
 	RUN(testReauditRegression);
 	RUN(testReauditRegression2);
 	RUN(testAuditMedLow);
+	RUN(testAuditGoonTronSpec);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

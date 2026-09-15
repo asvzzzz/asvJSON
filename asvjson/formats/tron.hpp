@@ -466,6 +466,10 @@ struct TronParseState {
     // Positional args fill the first posArgs.size() properties in order.
     if (posArgs.size() > props.size())
       throw asvJSONError("too many arguments for class " + className);
+    // Spec: a call with fewer values than the class has properties is a
+    // SyntaxError (missing values are not silently filled with null).
+    if (posArgs.size() + namedArgs.size() < props.size())
+      throw asvJSONError("not enough arguments for class " + className);
     for (auto& kv : namedArgs) {
       if (std::find(props.begin(), props.end(), kv.first) == props.end())
         throw asvJSONError("unknown argument: " + kv.first);
