@@ -302,6 +302,9 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			}
 			case T2::REGEX: {
 				size_t sep = v->str_data.rfind('\0');
+				// Only the pattern text survives a CSV round-trip: options are
+				// dropped by design (special types have no CSV cell syntax and
+				// decode back as STRING) -- see testCsvSpecialTypesStayText.
 				return (sep != std::string::npos) ? std::string(v->str_data.data(), sep) : v->str_data;
 			}
 			case T2::TIMESTAMP: return std::to_string(v->num);
@@ -441,6 +444,10 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			break;
 		}
 		default:
+			// A scalar root is emitted as a lone headerless data line. The
+			// decoder treats the first line as a header, so a scalar does not
+			// round-trip through fromCSV -- this is the documented design
+			// (a scalar CSV export is a data-only dump).
 			out += csvCell(this); out += '\n';
 			break;
 	}

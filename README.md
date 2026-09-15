@@ -6,7 +6,7 @@ A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack
 
 ## Online Converter
 
-Try it online: **https://jx8.ru/** — browser-based converter supporting all 18 formats with file upload/download.
+Try it online: **https://jx8.ru/** — browser-based converter supporting all 18 formats plus RFC 9535 JSONPath queries, with file upload/download.
 
 ## License
 
@@ -44,11 +44,11 @@ MIT license - see the `LICENSE` file for details.
 
 ### Serialization Formats
 - JSON (compact and pretty print)
-- BSON (binary)
+- BSON (binary) — MongoDB document format; duplicate keys follow last-wins; string elements must be NUL-terminated; unsupported types (e.g. `CUSTOM_TAG`) are rejected with an error
 - MessagePack (binary, RFC 7049)
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
 - YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`/`!!value`/`!!yaml`), block-style `!!set` (`- key` / `? key` items), explicit tags on block nodes (`!!map`/`!!seq`/`!!binary`/custom at root, mapping values, sequence items, explicit keys), complex (flow-collection) mapping keys stringified to JSON string keys, user-defined tags preserved as `CUSTOM_TAG` (with an optional `customTagTransform` hook to dispatch them to custom types at parse time), configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
-- XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension)
+- XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension); malformed input (unterminated comments/CDATAs/attribute values) and duplicate attributes are rejected, and attribute/`#content` types that cannot be represented throw instead of being silently altered
 - CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
@@ -108,6 +108,8 @@ bool valid = asvJSON::isValidPath("$.users[*].name"); // true
 ```
 
 Supports: `$`, `.member`, `['member']`, `[index]`, `[start:end:step]` slices, `..` recursive descent, `[*]` wildcard, `?(filter)` with `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`, `!` operators, and functions: `length()`, `count()`, `min()`, `max()`, `sum()`, `avg()`, `match()`, `search()`, `value()`.
+
+`query()` is inherently lenient (RFC 9535): a selector it cannot evaluate (e.g. an unterminated bracket, arguments passed to a function, or a filter expression containing unsupported constructs) never throws — it contributes no matches, so a malformed path yields an empty result rather than a partial one. Function arguments are only allowed on the parenthesized right-hand side of filter operators (e.g. `[?(@.price ..)]`).
 
 Disable with `#define ASVJSON_DISABLE_JSONPATH`.
 
@@ -633,6 +635,7 @@ TRON features:
 - Trailing commas allowed in arrays, objects, and class instances
 - Objects with 1 property or 1 occurrence are serialized as plain JSON `{"key":val}`
 - Full round-trip: `toTRON()` then `fromTRON()` returns the original data
+- **Strict tokenizer**: unterminated quoted strings and unrecognized characters are rejected (`fromTRON()` returns `false`) instead of being silently skipped
 
 ### GOON
 
@@ -808,6 +811,8 @@ S-Expression features:
 - **Null**: `nil`
 - **Strings**: `"quoted"` with C-style escapes (`\n`, `\t`, `\"`, `\\`)
 - **Comments**: `;` to end of line
+- **Number handling**: tokens shaped like numbers but invalid as JSON (leading `+`, leading zeros, `1.e5`) decode as strings rather than failing the whole document
+- **Non-finite doubles**: `NaN`/`Infinity` cannot be serialized — `toSexpr()` throws instead of emitting `nil`
 - **Full round-trip**: `toSexpr()` then `fromSexpr()` returns the original data
 
 ### JSON5 — Extended JSON superset
@@ -868,6 +873,13 @@ On decoding, all values are stored as strings. On encoding, types are formatted 
 - **Fix - CSV:** JSON number-shape gate keeps malformed numbers as strings; `0x` hex literals stay text; NaN/Inf cells emit `null`; integral doubles append `.0`; flattened-column collisions and oversized cells throw.
 - **Fix - INI:** Two-pass emission keeps bare lines ahead of `[[...]]` tables; empty containers round-trip as `{}`/`[]`; full double precision; out-of-range integers/doubles and trailing quoted garbage throw; leading-bracket keys and mixed/nested arrays rejected.
 - **Fix - fmtDoubleVal:** `%.16g` output is verified via `strtod` round-trip and escalates to `%.17g` when it would lose the last digit, fixing 17-digit doubles on weak toolchains.
+- **Fix - TRON parser:** Tokenizer rejects unterminated quoted strings and unrecognized characters instead of silently skipping them (`fromTRON()` returns `false`).
+- **Fix - S-Expression parser:** Tokens that parse as numbers but are not valid JSON (leading `+`, leading zeros, `1.e5`) decode as strings instead of failing the whole document; `toSexpr()` throws on `NaN`/`Infinity` doubles instead of emitting `nil`.
+- **Fix - BSON:** Duplicate keys now follow last-wins (the first value used to win); string elements whose declared length does not end in a NUL byte are rejected; serializing unsupported types (e.g. `CUSTOM_TAG`) throws instead of writing BSON null.
+- **Fix - XML parser/serializer:** Unterminated comments, CDATA sections, DOCTYPE/PI constructs and attribute values are rejected; duplicate attributes throw; attribute values whose type cannot be represented (datetime, binary, regex, compound) throw instead of being silently emptied; a `CUSTOM_TAG` in mixed `#content` is rejected instead of dropped.
+- **Fix - JSONPath:** `query()` stays lenient per RFC 9535 and returns empty for constructs it cannot evaluate (unterminated bracket segments, arguments passed to path-segment functions, filters with unsupported descent) instead of partially evaluating them.
+- **Fix - DateTime parsing:** ISO-8601 strings with more than 3 fractional-second digits parse successfully (extra digits are consumed, milliseconds truncated) instead of failing; timezone offsets are range-validated (hours ≤ 23, minutes ≤ 59), so `+99:99` no longer produces a bogus DATETIME.
+- **Web - JSONPath query mode:** The online converter accepts an optional `path` request field that evaluates an RFC 9535 JSONPath against any parsed input and returns the matches as a JSON array.
 - **Version bump:** 1.16.0 → 1.16.1
 
 ### 1.16.0 (2026-08-30)

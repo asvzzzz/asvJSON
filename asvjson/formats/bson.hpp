@@ -200,7 +200,8 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			out.insert(out.end(), bin_data.begin(), bin_data.end());
 			break;
 		}
-		default: out.push_back(0x0A); break;
+		default:
+			throw asvJSONError("BSON: cannot serialize unsupported type " + std::to_string(static_cast<int>(type)));
 	}
 }
 
@@ -240,20 +241,21 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		pos++;
 		if (pos > docEnd) throw asvJSONError("BSON element past end");
 		switch (elemType) {
-			case 0x01: { if (pos + 8 > docEnd + 1) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->emplace(key, asvJSONValue::makeDouble(d)); break; }
+			case 0x01: { if (pos + 8 > docEnd + 1) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->insert_or_assign(key, asvJSONValue::makeDouble(d)); break; }
 			case 0x02: {
 				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON string");
 				uint32_t slen; readLE32(data, pos, slen);
 				if (slen < 1 || pos + slen > docEnd + 1) throw asvJSONError("BSON string invalid");
+				if (data[pos + slen - 1] != 0) throw asvJSONError("BSON string not NUL-terminated");
 				auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen - 1);
 				pos += slen;
 				if (!val) throw asvJSONError("BSON string too long");
-				obj->obj->emplace(key, std::move(val));
+				obj->obj->insert_or_assign(key, std::move(val));
 				break;
 			}
 			case 0x03: {
 				auto subObj = parseBSON(data, pos, dataLen, depth + 1);
-				obj->obj->emplace(key, std::move(subObj));
+				obj->obj->insert_or_assign(key, std::move(subObj));
 				break;
 			}
 			case 0x04: {
@@ -285,7 +287,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 					subArr->obj.reset();
 					subArr->arr = std::make_unique<std::vector<std::unique_ptr<asvJSONValue>>>();
 				}
-				obj->obj->emplace(key, std::move(subArr));
+				obj->obj->insert_or_assign(key, std::move(subArr));
 				break;
 			}
 			case 0x05: {
@@ -298,7 +300,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 					auto val = asvJSONValue::makeBinary(data + pos, blen);
 					pos += blen;
 					if (!val) throw asvJSONError("BSON binary too large");
-					obj->obj->emplace(key, std::move(val));
+					obj->obj->insert_or_assign(key, std::move(val));
 				} else if (subtype == 0x03) {
 					if (blen >= 4) {
 						if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 truncated");
@@ -307,32 +309,32 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 						auto val = asvJSONValue::makeBinary(data + pos, oldLen);
 						pos += oldLen;
 						if (!val) throw asvJSONError("BSON binary too large");
-						obj->obj->emplace(key, std::move(val));
+						obj->obj->insert_or_assign(key, std::move(val));
 					} else {
 						auto val = asvJSONValue::makeBinary(data + pos, blen);
 						pos += blen;
 						if (!val) throw asvJSONError("BSON binary too large");
-						obj->obj->emplace(key, std::move(val));
+						obj->obj->insert_or_assign(key, std::move(val));
 					}
 				} else {
 					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + pos, blen);
 					pos += blen;
 					if (!val) throw asvJSONError("BSON extension too large");
-					obj->obj->emplace(key, std::move(val));
+					obj->obj->insert_or_assign(key, std::move(val));
 				}
 				break;
 			}
-			case 0x06: obj->obj->emplace(key, asvJSONValue::makeNull()); break;
+			case 0x06: obj->obj->insert_or_assign(key, asvJSONValue::makeNull()); break;
 			case 0x07: {
 				if (pos + 12 > docEnd + 1) throw asvJSONError("BSON objectid");
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += 12;
-				obj->obj->emplace(key, std::move(val));
+				obj->obj->insert_or_assign(key, std::move(val));
 				break;
 			}
 			case 0x08: {
 				if (pos >= docEnd + 1) throw asvJSONError("BSON bool");
-				obj->obj->emplace(key, asvJSONValue::makeBool(data[pos++] != 0));
+				obj->obj->insert_or_assign(key, asvJSONValue::makeBool(data[pos++] != 0));
 				break;
 			}
 			case 0x09: {
@@ -345,10 +347,10 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				int64_t q = ms64 / 1000;
 				int64_t r = ms64 % 1000;
 				if (r < 0) { q--; r += 1000; } // floor semantics for negative values
-				obj->obj->emplace(key, asvJSONValue::makeDateTime(static_cast<time_t>(q), static_cast<int>(r)));
+				obj->obj->insert_or_assign(key, asvJSONValue::makeDateTime(static_cast<time_t>(q), static_cast<int>(r)));
 				break;
 			}
-			case 0x0A: obj->obj->emplace(key, asvJSONValue::makeNull()); break;
+			case 0x0A: obj->obj->insert_or_assign(key, asvJSONValue::makeNull()); break;
 			case 0x0B: {
 				size_t patStart = pos;
 				while (pos < docEnd && data[pos] != 0) pos++;
@@ -365,13 +367,13 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				std::string options(reinterpret_cast<const char*>(data + optStart), optLen);
 				auto val = asvJSONValue::makeRegex(pattern.c_str(), options.c_str());
 				if (!val) throw asvJSONError("BSON regex invalid or too large");
-				obj->obj->emplace(key, std::move(val));
+				obj->obj->insert_or_assign(key, std::move(val));
 				break;
 			}
 			case 0x10: {
 				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON int32");
 				uint32_t v; readLE32(data, pos, v);
-				obj->obj->emplace(key, asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(v))));
+				obj->obj->insert_or_assign(key, asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(v))));
 				break;
 			}
 			case 0x11: {
@@ -384,7 +386,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				// documented loss -- the BSON timestamp type is primarily used
 				// internally by MongoDB and rarely round-trips through JSON.
 				(void)inc;
-				obj->obj->emplace(key, asvJSONValue::makeTimestamp(static_cast<int64_t>(ts)));
+				obj->obj->insert_or_assign(key, asvJSONValue::makeTimestamp(static_cast<int64_t>(ts)));
 				break;
 			}
 			case 0x12: {
@@ -392,7 +394,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				uint64_t v = 0;
 				for (int i = 0; i < 8; i++) v |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
-				obj->obj->emplace(key, asvJSONValue::makeInt(static_cast<int64_t>(v)));
+				obj->obj->insert_or_assign(key, asvJSONValue::makeInt(static_cast<int64_t>(v)));
 				break;
 			}
 			case 0x13: {

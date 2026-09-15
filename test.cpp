@@ -6726,6 +6726,46 @@ TEST(testYamlExtras) {
 		ASSERT(json.fromYAML("key#frag: val"));
 		ASSERT_EQ(std::string(json.getString("key#frag")), std::string("val"));
 	}
+	// Surrogate pair in a double-quoted scalar must assemble the astral code
+	// point (regression: the low half was never read and the cursor skipped
+	// only 6 chars, corrupting the rest of the string).
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("emoji: \"\\uD83D\\uDE00\""));
+		ASSERT_EQ(std::string(json.getString("emoji")), std::string("\xF0\x9F\x98\x80"));
+		ASSERT_EQ(std::string(json.getString("emoji")), std::string("😀"));
+	}
+	// A surrogate pair must survive a YAML round-trip.
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: \"\\uD800\\uDC00\""));
+		std::string y = json.toYAML();
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT_EQ(std::string(back.getString("a")), std::string("\xF0\x90\x80\x80"));
+	}
+	// A leading '+' must be parsed as a signed number (regression: the sign
+	// was kept, falling into the JSON layer's number parser which only accepts
+	// '-', producing "Invalid number: digit required").
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("a: +42\nb: +1.5\nc: +1e3\nd: -7"));
+		ASSERT_EQ(json.getInt("a"), int64_t(42));
+		ASSERT(json.getRoot()->get("a")->type == asvJSONValue::INT);
+		ASSERT(json.getRoot()->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(json.getDouble("b") > 1.49 && json.getDouble("b") < 1.51);
+		ASSERT(json.getRoot()->get("c")->type == asvJSONValue::DOUBLE);
+		ASSERT(json.getDouble("c") > 999.0 && json.getDouble("c") < 1001.0);
+		ASSERT_EQ(json.getInt("d"), int64_t(-7));
+	}
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("x: +42"));
+		std::string y = json.toYAML();
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT_EQ(back.getInt("x"), int64_t(42));
+	}
 }
 
 TEST(testToTOON) {
@@ -8049,6 +8089,12 @@ TEST(testGOONExtras) {
 		ASSERT(static_cast<int>(r->get(1)->ext_type) == 15);
 		ASSERT(r->get(1)->bin_data.size() == 2);
 		ASSERT(r->get(1)->bin_data[1] == 'i');
+	}
+	// A \u0000 escape must be rejected in GOON dictionary references
+	// (unescapeJsonString is called with allowNull=false).
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("$: $1=\"x\\u0000y\"\n")));
 	}
 }
 
@@ -10956,6 +11002,12 @@ TEST(testTRONExtras) {
     ASSERT_EQ(s1, s2);
     ASSERT(s1.find("class A:") != std::string::npos);
   }
+  // A \u0000 escape must be rejected in TRON strings (unescapeJsonString is
+  // called with allowNull=false).
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("x: \"a\\u0000b\"")));
+  }
 }
 
 TEST(testTRONSpecialTypes) {
@@ -11981,7 +12033,8 @@ TEST(testFromINI) {
     ASSERT(x2 != nullptr && x2->type == asvJSONValue::INT);
     ASSERT_EQ(x2->getInt(), int64_t(2));
   }
-  // Duplicate keys → arrays
+// Duplicate keys → arrays (repeated key = value lines are the primitive-array
+  // encoding, so the decoder merges duplicates into an ARRAY)
   {
     asvJSON j;
     ASSERT(j.fromINI(std::string("tag = cpp\ntag = json\n")));
@@ -12558,6 +12611,62 @@ TEST(testINIKeyLeadingBracket) {
     bool threw = false;
     try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
     ASSERT(threw);
+  }
+}
+
+TEST(testINIDottedKeyRoundTrip) {
+  // A flat key containing '.' must round-trip losslessly (regression: the
+  // encoder wrote "a.b" and the decoder re-split it, turning {"a.b":1} into
+  // {"a":{"b":1}}).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a.b\":1,\"c.d.e\":2}")));
+    std::string ini = j.toINI();
+    // Escaped dots: the key must survive the parser verbatim.
+    ASSERT(ini.find("a\\.b = 1") != std::string::npos);
+    ASSERT(ini.find("c\\.d\\.e = 2") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT_EQ(j2.getRoot()->get("a.b")->getInt(), int64_t(1));
+    ASSERT_EQ(j2.getRoot()->get("c.d.e")->getInt(), int64_t(2));
+    // No accidental nesting happened.
+    ASSERT(j2.getRoot()->get("a") == nullptr || j2.getRoot()->get("a")->type != asvJSONValue::OBJECT);
+  }
+  // Same invariant for the compact writer and nested dotted keys: the joiner
+  // dot between escaped segments is a nesting separator (decoder re-creates
+  // {"top.k":{"x.y":7}}).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"top.k\":{\"x.y\":7}}")));
+    std::string ini = j.toINI(false);
+    ASSERT(ini.find("top\\.k.x\\.y = 7") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT_EQ(j2.getRoot()->get("top.k")->get("x.y")->getInt(), int64_t(7));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"sec\":{\"a.b\":5}}")));
+    std::string ini = j.toINI(true);
+    ASSERT(ini.find("a\\.b = 5") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromINI(ini));
+    ASSERT_EQ(j2.getRoot()->get("sec")->get("a.b")->getInt(), int64_t(5));
+  }
+  // A section header with an escaped dot makes one literal segment.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[a\\.b]\nx = 1\n")));
+    auto* a = j.getRoot()->get("a.b");
+    ASSERT(a != nullptr && a->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(a->get("x")->getInt(), int64_t(1));
+  }
+  // A dotted key with a dotted section also nests correctly.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[server]\nhost.name = example.com\nhost.port = 8080\n")));
+    ASSERT_EQ(std::string(j.getString("server.host.name")), std::string("example.com"));
+    ASSERT_EQ(j.getInt("server.host.port"), int64_t(8080));
   }
 }
 
@@ -14409,6 +14518,121 @@ TEST(testJSONSchema) {
 		ASSERT(schema.parse(std::string_view(R"({"definitions":{"node":{"type":"object","properties":{"value":{"type":"number"},"child":{"$ref":"#/definitions/node"}},"required":["value"]}},"$ref":"#/definitions/node"})")));
 		asvJSON doc;
 		ASSERT(doc.parse(std::string_view(R"({"value":1,"child":{"value":2,"child":{"value":3}}})")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	// Malformed shapes for previously unvalidated keywords must fail validation
+	// instead of being silently ignored (fail-open regression).
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"not":42})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":{"type":"number"}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"anyOf":[]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"oneOf":"foo"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"properties":[1,2]})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"patternProperties":true})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"items":{"type":"string"},"additionalItems":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("[]")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"items":5})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("[]")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"dependencies":{"x":42}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"contains":"x"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("[]")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"propertyNames":123})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"format":123})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"dependentRequired":{"x":[1]}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{}")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// Valid shapes still validate fine.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"number"}],"not":{"const":0},"contains":{"type":"number"},"items":[true,false],"additionalProperties":false,"dependencies":{"x":["y"]},"dependentRequired":{"x":["y"]}})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("1")));
 		std::string err;
 		ASSERT(doc.validate(schema, err));
 	}
@@ -17944,6 +18168,158 @@ TEST(testReauditRegression2) {
 	}
 }
 
+// Medium/low-priority audit sweep (2026): TRON tokenizer errors, XML
+// malformed-input rejection, BSON duplicate keys / string termination /
+// CUSTOM_TAG serialization, S-Expression number degradations and NaN/Inf
+// rejection, JSONPath lenient-empty behavior for unsupported constructs.
+TEST(testAuditMedLow) {
+	// TRON: unterminated strings and unknown characters must fail instead of
+	// being silently skipped by the tokenizer.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTRON(std::string_view("x: \"abc")));
+		asvJSON j2;
+		ASSERT(!j2.fromTRON(std::string_view("x: 1 ?")));
+	}
+	// XML: unterminated comment / CDATA / attribute value and duplicate
+	// attributes are rejected (the old parser silently dropped trailing data).
+	{
+		asvJSON j;
+		ASSERT(!j.fromXML(std::string_view("<root><!-- unclosed <child/>")));
+		asvJSON j2;
+		ASSERT(!j2.fromXML(std::string_view("<root><![CDATA[hello")));
+		asvJSON j3;
+		ASSERT(!j3.fromXML(std::string_view("<root><a b=\"unclosed")));
+		asvJSON j4;
+		ASSERT(!j4.fromXML(std::string_view("<root><a x=\"1\" x=\"2\">t</a></root>")));
+	}
+	// XML: an attribute of an unrepresentable type throws instead of being
+	// silently emptied.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{}")));
+		j.getRoot()->obj->emplace("r", asvJSONValue::makeObject());
+		auto* r = j.getRoot()->get("r");
+		r->obj->emplace("@dt", asvJSONValue::makeDateTime(0, 0));
+		bool threw = false;
+		try { j.toXML(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// XML: a CUSTOM_TAG mixed into #content throws instead of being silently
+	// dropped; a plain null in mixed content is still skipped by design.
+	{
+		asvJSON v;
+		ASSERT(v.parse(std::string(R"({"x":{"$customTag":{"name":"t","value":1}}})")));
+		auto* tg = v.getRoot()->get("x");
+		ASSERT(tg != nullptr && tg->type == asvJSONValue::CUSTOM_TAG);
+		asvJSON j;
+		ASSERT(j.parse(std::string("{}")));
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(cloneValue(tg));
+		auto inner = asvJSONValue::makeObject();
+		inner->obj->emplace("#content", std::move(arr));
+		j.getRoot()->obj->emplace("r", std::move(inner));
+		bool threw = false;
+		try { j.toXML(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// BSON: duplicate keys follow last-wins (the first value used to win
+	// silently).
+	{
+		uint8_t data[] = {
+			0x13,0x00,0x00,0x00,
+			0x10,'a',0x00, 0x01,0x00,0x00,0x00,
+			0x10,'a',0x00, 0x02,0x00,0x00,0x00,
+			0x00
+		};
+		asvJSON j;
+		ASSERT(j.fromBSON(data, sizeof(data)));
+		ASSERT_EQ(j.getInt("a"), int64_t(2));
+	}
+	// BSON: a string element whose declared length does not end in NUL is
+	// rejected (was accepted as data).
+	{
+		uint8_t data[] = {
+			0x0D,0x00,0x00,0x00,
+			0x02,'s',0x00, 0x02,0x00,0x00,0x00, 'x','x',
+			0x00
+		};
+		asvJSON j;
+		ASSERT(!j.fromBSON(data, sizeof(data)));
+	}
+	// BSON: CUSTOM_TAG cannot be serialized (the old encoder wrote BSON null).
+	{
+		asvJSON v;
+		ASSERT(v.parse(std::string(R"({"x":{"$customTag":{"name":"t","value":1}}})")));
+		bool threw = false;
+		try { auto b = v.toBSON(); (void)b; } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// S-Expression: numbers that are not valid JSON (leading +, leading zeros,
+	// "1.e5") degrade to strings instead of rejecting the whole document,
+	// matching the existing "1." / "1e" convention; valid JSON numbers still
+	// round-trip as numbers.
+	{
+		asvJSON s;
+		ASSERT(s.fromSexpr(std::string_view("(a 01 b +42 c -01 d 1.e5 e +1.5)")));
+		ASSERT_EQ(std::string(s.getString("a")), "01");
+		ASSERT_EQ(std::string(s.getString("b")), "+42");
+		ASSERT_EQ(std::string(s.getString("c")), "-01");
+		ASSERT_EQ(std::string(s.getString("d")), "1.e5");
+		ASSERT_EQ(std::string(s.getString("e")), "+1.5");
+		asvJSON s2;
+		ASSERT(s2.fromSexpr(std::string_view("(x -7 y 0.5)")));
+		ASSERT(s2.get("x")->type == asvJSONValue::INT);
+		ASSERT_EQ(s2.getInt("x"), int64_t(-7));
+		ASSERT(s2.get("y")->type == asvJSONValue::DOUBLE);
+	}
+	// S-Expression: NaN/Infinity doubles cannot be serialized (used to become
+	// the null literal "nil").
+	{
+		asvJSON n;
+		ASSERT(n.parse(std::string("{}")));
+		n.getRoot()->obj->emplace("nn", asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+		bool threw = false;
+		try { n.toSexpr(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// JSONPath stays lenient (never throws) and returns empty for constructs it
+	// does not support, instead of partially evaluating and silently ignoring
+	// the malformed tail / arguments.
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":[10]})")));
+		ASSERT_EQ(doc.query("$[0").size(), size_t(0));            // was element 0
+		ASSERT_EQ(doc.query("$['a'").size(), size_t(0));          // was member a
+		ASSERT_EQ(doc.query("$.length(123)").size(), size_t(0));  // was length(root)
+		ASSERT_EQ(doc.query("$.match(@.a, 'x')").size(), size_t(0));
+		asvJSON d2;
+		ASSERT(d2.parse(std::string_view(R"({"a":[{"b":{"price":10}}]})")));
+		ASSERT_EQ(d2.query("$.a[?(@..price)]").size(), size_t(0)); // unsupported descent -> empty
+	}
+	// Datetime: fractional seconds longer than 3 digits no longer make the
+	// whole string unparseable (extra digits are consumed, ms truncated);
+	// out-of-range timezone offsets like +99:99 fall back to plain strings
+	// instead of producing a bogus DATETIME.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string(R"({"t1":"2024-01-15T10:30:45.123456Z"})")));
+		ASSERT(j.get("t1")->type == asvJSONValue::DATETIME);
+		ASSERT(j.serialize().find(".123Z") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.parse(std::string(R"({"t2":"2024-01-15T10:30:45+99:99"})")));
+		ASSERT(j2.get("t2")->type == asvJSONValue::STRING);
+		asvJSON j3;
+		ASSERT(j3.parse(std::string(R"({"t3":"2024-01-15T10:30:45+14:00"})")));
+		ASSERT(j3.get("t3")->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(j3.get("t3")->tz_offset_min, 14 * 60);
+		// leap second :60 still parses and normalizes
+		asvJSON j4;
+		ASSERT(j4.parse(std::string(R"({"t4":"2016-12-31T23:59:60Z"})")));
+		ASSERT(j4.get("t4")->type == asvJSONValue::DATETIME);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -18334,6 +18710,7 @@ RUN(testCBORFloat16);
 	RUN(testINIMixedArray);
 	RUN(testINITableOrder);
 	RUN(testINIKeyLeadingBracket);
+	RUN(testINIDottedKeyRoundTrip);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
@@ -18419,6 +18796,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- Re-audit Regression Tests ---\n";
 	RUN(testReauditRegression);
 	RUN(testReauditRegression2);
+	RUN(testAuditMedLow);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

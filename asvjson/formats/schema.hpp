@@ -421,6 +421,117 @@ private:
         return false;
       }
     }
+    // A schema value is either a boolean (true/false schema) or an object.
+    auto isSchema = [](const asvJSONValue* v) {
+      return v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::BOOL_VAL;
+    };
+    // allOf / anyOf / oneOf -- non-empty arrays of schemas.
+    static const char* const ofArrays[] = {"allOf", "anyOf", "oneOf"};
+    for (const char* k : ofArrays) {
+      if (auto n = schemaGet(schema, k)) {
+        if (n->type != asvJSONValue::ARRAY || !n->arr || n->arr->empty()) {
+          setError(std::string("Invalid schema: '") + k + "' must be a non-empty array of schemas");
+          return false;
+        }
+        for (const auto& e : *n->arr)
+          if (!isSchema(e.get())) {
+            setError(std::string("Invalid schema: '") + k + "' entries must be schemas");
+            return false;
+          }
+      }
+    }
+    // not / if / then / else / contains / propertyNames -- single schemas.
+    static const char* const singleSchemas[] = {"not", "if", "then", "else", "contains", "propertyNames"};
+    for (const char* k : singleSchemas) {
+      if (auto n = schemaGet(schema, k)) {
+        if (!isSchema(n)) {
+          setError(std::string("Invalid schema: '") + k + "' must be a schema");
+          return false;
+        }
+      }
+    }
+    // items -- a schema, or an (possibly empty) array of schemas (tuple form).
+    if (auto it = schemaGet(schema, "items")) {
+      bool ok = isSchema(it);
+      if (it->type == asvJSONValue::ARRAY && it->arr) {
+        ok = true;
+        for (const auto& e : *it->arr)
+          if (!isSchema(e.get())) { ok = false; break; }
+      }
+      if (!ok) {
+        setError("Invalid schema: 'items' must be a schema or an array of schemas");
+        return false;
+      }
+    }
+    if (auto ai = schemaGet(schema, "additionalItems")) {
+      if (!isSchema(ai)) {
+        setError("Invalid schema: 'additionalItems' must be a schema or boolean");
+        return false;
+      }
+    }
+    if (auto ap = schemaGet(schema, "additionalProperties")) {
+      if (!isSchema(ap)) {
+        setError("Invalid schema: 'additionalProperties' must be a schema or boolean");
+        return false;
+      }
+    }
+    // properties / patternProperties / definitions -- objects of schemas.
+    static const char* const schemaMaps[] = {"properties", "patternProperties", "definitions"};
+    for (const char* k : schemaMaps) {
+      if (auto n = schemaGet(schema, k)) {
+        if (n->type != asvJSONValue::OBJECT) {
+          setError(std::string("Invalid schema: '") + k + "' must be an object");
+          return false;
+        }
+      }
+    }
+    // dependencies -- object; each value is a schema or an array of strings.
+    if (auto d = schemaGet(schema, "dependencies")) {
+      if (d->type != asvJSONValue::OBJECT) {
+        setError("Invalid schema: 'dependencies' must be an object");
+        return false;
+      }
+      if (d->obj) {
+        for (const auto& [k, v] : *d->obj) {
+          bool ok = isSchema(v.get());
+          if (v->type == asvJSONValue::ARRAY && v->arr) {
+            ok = true;
+            for (const auto& e : *v->arr)
+              if (e->type != asvJSONValue::STRING) { ok = false; break; }
+          }
+          if (!ok) {
+            setError("Invalid schema: 'dependencies' entries must be schemas or arrays of strings");
+            return false;
+          }
+        }
+      }
+    }
+    // dependentRequired -- object of arrays of strings.
+    if (auto dr = schemaGet(schema, "dependentRequired")) {
+      if (dr->type != asvJSONValue::OBJECT) {
+        setError("Invalid schema: 'dependentRequired' must be an object");
+        return false;
+      }
+      if (dr->obj) {
+        for (const auto& [k, v] : *dr->obj) {
+          bool ok = v->type == asvJSONValue::ARRAY && v->arr;
+          if (ok) {
+            for (const auto& e : *v->arr)
+              if (e->type != asvJSONValue::STRING) { ok = false; break; }
+          }
+          if (!ok) {
+            setError("Invalid schema: 'dependentRequired' entries must be arrays of strings");
+            return false;
+          }
+        }
+      }
+    }
+    if (auto f = schemaGet(schema, "format")) {
+      if (f->type != asvJSONValue::STRING) {
+        setError("Invalid schema: 'format' must be a string");
+        return false;
+      }
+    }
     return true;
   }
 

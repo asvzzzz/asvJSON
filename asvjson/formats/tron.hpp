@@ -286,7 +286,8 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
         if (in[i] == '\\' && i + 1 < in.size()) { s += in[i++]; s += in[i++]; }
         else s += in[i++];
       }
-      if (i < in.size()) i++;
+      if (i >= in.size()) throw asvJSONError("unterminated string in TRON");
+      i++;
       add(TronTokType::STRING, s);
       continue;
     }
@@ -334,7 +335,8 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
       case ':': add(TronTokType::COLON); break;
       case ';': add(TronTokType::SEMICOLON); break;
       case '=': add(TronTokType::EQUALS); break;
-      default: i++; continue;
+      default:
+        throw asvJSONError(std::string("unexpected character in TRON: '") + c + "'");
     }
     i++;
   }

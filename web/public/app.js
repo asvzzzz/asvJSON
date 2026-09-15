@@ -16,6 +16,8 @@ const SAMPLES = {
   TRON: '# TRON sample\nclass Data: name, version, active, formats\nData(name="asvJSON++", version="1.16.1", active=true, formats=18)\n',
   GOON: 'name: asvJSON++\nactive: T\nversion: "1.16.1"\nformats: 18\ntags[]:\n  - json\n  - c++\n  - header-only\n',
   ProtobufText: '{\n  name: "asvJSON++"\n  active: true\n  version: "1.16.1"\n  formats: 18\n  tags: ["json", "c++", "header-only"]\n}\n',
+  JSONPath: '$.store.book[*].author',
+  JSONPathDoc: '{\n  "store": {\n    "book": [\n      {"category": "reference", "author": "Nigel Rees", "title": "Sayings of the Century", "price": 8.95},\n      {"category": "fiction", "author": "Evelyn Waugh", "title": "Sword of Honour", "price": 12.99},\n      {"category": "fiction", "author": "Herman Melville", "title": "Moby Dick", "isbn": "0-553-21311-3", "price": 8.99}\n    ],\n    "bicycle": {"color": "red", "price": 19.95}\n  }\n}',
 };
 
 const inputArea = document.getElementById('inputArea');
@@ -26,6 +28,28 @@ const inputStatus = document.getElementById('inputStatus');
 const outputStatus = document.getElementById('outputStatus');
 const statusMsg = document.getElementById('statusMsg');
 const convertBtn = document.getElementById('convertBtn');
+const pathInput = document.getElementById('pathQuery');
+
+// --- JSONPath query ---
+function runPath() {
+  const path = pathInput.value.trim();
+  if (!path) {
+    setStatus('Enter a JSONPath query first', 'error');
+    return;
+  }
+  _inputIsSample = false;
+  convert();
+}
+
+function loadPathSample() {
+  inputFormat.value = 'JSON~pretty';
+  outputFormat.value = 'JSON~pretty';
+  pathInput.value = SAMPLES.JSONPath;
+  inputArea.value = SAMPLES.JSONPathDoc;
+  inputStatus.textContent = 'JSONPath demo loaded';
+  _inputIsSample = true;
+  convert();
+}
 
 // --- Format parsing (value may be "JSON~pretty", "JSON~minify", or "XML") ---
 function parseFmt(val) {
@@ -248,19 +272,27 @@ async function convert() {
   }
 
   try {
-    const payload = JSON.stringify({ from: fromOpt.name, to: toOpt.name, data: data, binary: isBinaryInput, pretty: toOpt.pretty });
+    const path = pathInput.value.trim();
+    const payloadObj = { from: fromOpt.name, to: toOpt.name, data: data, binary: isBinaryInput, pretty: toOpt.pretty };
+    if (path) payloadObj.path = path;
+    const payload = JSON.stringify(payloadObj);
     const resp = await fetch('/api/convert', { method: 'POST', body: payload });
     const result = await resp.json();
 
     if (result.success) {
-      _lastBinary = !!result.binary;
-      if (result.binary) {
-        const b64 = result.data;
-        outputArea.value = _BIN_PREFIX + b64;
-        outputStatus.textContent = 'Binary output (base64)';
-      } else {
+      if (path) {
         outputArea.value = result.data;
-        outputStatus.textContent = `Converted: ${fromOpt.name} → ${toOpt.name}`;
+        outputStatus.textContent = `JSONPath result (${result.data === '[]' ? 'no matches' : 'array of matches'})`;
+      } else {
+        _lastBinary = !!result.binary;
+        if (result.binary) {
+          const b64 = result.data;
+          outputArea.value = _BIN_PREFIX + b64;
+          outputStatus.textContent = 'Binary output (base64)';
+        } else {
+          outputArea.value = result.data;
+          outputStatus.textContent = `Converted: ${fromOpt.name} → ${toOpt.name}`;
+        }
       }
       setStatus('Conversion successful', 'success');
     } else {

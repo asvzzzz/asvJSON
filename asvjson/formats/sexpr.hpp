@@ -199,6 +199,34 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
   return tokens;
 }
 
+inline bool sexprIsJsonNumber(const std::string& s) {
+  if (s.empty()) return false;
+  size_t i = 0;
+  if (s[i] == '-') i++;
+  if (i >= s.size()) return false;
+  if (s[i] == '0') {
+    i++;
+    // leading zeros are not valid JSON ("01", "-01")
+    if (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+  } else if (s[i] >= '1' && s[i] <= '9') {
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  } else {
+    return false;
+  }
+  if (i < s.size() && s[i] == '.') {
+    i++;
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  }
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    i++;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  }
+  return i == s.size();
+}
+
 inline std::string sexprTokenToJson(const SexprToken& token) {
   switch (token.type) {
     case SEXPR_STRING: {
@@ -209,7 +237,18 @@ inline std::string sexprTokenToJson(const SexprToken& token) {
       esc += '"';
       return esc;
     }
-    case SEXPR_NUMBER: return token.value;
+    case SEXPR_NUMBER: {
+      if (sexprIsJsonNumber(token.value)) return token.value;
+      // Not a JSON number (leading '+', leading zeros, "1.e5", ...): degrade
+      // to a string like the sibling "1." / "1e" / "1E" cases instead of
+      // letting an invalid token reject the whole document.
+      std::string esc;
+      esc.reserve(token.value.size() + 2);
+      esc += '"';
+      appendJsonEscaped(esc, token.value);
+      esc += '"';
+      return esc;
+    }
     case SEXPR_TRUE:   return "true";
     case SEXPR_FALSE:  return "false";
     case SEXPR_NIL:    return "null";
@@ -411,7 +450,8 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::INT: out += std::to_string(v->num); break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
-      if (std::isnan(d) || std::isinf(d)) { out += "nil"; break; }
+      if (std::isnan(d) || std::isinf(d))
+        throw asvJSONError("cannot serialize NaN/Infinity as S-Expression");
       std::string r; fmtDoubleVal(d, r); out += r;
       break;
     }

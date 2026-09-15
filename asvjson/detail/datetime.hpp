@@ -72,6 +72,7 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int*
 			mult /= 10;
 			pos++;
 		}
+		while (pos < sv.size() && sv[pos] >= '0' && sv[pos] <= '9') pos++; // consume >3 fractional digits
 	}
 
 	if (ms_out) *ms_out = ms;
@@ -87,12 +88,14 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int*
 		if (pos + 1 >= sv.size()) return false;
 		int tz_h, tz_m = 0;
 		if (!parse2(sv.data() + pos, tz_h)) return false;
+		if (tz_h > 23) return false; // reject out-of-range offsets e.g. +99:99
 		pos += 2;
 		if (pos < sv.size() && sv[pos] == ':') pos++;
 		if (pos + 1 < sv.size() && sv[pos] >= '0' && sv[pos] <= '9' && sv[pos + 1] >= '0' && sv[pos + 1] <= '9') {
 			tz_m = (sv[pos] - '0') * 10 + (sv[pos + 1] - '0');
 			pos += 2;
 		}
+		if (tz_m > 59) return false;
 		tzH = tz_h;
 		tzM = tz_m;
 		tzOffsetMin = (tzH * 60 + tzM) * (sign == '-' ? -1 : 1);
@@ -153,7 +156,10 @@ inline std::string unescapeJsonString(std::string_view raw, bool allowNull) {
 	std::string out;
 	out.reserve(raw.size());
 	for (size_t i = 0; i < raw.size(); i++) {
-		if (raw[i] != '\\') { out += raw[i]; continue; }
+		if (raw[i] != '\\') {
+			if (!allowNull && raw[i] == '\0') throw std::runtime_error("Null character in string");
+			out += raw[i]; continue;
+		}
 		if (i + 1 >= raw.size()) throw std::runtime_error("Invalid escape in string");
 		switch (raw[++i]) {
 			case '"': out += '"'; break;
@@ -192,6 +198,7 @@ inline std::string unescapeJsonString(std::string_view raw, bool allowNull) {
 					}
 				}
 				if (cp >= 0xD800 && cp <= 0xDFFF) throw std::runtime_error("Lone surrogate in string");
+				if (!allowNull && cp == 0) throw std::runtime_error("Null character in string");
 				appendUtf8Codepoint(out, cp);
 				break;
 			}

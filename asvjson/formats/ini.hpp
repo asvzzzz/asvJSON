@@ -77,7 +77,7 @@ inline std::string iniEscape(std::string_view s) {
   return out;
 }
 
-// Escape a key for use inside a section header [...] (brackets/backslash)
+// Escape a key for use inside a section header [...] (brackets/backslash/dot)
 inline std::string iniEscapeSectionKey(std::string_view s) {
   std::string out;
   out.reserve(s.size());
@@ -86,6 +86,7 @@ inline std::string iniEscapeSectionKey(std::string_view s) {
       case '\\': out += "\\\\"; break;
       case '[': out += "\\["; break;
       case ']': out += "\\]"; break;
+      case '.': out += "\\."; break;
       default: out += c;
     }
   }
@@ -102,6 +103,39 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
       i++;
     } else {
       out += s[i];
+    }
+  }
+  return out;
+}
+
+// Escape a flat (key = value side) key: '.' must be escaped so a re-parse does
+// not split it into a nested path. Backslashes are left untouched (they are
+// not unescaped on the raw key path).
+inline std::string iniEscapeFlatKey(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (auto c : s) {
+    if (c == '.') out += "\\.";
+    else out += c;
+  }
+  return out;
+}
+
+// Split a dotted path (section name or dotted key) on unescaped '.', trimming
+// and unescaping each segment. A backslash escapes the following character, so
+// "[a\.b]" and "a\.b = 1" both yield a single literal segment "a.b".
+inline std::vector<std::string> iniSplitDottedPath(std::string_view s) {
+  std::vector<std::string> out;
+  size_t dotStart = 0;
+  bool escaped = false;
+  for (size_t i = 0; i <= s.size(); i++) {
+    if (i == s.size() || (s[i] == '.' && !escaped)) {
+      out.push_back(iniUnescapeSectionKey(iniTrim(s.substr(dotStart, i - dotStart))));
+      dotStart = i + 1;
+      escaped = false;
+    } else {
+      bool wasEscaped = escaped;
+      escaped = (s[i] == '\\' && !wasEscaped);
     }
   }
   return out;
@@ -261,7 +295,9 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
   return asvJSONValue::makeString(s.data(), s.size());
 }
 
-// Insert a value into an object by key, converting duplicate keys to arrays
+// Insert a value into an object by key. Repeated keys convert to arrays: the
+// primitive-array encoder emits duplicates of the same key (one per element),
+// so the decoder must merge them back into an array instead of overriding.
 inline void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!target || target->type != asvJSONValue::OBJECT || !target->obj) return;
   auto it = target->obj->find(key);
@@ -328,25 +364,26 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   // These MUST precede [[...]] table headers so the decoder does not assign
   // them to a currentArrayElement opened by a preceding table.
   for (const auto& [key, val] : *obj->obj) {
-    std::string dottedKey = prefix.empty() ? key : prefix + "." + key;
+    std::string flatKey = iniEscapeFlatKey(key);
+    std::string dottedKey = prefix.empty() ? flatKey : prefix + "." + flatKey;
     if (!key.empty() && key[0] == '[')
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        out += (pretty ? key : dottedKey) + " = {}\n";
+        out += (pretty ? flatKey : dottedKey) + " = {}\n";
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        out += (pretty ? key : dottedKey) + " = []\n";
+        out += (pretty ? flatKey : dottedKey) + " = []\n";
       } else if (iniIsBareChild(val.get())) {
         for (const auto& elem : *val->arr) {
-          out += (pretty ? key : dottedKey) + " = ";
+          out += (pretty ? flatKey : dottedKey) + " = ";
           iniFormatVal(elem.get(), out);
           out += '\n';
         }
       }
     } else {
-      out += (pretty ? key : dottedKey) + " = ";
+      out += (pretty ? flatKey : dottedKey) + " = ";
       iniFormatVal(val.get(), out);
       out += '\n';
     }
@@ -398,7 +435,8 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, std::string& out, const std::string& prefix) {
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *obj->obj) {
-    std::string full = dk.empty() ? key : dk + "." + key;
+    std::string flatKey = iniEscapeFlatKey(key);
+    std::string full = dk.empty() ? flatKey : dk + "." + flatKey;
     if (!key.empty() && key[0] == '[')
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
@@ -423,7 +461,8 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
   }
   // Pass 2: objects and object-arrays
   for (const auto& [key, val] : *obj->obj) {
-    std::string full = dk.empty() ? key : dk + "." + key;
+    std::string flatKey = iniEscapeFlatKey(key);
+    std::string full = dk.empty() ? flatKey : dk + "." + flatKey;
     if (val->type == asvJSONValue::OBJECT && val->obj) {
       iniEmitElementFlat(val.get(), full, out, prefix);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
@@ -445,38 +484,40 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
   if (!elem || elem->type != asvJSONValue::OBJECT || !elem->obj) return;
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *elem->obj) {
+    std::string flatKey = iniEscapeFlatKey(key);
     if (!key.empty() && key[0] == '[')
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        out += key + " = {}\n";
+        out += flatKey + " = {}\n";
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        out += key + " = []\n";
+        out += flatKey + " = []\n";
       } else if (iniIsBareChild(val.get())) {
         for (const auto& e : *val->arr) {
-          out += key + " = ";
+          out += flatKey + " = ";
           iniFormatVal(e.get(), out);
           out += '\n';
         }
       }
     } else {
-      out += key + " = ";
+      out += flatKey + " = ";
       iniFormatVal(val.get(), out);
       out += '\n';
     }
   }
   // Pass 2: objects and object-arrays
   for (const auto& [key, val] : *elem->obj) {
+    std::string flatKey = iniEscapeFlatKey(key);
     if (val->type == asvJSONValue::OBJECT && val->obj) {
-      iniEmitElementFlat(val.get(), key, out, prefix);
+      iniEmitElementFlat(val.get(), flatKey, out, prefix);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool allObjects = true;
       for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
       if (allObjects && !val->arr->empty()) {
         for (const auto& e : *val->arr) {
-          std::string np = prefix.empty() ? key : prefix + "." + key;
+          std::string np = prefix.empty() ? flatKey : prefix + "." + flatKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np);
@@ -496,24 +537,25 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         // Compact: dotted keys for scalars/objects, [[...]] headers for
         // arrays-of-objects.  Bare lines must precede tables.
         for (const auto& [key, val] : *obj) {
+          std::string flatKey = iniEscapeFlatKey(key);
           if (!key.empty() && key[0] == '[')
             throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
-              out += key + " = {}\n";
+              out += flatKey + " = {}\n";
             }
           } else if (val->type == T::ARRAY && val->arr) {
             if (val->arr->empty()) {
-              out += key + " = []\n";
+              out += flatKey + " = []\n";
             } else if (iniIsBareChild(val.get())) {
               for (const auto& elem : *val->arr) {
-                out += key + " = ";
+                out += flatKey + " = ";
                 iniFormatVal(elem.get(), out);
                 out += '\n';
               }
             }
           } else {
-            out += key + " = ";
+            out += flatKey + " = ";
             iniFormatVal(val.get(), out);
             out += '\n';
           }
@@ -540,24 +582,25 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
       } else {
         // Pretty: first pass -- bare-line producers
         for (const auto& [key, val] : *obj) {
+          std::string flatKey = iniEscapeFlatKey(key);
           if (!key.empty() && key[0] == '[')
             throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
-              out += key + " = {}\n";
+              out += flatKey + " = {}\n";
             }
           } else if (val->type == T::ARRAY && val->arr) {
             if (val->arr->empty()) {
-              out += key + " = []\n";
+              out += flatKey + " = []\n";
             } else if (iniIsBareChild(val.get())) {
               for (const auto& elem : *val->arr) {
-                out += key + " = ";
+                out += flatKey + " = ";
                 iniFormatVal(elem.get(), out);
                 out += '\n';
               }
             }
           } else {
-            out += key + " = ";
+            out += flatKey + " = ";
             iniFormatVal(val.get(), out);
             out += '\n';
           }
@@ -684,15 +727,9 @@ inline bool asvJSON::fromINI(std::string_view input) {
         std::string_view sectionName = iniTrim(line.substr(start, nameLen));
         if (sectionName.empty()) throw asvJSONError("empty section name");
 
-        // Split section name on dots for nesting, trimming each segment
-        std::vector<std::string> newPath;
-        size_t dotStart = 0;
-        for (size_t i = 0; i <= sectionName.size(); i++) {
-          if (i == sectionName.size() || sectionName[i] == '.') {
-            newPath.push_back(iniUnescapeSectionKey(iniTrim(sectionName.substr(dotStart, i - dotStart))));
-            dotStart = i + 1;
-          }
-        }
+        // Split section name on dots for nesting, trimming each segment.
+        // Escaped dots ("\.") are literal characters of a single segment.
+        std::vector<std::string> newPath = iniSplitDottedPath(sectionName);
 
         if (isArraySection) {
           std::string arrKey = newPath.back();
@@ -847,17 +884,10 @@ inline bool asvJSON::fromINI(std::string_view input) {
       }
 
       if (target) {
-        // Split dotted keys into nested objects (e.g. "general.name" -> {"general":{"name":...}})
-        size_t dotPos = key.find('.');
-        if (dotPos != std::string::npos) {
-          std::vector<std::string> keyPath;
-          size_t start = 0;
-          for (size_t i = 0; i <= key.size(); i++) {
-            if (i == key.size() || key[i] == '.') {
-              keyPath.push_back(key.substr(start, i - start));
-              start = i + 1;
-            }
-          }
+        // Split dotted keys into nested objects (e.g. "general.name" -> {"general":{"name":...}}).
+        // Escaped dots ("a\.b") are literal single segments, so {"a.b":1} round-trips.
+        if (key.find('.') != std::string::npos) {
+          std::vector<std::string> keyPath = iniSplitDottedPath(key);
           std::string leafKey = keyPath.back();
           keyPath.pop_back();
           asvJSONValue* parent = iniNavigate(target, keyPath, true);

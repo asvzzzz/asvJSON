@@ -211,7 +211,8 @@ static bool isSafePath(const std::string& path) {
 /* ---- Conversion logic (inline from convert.cpp) ---- */
 static std::string doConvert(const std::string& fromFmt, const std::string& toFmt,
                              const std::string& textData, const std::vector<uint8_t>& binData,
-                             bool binaryInput, bool& outBinary, bool pretty = true)
+                             bool binaryInput, bool& outBinary, bool pretty = true,
+                             const std::string& jsonPath = "")
 {
   try {
     asvJSON j;
@@ -247,6 +248,21 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "Protobuf") ok = j.fromProtobuf(resolvedBin.data(), resolvedBin.size());
       else return jsonMsg(false, "", false, "Unknown input format: " + fromFmt);
       if (!ok) return jsonMsg(false, "", false, j.getLastError());
+    }
+
+    // JSONPath query mode: an optional "path" evaluates a query against the
+    // parsed input and returns the matches as a JSON array.
+    if (!jsonPath.empty()) {
+      auto matches = j.query(jsonPath);
+      std::string resp = "[";
+      bool first = true;
+      for (const auto* m : matches) {
+        if (!first) resp += ",";
+        first = false;
+        m->serialize(resp, false);
+      }
+      resp += "]";
+      return jsonMsg(true, resp, false, "");
     }
 
     outBinary = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf");
@@ -489,7 +505,8 @@ private:
 
     auto t0 = std::chrono::steady_clock::now();
     bool outBinary = false;
-    std::string result = doConvert(fromFmt, toFmt, textData, binData, binaryInput, outBinary, pretty);
+    std::string jsonPath = req.optString("path", "");
+    std::string result = doConvert(fromFmt, toFmt, textData, binData, binaryInput, outBinary, pretty, jsonPath);
     auto t1 = std::chrono::steady_clock::now();
     double durationMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 

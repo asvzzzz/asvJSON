@@ -451,10 +451,10 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 					};
 					unsigned int cp = 0;
 					for (int j = 0; j < 4; j++) { int h = hex(1 + j); if (h < 0) break; cp = (cp << 4) | static_cast<unsigned int>(h); }
-					if (cp >= 0xD800 && cp <= 0xDBFF && i + 10 <= s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
+					if (cp >= 0xD800 && cp <= 0xDBFF && i + 11 <= s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
 						unsigned int lo = 0;
-						for (int j = 0; j < 4; j++) { int h = hex(6 + j); if (h < 0) break; lo = (lo << 4) | static_cast<unsigned int>(h); }
-						if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
+						for (int j = 0; j < 4; j++) { int h = hex(7 + j); if (h < 0) break; lo = (lo << 4) | static_cast<unsigned int>(h); }
+						if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 10; }
 						else { i += 4; }
 					} else { i += 4; }
 					if (cp < 0x80) { out += static_cast<char>(cp); }
@@ -509,11 +509,43 @@ inline std::string_view yamlStripComment(std::string_view s) {
 
 // Convert YAML scalar to JSON (auto-detect type)
 inline std::string yamlScalarToJson(std::string_view s) {
+	auto fmtDbl = [](double d) {
+		std::string n;
+		fmtDoubleVal(d, n);
+		// Keep an integral-valued double a DOUBLE in the intermediate JSON
+		// (a bare "1000" would re-parse as an integer).
+		if (n.find_first_of(".eE") == std::string::npos) n += ".0";
+		return n;
+	};
 	if (s.empty() || s == "~" || s == "null" || s == "NULL" || s == "Null") return "null";
 	if (s == "true" || s == "TRUE" || s == "True" || s == "yes" || s == "YES" || s == "Yes" || s == "on" || s == "ON" || s == "On")
 		return "true";
 	if (s == "false" || s == "FALSE" || s == "False" || s == "no" || s == "NO" || s == "No" || s == "off" || s == "OFF" || s == "Off")
 		return "false";
+	// JSON accepts '-' but not '+' as a number sign. Strip the plus, validate
+	// the remainder with the C++ number grammar, and re-emit a normalised
+	// unsigned token (std::from_chars float formats reject a leading '+').
+	if (!s.empty() && s[0] == '+') {
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+		std::string_view rest = s.substr(1);
+		double dv = 0.0;
+		auto [pp, pe] = std::from_chars(rest.data(), rest.data() + rest.size(), dv);
+		if (pe == std::errc() && pp == rest.data() + rest.size()) {
+			long long iv = 0;
+			auto [ip, ie] = std::from_chars(rest.data(), rest.data() + rest.size(), iv);
+			if (ie == std::errc() && ip == rest.data() + rest.size()) return std::to_string(iv);
+			return fmtDbl(dv);
+		}
+	#else
+		std::string tmp(s.substr(1));
+		char* end = nullptr;
+		long long iv = std::strtoll(tmp.c_str(), &end, 10);
+		if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
+		double dv = std::strtod(tmp.c_str(), &end);
+		if (end == tmp.c_str() + tmp.size()) return fmtDbl(dv);
+		return tmp;
+	#endif
+	}
 	if (s == "NaN" || s == ".NaN" || s == ".nan" || s == ".NAN") return "NaN";
 	if (s == "Infinity" || s == ".Inf" || s == ".inf" || s == ".INF") return "Infinity";
 	if (s == "-Infinity" || s == "-.Inf" || s == "-.inf" || s == "-.INF") return "-Infinity";
@@ -533,6 +565,19 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		}
 	#endif
 		if (validNumber) {
+			// JSON has no leading '+' sign; strip it and re-emit a normalized token.
+			if (!s.empty() && s[0] == '+') {
+				std::string_view rest = s.substr(1);
+				long long iv = 0;
+				auto [ip, ie] = std::from_chars(rest.data(), rest.data() + rest.size(), iv);
+				if (ie == std::errc() && ip == rest.data() + rest.size()) return std::to_string(iv);
+				double dv = 0.0;
+				auto [dp2, de2] = std::from_chars(rest.data(), rest.data() + rest.size(), dv);
+				if (de2 == std::errc() && dp2 == rest.data() + rest.size()) {
+					return fmtDbl(dv);
+				}
+				return std::string(rest);
+			}
 			// JSON rejects leading-zero integers ("007", "01e2") even though
 			// the YAML 1.2 spec allows them as plain scalars. Re-emit a
 			// normalized JSON-compatible number instead of a raw token.
@@ -547,12 +592,23 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				double dv = 0.0;
 				auto [dp2, de2] = std::from_chars(s.data(), s.data() + s.size(), dv);
 				if (de2 == std::errc() && dp2 == s.data() + s.size()) {
+					return fmtDbl(dv);
+				}
+			}
+	#else
+			if (!s.empty() && s[0] == '+') {
+				std::string tmp(s.substr(1));
+				char* end = nullptr;
+				long long iv = std::strtoll(tmp.c_str(), &end, 10);
+				if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
+				double dv = std::strtod(tmp.c_str(), &end);
+				if (end == tmp.c_str() + tmp.size()) {
 					std::string norm;
 					fmtDoubleVal(dv, norm);
 					return norm;
 				}
+				return tmp;
 			}
-	#else
 			size_t sign = 0;
 			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
 			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&

@@ -100,7 +100,11 @@ inline void xmlAppendAttrValue(std::string& out, const asvJSONValue* v) {
 		}
 		case T::BOOL_VAL: out += v->flag ? "true" : "false"; break;
 		case T::NULL_VAL: out += "null"; break;
-		default: break;
+		default:
+			// DATETIME/BINARY/OBJECTID/REGEX/TIMESTAMP/EXTENSION and anything
+			// container-like have no XML attribute text form; emitting "" would
+			// silently lose the value.
+			throw asvJSONError("XML: attribute value type cannot be serialized");
 	}
 }
 
@@ -242,6 +246,10 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 						if (!out.empty() && out.back() == '\n') out.pop_back();
 					} else if (item->type == asvJSONValue::NULL_VAL) {
 						// null in mixed content -> skip
+					} else {
+						// CUSTOM_TAG (and any future unhandled type) used to fall
+						// through silently; reject instead of dropping the item.
+						throw asvJSONError("XML: cannot serialize this type in mixed content");
 					}
 				}
 				out += "</" + xmlSanitizeElementName(name) + ">\n";
@@ -383,7 +391,8 @@ inline std::string xmlParseAttrValue(std::string_view s, size_t& pos) {
 	while (pos < s.size() && s[pos] != quote) {
 		val += s[pos++];
 	}
-	if (pos < s.size()) pos++;
+	if (pos >= s.size()) throw asvJSONError("XML: unterminated attribute value");
+	pos++;
 	return xmlDecodeEntities(val);
 }
 
@@ -459,12 +468,12 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 			if (pos + 1 < s.size() && s[pos + 1] == '!') {
 				if (pos + 3 < s.size() && s[pos + 2] == '-' && s[pos + 3] == '-') {
 					size_t end = s.find("-->", pos + 4);
-					if (end == std::string_view::npos) { pos = s.size(); break; }
+					if (end == std::string_view::npos) throw asvJSONError("XML: unterminated comment");
 					pos = end + 3; continue;
 				}
 				if (pos + 8 < s.size() && s.substr(pos + 2, 7) == "[CDATA[") {
 					size_t end = s.find("]]>", pos + 9);
-					if (end == std::string_view::npos) { pos = s.size(); break; }
+					if (end == std::string_view::npos) throw asvJSONError("XML: unterminated CDATA section");
 					std::string cdata = std::string(s.substr(pos + 9, end - pos - 9));
 					if (!cdata.empty()) {
 						segments.push_back({false, std::move(cdata), "", nullptr});
@@ -480,14 +489,14 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 						else if (s[scan] == '>' && bracketDepth <= 0) break;
 						scan++;
 					}
-					if (scan >= s.size()) { pos = s.size(); break; }
+					if (scan >= s.size()) throw asvJSONError("XML: unterminated DOCTYPE");
 					pos = scan + 1; continue;
 				}
 				break;
 			}
 			if (pos + 1 < s.size() && s[pos + 1] == '?') {
 				size_t end = s.find("?>", pos + 2);
-				if (end == std::string_view::npos) { pos = s.size(); break; }
+				if (end == std::string_view::npos) throw asvJSONError("XML: unterminated processing instruction");
 				pos = end + 2; continue;
 			}
 			std::string childName;
@@ -528,7 +537,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			pos++;
 			xmlSkipSpaces(s, pos);
 			if (pos < s.size() && (s[pos] == '"' || s[pos] == '\'')) {
-				attrs[attrName] = xmlParseAttrValue(s, pos);
+				// Duplicate attributes are forbidden by the XML spec; the
+				// first value would otherwise be silently overwritten.
+				if (!attrs.emplace(attrName, xmlParseAttrValue(s, pos)).second)
+					throw asvJSONError("XML: duplicate attribute \"" + attrName + "\"");
 			}
 		}
 	}

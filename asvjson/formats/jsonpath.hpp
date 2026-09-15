@@ -300,7 +300,7 @@ public:
   // Advance raw position past the ']' that closes the current bracket segment
   // (depth-aware over nested '[', skipped quoted strings). Caller has consumed
   // the opening '['.
-  void skipToEndBracket() {
+  bool skipToEndBracket() {
     int depth = 0;
     char q = 0;
     while (pos_ < src.size()) {
@@ -313,11 +313,12 @@ public:
       if (c == '\'' || c == '"') { q = c; pos_++; continue; }
       if (c == '[') { depth++; pos_++; continue; }
       if (c == ']') {
-        if (depth == 0) { pos_++; return; }
+        if (depth == 0) { pos_++; return true; }
         depth--; pos_++; continue;
       }
       pos_++;
     }
+    return false;
   }
 
   // Like skipToEndBracket but additionally enforces balanced parentheses in
@@ -953,6 +954,8 @@ inline void jpExpandDotDot(Tok seg, PathLexer& lex, const asvJSONValue* node,
 
 inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
                              std::vector<const asvJSONValue*>& out, PathResult& res) {
+  bool closed = false;
+  size_t before = out.size();
   while (true) {
     Tok inner = lex.peek();
 
@@ -1055,7 +1058,9 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
         if (filterEval.evaluate()) out.push_back(child);
       }
 
-      lex.skipToEndBracket();
+      // query() is lenient by contract: an unterminated bracket segment must
+      // yield an empty result, not a partially-evaluated one (or an error).
+      closed = lex.skipToEndBracket();
     }
 
     else {
@@ -1066,7 +1071,11 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
     break;
   }
 
-  if (lex.peek().type == TokType::RBRACKET) lex.next();
+  if (lex.peek().type == TokType::RBRACKET) {
+    lex.next();
+    closed = true;
+  }
+  if (!closed) out.resize(before);
 }
 
 inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const asvJSONValue* arg) {
@@ -1138,7 +1147,15 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
       if (seg.type == TokType::IDENT && jpIsFuncName(seg.val) &&
           lex.peek().type == TokType::LPAREN) {
         lex.next();
-        if (lex.peek().type == TokType::RPAREN) lex.next();
+        // Segment-level functions take no arguments (length(), count(), ...,
+        // value()). A call with arguments was previously evaluated with the
+        // arguments silently dropped; query() is lenient so reject it as an
+        // empty result instead.
+        if (lex.peek().type != TokType::RPAREN) {
+          current.clear();
+          break;
+        }
+        lex.next();
         std::vector<const asvJSONValue*> next;
         for (auto* n : current) {
           auto r = jpApplyFunc(seg.val, n);

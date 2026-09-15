@@ -87,8 +87,10 @@ int main(int argc, char** argv) {
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
            "\n"
            "Reads a JSON request from stdin, writes JSON response to stdout.\n"
-           "Request:  {\"from\":\"<fmt>\",\"to\":\"<fmt>\",\"data\":\"...\",\"binary\":false}\n"
-           "Response: {\"success\":true,\"data\":\"...\",\"binary\":false}\n"
+"Request:  {\"from\":\"<fmt>\",\"to\":\"<fmt>\",\"data\":\"...\",\"binary\":false}\n"
+            "Optional \"path\":\"<jsonpath>\" evaluates an RFC 9535 JSONPath\n"
+            "query against the parsed input and returns matches as a JSON array.\n"
+            "Response: {\"success\":true,\"data\":\"...\",\"binary\":false}\n"
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
@@ -177,6 +179,26 @@ int main(int argc, char** argv) {
         if (rawMode) { std::cerr << "Error: " << j.getLastError() << "\n"; }
         else { std::cout << jsonError(j.getLastError()); }
         return 1;
+      }
+    }
+
+    // JSONPath query mode: an optional "path" field evaluates a query
+    // against the parsed input and returns the matches as a JSON array.
+    {
+      std::string jp = req.getString("path");
+      if (!jp.empty()) {
+        auto matches = j.query(jp);
+        std::string out = "[";
+        bool first = true;
+        for (const auto* m : matches) {
+          if (!first) out += ",";
+          first = false;
+          m->serialize(out, false);
+        }
+        out += "]";
+        if (rawMode) { std::cout << out; }
+        else { std::cout << jsonSuccess(out, false); }
+        return 0;
       }
     }
 
