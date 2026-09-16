@@ -11327,6 +11327,572 @@ TEST(testToJSON5) {
   }
 }
 
+TEST(testFromRON) {
+  // Simple struct
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(name: \"John\", age: 30, active: true, score: 91.5, empty: None)")));
+    ASSERT_EQ(std::string(j.getString("name")), "John");
+    ASSERT_EQ(j.getInt("age"), int64_t(30));
+    ASSERT_EQ(j.getBool("active"), true);
+    ASSERT(j.getDouble("score") > 91.4 && j.getDouble("score") < 91.6);
+    ASSERT(j.isNull("empty"));
+  }
+  // Null/Some(o) optionals
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: None, b: Some(7), c: Some(\"hi\"))")));
+    ASSERT(j.isNull("a"));
+    ASSERT_EQ(j.getInt("b"), int64_t(7));
+    ASSERT_EQ(std::string(j.getString("c")), "hi");
+  }
+  // Tuple -> array
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(10, 20, 30)")));
+    auto* r = j.getRoot();
+    ASSERT(r != nullptr && r->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(r->size(), size_t(3));
+    ASSERT_EQ(r->get(static_cast<size_t>(0))->getInt(), int64_t(10));
+    ASSERT_EQ(r->get(static_cast<size_t>(2))->getInt(), int64_t(30));
+  }
+  // Empty tuple () -> empty object; empty list; empty map
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("()")));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+    ASSERT_EQ(j.getRoot()->size(), size_t(0));
+    ASSERT(j.fromRON(std::string_view("[]")));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->size(), size_t(0));
+    ASSERT(j.fromRON(std::string_view("{}")));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+  }
+  // Named struct / named tuple (name kept as JSON key)
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(width: 800, height: 600)")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(1));
+    auto* inner = j.getRoot()->get("GameConfig");
+    ASSERT(inner != nullptr && inner->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(inner->get("width")->getInt(), int64_t(800));
+    ASSERT_EQ(inner->get("height")->getInt(), int64_t(600));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("Point3D(1.0, 2.0, 3.0)")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(1));
+    auto* inner = j.getRoot()->get("Point3D");
+    ASSERT(inner != nullptr && inner->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(inner->size(), size_t(3));
+    ASSERT_EQ(inner->get(static_cast<size_t>(2))->getDouble(), 3.0);
+  }
+  // Map with arbitrary keys
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{ \"foo-bar\": 1, 42: \"answer\", \"sp ace\": true }")));
+    ASSERT_EQ(j.getInt("foo-bar"), int64_t(1));
+    ASSERT_EQ(std::string(j.getString("42")), "answer");
+    ASSERT_EQ(j.getBool("sp ace"), true);
+  }
+  // Enum unit variants -> strings
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("[Red, Green, Blue]")));
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(0))->getString()), "Red");
+    ASSERT_EQ(std::string(j.getRoot()->get(static_cast<size_t>(1))->getString()), "Green");
+  }
+  // Qualified enum variant with data
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(shape: Shape::Circle(radius: 5))")));
+    auto* c = j.getRoot()->get("shape");
+    ASSERT(c != nullptr && c->type == asvJSONValue::OBJECT);
+    auto* sub = c->get("Shape::Circle");
+    ASSERT(sub != nullptr && sub->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(sub->get("radius")->getInt(), int64_t(5));
+  }
+  // Numbers: radix, separators, suffixes, .5, 5., exponent
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: 1_000, b: 0xFF, c: 0o17, d: 0b1010, e: .5, f: 5., g: 5.e3, h: 1e6)")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1000));
+    ASSERT_EQ(j.getInt("b"), int64_t(255));
+    ASSERT_EQ(j.getInt("c"), int64_t(15));
+    ASSERT_EQ(j.getInt("d"), int64_t(10));
+    ASSERT_EQ(j.getDouble("e"), 0.5);
+    ASSERT_EQ(j.getDouble("f"), 5.0);
+    ASSERT_EQ(j.getDouble("g"), 5000.0);
+    ASSERT_EQ(j.getDouble("h"), 1000000.0);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: 42u32, b: -7i8, c: 3.14f64, d: +9)")));
+    ASSERT_EQ(j.getInt("a"), int64_t(42));
+    ASSERT_EQ(j.getInt("b"), int64_t(-7));
+    ASSERT(j.getDouble("c") > 3.13 && j.getDouble("c") < 3.15);
+    ASSERT_EQ(j.getInt("d"), int64_t(9));
+  }
+  // inf / NaN
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("[inf, -inf, NaN]")));
+    auto* r = j.getRoot();
+    ASSERT(r->get(static_cast<size_t>(0))->getDouble() > 1e300);
+    ASSERT(r->get(static_cast<size_t>(1))->getDouble() < -1e300);
+    ASSERT(std::isnan(r->get(static_cast<size_t>(2))->getDouble()));
+  }
+  // Ranges (round-trip as {"$range":{...}} objects)
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("[3..5, ..=7.3, 3.., .., ..=]")));
+    auto* r = j.getRoot();
+    auto* r0 = r->get(static_cast<size_t>(0))->get("$range");
+    ASSERT(r0 != nullptr);
+    ASSERT_EQ(r0->get("start")->getInt(), int64_t(3));
+    ASSERT_EQ(r0->get("end")->getInt(), int64_t(5));
+    auto* r1 = r->get(static_cast<size_t>(1))->get("$range");
+    ASSERT(r1 != nullptr);
+    ASSERT_EQ(r1->get("end")->getDouble(), 7.3);
+    ASSERT_EQ(r1->get("inclusive")->getBool(), true);
+    auto* r2 = r->get(static_cast<size_t>(2))->get("$range");
+    ASSERT(r2 != nullptr);
+    ASSERT_EQ(r2->get("start")->getInt(), int64_t(3));
+    ASSERT(r2->get("end") == nullptr);
+    auto* r3 = r->get(static_cast<size_t>(3))->get("$range");
+    ASSERT(r3 != nullptr && r3->size() == size_t(0));
+    auto* r4 = r->get(static_cast<size_t>(4))->get("$range");
+    ASSERT(r4 != nullptr);
+    ASSERT(r4->get("end") == nullptr);
+    ASSERT_EQ(r4->get("inclusive")->getBool(), true);
+  }
+  // Strings: escapes, raw strings, byte strings, chars
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: \"line\\nbreak\", b: \"tab\\t\", c: \"\\x41\", d: \"\\u{1F600}\")")));
+    ASSERT_EQ(std::string(j.getString("a")), "line\nbreak");
+    ASSERT_EQ(std::string(j.getString("b")), "tab\t");
+    ASSERT_EQ(std::string(j.getString("c")), "A");
+    ASSERT_EQ(std::string(j.getString("d")), "\xF0\x9F\x98\x80");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: r\"no \\ escape\", b: r#\"quo \" inside\"#, c: br##\"bytes\\0\"##)")));
+    ASSERT_EQ(std::string(j.getString("a")), "no \\ escape");
+    ASSERT_EQ(std::string(j.getString("b")), "quo \" inside");
+    ASSERT_EQ(std::string(j.getString("c")), "bytes\\0");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: b\"bytes\", b: 'Z', c: '\\n', d: b'Q')")));
+    ASSERT_EQ(std::string(j.getString("a")), "bytes");
+    ASSERT_EQ(std::string(j.getString("b")), "Z");
+    ASSERT_EQ(std::string(j.getString("c")), "\n");
+    ASSERT_EQ(std::string(j.getString("d")), "Q");
+  }
+  // Comments and trailing commas
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("// leading\n(a: 1, /* mid // comment */ b: 2,)\n// trailing")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // Extension header
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("#![enable(unwrap_variant_newtypes)]\n(keep: ftw)")));
+    ASSERT_EQ(std::string(j.getString("keep")), "ftw");
+  }
+  // Multi-line string continuation
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: \"one\\\n  two\")")));
+    ASSERT_EQ(std::string(j.getString("a")), "onetwo");
+  }
+  // Root-level scalar document
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("42")));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(42));
+    ASSERT(j.fromRON(std::string_view("None")));
+    ASSERT(j.getRoot()->type == asvJSONValue::NULL_VAL);
+    ASSERT(j.fromRON(std::string_view("true")));
+    ASSERT_EQ(j.getRoot()->getBool(), true);
+  }
+  // Errors
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("(a: 1")));          // unterminated
+    ASSERT(!j.fromRON(std::string_view("[1 2]")));           // missing comma
+    ASSERT(!j.fromRON(std::string_view("(a: )")));           // missing value
+    ASSERT(!j.fromRON(std::string_view("\"unterminated")));
+    ASSERT(!j.fromRON(std::string_view("")));
+    ASSERT(!j.fromRON(std::string_view("(a: 1) trailing")));
+  }
+}
+
+TEST(testToRON) {
+  // Basic object -> struct syntax
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"name":"John","age":30,"active":true})")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "(name:\"John\",age:30,active:true)");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(std::string(j2.getString("name")), "John");
+    ASSERT_EQ(j2.getInt("age"), int64_t(30));
+    ASSERT_EQ(j2.getBool("active"), true);
+    std::string sp = j.toRON(true);
+    ASSERT(sp.find("name: \"John\"") != std::string::npos);
+  }
+  // Pretty output
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":{"b":1},"c":[1,2]})")));
+    std::string s = j.toRON(true);
+    ASSERT(s.find('\n') != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getInt("a.b"), int64_t(1));
+    ASSERT_EQ(j2.getRoot()->get("c")->size(), size_t(2));
+  }
+  // Compact output
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":{"b":1},"c":[1,2]})")));
+    ASSERT_EQ(j.toRON(false), "(a:(b:1),c:[1,2])");
+  }
+  // Empty object / array
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    ASSERT_EQ(j.toRON(), "{}");
+    ASSERT(j.parse(std::string_view("[]")));
+    ASSERT_EQ(j.toRON(), "[]");
+  }
+  // null -> None
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":null})")));
+    ASSERT_EQ(j.toRON(false), "(a:None)");
+  }
+  // Non-ident keys -> map form
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"foo-bar":1,"42":"answer","sp ace":true})")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "{\"foo-bar\":1,\"42\":\"answer\",\"sp ace\":true}");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getInt("foo-bar"), int64_t(1));
+    ASSERT_EQ(std::string(j2.getString("42")), "answer");
+  }
+  // Numbers / floats round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"i":42,"d":3.14,"n":-7,"x":0.5})")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "(i:42,d:3.14,n:-7,x:0.5)");
+  }
+  // NaN / inf
+  {
+    asvJSON j;
+    j.allowNaNInfinity = true;
+    ASSERT(j.parse(std::string_view("[NaN, -NaN, Infinity, -Infinity]")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "[NaN,-NaN,inf,-inf]");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    auto* r = j2.getRoot();
+    ASSERT(std::isnan(r->get(static_cast<size_t>(0))->getDouble()));
+    ASSERT(std::isnan(r->get(static_cast<size_t>(1))->getDouble()));
+    ASSERT(r->get(static_cast<size_t>(2))->getDouble() > 1e300);
+    ASSERT(r->get(static_cast<size_t>(3))->getDouble() < -1e300);
+  }
+  // Range round-trip
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(r: 3..=7, u: ..9)")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "(r:3..=7,u:..9)");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("r")->get("$range")->get("start")->getInt(), int64_t(3));
+    ASSERT_EQ(j2.getRoot()->get("r")->get("$range")->get("end")->getInt(), int64_t(7));
+    ASSERT_EQ(j2.getRoot()->get("r")->get("$range")->get("inclusive")->getBool(), true);
+    ASSERT_EQ(j2.getRoot()->get("u")->get("$range")->get("end")->getInt(), int64_t(9));
+  }
+  // Special types round-trip
+  {
+    asvJSON j;
+    j.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+    j.putRegex("rx", "^test$", "gi");
+    uint8_t bin[] = {0xde, 0xad};
+    j.putBinary("bin", bin, 2);
+    j.putExtension("ext", 42, bin, 2);
+    j.putDateTime("dt", 1705314645);
+    j.putInt("ts", 1712345678);
+    std::string s = j.toRON();
+    ASSERT(!s.empty());
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    auto* oid = j2.getRoot()->get("oid");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::OBJECTID);
+    ASSERT_EQ(std::string_view(oid->str_data), std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+    ASSERT_EQ(j2.getRegexPattern("rx"), "^test$");
+    ASSERT_EQ(j2.getRegexOptions("rx"), "gi");
+    auto* bin2 = j2.getRoot()->get("bin");
+    ASSERT(bin2 != nullptr && bin2->type == asvJSONValue::BINARY);
+    ASSERT_EQ(bin2->bin_data.size(), size_t(2));
+    auto* ext2 = j2.getRoot()->get("ext");
+    ASSERT(ext2 != nullptr && ext2->type == asvJSONValue::EXTENSION);
+    ASSERT_EQ(ext2->ext_type, 42);
+    ASSERT_EQ(ext2->bin_data.size(), size_t(2));
+    auto* dt2 = j2.getRoot()->get("dt");
+    ASSERT(dt2 != nullptr && dt2->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(dt2->timestamp, 1705314645);
+  }
+  // asvJSONValue::toRON
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"nested":{"v":5}})")));
+    std::string s;
+    j.getRoot()->get("nested")->toRON(s, false);
+    ASSERT_EQ(s, "(v:5)");
+  }
+  // Named struct / tuple struct round-trip: single-key object whose value is a
+  // group re-emits the RON wrapper `Name(...)` so the name survives JSON.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"GameConfig":{"width":800,"height":600}})")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "GameConfig(width:800,height:600)");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("GameConfig")->get("width")->getInt() == int64_t(800));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"Point3D":[1,2,3]})")));
+    std::string s = j.toRON(false);
+    ASSERT_EQ(s, "Point3D(1,2,3)");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("Point3D")->size() == size_t(3));
+    ASSERT_EQ(j2.getRoot()->get("Point3D")->get(static_cast<size_t>(2))->getInt(), int64_t(3));
+  }
+  // Qualified variant path key
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"Line::Point":{"x":1,"y":2}})")));
+    ASSERT_EQ(j.toRON(false), "Line::Point(x:1,y:2)");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view("Line::Point(x:1,y:2)")));
+    ASSERT(j2.getRoot()->get("Line::Point")->get("y")->getInt() == int64_t(2));
+  }
+  // Empty named struct
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"GameConfig":{}})")));
+    ASSERT_EQ(j.toRON(false), "GameConfig()");
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view("GameConfig()")));
+    ASSERT(j2.getRoot()->get("GameConfig")->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->size(), size_t(0));
+  }
+  // Named form NOT applied to a scalar value, empty array, or range child
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"background":5})")));
+    ASSERT_EQ(j.toRON(false), "(background:5)");
+    asvJSON j2;
+    ASSERT(j2.parse(std::string_view(R"({"x":[]})")));
+    ASSERT_EQ(j2.toRON(false), "(x:[])");
+    asvJSON j3;
+    ASSERT(j3.fromRON(std::string_view("(r: 3..=7)")));
+    std::string s = j3.toRON(false);
+    ASSERT_EQ(s, "(r:3..=7)");
+  }
+}
+
+TEST(testRONComments) {
+  // RON -> RON round-trip preserves comments (name, leading, block, closings).
+  {
+    asvJSON j;
+    const char* src = "// optional struct name\n"
+                      "GameConfig(\n"
+                      "  // current time\n"
+                      "  time: 10.5,\n"
+                      "  // Uncomment to enable WASD controls\n"
+                      "  /*\n"
+                      "    headless: false\n"
+                      "  */\n"
+                      "  wasd: true,\n"
+                      ")";
+    ASSERT(j.fromRON(std::string_view(src)));
+    std::string s = j.toRON();
+    ASSERT(s.find("// optional struct name") != std::string::npos);
+    ASSERT(s.find("// current time") != std::string::npos);
+    ASSERT(s.find("// Uncomment to enable WASD controls") != std::string::npos);
+    ASSERT(s.find("/*") != std::string::npos);
+    ASSERT(s.find("headless: false") != std::string::npos);
+    // Comments survive a second parse -> serialize cycle untouched.
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    std::string s2 = j2.toRON();
+    ASSERT_EQ(s, s2);
+  }
+  // Same-line trailing comment -> emitted on the value's line, stable across
+// round-trips (a `//` after a separator binds to the entry that just ended).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: 1, // trailing on field\n  b: 2)")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("// trailing on field") != std::string::npos);
+    ASSERT(s.find("a:1, // trailing on field") != std::string::npos);
+    ASSERT(s.find("b:2") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getInt("a"), int64_t(1));
+    ASSERT_EQ(j2.getInt("b"), int64_t(2));
+    std::string s2 = j2.toRON(false);
+    ASSERT_EQ(s, s2);
+  }
+  // Array-element trailing: `[800, // note\n  600]` keeps the comment on 800
+  // and round-trips byte-for-byte.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(\nwindow_size: [\n800, // optional struct name\n600\n])")));
+    std::string s = j.toRON();
+    ASSERT(s.find("800, // optional struct name") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("GameConfig")->get("window_size")->get(0)->getInt() == 800);
+    std::string s2 = j2.toRON();
+    ASSERT_EQ(s, s2);
+  }
+  // Closing comment before '}' / ']' is preserved.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(m: {x: 1, /* note */}, arr: [1, // el\n  2])")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("/* note */") != std::string::npos);
+    ASSERT(s.find("// el") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("m")->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(j2.getRoot()->get("arr")->size(), size_t(2));
+  }
+  // Same-line trailing before a closing paren inside a named form survives
+  // the RON -> RON round-trip and the comment text is preserved.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(\n  time: 10.5,\n  wasd: true, // keyboard\n)")));
+    std::string s = j.toRON();
+    ASSERT(s.find("// keyboard") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    std::string s2 = j2.toRON();
+    ASSERT(s2.find("// keyboard") != std::string::npos);
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("time")->getDouble(), 10.5);
+  }
+  // Footing comment after the document becomes a trailing comment line.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: 1)\n// The End")));
+    std::string s = j.toRON();
+    ASSERT(s.find("// The End") != std::string::npos);
+  }
+  // RON -> JSON5 keeps comments verbatim (native // and /* */).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(time: 10.5, // current\n  wasd: true)")));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("// current") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getDouble("time"), 10.5);
+    ASSERT_EQ(j2.getBool("wasd"), true);
+  }
+  // RON -> YAML translates comments to '#'.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(\n  // current time\n  time: 10.5,\n)")));
+    std::string s = j.toYAML(true);
+    ASSERT(s.find("// optional struct name") == std::string::npos);
+    ASSERT(s.find("# current time") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromYAML(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("time")->getDouble(), 10.5);
+  }
+  // RON -> UDE keeps comments; output re-parses to the same data.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(\n  // current time\n  time: 10.5,\n  /*\n    headless: false\n  */\n  wasd: true,\n)")));
+    std::string s = j.toUDE();
+    ASSERT(s.find("// current time") != std::string::npos);
+    ASSERT(s.find("/*") != std::string::npos);
+    ASSERT(s.find("headless: false") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("time")->getDouble(), 10.5);
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("wasd")->getBool(), true);
+  }
+  // RON -> JSON drops comments (JSON has no comment syntax).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("(a: 1, // note\n  b: 2)")));
+    std::string s = j.serialize();
+    ASSERT(s.find("//") == std::string::npos);
+    ASSERT(s.find("/*") == std::string::npos);
+  }
+  // YAML -> RON bridges YAML comments to RON comments (leading + trailing).
+  {
+    asvJSON j;
+    const char* yaml = "GameConfig:\n"
+                       "  window_size:\n"
+                       "    - 800 # optional struct name\n"
+                       "    - 600\n"
+                       "  # Uncomment to enable WASD controls\n"
+                       "  # \"W\": Up,\n"
+                       "  # \"S\": Down,\n"
+                       "  key_bindings:\n"
+                       "    up: Up\n"
+                       "    down: Down\n";
+    ASSERT(j.fromYAML(std::string_view(yaml)));
+    std::string s = j.toRON();
+    ASSERT(s.find("// optional struct name") != std::string::npos);
+    ASSERT(s.find("// Uncomment to enable WASD controls") != std::string::npos);
+    ASSERT(s.find("// \"W\": Up,") != std::string::npos);
+    ASSERT(s.find("// \"S\": Down,") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("window_size")->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("key_bindings")->get("up")->getString(), std::string("Up"));
+  }
+  // YAML -> JSON5 also bridges comments.
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("GameConfig:\n  # current time\n  time: 10.5\n")));
+    std::string s = j.toJSON5();
+    ASSERT(s.find("// current time") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("time")->getDouble(), 10.5);
+  }
+  // YAML -> UDE also bridges comments.
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("GameConfig:\n  # current time\n  time: 10.5\n")));
+    std::string s = j.toUDE();
+    ASSERT(s.find("// current time") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("time")->getDouble(), 10.5);
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -19099,6 +19665,11 @@ RUN(testCBORFloat16);
     RUN(testSexprAudit);
     RUN(testSexprSpecialTypes);
     RUN(testSexprExtras);
+
+	std::cout << "\n--- RON Serialization Tests ---\n";
+	RUN(testToRON);
+	RUN(testFromRON);
+	RUN(testRONComments);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

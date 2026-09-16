@@ -29,6 +29,10 @@ inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 inline std::string yamlTrail(const asvJSONValue* v) {
 	if (v->yaml_comments && !v->yaml_comments->trailing.empty())
 		return " " + v->yaml_comments->trailing;
+	if (v->ron_comments && !v->ron_comments->trailing.empty()) {
+		std::string t = ronCommentAsYaml(v->ron_comments->trailing);
+		if (t.find('\n') == std::string::npos) return " " + t;
+	}
 	return std::string();
 }
 
@@ -78,6 +82,8 @@ inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
 		root->toYAML(out, opts);
 		if (opts.style == YamlWriteOptions::Style::Block && root->yaml_comments)
 			for (const auto& cl : root->yaml_comments->footing) out += cl + "\n";
+		if (opts.style == YamlWriteOptions::Style::Block && root->ron_comments && !root->ron_comments->footing.empty())
+			ronFootingToYaml(out, root->ron_comments->footing);
 	}
 	return out;
 }
@@ -210,6 +216,26 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 	if (wc && v->yaml_comments && !v->yaml_comments->leading.empty()) {
 		for (const auto& cl : v->yaml_comments->leading)
 			out += std::string(indent * iw, ' ') + cl + "\n";
+	}
+	if (wc && v->ron_comments) {
+		std::vector<const std::string*> extra;
+		for (const auto& c : v->ron_comments->leading) extra.push_back(&c);
+		for (const auto& c : v->ron_comments->closing) extra.push_back(&c);
+		for (const auto* cp : extra) {
+			std::string t = ronCommentAsYaml(*cp);
+			size_t pos = 0;
+			while (pos <= t.size()) {
+				size_t nl = t.find('\n', pos);
+				std::string_view l(t.data() + pos, nl == std::string::npos ? t.size() - pos : nl - pos);
+				if (!l.empty()) {
+					out += std::string(indent * iw, ' ');
+					out.append(l.data(), l.size());
+					out += '\n';
+				}
+				if (nl == std::string::npos) break;
+				pos = nl + 1;
+			}
+		}
 	}
 
 	switch (v->type) {

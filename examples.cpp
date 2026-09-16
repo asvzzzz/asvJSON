@@ -1202,6 +1202,97 @@ void example_from_sexpr() {
 	std::cout << std::endl;
 }
 
+void example_to_ron() {
+	std::cout << "=== RON Output ===" << std::endl;
+	
+	asvJSON json;
+	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":10001}})"));
+	std::string ron = json.toRON();
+	std::cout << "RON:" << std::endl << ron << std::endl << std::endl;
+	
+	// Round-trip
+	asvJSON j2;
+	if (j2.fromRON(std::string_view(ron))) {
+		std::cout << "Round-trip: name=" << j2.getString("name")
+		          << " age=" << j2.getInt("age")
+		          << " city=" << j2.getString("address.city")
+		          << std::endl;
+	}
+	
+	// Special types - Extended JSON marker objects
+	asvJSON j3;
+	uint8_t bin[] = {0xde, 0xad, 0xbe, 0xef};
+	j3.putObjectId("oid", std::string_view("\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c", 12));
+	j3.putRegex("rx", "^test$", "gi");
+	j3.putBinary("bin", bin, 4);
+	j3.putExtension("ext", 42, bin, 4);
+	j3.putDateTime("dt", 1705314645);
+	j3.putInt("ts", 1712345678);
+	std::string rons = j3.toRON();
+	std::cout << "RON with special types:" << std::endl << rons << std::endl << std::endl;
+	
+	// Round-trip special types
+	asvJSON j4;
+	if (j4.fromRON(std::string_view(rons))) {
+		std::cout << "Special types round-trip OK:";
+		if (j4.getRoot()->get("oid") && j4.getRoot()->get("oid")->type == asvJSONValue::OBJECTID) std::cout << " oid";
+		if (j4.getRoot()->get("rx") && j4.getRoot()->get("rx")->type == asvJSONValue::REGEX) std::cout << " rx";
+		if (j4.getRoot()->get("bin") && j4.getRoot()->get("bin")->type == asvJSONValue::BINARY) std::cout << " bin";
+		if (j4.getRoot()->get("ext") && j4.getRoot()->get("ext")->type == asvJSONValue::EXTENSION) std::cout << " ext";
+		if (j4.getRoot()->get("dt") && j4.getRoot()->get("dt")->type == asvJSONValue::DATETIME) std::cout << " dt";
+		std::cout << std::endl;
+	}
+	std::cout << std::endl;
+
+	// Comment round-trip: RON -> RON, then converted into JSON5 / YAML / UDE
+	// (each keeps the comments in its own syntax).
+	asvJSON j5;
+	j5.fromRON(std::string_view("// optional struct name\n"
+	                            "GameConfig(\n"
+	                            "  // current time\n"
+	                            "  time: 10.5,\n"
+	                            "  wasd: true, // keyboard controls\n"
+	                            ")"));
+	std::string ronC = j5.toRON();
+	std::cout << "RON with comments (round-trip):" << std::endl << ronC << std::endl;
+	std::cout << "Comments -> JSON5:" << std::endl << j5.toJSON5() << std::endl;
+	std::cout << "Comments -> YAML:" << std::endl << j5.toYAML(true) << std::endl;
+	std::cout << "Comments -> UDE:" << std::endl << j5.toUDE() << std::endl;
+	asvJSON j6;
+	j6.fromRON(std::string_view(ronC));
+	std::cout << "RON->RON comment round-trip idempotent: "
+	          << (j6.toRON() == ronC ? "yes" : "no") << std::endl;
+	std::cout << std::endl;
+}
+
+void example_from_ron() {
+	std::cout << "=== RON Input ===" << std::endl;
+	
+	// RON struct with nested values, ranges and enums
+	asvJSON json;
+	std::string_view input = R"((
+		name: "Alice",
+		age: 0x1E,
+		active: true,
+		score: 98.5,
+		tags: ["fast", "light"],
+		level: 3..=5,
+		status: Ready,
+		maybe: Some("hidden"),
+	)
+	)";
+	if (json.fromRON(input)) {
+		std::cout << "Parsed RON:" << std::endl;
+		std::cout << "  name: " << json.getString("name") << std::endl;
+		std::cout << "  age: " << json.getInt("age") << std::endl;
+		std::cout << "  state: " << json.getString("status") << std::endl;
+		auto* lvl = json.getRoot()->get("level")->get("$range");
+		if (lvl) std::cout << "  level range: " << lvl->get("start")->getInt() << "..=" << lvl->get("end")->getInt() << std::endl;
+		std::cout << "  maybe: '" << json.getString("maybe") << "'" << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_to_json5() {
 	std::cout << "=== JSON5 Output ===" << std::endl;
 	
@@ -1674,6 +1765,8 @@ int main() {
 	example_json_lines();
 	example_to_sexpr();
 	example_from_sexpr();
+	example_to_ron();
+	example_from_ron();
 	example_to_json5();
 	example_from_json5();
 	example_to_ini();

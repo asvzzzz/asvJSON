@@ -116,33 +116,6 @@ textarea[readonly] { background: #f8f9fb; cursor: default; }
   flex-shrink: 0;
 }
 
-.jp-box {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px;
-  width: 230px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel-header);
-}
-.jp-label {
-  font-size: 11px;
-  color: var(--text-dim);
-  text-align: center;
-}
-#pathQuery {
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 12px;
-  font-family: Consolas, "Courier New", monospace;
-  background: var(--surface);
-  color: var(--text);
-  width: 100%;
-}
-#pathQuery:focus { outline: none; border-color: var(--primary); }
-
 .btn {
   padding: 8px 16px;
   border: 1px solid var(--border);

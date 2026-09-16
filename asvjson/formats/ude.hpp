@@ -1626,6 +1626,89 @@ inline void udeWriteFoldedScalar(std::ostream& os, std::string_view s) {
 // Forward declaration
 inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict);
 
+// True when a node carries RON comments (or any descendant does): such nodes
+// need multi-line output so the comments can be preserved verbatim.
+inline bool udeHasRonComments(const asvJSONValue* v) {
+  if (!v) return false;
+  if (v->ron_comments &&
+      (!v->ron_comments->leading.empty() || !v->ron_comments->trailing.empty() ||
+       !v->ron_comments->closing.empty() || !v->ron_comments->footing.empty()))
+    return true;
+  if (v->type == asvJSONValue::OBJECT && v->obj) {
+    for (const auto& [k, c] : *v->obj) if (udeHasRonComments(c.get())) return true;
+  } else if (v->type == asvJSONValue::ARRAY && v->arr) {
+    for (const auto& c : *v->arr) if (udeHasRonComments(c.get())) return true;
+  }
+  return false;
+}
+
+inline void udeWriteRonCommentLines(std::ostream& os, const std::vector<std::string>& list, int indent) {
+  for (const auto& c : list) {
+    udeWriteIndent(os, indent);
+    os << c << '\n';
+  }
+}
+
+// Appends a trailing RON comment after a value; returns true when the comment
+// was terminated with a newline (a `//`-style comment swallows anything on the
+// same line, so UDE separators/closers must start on a fresh line).
+inline bool udeWriteRonTrailing(std::ostream& os, const asvJSONValue* v) {
+  if (!v->ron_comments || v->ron_comments->trailing.empty()) return false;
+  const std::string& t = v->ron_comments->trailing;
+  os << ' ' << t;
+  size_t nl = t.rfind('\n');
+  std::string_view last = (nl == std::string::npos) ? std::string_view(t)
+                                                    : std::string_view(t).substr(nl + 1);
+  bool needNl = last.rfind("*/") == std::string_view::npos;
+  if (needNl) os << '\n';
+  return needNl;
+}
+
+// Multi-line inline object ("key: { ... }") that preserves RON comments on
+// fields, closing comments before '}', and the object's own trailing.
+inline void udeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+  os << "{\n";
+  for (const auto& [k, sub] : *v->obj) {
+    if (sub->ron_comments) udeWriteRonCommentLines(os, sub->ron_comments->leading, indent);
+    udeWriteIndent(os, indent);
+    udeWriteKey(os, k, strict);
+    os << ": ";
+    std::ostringstream vbuf;
+    udeWriteValue(vbuf, sub.get(), indent, true, strict);
+    os << vbuf.str();
+    os << ',';
+    bool nl = udeWriteRonTrailing(os, sub.get());
+    if (!nl) os << '\n';
+  }
+  if (v->ron_comments && !v->ron_comments->closing.empty()) {
+    udeWriteRonCommentLines(os, v->ron_comments->closing, indent);
+  }
+  udeWriteIndent(os, indent - 1);
+  os << '}';
+}
+
+// Multi-line array ("[\n ... \n]") that preserves RON comments on elements
+// and closing comments before ']'.
+inline void udeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+  os << "[\n";
+  for (size_t i = 0; i < v->arr->size(); i++) {
+    const auto& el = v->arr->at(i);
+    if (el->ron_comments) udeWriteRonCommentLines(os, el->ron_comments->leading, indent);
+    udeWriteIndent(os, indent);
+    std::ostringstream vbuf;
+    udeWriteValue(vbuf, el.get(), indent, true, strict);
+    os << vbuf.str();
+    os << ',';
+    bool nl = udeWriteRonTrailing(os, el.get());
+    if (!nl) os << '\n';
+  }
+  if (v->ron_comments && !v->ron_comments->closing.empty()) {
+    udeWriteRonCommentLines(os, v->ron_comments->closing, indent);
+  }
+  udeWriteIndent(os, indent - 1);
+  os << ']';
+}
+
 inline void udeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
   if (indent == 0) {
     bool first = true;
@@ -1636,6 +1719,8 @@ inline void udeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, 
       os << ": ";
       udeWriteValue(os, sub.get(), 1, true, strict);
     }
+  } else if (udeHasRonComments(v)) {
+    udeWriteMultilineObject(os, v, indent, strict);
   } else {
     os << '{';
     bool first = true;
@@ -1654,7 +1739,8 @@ inline void udeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, b
   if (!v->arr || v->arr->empty()) { os << "[]"; return; }
   bool allObjs = true;
   for (const auto& e : *v->arr) if (e->type != asvJSONValue::OBJECT) { allObjs = false; break; }
-  if (allObjs && multiline) {
+  if ((allObjs && multiline) || udeHasRonComments(v)) {
+    if (udeHasRonComments(v)) { udeWriteMultilineArray(os, v, indent, strict); return; }
     os << "[\n";
     for (size_t i = 0; i < v->arr->size(); i++) {
       udeWriteIndent(os, indent);
@@ -1787,6 +1873,7 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
 
 inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, bool strict) {
   if (val.type == asvJSONValue::OBJECT && val.obj && indent == 0) {
+    if (val.ron_comments) udeWriteRonCommentLines(os, val.ron_comments->leading, 0);
     bool first = true;
     bool prevEndsNl = false;
     for (const auto& [k, sub] : *val.obj) {
@@ -1796,6 +1883,7 @@ inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, 
       // a spurious trailing newline on round-trip.
       if (!first && !prevEndsNl) os << '\n';
       first = false;
+      if (sub->ron_comments) udeWriteRonCommentLines(os, sub->ron_comments->leading, 0);
       udeWriteKey(os, k, strict);
       os << ": ";
       std::ostringstream vbuf;
@@ -1803,16 +1891,33 @@ inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, 
       std::string vs = vbuf.str();
       prevEndsNl = !vs.empty() && vs.back() == '\n';
       os << vs;
+      bool tNl = udeWriteRonTrailing(os, sub.get());
+      if (tNl) prevEndsNl = true;
+    }
+    if (val.ron_comments) {
+      if (!val.ron_comments->closing.empty()) {
+        if (!prevEndsNl) os << '\n';
+        udeWriteRonCommentLines(os, val.ron_comments->closing, 0);
+        prevEndsNl = true;
+      }
+      if (!val.ron_comments->footing.empty()) {
+        if (!prevEndsNl) os << '\n';
+        udeWriteRonCommentLines(os, val.ron_comments->footing, 0);
+      }
     }
   } else {
+    if (val.ron_comments) udeWriteRonCommentLines(os, val.ron_comments->leading, 0);
     udeWriteValue(os, &val, indent, false, strict);
     os << '\n';
+    if (val.ron_comments && !val.ron_comments->footing.empty())
+      udeWriteRonCommentLines(os, val.ron_comments->footing, 0);
   }
 }
 
 // ====================== asvJSON member methods ======================
 
 inline std::string asvJSON::toUDE(bool strict) const {
+  fillRonCommentsFromYaml(root.get());
   std::ostringstream os;
   if (root) asvJSONInternal::serializeUDE(os, *root, 0, strict);
   return os.str();

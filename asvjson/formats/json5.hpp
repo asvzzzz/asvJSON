@@ -423,7 +423,24 @@ inline std::string json5ToJson(std::string_view input) {
   return out;
 }
 
-inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false) {
+inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false);
+
+// Serialize a value plus its same-line trailing comment. When `commaNeeded`
+// and the trailing is a `//` comment (which swallows everything to end-of-line),
+// the separating comma is emitted BEFORE the comment so the next entry starts
+// fresh on its own line with no leading comma. Mirrors the RON encoder.
+// Returns true when the output ended with a newline.
+inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
+  json5SerializeVal(v, out, depth, pretty);
+  if (!v->ron_comments || v->ron_comments->trailing.empty()) return false;
+  if (commaNeeded && ronTrailingNeedsNewline(v->ron_comments->trailing)) out += ',';
+  out += ' ';
+  out += v->ron_comments->trailing;
+  if (ronTrailingNeedsNewline(v->ron_comments->trailing)) { out += '\n'; return true; }
+  return false;
+}
+
+inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth, bool pretty) {
   if (!v) { out += "null"; return; }
   if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
   std::string pad;
@@ -448,31 +465,79 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::OBJECT: {
       out += '{';
       if (pretty && v->obj && !v->obj->empty()) out += '\n';
-      bool first = true;
+      size_t i = 0;
+      const size_t n = v->obj->size();
+      bool prevNl = false; // previous field ended with a // comment -> comma already placed
       for (const auto& [k, child] : *(v->obj)) {
-        if (!first) out += pretty ? ",\n" : ",";
-        first = false;
+        if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+        prevNl = false;
+        if (child->ron_comments) {
+          for (const auto& c : child->ron_comments->leading) {
+            if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+            out += c;
+            out += '\n';
+          }
+        }
         if (pretty) { out += std::string(static_cast<size_t>(depth + 1) * 2, ' '); }
         bool needsQuote = k.empty() || k.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$0123456789") != std::string::npos || (k[0] >= '0' && k[0] <= '9');
         if (needsQuote) { out += '"'; appendJsonEscaped(out, k); out += '"'; }
         else out += k;
         out += ':';
         if (pretty) out += ' ';
-        json5SerializeVal(child.get(), out, depth + 1, pretty);
+        if (json5EmitValueWithTrailing(child.get(), out, depth + 1, pretty, /*commaNeeded=*/i + 1 < n))
+          prevNl = true;
+        i++;
       }
-      if (pretty && v->obj && !v->obj->empty()) { out += '\n'; out += pad; }
+      if (v->ron_comments && !v->ron_comments->closing.empty()) {
+        if (pretty) out += '\n';
+        for (const auto& c : v->ron_comments->closing) {
+          if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+          else out += ", ";
+          out += c;
+          if (pretty) out += '\n';
+          else if (ronTrailingNeedsNewline(c)) out += '\n';
+        }
+      }
+      if (pretty && v->obj && !v->obj->empty()) {
+        if (out.back() != '\n') out += '\n';
+        out += pad;
+      }
       out += '}';
       break;
     }
     case asvJSONValue::ARRAY: {
       out += '[';
       if (pretty && v->arr && !v->arr->empty()) out += '\n';
-      for (size_t i = 0; i < v->size(); i++) {
-        if (i > 0) out += pretty ? ",\n" : ",";
+      bool prevNl = false; // previous element ended with a // comment
+      const size_t ne = v->arr ? v->arr->size() : 0;
+      for (size_t i = 0; i < ne; i++) {
+        if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+        prevNl = false;
         if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-        json5SerializeVal(v->get(i), out, depth + 1, pretty);
+        if (v->get(i)->ron_comments) {
+          for (const auto& c : v->get(i)->ron_comments->leading) {
+            if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+            out += c;
+            out += '\n';
+          }
+        }
+        if (json5EmitValueWithTrailing(v->get(i), out, depth + 1, pretty, /*commaNeeded=*/i + 1 < ne))
+          prevNl = true;
       }
-      if (pretty && v->arr && !v->arr->empty()) { out += '\n'; out += pad; }
+      if (v->ron_comments && !v->ron_comments->closing.empty()) {
+        if (pretty) out += '\n';
+        for (const auto& c : v->ron_comments->closing) {
+          if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+          else out += ", ";
+          out += c;
+          if (pretty) out += '\n';
+          else if (ronTrailingNeedsNewline(c)) out += '\n';
+        }
+      }
+      if (pretty && v->arr && !v->arr->empty()) {
+        if (out.back() != '\n') out += '\n';
+        out += pad;
+      }
       out += ']';
       break;
     }
@@ -553,8 +618,20 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
 
 inline std::string asvJSON::toJSON5(bool pretty) const {
   if (!root) return "null";
+  fillRonCommentsFromYaml(root.get());
   std::string out;
+  if (root->ron_comments) {
+    for (const auto& c : root->ron_comments->leading) { out += c; out += '\n'; }
+  }
   json5SerializeVal(root.get(), out, 0, pretty);
+  if (root->ron_comments) {
+    if (!root->ron_comments->trailing.empty()) {
+      out += ' ';
+      out += root->ron_comments->trailing;
+      if (ronTrailingNeedsNewline(root->ron_comments->trailing)) out += '\n';
+    }
+    for (const auto& c : root->ron_comments->footing) { out += '\n'; out += c; }
+  }
   return out;
 }
 

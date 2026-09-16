@@ -10,7 +10,7 @@
 
 <div class="header">
   <a href="https://github.com/asvzzzz/asvJSON" target="_blank" class="header-title">asvJSON++ Converter</a>
-  <div class="header-sub">18 formats - JSONPath query - C++17 - header-only - v1.16.1</div>
+  <div class="header-sub">19 formats - C++17 - header-only - v1.17.0</div>
 </div>
 
 <div class="container">
@@ -33,6 +33,8 @@
           <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
+          <option value="RON~pretty" title="RON - Rusty Object Notation, pretty aligned style">RON (pretty)</option>
+          <option value="RON~minify" title="RON compact form">RON (minify)</option>
           <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>
           <option value="TRON" title="TRON - class-based format with inheritance support">TRON</option>
           <option value="GOON" title="Greatly Optimized Object Notation - JSON superset with tabular arrays">GOON</option>
@@ -48,7 +50,7 @@
       <button class="btn btn-sm" onclick="loadSample('input')">Sample</button>
       <button class="btn btn-sm" onclick="clearInput()">Clear</button>
       <span class="file-label">or <label class="file-link" for="fileInput">Upload file</label></span>
-      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.ude,.jsonl,.sexpr,.toon,.tron,.goon,.msgpack,.bson,.cbor,.bin" onchange="loadFile(event)">
+      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.ude,.jsonl,.sexpr,.ron,.toon,.tron,.goon,.msgpack,.bson,.cbor,.bin" onchange="loadFile(event)">
     </div>
     <textarea id="inputArea" placeholder="Paste your data here..."></textarea>
     <div class="panel-status" id="inputStatus">Ready</div>
@@ -57,13 +59,6 @@
   <div class="center-col">
     <button class="btn btn-convert" onclick="convert()" id="convertBtn">Convert  -> </button>
     <button class="btn btn-sm" onclick="swapFormats()" title="Swap input/output formats"><-></button>
-    <div class="jp-box">
-      <div class="jp-label">JSONPath query (RFC 9535)</div>
-      <input type="text" id="pathQuery" spellcheck="false"
-             placeholder="$.store.book[*].author" title="Evaluate a JSONPath query against the parsed input; matches are shown as a JSON array.">
-      <button class="btn btn-sm" onclick="runPath()" title="Evaluate the path against the input document">Query</button>
-      <button class="btn btn-sm" onclick="loadPathSample()" title="Load the demonstration document and path">Demo</button>
-    </div>
   </div>
 
   <div class="panel panel-right">
@@ -85,6 +80,8 @@
           <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
+          <option value="RON~pretty" title="RON - Rusty Object Notation, pretty aligned style">RON (pretty)</option>
+          <option value="RON~minify" title="RON compact form">RON (minify)</option>
           <option value="TOON" title="Terse Object-Oriented Notation - compact, readable format">TOON</option>
           <option value="TRON" title="TRON - class-based format with inheritance support">TRON</option>
           <option value="GOON" title="Greatly Optimized Object Notation - JSON superset with tabular arrays">GOON</option>

@@ -1,11 +1,12 @@
 #pragma once
-// asvJSON++ v1.14.0 - Main entry point
+// asvJSON++ v1.17.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
 // ASVJSON_DISABLE_XML, ASVJSON_DISABLE_YAML, ASVJSON_DISABLE_CSV,
 // ASVJSON_DISABLE_PROTOBUF, ASVJSON_DISABLE_TOML, ASVJSON_DISABLE_SEXPR,
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
+// ASVJSON_DISABLE_RON,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -69,6 +70,10 @@
 
 #ifndef ASVJSON_DISABLE_UDE
 #include "formats/ude.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_RON
+#include "formats/ron.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -186,7 +191,26 @@ inline bool asvJSON::fromAny(std::string_view input) {
 
   // S-Expression: starts with '('
   if (f == '(') {
+    // RON groups are parenthesized too. Heuristic: if the text contains a ':'
+    // or ',' inside the group it is more likely a RON tuple/struct than an
+    // S-expression.
+    if (s.find(':') != std::string_view::npos || s.find(',') != std::string_view::npos) {
+      if (fromRON(s)) return true;
+    }
     if (fromSexpr(s)) return true;
+  }
+
+  // RON: starts with '[' '{' or a bare identifier/enum variant. Fall back
+  // after JSON/JSON5/JSONLines and other text formats.
+  if (f == '{' || f == '[') {
+    if (fromRON(s)) return true;
+  }
+
+  // RON named structs / tuple structs / enum variants with data: `Name(...)`.
+  // Try RON early when the input starts with an identifier followed by '(';
+  // non-matching input fails quickly and falls through to other formats.
+  if ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_') {
+    if (s.find('(') != std::string_view::npos && fromRON(s)) return true;
   }
 
   // YAML document markers
@@ -257,6 +281,9 @@ inline bool asvJSON::fromAny(std::string_view input) {
   // JSONLines: multiple JSON values, one per line
   if (fromJSONLines(s)) return true;
 
+  // RON (structs/maps/lists with Rust-like syntax)
+  if (fromRON(s)) return true;
+
   lastError = "Unable to detect format";
   return false;
 }
@@ -308,6 +335,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "tron") { formatType = FormatType::TRON;     return fromTRON(content); }
   if (ext == "goon") { formatType = FormatType::GOON;     return fromGOON(content); }
   if (ext == "ude")  { formatType = FormatType::UDE;      return fromUDE(content); }
+  if (ext == "ron")  { formatType = FormatType::RON;      return fromRON(content); }
   if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
 
   // Unknown extension - auto-detect from content
@@ -363,6 +391,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "tron") content = toTRON();
   else if (ext == "goon") content = toGOON();
   else if (ext == "ude")  content = toUDE();
+  else if (ext == "ron")  content = toRON(pretty);
   else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
   else content = serialize(pretty);
 

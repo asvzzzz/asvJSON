@@ -81,21 +81,19 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.16.1\n"
+        << "asvJSON++ Format Converter v1.17.0\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
            "\n"
            "Reads a JSON request from stdin, writes JSON response to stdout.\n"
 "Request:  {\"from\":\"<fmt>\",\"to\":\"<fmt>\",\"data\":\"...\",\"binary\":false}\n"
-            "Optional \"path\":\"<jsonpath>\" evaluates an RFC 9535 JSONPath\n"
-            "query against the parsed input and returns matches as a JSON array.\n"
             "Response: {\"success\":true,\"data\":\"...\",\"binary\":false}\n"
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
             "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, UDE, JSONLines,\n"
-            "         Sexpr, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
+            "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
            "         (empty from=JSON, to=JSON)\n";
       return 0;
     }
@@ -165,6 +163,7 @@ int main(int argc, char** argv) {
       else if (fromFmt == "UDE") ok = j.fromUDE(text);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(text);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(text);
+      else if (fromFmt == "RON") ok = j.fromRON(text);
       else if (fromFmt == "TOON") ok = j.fromTOON(text);
       else if (fromFmt == "TRON") ok = j.fromTRON(text);
       else if (fromFmt == "GOON") ok = j.fromGOON(text);
@@ -179,26 +178,6 @@ int main(int argc, char** argv) {
         if (rawMode) { std::cerr << "Error: " << j.getLastError() << "\n"; }
         else { std::cout << jsonError(j.getLastError()); }
         return 1;
-      }
-    }
-
-    // JSONPath query mode: an optional "path" field evaluates a query
-    // against the parsed input and returns the matches as a JSON array.
-    {
-      std::string jp = req.getString("path");
-      if (!jp.empty()) {
-        auto matches = j.query(jp);
-        std::string out = "[";
-        bool first = true;
-        for (const auto* m : matches) {
-          if (!first) out += ",";
-          first = false;
-          m->serialize(out, false);
-        }
-        out += "]";
-        if (rawMode) { std::cout << out; }
-        else { std::cout << jsonSuccess(out, false); }
-        return 0;
       }
     }
 
@@ -225,6 +204,7 @@ int main(int argc, char** argv) {
       else if (toFmt == "UDE") result = j.toUDE();
       else if (toFmt == "JSONLines") result = j.toJSONLines();
       else if (toFmt == "Sexpr") result = j.toSexpr();
+      else if (toFmt == "RON") result = j.toRON(req.optBool("pretty", true));
       else if (toFmt == "TOON") result = j.toTOON();
       else if (toFmt == "TRON") result = j.toTRON();
       else if (toFmt == "GOON") result = j.toGOON();

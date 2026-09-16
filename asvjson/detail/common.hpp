@@ -136,6 +136,18 @@ inline int countIndent(const std::string& s) {
 	return static_cast<int>(n < static_cast<size_t>(std::numeric_limits<int>::max()) ? n : static_cast<size_t>(std::numeric_limits<int>::max()));
 }
 
+// A trailing comment whose final line is a `//` line comment swallows anything
+// appended after it on the same line (all line-oriented decoders treat it as
+// comment text). Serializers emitting the comment must break the line after it
+// so separators/closers on the following line are not consumed. Block comments
+// end with `*/` on their final line and are safe to append to.
+inline bool ronTrailingNeedsNewline(const std::string& t) {
+  size_t nl = t.rfind('\n');
+  std::string_view last = (nl == std::string::npos) ? std::string_view(t)
+                                                    : std::string_view(t).substr(nl + 1);
+  return last.rfind("*/") == std::string_view::npos;
+}
+
 inline std::string_view stripIndent(const std::string& s) {
 	size_t pos = 0;
 	while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) pos++;

@@ -1,23 +1,23 @@
 const SAMPLES = {
-  JSON: '{\n  "name": "asvJSON++",\n  "version": "1.16.1",\n  "formats": 18,\n  "active": true,\n  "tags": ["json", "c++", "header-only"]\n}',
-  JSON5: '{ // single-line comment\n  name: "asvJSON++",\n  version: "1.16.1",\n  active: true,\n  /* block comment */\n  tags: ["json5", "c++"],\n}',
-  XML: '<root>\n  <name>asvJSON++</name>\n  <version>1.16.1</version>\n  <active>true</active>\n  <tags>\n    <item>json</item>\n    <item>c++</item>\n  </tags>\n</root>',
-  YAML: 'name: asvJSON++\nversion: "1.16.1"\nactive: true\ntags:\n  - json\n  - c++\n  - header-only\n',
-  YAML_minify: '{name: asvJSON++, version: "1.16.1", active: true, tags: [json, c++, header-only]}',
-  CSV: 'name,version,active\nasvJSON++,1.16.1,true\n',
-  TOML: 'name = "asvJSON++"\nversion = "1.16.1"\nactive = true\n\n[metadata]\nauthor = "asv"\nlicense = "MIT"\n',
-  TOML_minify: 'name = "asvJSON++"\nversion = "1.16.1"\nactive = true\nmetadata = {author = "asv", license = "MIT"}\n',
-  INI: '[general]\nname = asvJSON++\nversion = 1.16.1\nactive = true\n\n[metadata]\nauthor = asv\nlicense = MIT\n',
-  INI_minify: 'general.name = asvJSON++\ngeneral.version = 1.16.1\ngeneral.active = true\nmetadata.author = asv\nmetadata.license = MIT\n',
-  UDE: '# UDE v1.0\nname: "asvJSON++"\nversion: 1.16.1\nactive: true\nformats: 18\ntags: [json, c++, header-only]\n',
-  JSONLines: '{"name": "asvJSON++", "version": "1.16.1"}\n{"name": "sample2", "version": "2.0.0"}\n',
-  Sexpr: '(root\n  (name "asvJSON++")\n  (version "1.16.1")\n  (active true)\n  (tags "json" "c++"))\n',
-  TOON: 'name: asvJSON++\nactive: true\nversion: "1.16.1"\nformats: 18\ntags: []\n  - json\n  - c++\n  - header-only\n',
-  TRON: '# TRON sample\nclass Data: name, version, active, formats\nData(name="asvJSON++", version="1.16.1", active=true, formats=18)\n',
-  GOON: 'name: asvJSON++\nactive: T\nversion: "1.16.1"\nformats: 18\ntags[]:\n  - json\n  - c++\n  - header-only\n',
-  ProtobufText: '{\n  name: "asvJSON++"\n  active: true\n  version: "1.16.1"\n  formats: 18\n  tags: ["json", "c++", "header-only"]\n}\n',
-  JSONPath: '$.store.book[*].author',
-  JSONPathDoc: '{\n  "store": {\n    "book": [\n      {"category": "reference", "author": "Nigel Rees", "title": "Sayings of the Century", "price": 8.95},\n      {"category": "fiction", "author": "Evelyn Waugh", "title": "Sword of Honour", "price": 12.99},\n      {"category": "fiction", "author": "Herman Melville", "title": "Moby Dick", "isbn": "0-553-21311-3", "price": 8.99}\n    ],\n    "bicycle": {"color": "red", "price": 19.95}\n  }\n}',
+  JSON: '{\n  "name": "asvJSON++",\n  "version": "1.17.0",\n  "formats": 19,\n  "active": true,\n  "tags": ["json", "c++", "header-only"]\n}',
+  JSON5: '{ // single-line comment\n  name: "asvJSON++",\n  version: "1.17.0",\n  active: true,\n  /* block comment */\n  tags: ["json5", "c++"],\n}',
+  XML: '<root>\n  <name>asvJSON++</name>\n  <version>1.17.0</version>\n  <active>true</active>\n  <tags>\n    <item>json</item>\n    <item>c++</item>\n  </tags>\n</root>',
+  YAML: 'name: asvJSON++\nversion: "1.17.0"\nactive: true\ntags:\n  - json\n  - c++\n  - header-only\n',
+  YAML_minify: '{name: asvJSON++, version: "1.17.0", active: true, tags: [json, c++, header-only]}',
+  CSV: 'name,version,active\nasvJSON++,1.17.0,true\n',
+  TOML: 'name = "asvJSON++"\nversion = "1.17.0"\nactive = true\n\n[metadata]\nauthor = "asv"\nlicense = "MIT"\n',
+  TOML_minify: 'name = "asvJSON++"\nversion = "1.17.0"\nactive = true\nmetadata = {author = "asv", license = "MIT"}\n',
+  INI: '[general]\nname = asvJSON++\nversion = 1.17.0\nactive = true\n\n[metadata]\nauthor = asv\nlicense = MIT\n',
+  INI_minify: 'general.name = asvJSON++\ngeneral.version = 1.17.0\ngeneral.active = true\nmetadata.author = asv\nmetadata.license = MIT\n',
+  UDE: '# UDE v1.0\nname: "asvJSON++"\nversion: 1.17.0\nactive: true\nformats: 19\ntags: [json, c++, header-only]\n',
+  JSONLines: '{"name": "asvJSON++", "version": "1.17.0"}\n{"name": "sample2", "version": "2.0.0"}\n',
+  Sexpr: '(root\n  (name "asvJSON++")\n  (version "1.17.0")\n  (active true)\n  (tags "json" "c++"))\n',
+  RON: 'GameConfig(\n  window_size: [\n    800,\n    600\n  ],\n  fullscreen: true,\n  title: "My Game",\n  tags: [\n    "rpg",\n    "demo"\n  ],\n  difficulty: (\n    easy: 0.8,\n    hard: 1.4\n  )\n)\n',
+  RON_minify: 'GameConfig(window_size:[800,600],fullscreen:true,title:"My Game",tags:["rpg","demo"],difficulty:(easy:0.8,hard:1.4))\n',
+  TOON: 'name: asvJSON++\nactive: true\nversion: "1.17.0"\nformats: 19\ntags: []\n  - json\n  - c++\n  - header-only\n',
+  TRON: '# TRON sample\nclass Data: name, version, active, formats\nData(name="asvJSON++", version="1.17.0", active=true, formats=19)\n',
+  GOON: 'name: asvJSON++\nactive: T\nversion: "1.17.0"\nformats: 19\ntags[]:\n  - json\n  - c++\n  - header-only\n',
+  ProtobufText: '{\n  name: "asvJSON++"\n  active: true\n  version: "1.17.0"\n  formats: 19\n  tags: ["json", "c++", "header-only"]\n}\n',
 };
 
 const inputArea = document.getElementById('inputArea');
@@ -28,28 +28,6 @@ const inputStatus = document.getElementById('inputStatus');
 const outputStatus = document.getElementById('outputStatus');
 const statusMsg = document.getElementById('statusMsg');
 const convertBtn = document.getElementById('convertBtn');
-const pathInput = document.getElementById('pathQuery');
-
-// --- JSONPath query ---
-function runPath() {
-  const path = pathInput.value.trim();
-  if (!path) {
-    setStatus('Enter a JSONPath query first', 'error');
-    return;
-  }
-  _inputIsSample = false;
-  convert();
-}
-
-function loadPathSample() {
-  inputFormat.value = 'JSON~pretty';
-  outputFormat.value = 'JSON~pretty';
-  pathInput.value = SAMPLES.JSONPath;
-  inputArea.value = SAMPLES.JSONPathDoc;
-  inputStatus.textContent = 'JSONPath demo loaded';
-  _inputIsSample = true;
-  convert();
-}
 
 // --- Format parsing (value may be "JSON~pretty", "JSON~minify", or "XML") ---
 function parseFmt(val) {
@@ -144,6 +122,7 @@ const FORMAT_INFO = {
   UDE: 'Unified Data Exchange - header, multi-doc, anchors, tags',
   JSONLines: 'One JSON value per line - streaming-friendly',
   Sexpr: 'S-expressions - Lisp-style parenthesized notation',
+  RON: 'Rusty Object Notation - structs/tuples/maps with Rust-like syntax',
   TOON: 'Terse Object-Oriented Notation - compact, readable',
   TRON: 'Class-based format with inheritance support',
   GOON: 'Greatly Optimized Object Notation - JSON superset with tabular arrays',
@@ -222,7 +201,7 @@ function downloadOutput() {
   const fmtOpt = parseFmt(outputFormat.value);
   const fmt = fmtOpt.name.toLowerCase();
   const extMap = { json: 'json', json5: 'json5', xml: 'xml', yaml: 'yaml', csv: 'csv',
-    toml: 'toml', ini: 'ini', ude: 'ude', jsonlines: 'jsonl', sexpr: 'sexpr',
+    toml: 'toml', ini: 'ini', ude: 'ude', jsonlines: 'jsonl', sexpr: 'sexpr', ron: 'ron',
     toon: 'toon', tron: 'tron', goon: 'goon', protobuftext: 'txt',
     messagepack: 'msgpack', bson: 'bson', cbor: 'cbor', protobuf: 'bin' };
   const ext = extMap[fmt] || 'txt';
@@ -272,27 +251,20 @@ async function convert() {
   }
 
   try {
-    const path = pathInput.value.trim();
     const payloadObj = { from: fromOpt.name, to: toOpt.name, data: data, binary: isBinaryInput, pretty: toOpt.pretty };
-    if (path) payloadObj.path = path;
     const payload = JSON.stringify(payloadObj);
     const resp = await fetch('/api/convert', { method: 'POST', body: payload });
     const result = await resp.json();
 
     if (result.success) {
-      if (path) {
-        outputArea.value = result.data;
-        outputStatus.textContent = `JSONPath result (${result.data === '[]' ? 'no matches' : 'array of matches'})`;
+      _lastBinary = !!result.binary;
+      if (result.binary) {
+        const b64 = result.data;
+        outputArea.value = _BIN_PREFIX + b64;
+        outputStatus.textContent = 'Binary output (base64)';
       } else {
-        _lastBinary = !!result.binary;
-        if (result.binary) {
-          const b64 = result.data;
-          outputArea.value = _BIN_PREFIX + b64;
-          outputStatus.textContent = 'Binary output (base64)';
-        } else {
-          outputArea.value = result.data;
-          outputStatus.textContent = `Converted: ${fromOpt.name} -> ${toOpt.name}`;
-        }
+        outputArea.value = result.data;
+        outputStatus.textContent = `Converted: ${fromOpt.name} -> ${toOpt.name}`;
       }
       setStatus('Conversion successful', 'success');
     } else {

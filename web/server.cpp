@@ -211,8 +211,7 @@ static bool isSafePath(const std::string& path) {
 /* ---- Conversion logic (inline from convert.cpp) ---- */
 static std::string doConvert(const std::string& fromFmt, const std::string& toFmt,
                              const std::string& textData, const std::vector<uint8_t>& binData,
-                             bool binaryInput, bool& outBinary, bool pretty = true,
-                             const std::string& jsonPath = "")
+                             bool binaryInput, bool& outBinary, bool pretty = true)
 {
   try {
     asvJSON j;
@@ -238,6 +237,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "UDE") ok = j.fromUDE(textData);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(textData);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(textData);
+      else if (fromFmt == "RON") ok = j.fromRON(textData);
       else if (fromFmt == "TOON") ok = j.fromTOON(textData);
       else if (fromFmt == "TRON") ok = j.fromTRON(textData);
       else if (fromFmt == "GOON") ok = j.fromGOON(textData);
@@ -248,21 +248,6 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "Protobuf") ok = j.fromProtobuf(resolvedBin.data(), resolvedBin.size());
       else return jsonMsg(false, "", false, "Unknown input format: " + fromFmt);
       if (!ok) return jsonMsg(false, "", false, j.getLastError());
-    }
-
-    // JSONPath query mode: an optional "path" evaluates a query against the
-    // parsed input and returns the matches as a JSON array.
-    if (!jsonPath.empty()) {
-      auto matches = j.query(jsonPath);
-      std::string resp = "[";
-      bool first = true;
-      for (const auto* m : matches) {
-        if (!first) resp += ",";
-        first = false;
-        m->serialize(resp, false);
-      }
-      resp += "]";
-      return jsonMsg(true, resp, false, "");
     }
 
     outBinary = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf");
@@ -288,6 +273,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     else if (toFmt == "UDE") result = j.toUDE();
     else if (toFmt == "JSONLines") result = j.toJSONLines();
     else if (toFmt == "Sexpr") result = j.toSexpr();
+    else if (toFmt == "RON") result = j.toRON(pretty);
     else if (toFmt == "TOON") result = j.toTOON();
     else if (toFmt == "TRON") result = j.toTRON();
     else if (toFmt == "GOON") result = j.toGOON();
@@ -466,11 +452,15 @@ private:
 
     // Cache control for static assets
     std::string cacheHdr;
-    auto dot = path.rfind('.');
+    auto dot = filePath.rfind('.');
     if (dot != std::string::npos) {
-      std::string ext = path.substr(dot);
+      std::string ext = filePath.substr(dot);
       if (ext == ".png" || ext == ".svg" || ext == ".woff2") {
         cacheHdr = "Cache-Control: public, max-age=86400\r\n";
+      } else if (ext == ".html" || ext == ".js" || ext == ".css") {
+        cacheHdr = "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                   "Pragma: no-cache\r\n"
+                   "Expires: 0\r\n";
       }
     }
 
@@ -505,8 +495,7 @@ private:
 
     auto t0 = std::chrono::steady_clock::now();
     bool outBinary = false;
-    std::string jsonPath = req.optString("path", "");
-    std::string result = doConvert(fromFmt, toFmt, textData, binData, binaryInput, outBinary, pretty, jsonPath);
+    std::string result = doConvert(fromFmt, toFmt, textData, binData, binaryInput, outBinary, pretty);
     auto t1 = std::chrono::steady_clock::now();
     double durationMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 

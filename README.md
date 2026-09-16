@@ -6,7 +6,7 @@ A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack
 
 ## Online Converter
 
-Try it online: **https://jx8.ru/**  -  browser-based converter supporting all 18 formats plus RFC 9535 JSONPath queries, with file upload/download.
+Try it online: **https://jx8.ru/**  -  browser-based converter supporting all 18 formats, with file upload/download.
 
 ## License
 
@@ -60,6 +60,7 @@ MIT license - see the `LICENSE` file for details.
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
+- RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -255,6 +256,8 @@ int main() {
 | `bool fromJSONLines(std::string_view input)` | Parse JSON Lines text into an array of values. |
 | `std::string toSexpr() const` | Serialize to S-Expression (Lisp-style nested lists). |
 | `bool fromSexpr(std::string_view input)` | Parse S-Expression string (heuristic object/array detection, `;` comments). |
+| `std::string toRON(bool pretty = true) const` | Serialize to RON (Rusty Object Notation; struct/tuple/map/list syntax). |
+| `bool fromRON(std::string_view input)` | Parse RON string (structs, tuples, maps, enums, options, ranges, comments). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -815,6 +818,48 @@ S-Expression features:
 - **Non-finite doubles**: `NaN`/`Infinity` cannot be serialized  -  `toSexpr()` throws instead of emitting `nil`
 - **Full round-trip**: `toSexpr()` then `fromSexpr()` returns the original data
 
+### RON  -  Rusty Object Notation
+
+`toRON(bool pretty = true)` / `fromRON()`  -  the format used by Rust's `ron` crate.
+
+```
+asvJSON j;
+j.parse(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":10001}})");
+std::string ron = j.toRON();
+// (
+//   name: "John",
+//   age: 30,
+//   active: true,
+//   address: (
+//     city: "NYC",
+//     zip: 10001,
+//   ),
+// )
+```
+
+Decoding:
+
+```cpp
+asvJSON j;
+j.fromRON(R"((name: "Alice", mode: Auto, coord: (10, 20), level: 3..=5, maybe: Some("hidden")))");
+// j.getString("name") == "Alice"
+// j.getString("mode") == "Auto"          (bare ident / enum unit variant)
+// j.getRoot()->get("coord")->get(0)->getInt() == 10   (tuple -> array)
+// level round-trips as {"$range":{"start":3,"end":5,"inclusive":true}}
+// j.getString("maybe") == "hidden"       (Some(x) unfolds)
+```
+
+RON mapping rules:
+- `None`  ->  `null`; `Some(x)`  ->  `x`; empty `()`  ->  empty object; `[]`/`{}` stay empty collections
+- Bare idents and enum unit variants (`Red`, `Running`)  ->  strings; named structs/tuples and qualified variants keep their name as a key: `GameConfig(...)`  ->  `{"GameConfig": ...}`, `Type::Variant(data)`  ->  `{"Type::Variant": ...}`
+- Encoding `{"GameConfig": {"width": 800}}` emits the named form `GameConfig(width:800)` (a single-key object whose value is an object or non-empty array and whose key is a valid RON type name), so the name survives RON  ->  JSON  ->  RON round-trips; empty-object values emit `GameConfig()`; scalar, empty-array, range and YAML-set values keep the plain struct/map form
+- Keys that are valid identifiers emit as `(key: value)` structs; other keys force `{ "key": value }` map syntax
+- Numbers: radix (`0xFF`, `0o17`, `0b1010`), digit separators (`1_000`), type suffixes (`42u32`, `3.14f64`), `.5`/`5.`/`5.e3` normalization, `inf`/`-inf`/`NaN`
+- Ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` marker objects
+- Comments `//` and nested `/* */`, `#![enable(...)]` headers, trailing commas
+- Comments round-trip: `fromRON()` attaches comments to their nodes and `toRON()` re-emits them in place (leading above a key/item, same-line trailing after a value, closings before `)`/`}`/`]`, and a trailing footer after the document). The attached comments also survive conversion into the other comment-capable text formats: `toJSON5()` keeps them verbatim (`//`/`/* */` are native), `toYAML()` translates them to `#` lines, and `toUDE()` keeps them verbatim (`//`/`/* */` are native UDE comments). `serialize()`/JSON output intentionally drops them (JSON has no comment syntax)
+- Special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip via Extended JSON markers
+
 ### JSON5  -  Extended JSON superset
 
 `toJSON5()` / `fromJSON5()`  -  JSON5 with MongoDB Extended JSON for special types.
@@ -861,6 +906,13 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.17.0 (2026-09-16)
+
+- **New - RON support:** Added `toRON(bool pretty = true) const` and `fromRON(std::string_view)` plus `asvJSONValue::toRON()` for the RON (Rusty Object Notation) format. The decoder converts RON to an intermediate JSON document and parses with the existing JSON parser; the encoder walks the tree directly. Supported syntax: structs `(a: 1)`, maps `{ "k": v }`, lists, tuples, named types (`Name(...)` kept as `{"Name": ...}` and re-emitted as `Name(...)` from JSON), `Some(x)`  ->  unfolds, `None`  ->  `null`, enum unit variants and variants with data (`Red`, `Type::Variant(data)`)  ->  strings/objects, bare idents  ->  strings, radix/separable/suffixed numbers (`0xFF`, `0o17`, `0b1010`, `1_000`, `42u32`, `-7i8`, `3.14f64`), floats (`.5`, `5.`, `5.e3`, `inf`/`-inf`/`NaN`), quoted strings with escapes (`\n`, `\t`, `\xHH`, `\u{...}`) and line continuation, raw strings (`r"..."`, `r#"..."#`), byte strings/chars (`b"..."`, `br#"..."#`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7.3`, `3..`, `..`, `..=`) round-tripping as `{"$range":{"start":...,"end":...,"inclusive":...}}`, `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. Special types (BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP/DATETIME/CUSTOM_TAG/YAML sets) round-trip through their Extended JSON marker objects. `.ron` is recognized by `readFromFileAny`/`writeToFileAny` and `fromAny` (heuristics prefer RON for parenthesized input containing `:`/`,`). Disable with `ASVJSON_DISABLE_RON`.
+- **New - RON comment preservation:** `fromRON()` attaches `//` and `/* */` comments to their tree nodes (leading above a key/item, same-line trailing after values, closings before `)`/`}`/`]`, plus a footer for trailing document comments), and `toRON()` re-emits them in place for idempotent RON  ->  RON round-trips. A same-line `//` after a separator (`800, // optional struct name`) binds to the value that just ended, and the encoders place the separating comma BEFORE such a trailing comment so the next entry starts fresh on its own line (RON, JSON5 and UDE all do this; no stray leading `,`). The same metadata feeds the other comment-capable text serializers: JSON5 emits it verbatim, YAML translates it to `#` lines, and UDE keeps it verbatim, so RON  ->  JSON5 / YAML / UDE conversions preserve every comment. The reverse direction also works: YAML comments (from `yamlCollectComments`) are bridged into RON comment metadata before RON / JSON5 / UDE encoding, so YAML  ->  RON / JSON5 / UDE conversions carry `# ...` comments over as `// ...`. JSON output intentionally drops comments (JSON has no comment syntax). `cloneValueImpl` and `operator==` ignore comment metadata.
+- **Version bump:** 1.16.1  ->  1.17.0
+- **Web - removed JSONPath `path` request field:** the optional `path` query mode (which evaluated an RFC 9535 JSONPath and returned matches as a JSON array) was never used by the web UI, so the backend handling in `web/server.cpp` (`doConvert`) and `web/convert.cpp` is removed. `asvJSON::query()` and the JSONPath library remain fully available for library users.
 
 ### 1.16.1 (2026-09-11)
 
