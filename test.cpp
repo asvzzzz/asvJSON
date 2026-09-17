@@ -11325,6 +11325,20 @@ TEST(testToJSON5) {
     ASSERT(dt2 != nullptr && dt2->type == asvJSONValue::DATETIME);
     ASSERT_EQ(dt2->timestamp, 1705314645);
   }
+  // Leading block comment before a later key stays on its own line in minified
+  // output, so parsing the output keeps it as a leading comment (stable).
+  {
+    asvJSON j;
+    const char* src = "{ // head\n  name: \"x\",\n  /*\n    note\n  */\n  active: true,\n}";
+    ASSERT(j.fromJSON5(std::string_view(src)));
+    std::string s = j.toJSON5(false);
+    ASSERT(s.find("/*") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    std::string s2 = j2.toJSON5(false);
+    ASSERT_EQ(s, s2);
+    ASSERT_EQ(j2.getBool("active"), true);
+  }
 }
 
 TEST(testFromRON) {
@@ -11759,7 +11773,20 @@ TEST(testRONComments) {
     std::string s2 = j2.toRON(false);
     ASSERT_EQ(s, s2);
   }
-  // Array-element trailing: `[800, // note\n  600]` keeps the comment on 800
+  // An own-line leading block comment before a later field must stay on its
+  // own line in minified output (otherwise re-parsing binds it as a trailing
+  // comment of the previous field and the round-trip drifts).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("GameConfig(\n  tags: [\"a\"],\n  /*\n    note\n  */\n  difficulty: 1.4\n)")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("/*") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    std::string s2 = j2.toRON(false);
+    ASSERT_EQ(s, s2);
+    ASSERT_EQ(j2.getRoot()->get("GameConfig")->get("difficulty")->getDouble(), 1.4);
+  }
   // and round-trips byte-for-byte.
   {
     asvJSON j;

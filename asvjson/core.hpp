@@ -398,85 +398,60 @@ public:
 
 struct JsonProxy; // forward declaration for operator[] chaining
 
-// Optional comments attached to a node by the YAML decoder for round-trip
-// fidelity. Never consulted by value semantics (equality, cloning, JSON
-// serialization): comments are YAML-only metadata.
-struct YAMLComments {
-	std::vector<std::string> leading;   // whole-line comments (# ...) emitted before this node/entry
-	std::string trailing;               // comment (includes '#') at the end of the value line
-	std::vector<std::string> footing;   // trailing comments after the whole document (root only)
+// A comment attached to a node, stored WITHOUT its syntax markers.
+// `text` holds the comment body exactly as written between the delimiters:
+// for a line comment, everything after the marker up to end-of-line (leading
+// whitespace after the marker preserved); for a block comment, everything
+// between `/*` and `*/` (internal newlines kept). Each serializer wraps the
+// body in its own marker syntax (`//`, `#`, `;`, `/* */`, `<!-- -->`).
+// Comments are round-trip metadata: never consulted by value semantics.
+struct Comment {
+	std::string text;
+	bool block = false;  // true for /* ... */ form (safe to append after)
 };
 
-// Comments attached to a node by the RON decoder (elliptic comments, // and
-// /* */). Text is stored verbatim including its markers, so the RON, JSON5,
-// and UDE serializers can emit it as-is; only YAML translates markers to '#'.
-// Never consulted by value semantics: comments are round-trip metadata.
-struct RONComments {
-	std::vector<std::string> leading;   // full-line comments emitted before this node/entry (multi-line blocks kept)
-	std::string trailing;               // same-line comment at the end of the value line
-	std::vector<std::string> closing;   // comments just before the container closer, e.g. `{ a: 1, /* note */ }`
-	std::vector<std::string> footing;   // trailing comments after the whole document (root only)
+struct Comments {
+	std::vector<Comment> leading;   // whole-line comments above this node/entry
+	std::vector<Comment> trailing;  // same-line comment(s) after the value
+	std::vector<Comment> closing;   // comments just before the container closer
+	std::vector<Comment> footing;   // trailing comments after the whole document (root only)
 };
 
-// Translate a verbatim RON comment chunk ('// x', '/* x */', possibly a
-// multi-line block) into YAML '#' comment lines. May return a multi-line
-// string (each line already '#'-prefixed).
-inline std::string ronCommentAsYaml(std::string_view s) {
-	if (s.size() >= 2 && s[0] == '/' && s[1] == '/') {
-		std::string out("#");
-		out.append(s.substr(2));
-		return out;
-	}
-	if (s.size() >= 4 && s[0] == '/' && s[1] == '*') {
-		std::string body(s.substr(2, s.size() - 4));
-		std::string out;
-		size_t pos = 0;
-		bool first = true;
-		while (pos <= body.size()) {
-			size_t nl = body.find('\n', pos);
-			std::string_view line(body.data() + pos, nl == std::string_view::npos ? body.size() - pos : nl - pos);
-			size_t b = 0, e = line.size();
-			while (b < e && (line[b] == ' ' || line[b] == '\t' || line[b] == '\r')) ++b;
-			while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) --e;
-			if (e > b) {
-				if (!first) out += '\n';
-				first = false;
-				out += "# ";
-				out.append(line.data() + b, e - b);
-			}
-			if (nl == std::string_view::npos) break;
-			pos = nl + 1;
-		}
-		return out;
-	}
-	return "#";
-}
+// True when a trailing comment's final line is a line comment (not ending
+// `*/`), meaning any separator/closer on the next line would be swallowed
+// and a line break must follow.
+inline bool commentNeedsEol(const Comment& c) noexcept { return !c.block; }
 
-// Emit translated RON comment lines (footing list) into a YAML output.
-inline void ronFootingToYaml(std::string& out, const std::vector<std::string>& list) {
+// Emit a list of comments as own-line entries with the given line-marker
+// prefix ('//', '#', ';'). Block comments are split into lines.
+inline void emitCommentLines(std::string& out, const std::vector<Comment>& list, const char* lineMarker) {
 	for (const auto& c : list) {
-		std::string t = ronCommentAsYaml(c);
-		size_t pos = 0;
-		while (pos <= t.size()) {
-			size_t nl = t.find('\n', pos);
-			std::string_view l(t.data() + pos, nl == std::string_view::npos ? t.size() - pos : nl - pos);
-			if (!l.empty()) { out.append(l.data(), l.size()); out += '\n'; }
-			if (nl == std::string_view::npos) break;
-			pos = nl + 1;
+		if (c.block) {
+			size_t pos = 0;
+			bool first = true;
+			while (pos <= c.text.size()) {
+				size_t nl = c.text.find('\n', pos);
+				std::string_view line(c.text.data() + pos, nl == std::string_view::npos ? c.text.size() - pos : nl - pos);
+				size_t b = 0, e = line.size();
+				while (b < e && (line[b] == ' ' || line[b] == '\t' || line[b] == '\r')) ++b;
+				while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) --e;
+				if (e > b) {
+					if (!first) out += '\n';
+					first = false;
+					out += lineMarker;
+					if (lineMarker[0] != '/' && lineMarker[1] == '\0') out += ' ';
+					out.append(line.data() + b, e - b);
+				}
+				if (nl == std::string_view::npos) break;
+				pos = nl + 1;
+			}
+			out += '\n';
+		} else {
+			out += lineMarker;
+			out += c.text;
+			out += '\n';
 		}
 	}
-}
-
-// Translate a YAML comment ('# ...') into a RON comment ('// ...').
-inline std::string yamlCommentAsRon(std::string_view s) {
-	size_t p = 0;
-	while (p < s.size() && s[p] == ' ') ++p;
-	if (p < s.size() && s[p] == '#') {
-		++p;
-		if (p < s.size() && s[p] == ' ') { ++p; return std::string("// ") + std::string(s.substr(p)); }
-		return std::string("//") + std::string(s.substr(p));
-	}
-	return "//";
 }
 
 struct asvJSONValue {
@@ -522,8 +497,7 @@ struct asvJSONValue {
 	std::unique_ptr<asvJSONValue> custom_value;  // value of a CUSTOM_TAG (name kept in str_data)
 	int datetime_ms = 0;
 	int tz_offset_min = 0;  // DATETIME display offset in minutes from UTC (0 = Z)
-	std::unique_ptr<YAMLComments> yaml_comments;  // YAML comment metadata (round-trip only)
-	std::unique_ptr<RONComments> ron_comments;    // RON comment metadata (round-trip only)
+	std::unique_ptr<Comments> comments;           // comment metadata (round-trip only)
 
 	asvJSONValue() : type(NULL_VAL), ext_type(0), flag(false), is_float32(false), raw_number(false), yaml_set(false), obj(), arr(), num(0), datetime_ms(0), tz_offset_min(0) {}
 	~asvJSONValue() { destroy(); }
@@ -550,8 +524,7 @@ struct asvJSONValue {
 		custom_value = std::move(other.custom_value);
 		datetime_ms = other.datetime_ms;
 		tz_offset_min = other.tz_offset_min;
-		yaml_comments = std::move(other.yaml_comments);
-		ron_comments = std::move(other.ron_comments);
+		comments = std::move(other.comments);
 		other.type = NULL_VAL;
 		other.datetime_ms = 0;
 		other.tz_offset_min = 0;
@@ -578,8 +551,7 @@ struct asvJSONValue {
 			custom_value = std::move(other.custom_value);
 			datetime_ms = other.datetime_ms;
 			tz_offset_min = other.tz_offset_min;
-			yaml_comments = std::move(other.yaml_comments);
-			ron_comments = std::move(other.ron_comments);
+			comments = std::move(other.comments);
 			other.type = NULL_VAL;
 			other.datetime_ms = 0;
 			other.tz_offset_min = 0;
@@ -594,8 +566,7 @@ struct asvJSONValue {
 	void destroy() noexcept {
 		str_data.clear();
 		bin_data.clear();
-		yaml_comments.reset();
-		ron_comments.reset();
+		comments.reset();
 		if (type == OBJECT) { obj.reset(); }
 		else if (type == ARRAY) { arr.reset(); }
 		else if (type == CUSTOM_TAG) { custom_value.reset(); }
@@ -915,30 +886,6 @@ struct JsonProxy {
 // asvJSONValue operator[] (defined after JsonProxy is complete)
 [[nodiscard]] inline JsonProxy asvJSONValue::operator[](std::string_view key) noexcept { return JsonProxy(get(key)); }
 [[nodiscard]] inline JsonProxy asvJSONValue::operator[](size_t idx) noexcept { return JsonProxy(get(idx)); }
-
-// Recursively populate ron_comments from yaml_comments for every node that
-// has YAML comment metadata but no RON comment metadata.  Called once before
-// RON serialization so that YAML  ->  RON (and, transitively, YAML  ->  JSON5
-// / UDE) conversions preserve comments.
-inline void fillRonCommentsFromYaml(asvJSONValue* v) {
-	if (!v) return;
-	if (v->yaml_comments && !v->ron_comments) {
-		v->ron_comments = std::make_unique<RONComments>();
-		for (const auto& c : v->yaml_comments->leading)
-			v->ron_comments->leading.push_back(yamlCommentAsRon(c));
-		if (!v->yaml_comments->trailing.empty())
-			v->ron_comments->trailing = yamlCommentAsRon(v->yaml_comments->trailing);
-		for (const auto& c : v->yaml_comments->footing)
-			v->ron_comments->footing.push_back(yamlCommentAsRon(c));
-	}
-	if (v->type == asvJSONValue::OBJECT && v->obj) {
-		for (const auto& [k, child] : *v->obj) fillRonCommentsFromYaml(child.get());
-	} else if (v->type == asvJSONValue::ARRAY && v->arr) {
-		for (const auto& child : *v->arr) fillRonCommentsFromYaml(child.get());
-	} else if (v->type == asvJSONValue::CUSTOM_TAG && v->custom_value) {
-		fillRonCommentsFromYaml(v->custom_value.get());
-	}
-}
 
 // JSON formatting helpers
 
@@ -3361,10 +3308,8 @@ inline std::string asvJSON::toYAML(bool pretty) const {
 			out += "---\n";
 		}
 		root->toYAML(out, pretty);
-		if (pretty && root->yaml_comments)
-			for (const auto& cl : root->yaml_comments->footing) out += cl + "\n";
-		if (pretty && root->ron_comments && !root->ron_comments->footing.empty())
-			ronFootingToYaml(out, root->ron_comments->footing);
+		if (pretty && root->comments)
+			emitCommentLines(out, root->comments->footing, "#");
 	}
 	return out;
 }

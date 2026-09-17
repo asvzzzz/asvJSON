@@ -27,11 +27,10 @@ inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 
 // Trailing comment suffix for a value line ("" when the node carries none).
 inline std::string yamlTrail(const asvJSONValue* v) {
-	if (v->yaml_comments && !v->yaml_comments->trailing.empty())
-		return " " + v->yaml_comments->trailing;
-	if (v->ron_comments && !v->ron_comments->trailing.empty()) {
-		std::string t = ronCommentAsYaml(v->ron_comments->trailing);
-		if (t.find('\n') == std::string::npos) return " " + t;
+	if (v->comments && !v->comments->trailing.empty()) {
+		const auto& t = v->comments->trailing.back();
+		if (t.block) return std::string(); // multi-line block cannot go inline
+		return " #" + t.text;
 	}
 	return std::string();
 }
@@ -80,10 +79,8 @@ inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
 			out += "---\n";
 		}
 		root->toYAML(out, opts);
-		if (opts.style == YamlWriteOptions::Style::Block && root->yaml_comments)
-			for (const auto& cl : root->yaml_comments->footing) out += cl + "\n";
-		if (opts.style == YamlWriteOptions::Style::Block && root->ron_comments && !root->ron_comments->footing.empty())
-			ronFootingToYaml(out, root->ron_comments->footing);
+		if (opts.style == YamlWriteOptions::Style::Block && root->comments)
+			emitCommentLines(out, root->comments->footing, "#");
 	}
 	return out;
 }
@@ -213,27 +210,31 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 		return "";
 	};
 
-	if (wc && v->yaml_comments && !v->yaml_comments->leading.empty()) {
-		for (const auto& cl : v->yaml_comments->leading)
-			out += std::string(indent * iw, ' ') + cl + "\n";
-	}
-	if (wc && v->ron_comments) {
-		std::vector<const std::string*> extra;
-		for (const auto& c : v->ron_comments->leading) extra.push_back(&c);
-		for (const auto& c : v->ron_comments->closing) extra.push_back(&c);
-		for (const auto* cp : extra) {
-			std::string t = ronCommentAsYaml(*cp);
-			size_t pos = 0;
-			while (pos <= t.size()) {
-				size_t nl = t.find('\n', pos);
-				std::string_view l(t.data() + pos, nl == std::string::npos ? t.size() - pos : nl - pos);
-				if (!l.empty()) {
-					out += std::string(indent * iw, ' ');
-					out.append(l.data(), l.size());
-					out += '\n';
+	if (wc && v->comments) {
+		std::vector<Comment> extra;
+		for (const auto& c : v->comments->leading) extra.push_back(c);
+		for (const auto& c : v->comments->closing) extra.push_back(c);
+		for (const auto& c : extra) {
+			if (c.block || c.text.find('\n') != std::string::npos) {
+				size_t pos = 0;
+				bool first = true;
+				while (pos <= c.text.size()) {
+					size_t nl = c.text.find('\n', pos);
+					std::string_view l(c.text.data() + pos, nl == std::string_view::npos ? c.text.size() - pos : nl - pos);
+					size_t b = 0, e = l.size();
+					while (b < e && (l[b] == ' ' || l[b] == '\t' || l[b] == '\r')) ++b;
+					while (e > b && (l[e - 1] == ' ' || l[e - 1] == '\t' || l[e - 1] == '\r')) --e;
+					if (e > b) {
+						if (!first) out += '\n';
+						first = false;
+						out += std::string(indent * iw, ' ') + "# " + std::string(l.data() + b, e - b);
+					}
+					if (nl == std::string::npos) break;
+					pos = nl + 1;
 				}
-				if (nl == std::string::npos) break;
-				pos = nl + 1;
+				if (!first) out += '\n';
+			} else {
+				out += std::string(indent * iw, ' ') + '#' + c.text + "\n";
 			}
 		}
 	}
@@ -3395,9 +3396,15 @@ inline bool yamlIsBoundaryMarker(std::string_view s, bool isStart) {
 
 struct YamlCommentEntry {
 	std::string path;                    // "\x01" reserves the document footing
-	std::vector<std::string> leading;    // full-line comments ("# ...")
-	std::string trailing;                // comment at the end of the value line (incl. '#')
+	std::vector<Comment> leading;        // full-line comments (marker stripped)
+	std::vector<Comment> trailing;       // comment at the end of the value line
 };
+
+// Build a Comment from a raw "# ..." string (marker removed, line style).
+inline Comment yamlCommentFromRaw(std::string_view s) {
+	if (s.size() >= 1 && s[0] == '#') return Comment{std::string(s.substr(1)), false};
+	return Comment{std::string(s), false};
+}
 
 // The trailing "# ..." comment of a line (quote/escape aware), or empty.
 inline std::string yamlTrailingComment(std::string_view s) {
@@ -3428,7 +3435,7 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 	// opened by a deeper line).
 	struct YFrame { int indent; char kind; std::string path; int seqIdx; std::string lastEntry; std::string open; };
 	std::vector<YFrame> st;
-	std::vector<std::string> pending;
+	std::vector<Comment> pending;
 	bool disabled = false;   // multi-document streams do not keep comments
 	int boundaryCount = 0;
 	int blockBody = -1;      // indent of a block-scalar header line; deeper lines are body text
@@ -3454,7 +3461,7 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 		if (!c.empty() && c[0] == '%' && indent == 0) { pending.clear(); continue; }
 
 		if (c.empty() || c[0] == '#') {
-			if (!c.empty()) pending.push_back(std::string(c));
+			if (!c.empty()) pending.push_back(yamlCommentFromRaw(c));
 			continue;
 		}
 
@@ -3553,17 +3560,21 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 		}
 
 		if (bindable) {
-			std::string trail = valuePart.empty() ? std::string() : yamlTrailingComment(valuePart);
+			Comment trail;
+			if (!valuePart.empty()) {
+				std::string raw = yamlTrailingComment(valuePart);
+				if (!raw.empty()) trail = yamlCommentFromRaw(raw);
+			}
 			if (!pending.empty()) {
 				YamlCommentEntry e; e.path = entryPath; e.leading = std::move(pending);
 				out.push_back(std::move(e));
 			}
-			if (!trail.empty()) {
+			if (!trail.text.empty()) {
 				// Merge with a just-created leading-only entry for the same node.
 				if (!out.empty() && out.back().path == entryPath && out.back().trailing.empty())
-					out.back().trailing = trail;
+					out.back().trailing.push_back(std::move(trail));
 				else {
-					YamlCommentEntry e; e.path = entryPath; e.trailing = trail;
+					YamlCommentEntry e; e.path = entryPath; e.trailing.push_back(std::move(trail));
 					out.push_back(std::move(e));
 				}
 			}
@@ -3616,15 +3627,15 @@ inline void yamlAttachComments(asvJSONValue* root, const std::vector<YamlComment
 	if (!root) return;
 	for (const auto& e : entries) {
 		if (e.path == "\x01") {
-			if (!root->yaml_comments) root->yaml_comments.reset(new YAMLComments());
-			for (const auto& cl : e.leading) root->yaml_comments->footing.push_back(cl);
+			if (!root->comments) root->comments.reset(new Comments());
+			for (const auto& c : e.leading) root->comments->footing.push_back(c);
 			continue;
 		}
 		asvJSONValue* node = yamlFindPath(root, e.path);
 		if (!node) continue;
-		if (!node->yaml_comments) node->yaml_comments.reset(new YAMLComments());
-		for (const auto& cl : e.leading) node->yaml_comments->leading.push_back(cl);
-		if (!e.trailing.empty()) node->yaml_comments->trailing = e.trailing;
+		if (!node->comments) node->comments.reset(new Comments());
+		for (const auto& c : e.leading) node->comments->leading.push_back(c);
+		for (const auto& c : e.trailing) node->comments->trailing.push_back(c);
 	}
 }
 

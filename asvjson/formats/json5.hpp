@@ -423,6 +423,386 @@ inline std::string json5ToJson(std::string_view input) {
   return out;
 }
 
+// ------------------------- Comment collection -------------------------
+// JSON5 is bracket-delimited like RON, so comment binding reuses the RON
+// collector model: own-line comments lead the following node, same-line
+// comments trail the value just parsed, comments before a closer become the
+// container's closing comments, and a trailing newline-separated block becomes
+// the document footing.
+
+struct Json5CommentEntry {
+  std::string path;                   // "" is the root value
+  std::vector<Comment> leading;
+  std::vector<Comment> trailing;
+  std::vector<Comment> closing;
+  bool footing = false;
+};
+
+inline asvJSONValue* json5FindPath(asvJSONValue* root, std::string_view path) {
+  if (path.empty()) return root;
+  asvJSONValue* cur = root;
+  size_t pos = 0;
+  while (pos <= path.size()) {
+    size_t sep = path.find_first_of("\x1F", pos);
+    std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
+    if (seg.empty()) return nullptr;
+    if (seg[0] == '[') {
+      if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+      size_t idx = 0;
+      for (size_t k = 1; k + 1 < seg.size(); k++) {
+        char d = seg[k];
+        if (d < '0' || d > '9') return nullptr;
+        idx = idx * 10 + static_cast<size_t>(d - '0');
+      }
+      if (idx >= cur->arr->size()) return nullptr;
+      cur = (*cur->arr)[idx].get();
+    } else {
+      if (cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
+      auto it = cur->obj->find(seg);
+      if (it == cur->obj->end()) return nullptr;
+      cur = it->second.get();
+    }
+    if (sep == std::string_view::npos) break;
+    pos = sep + 1;
+  }
+  return cur;
+}
+
+inline void json5AppendUtf8(std::string& s, unsigned cp) {
+  if (cp < 0x80) s += static_cast<char>(cp);
+  else if (cp < 0x800) {
+    s += static_cast<char>(0xC0 | (cp >> 6));
+    s += static_cast<char>(0x80 | (cp & 0x3F));
+  } else if (cp < 0x10000) {
+    s += static_cast<char>(0xE0 | (cp >> 12));
+    s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    s += static_cast<char>(0x80 | (cp & 0x3F));
+  } else {
+    s += static_cast<char>(0xF0 | (cp >> 18));
+    s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    s += static_cast<char>(0x80 | (cp & 0x3F));
+  }
+}
+
+// Decode the raw text between quotes of a JSON5 string/identifier key so a
+// comment path matches the decoded key in the parsed tree. Covers the escapes
+// json5ToJson accepts (incl. \uXXXX surrogate pairs and \u{...}).
+inline std::string json5DecodeString(std::string_view raw) {
+  std::string s;
+  s.reserve(raw.size());
+  auto hexv = [](char c) -> int {
+    auto u = static_cast<unsigned char>(c);
+    if (u >= '0' && u <= '9') return u - '0';
+    if (u >= 'a' && u <= 'f') return u - 'a' + 10;
+    if (u >= 'A' && u <= 'F') return u - 'A' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < raw.size(); i++) {
+    char c = raw[i];
+    if (c != '\\') { s += c; continue; }
+    if (i + 1 >= raw.size()) { s += '\\'; break; }
+    char e = raw[++i];
+    switch (e) {
+      case 'n': s += '\n'; break;
+      case 't': s += '\t'; break;
+      case 'r': s += '\r'; break;
+      case 'b': s += '\b'; break;
+      case 'f': s += '\f'; break;
+      case 'v': s += '\v'; break;
+      case '0': s += '\0'; break;
+      case '\n': break;
+      case '\r': if (i + 1 < raw.size() && raw[i + 1] == '\n') i++; break;
+      case 'x': {
+        if (i + 2 < raw.size() && hexv(raw[i + 1]) >= 0 && hexv(raw[i + 2]) >= 0) {
+          json5AppendUtf8(s, static_cast<unsigned>((hexv(raw[i + 1]) << 4) | hexv(raw[i + 2])));
+          i += 2;
+        } else s += "\\x";
+        break;
+      }
+      case 'u': {
+        if (i + 1 < raw.size() && raw[i + 1] == '{') {
+          unsigned cp = 0; size_t k = i + 2;
+          while (k < raw.size() && raw[k] != '}' && hexv(raw[k]) >= 0) { cp = (cp << 4) | static_cast<unsigned>(hexv(raw[k])); k++; }
+          if (k < raw.size() && raw[k] == '}' && cp <= 0x10FFFF) { json5AppendUtf8(s, cp); i = k; }
+          else s += "\\u{";
+          break;
+        }
+        if (i + 4 < raw.size() && hexv(raw[i + 1]) >= 0 && hexv(raw[i + 2]) >= 0 &&
+            hexv(raw[i + 3]) >= 0 && hexv(raw[i + 4]) >= 0) {
+          unsigned hi = static_cast<unsigned>((hexv(raw[i + 1]) << 12) | (hexv(raw[i + 2]) << 8) | (hexv(raw[i + 3]) << 4) | hexv(raw[i + 4]));
+          i += 4;
+          if (hi >= 0xD800 && hi <= 0xDBFF && i + 6 < raw.size() && raw[i + 1] == '\\' && raw[i + 2] == 'u' &&
+              hexv(raw[i + 3]) >= 0 && hexv(raw[i + 4]) >= 0 && hexv(raw[i + 5]) >= 0 && hexv(raw[i + 6]) >= 0) {
+            unsigned lo = static_cast<unsigned>((hexv(raw[i + 3]) << 12) | (hexv(raw[i + 4]) << 8) | (hexv(raw[i + 5]) << 4) | hexv(raw[i + 6]));
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+              unsigned cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+              json5AppendUtf8(s, cp);
+              i += 6;
+              break;
+            }
+          }
+          json5AppendUtf8(s, hi);
+        } else s += "\\u";
+        break;
+      }
+      default: s += e; break;
+    }
+  }
+  return s;
+}
+
+inline void json5AttachComments(asvJSONValue* root, const std::vector<Json5CommentEntry>& entries) {
+  if (!root || entries.empty()) return;
+  auto appendAll = [](std::vector<Comment>& dst, const std::vector<Comment>& src) {
+    for (const auto& c : src) dst.push_back(c);
+  };
+  for (const auto& e : entries) {
+    asvJSONValue* node = e.footing ? json5FindPath(root, "") : json5FindPath(root, e.path);
+    if (!node) continue;
+    if (!node->comments) node->comments = std::make_unique<Comments>();
+    if (!e.leading.empty()) appendAll(node->comments->leading, e.leading);
+    if (!e.trailing.empty()) appendAll(node->comments->trailing, e.trailing);
+    if (!e.closing.empty()) appendAll(node->comments->closing, e.closing);
+    if (e.footing) {
+      appendAll(node->comments->footing, e.leading);
+      appendAll(node->comments->footing, e.trailing);
+    }
+  }
+}
+
+// Collect comments from a JSON5 document as path-anchored entries. The walk is
+// a token-level parse of the JSON5 structure (strings, scalars, object keys and
+// arrays), so comment positions resolve to the same JSON paths the parsed tree
+// uses. Mirrors the RON collector's leading/trailing/closing/ footing model.
+inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view input) {
+  struct Tok {
+    char kind;        // '{' '}' '[' ']' ':' ',' 'S' (string) 'B' (bare) 'C' (comment)
+    bool ownLine = false;  // comment: stood alone on its line
+    bool block = false;    // comment: "/* ... */"
+    std::string text;      // 'S': decoded string; 'B'/comment: raw source text
+  };
+  std::vector<Tok> toks;
+  const size_t n = input.size();
+  const auto isWs = [](char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
+  };
+  const auto ownLineStart = [&](size_t start) {
+    for (size_t j = start; j-- > 0;) {
+      char c = input[j];
+      if (c == '\n') return true;
+      if (c != ' ' && c != '\t' && c != '\r') return false;
+    }
+    return true;
+  };
+  const auto trimEnd = [](std::string_view s) {
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.remove_suffix(1);
+    return s;
+  };
+  size_t i = 0;
+  while (i < n) {
+    char c = input[i];
+    if (isWs(c) || (c == '\xC2' && i + 1 < n && static_cast<unsigned char>(input[i + 1]) == 0xA0) ||
+        (c == '\xE2' && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+         (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) ||
+        (c == '\xEF' && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0xBB && static_cast<unsigned char>(input[i + 2]) == 0xBF)) {
+      i++;
+      continue;
+    }
+    // Comments.
+    bool isLineCmt = false, isBlockCmt = false;
+    if (c == '#') isLineCmt = true;
+    else if (c == '/' && i + 1 < n && input[i + 1] == '/') isLineCmt = true;
+    else if (c == '/' && i + 1 < n && input[i + 1] == '*') isBlockCmt = true;
+    if (isLineCmt || isBlockCmt) {
+      Tok t;
+      t.kind = 'C';
+      t.ownLine = ownLineStart(i);
+      if (isLineCmt) {
+        size_t start = i + (c == '#' ? 1 : 2);
+        size_t j = i + (c == '#' ? 1 : 2);
+        size_t lineEnd = input.find('\n', j);
+        if (lineEnd == std::string_view::npos) lineEnd = n;
+        j = lineEnd;
+        t.block = false;
+        auto v = trimEnd(input.substr(start, j - start));
+        t.text.assign(v.data(), v.size());
+        i = j;
+      } else {
+        size_t j = i + 2;
+        while (j + 1 < n && !(input[j] == '*' && input[j + 1] == '/')) j++;
+        size_t end = (j + 1 < n) ? j : j;  // if unterminated, consume to EOF
+        t.block = true;
+        auto v = input.substr(i + 2, end - (i + 2));
+        t.text.assign(v.data(), v.size());
+        i = j + (j + 1 < n ? 2 : 0);
+      }
+      toks.push_back(std::move(t));
+      continue;
+    }
+    if (c == '"' || c == '\'') {
+      char q = c;
+      size_t j = i + 1;
+      while (j < n) {
+        if (input[j] == '\\' && j + 1 < n) { j += 2; continue; }
+        if (input[j] == q) break;
+        j++;
+      }
+      Tok t;
+      t.kind = 'S';
+      t.text = json5DecodeString(input.substr(i + 1, j - (i + 1)));
+      toks.push_back(std::move(t));
+      i = (j < n) ? j + 1 : j;
+      continue;
+    }
+    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',') {
+      Tok t;
+      t.kind = c;
+      toks.push_back(std::move(t));
+      i++;
+      continue;
+    }
+    // Bare token: identifiers, numbers, booleans, null, Infinity, ...
+    size_t j = i;
+    while (j < n && !isWs(input[j]) && input[j] != '{' && input[j] != '}' &&
+           input[j] != '[' && input[j] != ']' && input[j] != ':' && input[j] != ',' &&
+           input[j] != '"' && input[j] != '\'' && input[j] != '/' && input[j] != '#')
+      j++;
+    Tok t;
+    t.kind = 'B';
+    auto v = input.substr(i, j - i);
+    t.text.assign(v.data(), v.size());
+    toks.push_back(std::move(t));
+    i = j;
+  }
+
+  struct P {
+    const std::vector<Tok>& toks;
+    size_t k = 0;
+    std::vector<Json5CommentEntry> out;
+    std::vector<Comment> pendLead;
+    std::vector<Comment> pendTrail;
+  } p{toks};
+
+  auto joinPath = [](const std::string& path, const std::string& seg) {
+    if (path.empty()) return seg;
+    return path + std::string("\x1F") + seg;
+  };
+  auto skipComments = [&]() {
+    while (p.k < toks.size() && toks[p.k].kind == 'C') {
+      Comment cm;
+      cm.text = toks[p.k].text;
+      cm.block = toks[p.k].block;
+      if (toks[p.k].ownLine) p.pendLead.push_back(std::move(cm));
+      else p.pendTrail.push_back(std::move(cm));
+      p.k++;
+    }
+  };
+  auto commitLead = [&](std::string path) {
+    if (p.pendLead.empty()) return;
+    Json5CommentEntry e;
+    e.path = std::move(path);
+    e.leading.swap(p.pendLead);
+    p.out.push_back(std::move(e));
+  };
+  auto commitTrail = [&](std::string path) {
+    if (p.pendTrail.empty()) return;
+    Json5CommentEntry e;
+    e.path = std::move(path);
+    e.trailing.swap(p.pendTrail);
+    p.out.push_back(std::move(e));
+  };
+  auto commitClosing = [&](std::string path) {
+    if (p.pendLead.empty() && p.pendTrail.empty()) return;
+    Json5CommentEntry e;
+    e.path = std::move(path);
+    if (!p.pendTrail.empty()) e.trailing.swap(p.pendTrail);
+    for (auto& c : p.pendLead) e.closing.push_back(std::move(c));
+    p.pendLead.clear();
+    if (!e.closing.empty() || !e.trailing.empty()) p.out.push_back(std::move(e));
+  };
+
+  std::function<void(const std::string&)> parseValue;
+  std::function<void(const std::string&)> parseObject;
+  std::function<void(const std::string&)> parseArray;
+
+  parseValue = [&](const std::string& path) {
+    skipComments();
+    commitLead(path);
+    if (p.k >= toks.size()) return;
+    const char kind = toks[p.k].kind;
+    if (kind == '{') { p.k++; parseObject(path); return; }
+    if (kind == '[') { p.k++; parseArray(path); return; }
+    if (kind == 'S' || kind == 'B') { p.k++; return; }   // scalar value token
+    p.k++;              // tolerate a stray structural token (validated elsewhere)
+  };
+
+  parseObject = [&](const std::string& path) {
+    while (true) {
+      skipComments();
+      if (p.k >= toks.size()) return;
+      if (toks[p.k].kind == '}') { commitClosing(path); p.k++; return; }
+      if (toks[p.k].kind == '{' || toks[p.k].kind == '[' || toks[p.k].kind == ':' ||
+          toks[p.k].kind == ',') { p.k++; continue; }   // should not happen in valid JSON5
+      std::string key;
+      if (toks[p.k].kind == 'S') key = toks[p.k].text;
+      else key = toks[p.k].text;
+      p.k++;
+      skipComments();
+      if (p.k < toks.size() && toks[p.k].kind == ':') p.k++;
+      const std::string childPath = joinPath(path, key);
+      parseValue(childPath);
+      skipComments();
+      commitTrail(childPath);
+      if (p.k >= toks.size()) return;
+      if (toks[p.k].kind == ',') {
+        p.k++;
+        skipComments();
+        commitTrail(childPath);
+        if (p.k < toks.size() && toks[p.k].kind == '}') { commitClosing(path); p.k++; return; }
+        continue;
+      }
+      if (toks[p.k].kind == '}') { commitClosing(path); p.k++; return; }
+      return;
+    }
+  };
+
+  parseArray = [&](const std::string& path) {
+    size_t idx = 0;
+    while (true) {
+      skipComments();
+      if (p.k >= toks.size()) return;
+      if (toks[p.k].kind == ']') { commitClosing(path); p.k++; return; }
+      const std::string childPath = joinPath(path, "[" + std::to_string(idx) + "]");
+      parseValue(childPath);
+      skipComments();
+      commitTrail(childPath);
+      if (p.k >= toks.size()) return;
+      if (toks[p.k].kind == ',') {
+        p.k++;
+        skipComments();
+        commitTrail(childPath);
+        if (p.k < toks.size() && toks[p.k].kind == ']') { commitClosing(path); p.k++; return; }
+        idx++;
+        continue;
+      }
+      if (toks[p.k].kind == ']') { commitClosing(path); p.k++; return; }
+      return;
+    }
+  };
+
+  if (!toks.empty()) parseValue("");
+  skipComments();
+  if (!p.pendLead.empty() || !p.pendTrail.empty()) {
+    Json5CommentEntry e;
+    e.footing = true;
+    if (!p.pendLead.empty()) e.leading.swap(p.pendLead);
+    if (!p.pendTrail.empty()) e.trailing.swap(p.pendTrail);
+    p.out.push_back(std::move(e));
+  }
+  return p.out;
+}
+
 inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false);
 
 // Serialize a value plus its same-line trailing comment. When `commaNeeded`
@@ -432,11 +812,12 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
 // Returns true when the output ended with a newline.
 inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
   json5SerializeVal(v, out, depth, pretty);
-  if (!v->ron_comments || v->ron_comments->trailing.empty()) return false;
-  if (commaNeeded && ronTrailingNeedsNewline(v->ron_comments->trailing)) out += ',';
-  out += ' ';
-  out += v->ron_comments->trailing;
-  if (ronTrailingNeedsNewline(v->ron_comments->trailing)) { out += '\n'; return true; }
+  if (!v->comments || v->comments->trailing.empty()) return false;
+  for (const auto& c : v->comments->trailing) {
+    if (!c.block && commaNeeded) { out += ','; commaNeeded = false; }
+    if (c.block) { out += " /*"; out += c.text; out += "*/"; }
+    else { out += " //"; out += c.text; out += '\n'; return true; }
+  }
   return false;
 }
 
@@ -469,12 +850,16 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       const size_t n = v->obj->size();
       bool prevNl = false; // previous field ended with a // comment -> comma already placed
       for (const auto& [k, child] : *(v->obj)) {
-        if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+        if (i > 0 && !prevNl) {
+          bool leadCmt = child->comments && !child->comments->leading.empty();
+          out += (pretty || leadCmt) ? ",\n" : ",";
+        }
         prevNl = false;
-        if (child->ron_comments) {
-          for (const auto& c : child->ron_comments->leading) {
+        if (child->comments) {
+          for (const auto& c : child->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-            out += c;
+            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+            else { out += "//"; out += c.text; }
             out += '\n';
           }
         }
@@ -488,14 +873,14 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
           prevNl = true;
         i++;
       }
-      if (v->ron_comments && !v->ron_comments->closing.empty()) {
+      if (v->comments && !v->comments->closing.empty()) {
         if (pretty) out += '\n';
-        for (const auto& c : v->ron_comments->closing) {
+        for (const auto& c : v->comments->closing) {
           if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
           else out += ", ";
-          out += c;
+          if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+          else { out += "//"; out += c.text; }
           if (pretty) out += '\n';
-          else if (ronTrailingNeedsNewline(c)) out += '\n';
         }
       }
       if (pretty && v->obj && !v->obj->empty()) {
@@ -511,27 +896,31 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       bool prevNl = false; // previous element ended with a // comment
       const size_t ne = v->arr ? v->arr->size() : 0;
       for (size_t i = 0; i < ne; i++) {
-        if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+        if (i > 0 && !prevNl) {
+          bool leadCmt = v->get(i)->comments && !v->get(i)->comments->leading.empty();
+          out += (pretty || leadCmt) ? ",\n" : ",";
+        }
         prevNl = false;
         if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-        if (v->get(i)->ron_comments) {
-          for (const auto& c : v->get(i)->ron_comments->leading) {
+        if (v->get(i)->comments) {
+          for (const auto& c : v->get(i)->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-            out += c;
+            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+            else { out += "//"; out += c.text; }
             out += '\n';
           }
         }
         if (json5EmitValueWithTrailing(v->get(i), out, depth + 1, pretty, /*commaNeeded=*/i + 1 < ne))
           prevNl = true;
       }
-      if (v->ron_comments && !v->ron_comments->closing.empty()) {
+      if (v->comments && !v->comments->closing.empty()) {
         if (pretty) out += '\n';
-        for (const auto& c : v->ron_comments->closing) {
+        for (const auto& c : v->comments->closing) {
           if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
           else out += ", ";
-          out += c;
+          if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+          else { out += "//"; out += c.text; }
           if (pretty) out += '\n';
-          else if (ronTrailingNeedsNewline(c)) out += '\n';
         }
       }
       if (pretty && v->arr && !v->arr->empty()) {
@@ -618,19 +1007,29 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
 
 inline std::string asvJSON::toJSON5(bool pretty) const {
   if (!root) return "null";
-  fillRonCommentsFromYaml(root.get());
   std::string out;
-  if (root->ron_comments) {
-    for (const auto& c : root->ron_comments->leading) { out += c; out += '\n'; }
+  if (root->comments) {
+    for (const auto& c : root->comments->leading) {
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      out += '\n';
+    }
   }
   json5SerializeVal(root.get(), out, 0, pretty);
-  if (root->ron_comments) {
-    if (!root->ron_comments->trailing.empty()) {
+  if (root->comments) {
+    if (!root->comments->trailing.empty()) {
+      const auto& c = root->comments->trailing.front();
       out += ' ';
-      out += root->ron_comments->trailing;
-      if (ronTrailingNeedsNewline(root->ron_comments->trailing)) out += '\n';
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      if (commentNeedsEol(c)) out += '\n';
     }
-    for (const auto& c : root->ron_comments->footing) { out += '\n'; out += c; }
+    for (const auto& c : root->comments->footing) {
+      out += '\n';
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      out += '\n';
+    }
   }
   return out;
 }
@@ -644,7 +1043,13 @@ inline bool asvJSON::fromJSON5(std::string_view input) {
     std::string json = json5ToJson(input);
     bool ok = parse(std::string_view(json));
     allowNaNInfinity = prevNaN;
-    if (ok) formatType = FormatType::JSON5;
+    if (ok) {
+      formatType = FormatType::JSON5;
+      auto comments = json5CollectComments(input);
+      if (asvJSONValue* root = getRoot()) {
+        json5AttachComments(root, comments);
+      }
+    }
     return ok;
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;

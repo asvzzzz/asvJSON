@@ -12,7 +12,7 @@ const SAMPLES = {
   UDE: '# UDE v1.0\nname: "asvJSON++"\nversion: 1.17.0\nactive: true\nformats: 19\ntags: [json, c++, header-only]\n',
   JSONLines: '{"name": "asvJSON++", "version": "1.17.0"}\n{"name": "sample2", "version": "2.0.0"}\n',
   Sexpr: '(root\n  (name "asvJSON++")\n  (version "1.17.0")\n  (active true)\n  (tags "json" "c++"))\n',
-  RON: 'GameConfig(\n  window_size: [\n    800,\n    600\n  ],\n  fullscreen: true,\n  title: "My Game",\n  tags: [\n    "rpg",\n    "demo"\n  ],\n  difficulty: (\n    easy: 0.8,\n    hard: 1.4\n  )\n)\n',
+  RON: '// Game persistent settings\nGameConfig(\n  window_size: [\n    800, // default width\n    600\n  ],\n  fullscreen: true, // start in windowed mode\n  title: "My Game",\n  tags: [\n    "rpg",\n    "demo"\n  ],\n  /*\n    Set difficulty per level\n  */\n  difficulty: (\n    easy: 0.8,\n    hard: 1.4\n  )\n)\n',
   RON_minify: 'GameConfig(window_size:[800,600],fullscreen:true,title:"My Game",tags:["rpg","demo"],difficulty:(easy:0.8,hard:1.4))\n',
   TOON: 'name: asvJSON++\nactive: true\nversion: "1.17.0"\nformats: 19\ntags: []\n  - json\n  - c++\n  - header-only\n',
   TRON: '# TRON sample\nclass Data: name, version, active, formats\nData(name="asvJSON++", version="1.17.0", active=true, formats=19)\n',

@@ -96,10 +96,10 @@ inline std::string ronJsonStr(std::string_view s) {
 // "" root, "a\x1Fb\x1F[2]" nested keys / array indices.
 struct RonCommentEntry {
   std::string path;
-  std::vector<std::string> leading;   // full-line comments before this node (verbatim, incl. markers)
-  std::string trailing;               // same-line comment after the value (verbatim)
-  std::vector<std::string> closing;   // comments just before the container closer (object/array only)
-  bool footing = false;               // trailing comments after the whole document (root only)
+  std::vector<Comment> leading;
+  std::vector<Comment> trailing;
+  std::vector<Comment> closing;
+  bool footing = false;
 };
 
 // Append a path segment ('\x1F'-separated) with no leading separator for the
@@ -148,8 +148,8 @@ struct RonParser {
   // Comment collection state (see skipWsFrom). Pending comments are committed
   // to node paths by the container parsers.
   std::vector<RonCommentEntry>& comments;
-  std::vector<std::string> pendLead;   // own-line comments accumulated since the last child boundary
-  std::string pendTrail;               // same-line comment collected after a value ('// x' / '/* x */')
+  std::vector<Comment> pendLead;
+  std::vector<Comment> pendTrail;
 
   RonParser(std::string_view input, size_t start, std::vector<RonCommentEntry>& out)
     : in(input), i(start), comments(out) {}
@@ -160,23 +160,25 @@ struct RonParser {
       if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++p; continue; }
       if (c == '/' && p + 1 < in.size()) {
         if (in[p + 1] == '/') {
-          size_t start = p;
+          size_t mark = p;
+          size_t start = p + 2;
           while (p < in.size() && in[p] != '\n') ++p;
           if (collect) {
             size_t end = p;
             while (end > start && (in[end - 1] == ' ' || in[end - 1] == '\t' || in[end - 1] == '\r')) --end;
-            size_t b = start;
+            size_t b = mark;
             while (b > 0 && (in[b - 1] == ' ' || in[b - 1] == '\t')) --b;
             bool ownLine = (b == 0 || in[b - 1] == '\n');
-            std::string t(in.data() + start, end - start);
-            if (ownLine) pendLead.push_back(std::move(t));
-            else if (!pendTrail.empty()) { pendTrail += '\n'; pendTrail += t; }
-            else pendTrail = std::move(t);
+            Comment cm;
+            cm.text.assign(in.data() + start, end - start);
+            cm.block = false;
+            if (ownLine) pendLead.push_back(std::move(cm));
+            else pendTrail.push_back(std::move(cm));
           }
           continue;
         }
         if (in[p + 1] == '*') {
-          size_t start = p;
+          size_t start = p + 2;
           int depth = 1;
           size_t pos = p + 2;
           while (pos + 1 < in.size() && depth > 0) {
@@ -187,13 +189,14 @@ struct RonParser {
           if (depth > 0) throw asvJSONError("RON: unterminated block comment");
           size_t end = pos;
           if (collect) {
-            size_t b = start;
+            size_t b = p;
             while (b > 0 && (in[b - 1] == ' ' || in[b - 1] == '\t')) --b;
             bool ownLine = (b == 0 || in[b - 1] == '\n');
-            std::string t(in.data() + start, end - start);
-            if (ownLine) pendLead.push_back(std::move(t));
-            else if (!pendTrail.empty()) { pendTrail += '\n'; pendTrail += t; }
-            else pendTrail = std::move(t);
+            Comment cm;
+            cm.text.assign(in.data() + start, end - start - 2); // strip closing */
+            cm.block = true;
+            if (ownLine) pendLead.push_back(std::move(cm));
+            else pendTrail.push_back(std::move(cm));
           }
           p = end;
           continue;
@@ -973,11 +976,15 @@ inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, b
 // the output ended with a newline (the caller must not emit a separator).
 inline bool ronEmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
   ronSerializeVal(v, out, depth, pretty);
-  if (!v->ron_comments || v->ron_comments->trailing.empty()) return false;
-  if (commaNeeded && ronTrailingNeedsNewline(v->ron_comments->trailing)) out += ',';
-  out += ' ';
-  out += v->ron_comments->trailing;
-  if (ronTrailingNeedsNewline(v->ron_comments->trailing)) { out += '\n'; return true; }
+  if (!v->comments || v->comments->trailing.empty()) return false;
+  const auto& last = v->comments->trailing.back();
+  if (commaNeeded && commentNeedsEol(last)) out += ',';
+  for (const auto& c : v->comments->trailing) {
+    out += ' ';
+    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+    else { out += "//"; out += c.text; }
+  }
+  if (commentNeedsEol(last)) { out += '\n'; return true; }
   return false;
 }
 
@@ -993,12 +1000,16 @@ inline void ronSerializeObjFields(const asvJSONValue* v, std::string& out, int d
   const size_t n = v->obj->size();
   bool prevNl = false; // previous field ended with a line comment -> comma already placed
   for (const auto& [k, child] : *(v->obj)) {
-    if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+    if (i > 0 && !prevNl) {
+      bool leadCmt = child->comments && !child->comments->leading.empty();
+      out += (pretty || leadCmt) ? ",\n" : ",";
+    }
     prevNl = false;
-    if (child->ron_comments) {
-      for (const auto& c : child->ron_comments->leading) {
+    if (child->comments) {
+      for (const auto& c : child->comments->leading) {
         ronIndent(out, depth + 1);
-        out += c;
+        if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+        else { out += "//"; out += c.text; }
         out += '\n';
       }
     }
@@ -1094,7 +1105,10 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
             const size_t ne = child->arr->size();
             bool prevNl = false; // previous element ended with a line comment
             for (const auto& el : *(child->arr)) {
-              if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+              if (i > 0 && !prevNl) {
+                bool leadCmt = el->comments && !el->comments->leading.empty();
+                out += (pretty || leadCmt) ? ",\n" : ",";
+              }
               prevNl = false;
               if (pretty) ronIndent(out, depth + 1);
               if (ronEmitValueWithTrailing(el.get(), out, depth + 1, pretty, /*commaNeeded=*/i + 1 < ne))
@@ -1111,10 +1125,13 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           // Comments attached to the wrapped child itself (a `/` same-line
           // trailing after the last field, or closings before `)`) belong to
           // the `Name(...)` form and are emitted here around the closer.
-          if (child->ron_comments && !child->ron_comments->trailing.empty()) {
-            out += ' ';
-            out += child->ron_comments->trailing;
-            if (ronTrailingNeedsNewline(child->ron_comments->trailing)) out += '\n';
+          if (child->comments && !child->comments->trailing.empty()) {
+            for (const auto& c : child->comments->trailing) {
+              out += ' ';
+              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+              else { out += "//"; out += c.text; }
+              if (commentNeedsEol(c)) out += '\n';
+            }
           }
           break;
         }
@@ -1153,12 +1170,16 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
         const size_t ne = v->arr->size();
         bool prevNl = false; // previous element ended with a line comment
         for (const auto& el : *(v->arr)) {
-          if (i > 0 && !prevNl) out += pretty ? ",\n" : ",";
+          if (i > 0 && !prevNl) {
+            bool leadCmt = el->comments && !el->comments->leading.empty();
+            out += (pretty || leadCmt) ? ",\n" : ",";
+          }
           prevNl = false;
-          if (el->ron_comments) {
-            for (const auto& c : el->ron_comments->leading) {
+          if (el->comments) {
+            for (const auto& c : el->comments->leading) {
               ronIndent(out, depth + 1);
-              out += c;
+              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+              else { out += "//"; out += c.text; }
               out += '\n';
             }
           }
@@ -1240,42 +1261,53 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
 // Emit "closing" comments (collected just before a container closer) right
 // before the closer. Keeps `{ a: 1, /* note */ }` shape on round-trips.
 inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, bool pretty) {
-  if (!v->ron_comments || v->ron_comments->closing.empty()) return;
+  if (!v->comments || v->comments->closing.empty()) return;
   if (pretty) out += '\n';
-  for (const auto& c : v->ron_comments->closing) {
+  for (const auto& c : v->comments->closing) {
     if (pretty) ronIndent(out, depth + 1);
     else out += ", ";
-    out += c;
+    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+    else { out += "//"; out += c.text; }
     if (pretty) out += '\n';
   }
 }
 
 inline std::string asvJSON::toRON(bool pretty) const {
   if (!root) return "None";
-  // Bridge YAML comments to RON comments so YAML -> RON preserves them.
-  fillRonCommentsFromYaml(root.get());
   std::string out;
-  if (root->ron_comments) {
-    for (const auto& c : root->ron_comments->leading) { out += c; out += '\n'; }
+  if (root->comments) {
+    for (const auto& c : root->comments->leading) {
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      out += '\n';
+    }
   }
   ronSerializeVal(root.get(), out, 0, pretty);
-  if (root->ron_comments) {
-    if (!root->ron_comments->trailing.empty()) {
+  if (root->comments) {
+    for (const auto& c : root->comments->trailing) {
       out += ' ';
-      out += root->ron_comments->trailing;
-      if (ronTrailingNeedsNewline(root->ron_comments->trailing)) out += '\n';
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      if (commentNeedsEol(c)) out += '\n';
     }
-    for (const auto& c : root->ron_comments->footing) { out += '\n'; out += c; }
+    for (const auto& c : root->comments->footing) {
+      out += '\n';
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+    }
   }
   return out;
 }
 
 inline void asvJSONValue::toRON(std::string& out, bool pretty) const {
   ronSerializeVal(this, out, 0, pretty);
-  if (ron_comments && !ron_comments->trailing.empty()) {
-    out += ' ';
-    out += ron_comments->trailing;
-    if (ronTrailingNeedsNewline(ron_comments->trailing)) out += '\n';
+  if (comments && !comments->trailing.empty()) {
+    for (const auto& c : comments->trailing) {
+      out += ' ';
+      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; out += c.text; }
+      if (commentNeedsEol(c)) out += '\n';
+    }
   }
 }
 
@@ -1287,19 +1319,19 @@ inline void ronAttachComments(asvJSONValue* root, const std::vector<RonCommentEn
   for (const RonCommentEntry& e : entries) {
     asvJSONValue* node = e.footing ? ronFindPath(root, "") : ronFindPath(root, e.path);
     if (!node) continue;
-    if (!node->ron_comments) node->ron_comments = std::make_unique<RONComments>();
-    if (!e.leading.empty() && node->ron_comments->leading.empty()) {
-      node->ron_comments->leading = e.leading;
+    if (!node->comments) node->comments = std::make_unique<Comments>();
+    if (!e.leading.empty() && node->comments->leading.empty()) {
+      node->comments->leading = e.leading;
     }
-    if (!e.trailing.empty() && node->ron_comments->trailing.empty()) {
-      node->ron_comments->trailing = e.trailing;
+    if (!e.trailing.empty() && node->comments->trailing.empty()) {
+      node->comments->trailing = e.trailing;
     }
-    if (!e.closing.empty() && node->ron_comments->closing.empty()) {
-      node->ron_comments->closing = e.closing;
+    if (!e.closing.empty() && node->comments->closing.empty()) {
+      node->comments->closing = e.closing;
     }
     if (e.footing) {
-      for (const std::string& c : e.leading) node->ron_comments->footing.push_back(c);
-      if (!e.trailing.empty()) node->ron_comments->footing.push_back(e.trailing);
+      for (const auto& c : e.leading) node->comments->footing.push_back(c);
+      for (const auto& c : e.trailing) node->comments->footing.push_back(c);
     }
   }
 }

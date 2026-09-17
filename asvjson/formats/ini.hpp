@@ -316,6 +316,246 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
   }
 }
 
+// ----------------------------------------------------------------------------
+// Comment collection (INI -> tree): comments are stored on the value nodes they
+// annotate, so a JSON5/YAML/... tree carrying comments round-trips through INI
+// and back. A comment-only line leads the following key / section; an inline
+// `;`/`#` comment trails its value; comments at EOF become the root footing.
+// ----------------------------------------------------------------------------
+
+struct IniCommentEntry {
+  std::string path;               // \x1F-joined path ("" = root)
+  std::vector<Comment> leading;   // comments before the annotated node
+  std::vector<Comment> trailing;  // inline comment after its value
+  bool footing = false;           // comments at EOF -> root footing
+};
+
+inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
+  if (path.empty()) return root;
+  asvJSONValue* cur = root;
+  size_t pos = 0;
+  while (pos <= path.size()) {
+    size_t sep = path.find_first_of("\x1F", pos);
+    std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
+    if (seg.empty()) return nullptr;
+    if (seg[0] == '[') {
+      if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+      size_t idx = 0;
+      for (size_t k = 1; k + 1 < seg.size(); k++) {
+        char d = seg[k];
+        if (d < '0' || d > '9') return nullptr;
+        idx = idx * 10 + static_cast<size_t>(d - '0');
+      }
+      if (idx >= cur->arr->size()) return nullptr;
+      cur = (*cur->arr)[idx].get();
+    } else {
+      if (cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
+      auto it = (*cur->obj).find(seg);
+      if (it == cur->obj->end()) return nullptr;
+      cur = it->second.get();
+    }
+    if (sep == std::string_view::npos) break;
+    pos = sep + 1;
+  }
+  return cur;
+}
+
+inline void iniAttachComments(asvJSONValue* root, const std::vector<IniCommentEntry>& entries) {
+  if (!root || entries.empty()) return;
+  auto appendAll = [](std::vector<Comment>& dst, const std::vector<Comment>& src) {
+    for (const auto& c : src) dst.push_back(c);
+  };
+  for (const auto& e : entries) {
+    asvJSONValue* node = iniFindPath(root, e.path);
+    if (!node) continue;
+    if (!node->comments) node->comments = std::make_unique<Comments>();
+    if (e.footing) {
+      if (!e.leading.empty()) appendAll(node->comments->footing, e.leading);
+      if (!e.trailing.empty()) appendAll(node->comments->footing, e.trailing);
+    } else {
+      if (!e.leading.empty()) appendAll(node->comments->leading, e.leading);
+      if (!e.trailing.empty()) appendAll(node->comments->trailing, e.trailing);
+    }
+  }
+}
+
+// Walk the INI document and collect comment entries. Mirrors fromINI's own
+// line classification (continuation lines, quoted multi-line values, dotted
+// keys, [[...]] elements) so comment paths resolve against the parsed tree.
+inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
+  std::vector<IniCommentEntry> entries;
+  std::vector<Comment> pending;
+  std::vector<std::string> sectionPath;  // decoded segments of the current section
+  std::string curArrayElemPath;          // path of the current [[...]] element (e.g. "items\x1F[0]")
+  bool inSection = false, inArrayElement = false, inMlValue = false;
+  std::vector<std::pair<std::string, size_t>> arrayCounts;  // array key path -> next element index
+
+  auto join = [](std::string a, const std::string& b) {
+    if (a.empty()) return b;
+    return a + std::string("\x1F") + b;
+  };
+  auto joinSegs = [&](const std::vector<std::string>& segs) {
+    std::string p;
+    for (const auto& s : segs) p = join(p, s);
+    return p;
+  };
+  auto consumeLeading = [&](std::string path) {
+    if (pending.empty()) return;
+    IniCommentEntry e;
+    e.path = std::move(path);
+    e.leading.swap(pending);
+    entries.push_back(std::move(e));
+  };
+
+  auto lines = splitLines(input);
+  size_t lineCount = lines.size();
+  for (size_t li = 0; li < lineCount; li++) {
+    std::string_view line = iniTrim(lines[li]);
+    if (inMlValue) {
+      // Continue scanning a multi-line quoted value for its closing quote.
+      if (line.find('"') != std::string_view::npos) inMlValue = false;
+      continue;
+    }
+    if (line.empty()) continue;
+    // Continuation: a line ending with '\' joins the next; skip its comment
+    // classification (rare edge case -- same as fromINI).
+    if (line.back() == '\\') {
+      size_t j = li + 1;
+      while (j < lineCount) {
+        std::string_view nx = iniTrim(lines[j]);
+        if (nx.empty()) { j++; continue; }
+        if (nx.back() == '\\') j++;
+        else break;
+      }
+      continue;
+    }
+    // Comment-only line.
+    if (line[0] == ';' || line[0] == '#') {
+      size_t start = 1;
+      while (start < line.size() && (line[start] == ' ' || line[start] == '\t' || line[start] == '\r')) start++;
+      Comment c;
+      c.text.assign(line.data() + start, line.size() - start);
+      pending.push_back(std::move(c));
+      continue;
+    }
+    // Section header.
+    if (line[0] == '[') {
+      auto findCloseBracket = [&](size_t from) -> size_t {
+        size_t i = from;
+        while (i < line.size()) {
+          if (line[i] == '\\' && i + 1 < line.size()) { i += 2; continue; }
+          if (line[i] == ']') return i;
+          i++;
+        }
+        return std::string_view::npos;
+      };
+      bool isArray = line.size() > 1 && line[1] == '[';
+      size_t start = isArray ? 2 : 1;
+      size_t end = findCloseBracket(start);
+      if (end == std::string_view::npos || (isArray && (end + 1 >= line.size() || line[end + 1] != ']'))) {
+        // Malformed header: the parser will reject it; nothing to collect.
+        pending.clear();
+        inSection = false; inArrayElement = false;
+        continue;
+      }
+      std::string_view name = iniTrim(line.substr(start, end - start));
+      if (name.empty()) { pending.clear(); continue; }
+      std::vector<std::string> newPath = iniSplitDottedPath(name);
+      if (isArray) {
+        // "[[a.b]]" -> array key "b" under path "a"; element index increments
+        // per repeated header.
+        std::string arrKey = newPath.back();
+        newPath.pop_back();
+        std::string arrPath = joinSegs(newPath);
+        std::string arrP = join(arrPath, arrKey);
+        size_t idx = 0;
+        bool found = false;
+        for (auto& ac : arrayCounts) {
+          if (ac.first == arrP) { idx = ac.second++; found = true; break; }
+        }
+        if (!found) arrayCounts.push_back(std::make_pair(arrP, size_t(1)));
+        curArrayElemPath = arrP + "\x1F[" + std::to_string(idx) + "]";
+        consumeLeading(curArrayElemPath);
+        inArrayElement = true;
+        inSection = false;
+        sectionPath = std::move(newPath);
+      } else {
+        std::string path = joinSegs(newPath);
+        consumeLeading(path);
+        sectionPath = std::move(newPath);
+        inSection = true;
+        inArrayElement = false;
+        curArrayElemPath.clear();
+      }
+      inMlValue = false;
+      continue;
+    }
+    // Key = value (or key: value, or key followed by whitespace).
+    size_t delim = std::string_view::npos;
+    for (size_t i = 0; i < line.size(); i++) {
+      if (line[i] == '=' || line[i] == ':') { delim = i; break; }
+    }
+    if (delim == std::string_view::npos) {
+      for (size_t i = 0; i < line.size(); i++) {
+        if (line[i] == ' ' || line[i] == '\t') { delim = i; break; }
+      }
+      if (delim == std::string_view::npos) continue;
+    }
+    std::string_view keyView = iniTrim(line.substr(0, delim));
+    std::string_view valView = iniTrim(line.substr(delim + 1));
+    if (keyView.empty()) continue;
+
+    // Quoted values may span lines (fromINI gathers them); suppress the inline
+    // comment scan while inside one.
+    std::vector<Comment> trailing;
+    if (!valView.empty() && valView.front() == '"') {
+      // Find closing quote on this line.
+      bool escaped = false, closed = false;
+      size_t qi = 1;
+      for (; qi < valView.size(); qi++) {
+        if (escaped) { escaped = false; continue; }
+        if (valView[qi] == '\\') { escaped = true; continue; }
+        if (valView[qi] == '"') { closed = true; break; }
+      }
+      if (!closed) inMlValue = true;
+    } else {
+      size_t cpos = iniFindComment(valView);
+      if (cpos != std::string_view::npos) {
+        std::string_view rest = valView.substr(cpos + 1);
+        rest = iniTrim(rest);
+        Comment c;
+        c.text.assign(rest.data(), rest.size());
+        trailing.push_back(std::move(c));
+      }
+    }
+
+    // Resolve the value node path (section + dotted key / array element + key).
+    std::string base = inArrayElement ? curArrayElemPath
+                                      : (inSection ? joinSegs(sectionPath) : std::string());
+    std::vector<std::string> keyPath = iniSplitDottedPath(keyView);
+    std::string path = base;
+    for (const auto& s : keyPath) path = join(path, s);
+
+    if (!pending.empty() || !trailing.empty()) {
+      IniCommentEntry e;
+      e.path = std::move(path);
+      e.leading.swap(pending);
+      e.trailing.swap(trailing);
+      entries.push_back(std::move(e));
+    }
+    inMlValue = false;
+  }
+
+  // Unconsumed comments at EOF become the root footing.
+  if (!pending.empty()) {
+    IniCommentEntry e;  // path "" -> root footing
+    e.footing = true;
+    e.leading.swap(pending);
+    entries.push_back(std::move(e));
+  }
+  return entries;
+}
+
 // Encoder classification of one child value: returns true when the child is
 // emitted as bare `key = value` lines (scalar, primitive array, empty
 // container), false when it becomes a [[...]] table (array of objects) or a
@@ -342,6 +582,48 @@ inline bool iniIsBareChild(const asvJSONValue* v) {
 
 // Recursively emit object contents for a given section path (prefix).
 // prefix == current section path; emitHeader controls whether to emit a section header.
+
+// Write comment groups as `; `-prefixed lines (INI has no block comments, so
+// multi-line text is line-ified).
+inline void iniWriteCommentLines(std::string& out, const std::vector<Comment>& list) {
+  for (const auto& c : list) {
+    std::string_view text(c.text);
+    size_t start = 0;
+    for (;;) {
+      size_t nl = text.find('\n', start);
+      std::string_view seg = text.substr(start, nl == std::string_view::npos ? text.size() - start : nl - start);
+      out += "; ";
+      out += seg;
+      out += '\n';
+      if (nl == std::string_view::npos) break;
+      start = nl + 1;
+    }
+  }
+}
+
+// Emit a `key = value` line with the value's leading comments above it and a
+// single-line trailing comment inlined after the value.
+inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asvJSONValue* v) {
+  if (v->comments && !v->comments->leading.empty())
+    iniWriteCommentLines(out, v->comments->leading);
+  out += keq;
+  out += " = ";
+  iniFormatVal(v, out);
+  if (v->comments && !v->comments->trailing.empty()) {
+    auto it = v->comments->trailing.rbegin();
+    if (!it->block && it->text.find('\n') == std::string::npos) {
+      out += " ;";
+      out += it->text;
+      out += '\n';
+    } else {
+      out += '\n';
+      iniWriteCommentLines(out, v->comments->trailing);
+    }
+  } else {
+    out += '\n';
+  }
+}
+
 inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix);
 inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
                            bool emitHeader, bool pretty = true) {
@@ -357,6 +639,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 
   if (emitHeader && hasDirectKeys && !prefix.empty()) {
     if (!out.empty() && out.back() != '\n') out += '\n';
+    if (obj->comments) iniWriteCommentLines(out, obj->comments->leading);
     out += '[' + prefix + "]\n";
   }
 
@@ -370,12 +653,13 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        out += (pretty ? flatKey : dottedKey) + " = {}\n";
+        iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        out += (pretty ? flatKey : dottedKey) + " = []\n";
+        iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
       } else if (iniIsBareChild(val.get())) {
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& elem : *val->arr) {
           out += (pretty ? flatKey : dottedKey) + " = ";
           iniFormatVal(elem.get(), out);
@@ -383,9 +667,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         }
       }
     } else {
-      out += (pretty ? flatKey : dottedKey) + " = ";
-      iniFormatVal(val.get(), out);
-      out += '\n';
+      iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
     }
   }
 
@@ -411,10 +693,9 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         for (const auto& elem : *val->arr) {
           std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
+          if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
           out += "[[" + newPrefix + "]]\n";
-          if (elem->type == asvJSONValue::OBJECT) {
-            iniEmitElement(elem.get(), out, newPrefix);
-          }
+          if (elem->type == asvJSONValue::OBJECT) iniEmitElement(elem.get(), out, newPrefix);
         }
       }
     }
@@ -441,12 +722,13 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        out += full + " = {}\n";
+        iniWriteKeyValue(out, full, val.get());
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        out += full + " = []\n";
+        iniWriteKeyValue(out, full, val.get());
       } else if (iniIsBareChild(val.get())) {
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& e : *val->arr) {
           out += full + " = ";
           iniFormatVal(e.get(), out);
@@ -454,9 +736,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
         }
       }
     } else {
-      out += full + " = ";
-      iniFormatVal(val.get(), out);
-      out += '\n';
+      iniWriteKeyValue(out, full, val.get());
     }
   }
   // Pass 2: objects and object-arrays
@@ -472,6 +752,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
         for (const auto& e : *val->arr) {
           std::string np = prefix.empty() ? full : prefix + "." + full;
           if (!out.empty() && out.back() != '\n') out += '\n';
+          if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np);
         }
@@ -489,12 +770,13 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        out += flatKey + " = {}\n";
+        iniWriteKeyValue(out, flatKey, val.get());
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        out += flatKey + " = []\n";
+        iniWriteKeyValue(out, flatKey, val.get());
       } else if (iniIsBareChild(val.get())) {
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& e : *val->arr) {
           out += flatKey + " = ";
           iniFormatVal(e.get(), out);
@@ -502,9 +784,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
         }
       }
     } else {
-      out += flatKey + " = ";
-      iniFormatVal(val.get(), out);
-      out += '\n';
+      iniWriteKeyValue(out, flatKey, val.get());
     }
   }
   // Pass 2: objects and object-arrays
@@ -519,6 +799,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
         for (const auto& e : *val->arr) {
           std::string np = prefix.empty() ? flatKey : prefix + "." + flatKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
+          if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np);
         }
@@ -533,6 +814,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
   using T = asvJSONValue::Type;
   if (type == T::OBJECT) {
     if (obj) {
+      if (comments) iniWriteCommentLines(out, comments->leading);
       if (!pretty) {
         // Compact: dotted keys for scalars/objects, [[...]] headers for
         // arrays-of-objects.  Bare lines must precede tables.
@@ -542,12 +824,13 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
-              out += flatKey + " = {}\n";
+              iniWriteKeyValue(out, flatKey, val.get());
             }
           } else if (val->type == T::ARRAY && val->arr) {
             if (val->arr->empty()) {
-              out += flatKey + " = []\n";
+              iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
+              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
               for (const auto& elem : *val->arr) {
                 out += flatKey + " = ";
                 iniFormatVal(elem.get(), out);
@@ -555,9 +838,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               }
             }
           } else {
-            out += flatKey + " = ";
-            iniFormatVal(val.get(), out);
-            out += '\n';
+            iniWriteKeyValue(out, flatKey, val.get());
           }
         }
         // Pass 2: objects and object-arrays
@@ -572,6 +853,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               std::string escKey = iniEscapeSectionKey(key);
               for (const auto& elem : *val->arr) {
                 if (!out.empty() && out.back() != '\n') out += '\n';
+                if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT)
                   iniEmitElement(elem.get(), out, escKey);
@@ -587,12 +869,13 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
-              out += flatKey + " = {}\n";
+              iniWriteKeyValue(out, flatKey, val.get());
             }
           } else if (val->type == T::ARRAY && val->arr) {
             if (val->arr->empty()) {
-              out += flatKey + " = []\n";
+              iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
+              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
               for (const auto& elem : *val->arr) {
                 out += flatKey + " = ";
                 iniFormatVal(elem.get(), out);
@@ -600,9 +883,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               }
             }
           } else {
-            out += flatKey + " = ";
-            iniFormatVal(val.get(), out);
-            out += '\n';
+            iniWriteKeyValue(out, flatKey, val.get());
           }
         }
         // Second pass: objects and object-arrays
@@ -624,6 +905,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               std::string escKey = iniEscapeSectionKey(key);
               for (const auto& elem : *val->arr) {
                 if (!out.empty() && out.back() != '\n') out += '\n';
+                if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT) {
                   iniEmitElement(elem.get(), out, escKey);
@@ -633,6 +915,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
           }
         }
       }
+      if (comments) iniWriteCommentLines(out, comments->footing);
     }
   } else if (type == T::ARRAY && arr) {
     out += "value = ";
@@ -901,6 +1184,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
     }
 
     formatType = FormatType::INI;
+    auto entries = iniCollectComments(input);
+    iniAttachComments(root.get(), entries);
     return true;
 
   } catch (const asvJSONError& e) {
