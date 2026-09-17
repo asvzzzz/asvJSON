@@ -796,6 +796,7 @@ struct asvJSONValue {
 	void toTOML(std::string& out, bool pretty = true) const;
 	void toINI(std::string& out, bool pretty = true) const;
 	void toRON(std::string& out, bool pretty = true) const;
+	void toCpp(std::string& out, const CppWriteOptions& opts = {}) const;
 
 	[[nodiscard]] JsonProxy operator[](std::string_view key) noexcept;
 	[[nodiscard]] JsonProxy operator[](size_t idx) noexcept;
@@ -1087,6 +1088,7 @@ enum class FormatType {
   Protobuf,
   ProtobufText,
   RON,
+  CPP,
 };
 
 /// Thread safety:
@@ -1631,6 +1633,8 @@ public:
 	bool fromUDE(std::string_view input, bool strict = false);
 	std::string toRON(bool pretty = true) const;
 	bool fromRON(std::string_view input);
+	std::string toCpp(const CppWriteOptions& opts = {}) const;
+	bool fromCpp(std::string_view input, const CppReadOptions& opts = {});
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;
@@ -3438,5 +3442,7 @@ using asvJSONInternal::asvJSONValue;
 using asvJSONInternal::asvJSON;
 using asvJSONInternal::asvJSONError;
 using asvJSONInternal::YamlWriteOptions;
+using asvJSONInternal::CppWriteOptions;
+using asvJSONInternal::CppReadOptions;
 
 #endif // ASVJSON_CORE_H

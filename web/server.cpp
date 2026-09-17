@@ -246,6 +246,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "BSON") ok = j.fromBSON(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "CBOR") ok = j.fromCBOR(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "Protobuf") ok = j.fromProtobuf(resolvedBin.data(), resolvedBin.size());
+      else if (fromFmt == "CPP" || fromFmt == "CPP_C") ok = j.fromCpp(textData);
       else return jsonMsg(false, "", false, "Unknown input format: " + fromFmt);
       if (!ok) return jsonMsg(false, "", false, j.getLastError());
     }
@@ -278,6 +279,12 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     else if (toFmt == "TRON") result = j.toTRON();
     else if (toFmt == "GOON") result = j.toGOON();
     else if (toFmt == "ProtobufText") result = j.toProtobufText();
+    else if (toFmt == "CPP") result = j.toCpp();
+    else if (toFmt == "CPP_C") {
+      CppWriteOptions co;
+      co.style = CppWriteOptions::Style::C;
+      result = j.toCpp(co);
+    }
     else return jsonMsg(false, "", false, "Unknown output format: " + toFmt);
 
     return jsonMsg(true, result, false, "");

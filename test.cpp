@@ -11920,6 +11920,227 @@ TEST(testRONComments) {
   }
 }
 
+TEST(testToCpp) {
+  // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
+  // defaults inferred, enum from an object map via enumPaths/enumNames.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view(
+      "GameConfig(\n"
+      "  window_size: (800, 600),\n"
+      "  window_title: \"PAC-MAN\",\n"
+      "  fullscreen: false,\n"
+      "  key_bindings: { up: \"Up\", down: \"Down\" },\n"
+      ")")));
+    CppWriteOptions o;
+    o.enumPaths.push_back("key_bindings");
+    o.enumNames.push_back({"key_bindings", "Direction"});
+    std::string s = j.toCpp(o);
+    ASSERT(s.find("#include <array>") != std::string::npos);
+    ASSERT(s.find("#include <string>") != std::string::npos);
+    ASSERT(s.find("enum class Direction {") != std::string::npos);
+    ASSERT(s.find("struct GameConfig {") != std::string::npos);
+    ASSERT(s.find("struct KeyBindings {") != std::string::npos);
+    ASSERT(s.find("std::array<int, 2> window_size = {800, 600};") != std::string::npos);
+    ASSERT(s.find("std::string window_title = \"PAC-MAN\";") != std::string::npos);
+    ASSERT(s.find("bool fullscreen = false;") != std::string::npos);
+    ASSERT(s.find("Direction up = Direction::Up;") != std::string::npos);
+    ASSERT(s.find("Direction down = Direction::Down;") != std::string::npos);
+    // Deterministic.
+    ASSERT_EQ(s, j.toCpp(o));
+  }
+  // C style: typedef structs, C arrays, `enum`, no member initializers.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view(
+      "(window_size: (800, 600), window_title: \"PAC-MAN\", fullscreen: false)")));
+    CppWriteOptions o;
+    o.style = CppWriteOptions::Style::C;
+    std::string s = j.toCpp(o);
+    ASSERT(s.find("#include <stdbool.h>") != std::string::npos);
+    ASSERT(s.find("typedef struct Document {") != std::string::npos);
+    ASSERT(s.find("int window_size[2];") != std::string::npos);
+    ASSERT(s.find("const char* window_title;") != std::string::npos);
+    ASSERT(s.find("bool fullscreen;") != std::string::npos);
+    ASSERT(s.find("= ") == std::string::npos);
+  }
+  // Arrays of objects share one element struct.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"id":0,"items":[{"id":1,"n":"a"},{"id":2,"n":"b"}]})")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("struct Item {") != std::string::npos);
+    ASSERT(s.find("std::array<Item, 2> items = {};") != std::string::npos);
+  }
+  // Identifier-string arrays auto-detect an enum.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"count":3,"roles":["admin","user","guest"]})")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("enum class Role {") != std::string::npos);
+    ASSERT(s.find("std::array<Role, 3> roles = {Role::admin, Role::user, Role::guest};")
+             != std::string::npos);
+  }
+  // Mixed array -> std::variant.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"k":true,"mixed":[1,"two",true]})")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("#include <variant>") != std::string::npos);
+    ASSERT(s.find("std::vector<std::variant<int, std::string, bool>> mixed = {};")
+             != std::string::npos);
+  }
+  // Empty array -> std::vector placeholder; useStdArray=false uses vectors.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"empty":[],"nums":[1,2,3]})")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("std::vector<std::nullptr_t> empty = {};") != std::string::npos);
+    ASSERT(s.find("std::array<int, 3> nums = {1, 2, 3};") != std::string::npos);
+    CppWriteOptions o;
+    o.useStdArray = false;
+    std::string v = j.toCpp(o);
+    ASSERT(v.find("std::vector<int> nums = {1, 2, 3};") != std::string::npos);
+  }
+  // Comments preserved as `//` / `/* */`; suppressible.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view(
+      "GameConfig(\n"
+      "  // window size in pixels\n"
+      "  window_size: (800, 600), // px\n"
+      ")")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("// window size in pixels") != std::string::npos);
+    ASSERT(s.find("// px") != std::string::npos);
+    CppWriteOptions o;
+    o.emitComments = false;
+    std::string n = j.toCpp(o);
+    ASSERT(n.find("window size in pixels") == std::string::npos);
+    ASSERT(n.find("// px") == std::string::npos);
+  }
+  // Root name / unwrap switch.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":1})")));
+    ASSERT(j.toCpp(CppWriteOptions{}).find("struct Document {") != std::string::npos);
+    CppWriteOptions o;
+    o.rootName = "Config";
+    ASSERT(j.toCpp(o).find("struct Config {") != std::string::npos);
+
+    asvJSON wrapped;
+    ASSERT(wrapped.parse(std::string_view(R"({"GameConfig":{"w":1}})")));
+    CppWriteOptions noUnwrap;
+    noUnwrap.unwrapRootSingleKey = false;
+    std::string s = wrapped.toCpp(noUnwrap);
+    ASSERT(s.find("struct GameConfig {") != std::string::npos);
+    ASSERT(s.find("struct Document {") != std::string::npos);
+  }
+  // emitDefaults=false leaves members uninitialized.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":1,"b":"x"})")));
+    CppWriteOptions o;
+    o.emitDefaults = false;
+    std::string s = j.toCpp(o);
+    ASSERT(s.find("int a;") != std::string::npos);
+    ASSERT(s.find("std::string b;") != std::string::npos);
+    ASSERT(s.find("int a = ") == std::string::npos);
+  }
+}
+
+TEST(testFromCpp) {
+  // Modern C++ round-trip: flat object with scalar defaults.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view(R"({"name":"x","n":3,"flag":true})")));
+    asvJSON b;
+    ASSERT(b.fromCpp(a.toCpp(CppWriteOptions{})));
+    ASSERT_EQ(a.serialize(), b.serialize());
+  }
+  // Fixed-size arrays and nested inline struct with declarator.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::array<int, 2> w = {800, 600};\n"
+      "  struct Player { std::string name = \"hero\"; int hp = 100; } player = {};\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"w":[800,600],"player":{"name":"hero","hp":100}})"));
+  }
+  // Array of objects: element fields default to the first element's values.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view(R"({"items":[{"id":1,"n":"a"},{"id":1,"n":"a"}]})")));
+    CppWriteOptions o;
+    o.unwrapRootSingleKey = false;
+    asvJSON b;
+    ASSERT(b.fromCpp(a.toCpp(o)));
+    ASSERT_EQ(a.serialize(), b.serialize());
+  }
+  // Identifier-string array recovers an enum array by member count.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "enum class Mode { easy, hard, normal };\n"
+      "struct Document {\n"
+      "  std::array<Mode, 3> modes = {};\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"modes":["easy","hard","normal"]})"));
+  }
+  // C typedef struct: types recovered, initializers absent -> default values.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "typedef struct Document {\n"
+      "  const char* name;\n"
+      "  int n;\n"
+      "  bool ok;\n"
+      "} Document;\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"name":"","n":0,"ok":false})"));
+  }
+  // Forward references resolve to the struct definition.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct A { int x = 1; B b; };\n"
+      "struct B { int y = 2; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"A":{"x":1,"b":{"y":2}}})"));
+  }
+  // Single non-root struct is wrapped under its name; rootName is configurable.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Config { int a = 5; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"Config":{"a":5}})"));
+    CppReadOptions o;
+    o.rootName = "Config";
+    asvJSON c;
+    ASSERT(c.fromCpp(std::string_view("struct Config { int a = 5; };\n"), o));
+    ASSERT_EQ(c.serialize(), std::string_view(R"({"a":5})"));
+  }
+  // Comments attach to the following struct when includeComments is set.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "// the document\n"
+      "struct Document {\n"
+      "  std::string name = \"x\";\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"name":"x"})"));
+    ASSERT(b.getRoot() && b.getRoot()->comments && !b.getRoot()->comments->leading.empty());
+  }
+  // formatType is set and a parse failure reports an error.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int a = 1; };\n")));
+    ASSERT_EQ(static_cast<int>(b.getFormatType()), static_cast<int>(FormatType::CPP));
+    asvJSON bad;
+    ASSERT(!bad.fromCpp(std::string_view("this is not c++\n")));
+    ASSERT(!bad.getLastError().empty());
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -19697,6 +19918,8 @@ RUN(testCBORFloat16);
 	RUN(testToRON);
 	RUN(testFromRON);
 	RUN(testRONComments);
+  RUN(testToCpp);
+  RUN(testFromCpp);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

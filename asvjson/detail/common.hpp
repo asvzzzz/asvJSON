@@ -93,6 +93,53 @@ struct GoonWriteOptions {
 	bool alwaysQuoteKeys = false;    // quote every mapping key
 };
 
+// C++ struct/enum code-generation options (passed to toCpp()).
+// toCpp() is encode-only: it infers C++ type declarations from a value tree.
+struct CppWriteOptions {
+	enum class Style : int { ModernCpp = 0, C = 1 };
+	Style style = Style::ModernCpp;
+	bool emitIncludes = true;        // emit the #include preamble (modern only)
+	bool emitDefaults = true;        // initialize members from the sample values
+	bool emitComments = true;        // preserve comments as `//` and `/* */`
+	bool emitEnums = true;           // infer enums from arrays of identifier strings
+	bool emitEnumMaps = false;       // infer enums from object maps of identifier strings
+	bool useEnumClass = true;        // modern: `enum class` (else plain `enum`)
+	bool useStdArray = true;         // fixed-size homogeneous arrays -> std::array<T,N>
+	bool unwrapRootSingleKey = true; // root {Name: {...}} -> `struct Name`
+	bool forwardDeclare = true;      // forward-declare structs used before definition
+	int indentWidth = 4;             // spaces per indentation level
+	std::string rootName = "Document"; // name used when no object key provides one
+	std::string intType = "int";
+	std::string stringType = "std::string";
+	std::string binaryType = "std::vector<std::uint8_t>";
+	std::string datetimeType = "std::time_t";
+	std::string nullType = "std::nullptr_t";
+	// Treat the object/array at these paths (or with these field names) as an
+	// enum. When unset, only identifier-string arrays are auto-detected.
+	std::vector<std::string> enumPaths;
+  // Explicit enum type name per path/field (e.g. {"key_bindings","direction"}).
+  std::vector<std::pair<std::string, std::string>> enumNames;
+};
+
+// C++ struct/enum decoding options (passed to fromCpp()).
+// fromCpp() parses a pragmatic subset of C/C++ type declarations (as produced
+// by toCpp(), or hand-written) back into a value tree.
+struct CppReadOptions {
+	// A single top-level struct named `rootName` is unwrapped to its fields
+	// (this is what toCpp() emits for a bare object root); other named structs
+	// are wrapped as { "StructName": {...} }.
+	bool unwrapRootStruct = true;
+	// Fill members without an initializer (and `= {}`) from the inferred type
+	// defaults, including nested struct defaults and fixed-array element count.
+	bool materializeDefaults = true;
+	// Re-attach `//` and `/* */` comments as node comment metadata.
+	bool includeComments = true;
+	// Throw on a member that cannot be parsed instead of skipping it.
+	bool strict = false;
+	// Name treated as the unwrapped root struct when it is the only one.
+	std::string rootName = "Document";
+};
+
 struct FormatFrame {
 	char type = 'O';
 	bool hasVal = false;

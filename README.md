@@ -1,6 +1,6 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), S-Expressions, JSON Schema validation, JSONPath (RFC 9535), and JSON SAX/streaming parsing.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), S-Expressions, JSON Schema validation, JSONPath (RFC 9535), JSON SAX/streaming parsing, and C++ struct/enum code generation.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
@@ -61,6 +61,7 @@ MIT license - see the `LICENSE` file for details.
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
+- C++ codegen - `toCpp()` / `fromCpp()` - generate C++17 `struct`/`enum` declarations from a parsed value tree, and parse C++ declarations back into a value tree: nested structs per object, `std::array<T,N>` (or `std::vector<T>`) for homogeneous arrays, `std::vector<std::variant<...>>` for mixed arrays, and enums inferred from identifier-string arrays (object-map enums via `enumPaths`/`enumNames`); a C-style output mode emits `typedef struct` / C arrays / `enum`; comments carry over as `//` / `/* */`
 
 ### Standards
 - JSON Pointer (RFC 6901)
@@ -258,6 +259,8 @@ int main() {
 | `bool fromSexpr(std::string_view input)` | Parse S-Expression string (heuristic object/array detection, `;` comments). |
 | `std::string toRON(bool pretty = true) const` | Serialize to RON (Rusty Object Notation; struct/tuple/map/list syntax). |
 | `bool fromRON(std::string_view input)` | Parse RON string (structs, tuples, maps, enums, options, ranges, comments). |
+| `std::string toCpp(const CppWriteOptions& opts = {}) const` | Generate C++ `struct`/`enum` declarations from the value tree (modern C++17 or C style). |
+| `bool fromCpp(std::string_view input, const CppReadOptions& opts = {})` | Parse C++ `struct`/`enum` declarations into the value tree. |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -860,6 +863,80 @@ RON mapping rules:
 - Comments round-trip: `fromRON()` attaches comments to their nodes and `toRON()` re-emits them in place (leading above a key/item, same-line trailing after a value, closings before `)`/`}`/`]`, and a trailing footer after the document). The attached comments also survive conversion into the other comment-capable text formats: `toJSON5()` keeps them verbatim (`//`/`/* */` are native), `toYAML()` translates them to `#` lines, and `toUDE()` keeps them verbatim (`//`/`/* */` are native UDE comments). `serialize()`/JSON output intentionally drops them (JSON has no comment syntax)
 - Special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip via Extended JSON markers
 
+### C++ Struct/Enum Generation  -  `toCpp()` / `fromCpp()`
+
+`toCpp(const CppWriteOptions& = {})` infers C++ type declarations from a parsed value tree. `fromCpp(input, const CppReadOptions& = {})` parses C++ `struct`/`enum` declarations back into a value tree, so `fromCpp(toCpp(x))` recovers the original for the common cases.
+
+```
+asvJSON j;
+j.fromRON(R"(
+GameConfig(
+  window_size: (800, 600),
+  window_title: "PAC-MAN",
+  fullscreen: false,
+  key_bindings: { up: "Up", down: "Down" },
+)
+)");
+
+CppWriteOptions o;
+o.enumPaths.push_back("key_bindings");
+o.enumNames.push_back({"key_bindings", "Direction"});
+std::cout << j.toCpp(o);
+// enum class Direction { Up, Down, };
+// struct KeyBindings { Direction up = Direction::Up; Direction down = Direction::Down; };
+// struct GameConfig {
+//     std::array<int, 2> window_size = {800, 600};
+//     std::string window_title = "PAC-MAN";
+//     bool fullscreen = false;
+//     KeyBindings key_bindings = {};
+// };
+```
+
+**Inference rules:**
+
+| Input shape | Generated type |
+|---|---|
+| OBJECT | `struct`, one member per key |
+| ARRAY of one type | `std::array<T, N>` (or `std::vector<T>` when `useStdArray = false`) |
+| ARRAY of objects | `std::array<Struct, N>` / `std::vector<Struct>` (union of keys; struct named from the field) |
+| ARRAY of mixed types | `std::vector<std::variant<...>>` |
+| empty ARRAY | `std::vector<std::nullptr_t>` placeholder (edit the type) |
+| ARRAY of identifier strings | an `enum` (disable with `emitEnums = false`) |
+| INT / DOUBLE / BOOL | `int` / `double` / `bool` |
+| STRING | `std::string` (`stringType`) |
+| DATETIME / BINARY | `std::time_t` / `std::vector<std::uint8_t>` |
+| NULL | `std::nullptr_t` |
+
+**Root handling:** a single-key root `{ "Name": { ... } }` is unwrapped into `struct Name` (`unwrapRootSingleKey`, default on); otherwise the root struct is named by `rootName` (default `Document`). A root array/scalar emits `using Name = <type>;`.
+
+**Options (`CppWriteOptions`):** `style` (`ModernCpp` default, or `C`), `emitIncludes`, `emitDefaults`, `emitComments`, `emitEnums`, `emitEnumMaps` (treat any object map of identifier strings as an enum; default `false`), `enumPaths` / `enumNames` (force and name enums for matching paths/field names), `useEnumClass`, `useStdArray`, `unwrapRootSingleKey`, `forwardDeclare`, `indentWidth`, `rootName`, and per-type overrides `intType` / `stringType` / `binaryType` / `datetimeType` / `nullType`.
+
+C style emits `typedef struct ... ;`, C arrays (`int window_size[2];`), plain `enum` types (`enum Direction`), and no member initializers (C has none); the include preamble uses `<stdbool.h>`, `<stdint.h>` and `<time.h>`. Disable the whole feature with `ASVJSON_DISABLE_CPP`.
+
+> **Note:** RON enum unit variants parse to plain strings (`Up` is indistinguishable from `"Up"`), so object-map enums must be opted into explicitly via `enumPaths`; identifier-string arrays are auto-detected.
+
+**Parsing C++ back  -  `fromCpp()`:** the decoder lexes declarations, resolves named types, and materializes a value tree from the default member initializers (initializers are the data source, so C-style output, which has none, yields type defaults).
+
+```
+asvJSON j;
+j.fromCpp(R"(
+struct Document {
+    std::string name = "PAC-MAN";
+    std::array<int, 2> window_size = {800, 600};
+    bool fullscreen = false;
+};
+)");
+std::cout << j.serialize();  // {"name":"PAC-MAN","window_size":[800,600],"fullscreen":false}
+```
+
+Supported constructs: `struct`/`class` definitions (public members; methods, access specifiers, bitfields, templates and bases skipped), C `typedef struct { ... } Name;`, nested `struct`s with a trailing declarator, `enum` / `enum class` (with optional underlying type and explicit values), `using Name = Type;` and `typedef` aliases, and forward references. Types: scalars (`int`, `double`, `bool`, `std::string`, `const char*`), `std::array<T,N>` and C `T[N]` arrays, `std::vector`/`std::list`/`std::deque`/`std::set` (dynamic), `std::variant<...>`, `std::optional<T>`, `std::map`/`std::unordered_map`, and `std::pair`. `//` and `/* */` comments are preserved on nodes when `includeComments` is set. A fixed `std::array<Enum,N>` left uninitialized with `N` equal to the enum's member count is filled with the member names in order (recovering enum arrays).
+
+**Root handling:** when an alias (`using`/`typedef`) exists, the last one in source order becomes the root; otherwise the root is the single struct not referenced by any other struct. A root named `rootName` (default `Document`) is unwrapped to its members; any other single struct is wrapped as `{ "Name": { ... } }`, and multiple roots are wrapped the same way.
+
+**Options (`CppReadOptions`):** `unwrapRootStruct` (unwrap a single root struct, default `true`), `materializeDefaults` (use member initializers, default `true`), `includeComments` (attach parsed comments, default `true`), `strict` (throw instead of skipping unparsable members, default `false`), and `rootName` (default `"Document"`). Disable the whole feature with `ASVJSON_DISABLE_CPP`.
+
+> **Note  -  lossy by design:** code generation cannot encode every JSON shape, so some round-trips lose data: single-key (`{Name:{...}}`) and alias roots lose the wrapper key; arrays of heterogeneous objects, top-level arrays/scalars, and `std::variant`/`std::map` values recover only type and length (fixed arrays repeat the first element's values); C-style output carries no initializers. `std::variant` alternatives that collapse to the same type (e.g. several integer types) resolve to the first match.
+
 ### JSON5  -  Extended JSON superset
 
 `toJSON5()` / `fromJSON5()`  -  JSON5 with MongoDB Extended JSON for special types.
@@ -906,6 +983,17 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.19.0 (2026-09-17)
+
+- **New - C++ declaration decoder:** added `asvJSON::fromCpp(std::string_view, const CppReadOptions& = {})`, the inverse of `toCpp()`. It lexes C++ declarations (methods, access specifiers, bitfields, templates and bases skipped), resolves named types, and materializes a value tree from default member initializers. Supports `struct`/`class`, C `typedef struct`, nested structs with a trailing declarator, `enum`/`enum class` (underlying type and explicit values), `using`/`typedef` aliases, forward references, `std::array<T,N>` / C `T[N]` / `std::vector` / `std::variant` / `std::optional` / `std::map` / `std::pair`, and comment preservation. A fixed `std::array<Enum,N>` with `N` equal to the member count recovers an enum array. Root resolution uses the last alias, or the single unreferenced struct; a root named `Document` (`rootName`) is unwrapped, others are wrapped as `{ "Name": {...} }`. `CppReadOptions` controls `unwrapRootStruct` / `materializeDefaults` / `includeComments` / `strict` / `rootName`. Wired into `readFromFileAny`/`writeToFileAny` (`.hpp`/`.h`) and the web converter (CPP input).
+- **Version bump:** 1.18.0  ->  1.19.0
+
+### 1.18.0 (2026-09-17)
+
+- **New - C++ struct/enum generation:** added `asvJSON::toCpp(const CppWriteOptions& = {})` (and `asvJSONValue::toCpp`) - an encode-only code generator that infers C++17 `struct`/`enum` declarations from a parsed value tree. Objects become structs (nested, union-of-keys for heterogeneous object arrays); homogeneous arrays become `std::array<T,N>` (or `std::vector<T>`), mixed arrays `std::vector<std::variant<...>>`, empty arrays a `std::vector<std::nullptr_t>` placeholder; identifier-string arrays are auto-detected as enums; object-map enums are opted into via `enumPaths`/`enumNames` (RON unit variants are plain strings, so they cannot be auto-detected); a single-key root `{Name:{...}}` is unwrapped into `struct Name` (`unwrapRootSingleKey`). `CppWriteOptions` controls style (`ModernCpp` default / `C` - `typedef struct`, C arrays, plain `enum`, no member initializers), includes, defaults, comments, forward declarations, `useEnumClass`, `useStdArray`, indent width, root name and per-type overrides. Comments carried on nodes (`//` / `/* */`) are emitted as leading/trailing lines. Disable with `ASVJSON_DISABLE_CPP`.
+- **Unified comment model:** all comment-capable formats (RON, JSON5, YAML, UDE, INI, ...) now share the same `Comment`/`Comments` metadata (leading / trailing / closing / footing) on `asvJSONValue`, so comments bridge uniformly between formats. A leading block comment on a later entry is never emitted inline after the previous entry's separator in minified RON/JSON5 output (which would re-bind it as that entry's trailing comment), so `toRON(false)` / `toJSON5(false)` round-trips are idempotent. Added regression tests for both.
+- **Version bump:** 1.17.0  ->  1.18.0
 
 ### 1.17.0 (2026-09-16)
 

@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.17.0\n"
+        << "asvJSON++ Format Converter v1.19.0\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
@@ -94,6 +94,7 @@ int main(int argc, char** argv) {
            "\n"
             "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, UDE, JSONLines,\n"
             "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
+            "Outputs: ... plus CPP (C++ structs/enums) and CPP_C (C structs/enums)\n"
            "         (empty from=JSON, to=JSON)\n";
       return 0;
     }
@@ -172,6 +173,7 @@ int main(int argc, char** argv) {
       else if (fromFmt == "BSON") { ok = j.fromBSON(bin.data(), bin.size()); }
       else if (fromFmt == "CBOR") { ok = j.fromCBOR(bin.data(), bin.size()); }
       else if (fromFmt == "Protobuf") { ok = j.fromProtobuf(bin.data(), bin.size()); }
+      else if (fromFmt == "CPP" || fromFmt == "CPP_C") ok = j.fromCpp(text);
       else { std::cout << jsonError("Unknown input format: " + fromFmt); return 1; }
 
       if (!ok) {
@@ -209,6 +211,12 @@ int main(int argc, char** argv) {
       else if (toFmt == "TRON") result = j.toTRON();
       else if (toFmt == "GOON") result = j.toGOON();
       else if (toFmt == "ProtobufText") result = j.toProtobufText();
+      else if (toFmt == "CPP") result = j.toCpp();
+      else if (toFmt == "CPP_C") {
+        CppWriteOptions co;
+        co.style = CppWriteOptions::Style::C;
+        result = j.toCpp(co);
+      }
       else { std::cout << jsonError("Unknown output format: " + toFmt); return 1; }
 
       if (rawMode) { std::cout << result; }

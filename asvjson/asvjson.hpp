@@ -7,6 +7,7 @@
 // ASVJSON_DISABLE_PROTOBUF, ASVJSON_DISABLE_TOML, ASVJSON_DISABLE_SEXPR,
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
 // ASVJSON_DISABLE_RON,
+// ASVJSON_DISABLE_CPP,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -74,6 +75,10 @@
 
 #ifndef ASVJSON_DISABLE_RON
 #include "formats/ron.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_CPP
+#include "formats/cpp.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -336,6 +341,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "goon") { formatType = FormatType::GOON;     return fromGOON(content); }
   if (ext == "ude")  { formatType = FormatType::UDE;      return fromUDE(content); }
   if (ext == "ron")  { formatType = FormatType::RON;      return fromRON(content); }
+  if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") { formatType = FormatType::CPP; return fromCpp(content); }
   if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
 
   // Unknown extension - auto-detect from content
@@ -391,7 +397,8 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "tron") content = toTRON();
   else if (ext == "goon") content = toGOON();
   else if (ext == "ude")  content = toUDE();
-  else if (ext == "ron")  content = toRON(pretty);
+  else if (ext == "ron") content = toRON(pretty);
+  else if (ext == "hpp" || ext == "h") content = toCpp();
   else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
   else content = serialize(pretty);
 

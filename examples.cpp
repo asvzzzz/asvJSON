@@ -1265,6 +1265,73 @@ void example_to_ron() {
 	std::cout << std::endl;
 }
 
+void example_to_cpp() {
+	std::cout << "=== C++ Struct/Enum Generation (toCpp) ===" << std::endl;
+
+	asvJSON json;
+	json.fromRON(std::string_view(
+		"// Game configuration\n"
+		"GameConfig(\n"
+		"  // window size in pixels\n"
+		"  window_size: (800, 600),\n"
+		"  window_title: \"PAC-MAN\",\n"
+		"  fullscreen: false,\n"
+		"  key_bindings: { up: \"Up\", down: \"Down\", left: \"Left\", right: \"Right\" },\n"
+		"  sprites: [\n"
+		"    (name: \"pac\", x: 1.5, y: 2.0),\n"
+		"    (name: \"ghost\", x: 0.5, y: 7.0),\n"
+		"  ],\n"
+		")"));
+
+	// Default: modern C++17. `key_bindings` is promoted to an enum via
+	// enumPaths; enumNames names the generated enum type.
+	CppWriteOptions opts;
+	opts.enumPaths.push_back("key_bindings");
+	opts.enumNames.push_back({"key_bindings", "Direction"});
+	std::cout << "Modern C++:" << std::endl << json.toCpp(opts) << std::endl;
+
+	// C style: typedef structs, `const char*` strings, C arrays, no defaults.
+	CppWriteOptions c;
+	c.style = CppWriteOptions::Style::C;
+	c.enumPaths.push_back("key_bindings");
+	c.enumNames.push_back({"key_bindings", "Direction"});
+	std::cout << "C:" << std::endl << json.toCpp(c) << std::endl;
+
+	// Fine-grained control: vectors instead of std::array, no comments.
+	CppWriteOptions lean;
+	lean.useStdArray = false;
+	lean.emitComments = false;
+	lean.rootName = "Game";
+	std::cout << "Lean (vectors, no comments):" << std::endl << json.toCpp(lean) << std::endl;
+}
+
+void example_from_cpp() {
+	std::cout << "=== C++ Declaration Parsing (fromCpp) ===" << std::endl;
+
+	asvJSON json;
+	json.fromCpp(R"(
+// Game configuration
+struct Document {
+  // window size in pixels
+  std::array<int, 2> window_size = {800, 600};
+  std::string window_title = "PAC-MAN";
+  bool fullscreen = false;
+  struct KeyBindings {
+    std::string up = "Up";
+    std::string down = "Down";
+  } key_bindings = {};
+  std::array<std::string, 2> tags = {"arcade", "retro"};
+};
+)");
+	std::cout << json.serialize(true) << std::endl;
+
+	// Round-trip: parse -> generate -> parse again.
+	std::string code = json.toCpp(CppWriteOptions{});
+	asvJSON again;
+	again.fromCpp(code);
+	std::cout << "Round-trip equal: " << (again.serialize() == json.serialize()) << std::endl;
+}
+
 void example_from_ron() {
 	std::cout << "=== RON Input ===" << std::endl;
 	
@@ -1767,6 +1834,8 @@ int main() {
 	example_from_sexpr();
 	example_to_ron();
 	example_from_ron();
+	example_to_cpp();
+	example_from_cpp();
 	example_to_json5();
 	example_from_json5();
 	example_to_ini();

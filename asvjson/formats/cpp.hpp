@@ -1,0 +1,1698 @@
+#pragma once
+// C++ struct/enum code generation and decoding for asvJSON++.
+//
+// `toCpp()` infers C++ type declarations (structs, enums, arrays) from a parsed
+// value tree and renders them as source text. `fromCpp()` parses a pragmatic
+// subset of C/C++ type declarations -- as produced by toCpp() or hand-written
+// -- back into a value tree (best-effort round-trip; see CppReadOptions).
+//
+// Inference rules (see CppWriteOptions for the switches):
+//   - OBJECT             -> struct; one field per key, named from the key.
+//   - ARRAY of one type  -> std::array<T,N> (useStdArray) / std::vector<T>;
+//                           C style -> `T name[N]`.
+//   - ARRAY of objects   -> std::vector<Struct> (struct named from the field).
+//   - ARRAY of mixed     -> std::vector<std::variant<...>>.
+//   - empty ARRAY        -> std::vector<NullType> (placeholder; edit the type).
+//   - INT/DOUBLE/BOOL    -> int/double/bool (intType configurable).
+//   - STRING             -> stringType; identifier strings in an enum context
+//                           (see emitEnums / emitEnumMaps / enumPaths) become
+//                           an enum type.
+//   - NULL_VAL           -> nullType.
+//   - DATETIME/BINARY    -> datetimeType/binaryType; other specials -> string.
+//   - root {Name: {...}} -> `struct Name` (unwrapRootSingleKey).
+//
+// Comments are preserved as `//` / `/* */` lines and same-line trails.
+
+#include "../core.hpp"
+
+#include <cctype>
+#include <cmath>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+namespace asvJSONInternal {
+
+// ---------------------------------------------------------------------------
+// Identifier helpers
+// ---------------------------------------------------------------------------
+
+inline bool cppIsKeyword(std::string_view s) {
+  static const char* const kw[] = {
+    "alignas","alignof","and","and_eq","asm","auto","bitand","bitor","bool",
+    "break","case","catch","char","char16_t","char32_t","class","compl",
+    "concept","const","consteval","constexpr","constinit","const_cast",
+    "continue","co_await","co_return","co_yield","decltype","default","delete",
+    "do","double","dynamic_cast","else","enum","explicit","export","extern",
+    "false","float","for","friend","goto","if","inline","int","long","mutable",
+    "namespace","new","noexcept","not","not_eq","nullptr","operator","or",
+    "or_eq","private","protected","public","register","reinterpret_cast",
+    "requires","return","short","signed","sizeof","static","static_assert",
+    "static_cast","struct","switch","template","this","thread_local","throw",
+    "true","try","typedef","typeid","typename","union","unsigned","using",
+    "virtual","void","volatile","wchar_t","while","xor","xor_eq",
+    "int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t","uint32_t",
+    "uint64_t","size_t","time_t","ssize_t"
+  };
+  for (const char* k : kw) if (s == k) return true;
+  return false;
+}
+
+inline bool cppIdentStart(unsigned char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+inline bool cppIdentChar(unsigned char c) {
+  return cppIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+// Sanitize arbitrary text into a valid C++ identifier (case preserved).
+inline std::string cppIdent(std::string_view raw, const char* fallback = "field") {
+  std::string out;
+  out.reserve(raw.size() + 1);
+  for (char ch : raw) {
+    unsigned char c = static_cast<unsigned char>(ch);
+    out += cppIdentChar(c) ? ch : '_';
+  }
+  if (out.empty()) out = fallback;
+  if (!cppIdentStart(static_cast<unsigned char>(out[0]))) out.insert(out.begin(), '_');
+  if (cppIsKeyword(out)) out += '_';
+  return out;
+}
+
+// Turn a key into a PascalCase type name.
+inline std::string cppPascal(std::string_view raw, const char* fallback = "Type") {
+  std::string out;
+  bool up = true;
+  for (char ch : raw) {
+    unsigned char c = static_cast<unsigned char>(ch);
+    if (cppIdentChar(c) && c != '_') {
+      if (up && c >= 'a' && c <= 'z') c = static_cast<unsigned char>(c - 'a' + 'A');
+      out += static_cast<char>(c);
+      up = false;
+    } else {
+      up = true;
+    }
+  }
+  if (out.empty()) out = fallback;
+  if (!cppIdentStart(static_cast<unsigned char>(out[0]))) out.insert(out.begin(), '_');
+  if (cppIsKeyword(out)) out += '_';
+  return out;
+}
+
+// Naive singularization for element type names ("items" -> "item").
+inline std::string cppSingular(std::string w) {
+  if (w.size() > 1 && w.back() == 's' && w[w.size() - 2] != 's') w.pop_back();
+  return w;
+}
+
+// A bare identifier token (an enum-variant candidate).
+inline bool cppIdentToken(std::string_view s) {
+  if (s.empty() || s.size() > 64) return false;
+  if (!cppIdentStart(static_cast<unsigned char>(s[0]))) return false;
+  for (char ch : s) if (!cppIdentChar(static_cast<unsigned char>(ch))) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Type descriptor produced by inference
+// ---------------------------------------------------------------------------
+
+struct CppType {
+  enum Kind { Scalar, Struct, Enum, Array, Variant };
+  Kind kind = Scalar;
+  std::string type;        // full C++ type spelling
+  std::string suffix;      // C-style array suffix, e.g. "[2]" / "[2][3]"
+  std::string structName;  // Struct/Variant primary struct name
+  std::string enumName;    // Enum kind (type name)
+  std::vector<CppType> alternatives; // Variant alternatives
+  std::shared_ptr<CppType> elem;     // Array element (owned copy)
+  bool hasElem = false;
+};
+
+// ---------------------------------------------------------------------------
+// Comment emission
+// ---------------------------------------------------------------------------
+
+inline void cppEmitComments(std::string& out, const std::vector<Comment>& list,
+                            int indent, const CppWriteOptions& o) {
+  if (!o.emitComments) return;
+  const std::string pad(static_cast<size_t>(indent < 0 ? 0 : indent) *
+                            static_cast<size_t>(o.indentWidth), ' ');
+  for (const auto& c : list) {
+    out += pad;
+    if (c.block) { out += "/*"; out += c.text; out += "*/\n"; }
+    else { out += "//"; out += c.text; out += '\n'; }
+  }
+}
+
+inline void cppEmitTrailing(std::string& out, const asvJSONValue* v, const CppWriteOptions& o) {
+  if (!o.emitComments || !v || !v->comments) return;
+  for (const auto& c : v->comments->trailing) {
+    out += ' ';
+    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+    else { out += "//"; out += c.text; }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generator
+// ---------------------------------------------------------------------------
+
+class CppGenerator {
+public:
+  explicit CppGenerator(const CppWriteOptions& o) : opts_(o) {}
+
+  std::string run(const asvJSONValue* root);
+
+private:
+  struct Field {
+    std::string name;
+    std::string type;
+    std::string suffix;
+    std::string init;
+    const asvJSONValue* src = nullptr;
+  };
+  struct StructDef {
+    std::string name;
+    std::vector<Field> fields;
+    const asvJSONValue* src = nullptr;
+    const asvJSONValue* commentSrc = nullptr;
+    std::vector<std::string> deps; // struct names referenced by value
+    bool registered = false;
+  };
+  struct EnumDef {
+    std::string name;
+    std::vector<std::pair<std::string, const asvJSONValue*>> values;
+    std::string sig;
+  };
+
+  bool isC() const { return opts_.style == CppWriteOptions::Style::C; }
+  bool enumQualified() const { return !isC() && opts_.useEnumClass; }
+  std::string effString() const { return isC() ? "const char*" : opts_.stringType; }
+  std::string effBinary() const { return isC() ? "unsigned char*" : opts_.binaryType; }
+  std::string effDateTime() const { return isC() ? "time_t" : opts_.datetimeType; }
+  std::string effNull() const { return isC() ? "void*" : opts_.nullType; }
+  std::string enumTypeName(const std::string& n) const { return isC() ? ("enum " + n) : n; }
+
+  static bool pathMatch(const std::string& path, const std::string& hint) {
+    if (path == hint) return true;
+    std::string last = path;
+    size_t dot = last.rfind('.');
+    if (dot != std::string::npos) last = last.substr(dot + 1);
+    return last == hint;
+  }
+  bool forcedEnum(const std::string& path) const {
+    if (opts_.emitEnumMaps) return true;
+    for (const auto& h : opts_.enumPaths) if (pathMatch(path, h)) return true;
+    return false;
+  }
+  std::string enumNameHint(const std::string& path, const std::string& hint) const {
+    for (const auto& p : opts_.enumNames) if (pathMatch(path, p.first)) return p.second;
+    (void)hint;
+    return std::string();
+  }
+
+  std::string uniqueName(const std::string& base) {
+    if (usedNames_.insert(base).second) return base;
+    for (int i = 2; i < 10000; i++) {
+      std::string cand = base + std::to_string(i);
+      if (usedNames_.insert(cand).second) return cand;
+    }
+    return base;
+  }
+
+  std::string registerEnum(const std::vector<std::string>& rawValues,
+                           const std::string& path, const std::string& hint,
+                           const std::vector<const asvJSONValue*>& srcs, bool singular) {
+    std::string sig;
+    for (const auto& v : rawValues) { sig += v; sig += '\x1F'; }
+    auto it = enumBySig_.find(sig);
+    if (it != enumBySig_.end()) return enums_[it->second].name;
+
+    std::string name = enumNameHint(path, hint);
+    if (name.empty()) {
+      std::string base = hint.empty() ? opts_.rootName : hint;
+      if (singular) base = cppSingular(base);
+      name = cppPascal(base, "Enum") + (isC() ? "" : "");
+    }
+    name = uniqueName(name);
+    EnumDef e;
+    e.name = name;
+    e.sig = sig;
+    for (size_t i = 0; i < rawValues.size(); i++) {
+      std::string en = cppIdent(rawValues[i], "Value");
+      e.values.emplace_back(en, i < srcs.size() ? srcs[i] : nullptr);
+    }
+    enumBySig_[sig] = enums_.size();
+    enums_.push_back(std::move(e));
+    return name;
+  }
+
+  bool enumMapLike(const asvJSONValue* v) const {
+    if (v->type != asvJSONValue::OBJECT || !v->obj || v->obj->empty()) return false;
+    std::set<std::string_view> seen;
+    for (const auto& [k, c] : *v->obj) {
+      (void)k;
+      if (!c || c->type != asvJSONValue::STRING) return false;
+      if (!cppIdentToken(c->str_data)) return false;
+      if (!seen.insert(std::string_view(c->str_data)).second) return false;
+    }
+    return true;
+  }
+
+  bool enumArrayLike(const asvJSONValue* v) const {
+    if (v->type != asvJSONValue::ARRAY || !v->arr || v->arr->empty()) return false;
+    std::set<std::string_view> seen;
+    for (const auto& c : *v->arr) {
+      if (!c || c->type != asvJSONValue::STRING) return false;
+      if (!cppIdentToken(c->str_data)) return false;
+      if (!seen.insert(std::string_view(c->str_data)).second) return false;
+    }
+    return true;
+  }
+
+  CppType inferType(const asvJSONValue* v, const std::string& path,
+                    const std::string& hint, const asvJSONValue* commentSrc = nullptr);
+  CppType inferArray(const asvJSONValue* v, const std::string& path,
+                     const std::string& hint);
+  std::string registerStruct(const asvJSONValue* v, const std::string& path,
+                             const std::string& hint, const asvJSONValue* commentSrc = nullptr);
+  std::string containerOf(const std::string& elem, size_t n, std::string& suffixOut);
+
+  void valueLiteral(const asvJSONValue* v, const CppType& t, std::string& out) const;
+  void renderStruct(const StructDef& s, std::string& out) const;
+  void renderEnum(const EnumDef& e, std::string& out) const;
+  void topoVisit(size_t idx);
+  size_t findStruct(const std::string& name) const;
+
+  const CppWriteOptions& opts_;
+  std::vector<StructDef> structs_;
+  std::vector<EnumDef> enums_;
+  std::map<std::string, size_t> enumBySig_;
+  std::set<std::string> usedNames_;
+  std::set<std::string> busyObjects_;
+  std::vector<std::string> order_;
+  bool usedVariant_ = false;
+  bool usedUniquePtr_ = false;
+};
+
+inline std::string CppGenerator::containerOf(const std::string& elem, size_t n,
+                                             std::string& suffixOut) {
+  if (isC()) {
+    suffixOut += "[" + std::to_string(n) + "]";
+    return elem;
+  }
+  if (opts_.useStdArray) return "std::array<" + elem + ", " + std::to_string(n) + ">";
+  return "std::vector<" + elem + ">";
+}
+
+inline size_t CppGenerator::findStruct(const std::string& name) const {
+  for (size_t i = 0; i < structs_.size(); i++) if (structs_[i].name == name) return i;
+  return static_cast<size_t>(-1);
+}
+
+inline std::string CppGenerator::registerStruct(const asvJSONValue* v,
+                                                const std::string& path,
+                                                const std::string& hint,
+                                                const asvJSONValue* commentSrc) {
+  std::string base = hint.empty() ? opts_.rootName : hint;
+  std::string name = uniqueName(cppPascal(base, opts_.rootName.c_str()));
+  StructDef def;
+  def.name = name;
+  def.src = v;
+  def.commentSrc = commentSrc ? commentSrc : v;
+
+  bool isEnumMap = enumMapLike(v) && forcedEnum(path);
+  if (isEnumMap) {
+    std::vector<std::string> vals;
+    std::vector<const asvJSONValue*> srcs;
+    for (const auto& [k, c] : *v->obj) {
+      (void)k;
+      vals.push_back(c->str_data);
+      srcs.push_back(c.get());
+    }
+    std::string en = registerEnum(vals, path, hint, srcs, /*singular=*/false);
+    for (const auto& [k, c] : *v->obj) {
+      Field f;
+      f.name = cppIdent(k);
+      f.type = enumTypeName(en);
+      f.src = c.get();
+      if (opts_.emitDefaults) f.init = (enumQualified() ? en + "::" : "") + cppIdent(c->str_data, "Value");
+      def.fields.push_back(std::move(f));
+    }
+  } else {
+    for (const auto& [k, c] : *v->obj) {
+      Field f;
+      f.name = cppIdent(k);
+      std::string childPath = path.empty() ? std::string(k) : path + "." + std::string(k);
+      CppType ct = inferType(c.get(), childPath, std::string(k));
+      f.type = ct.type;
+      f.suffix = ct.suffix;
+      f.src = c.get();
+      if (opts_.emitDefaults) {
+        std::string lit;
+        valueLiteral(c.get(), ct, lit);
+        f.init = lit;
+      }
+      // Record by-value struct dependencies for ordering.
+      if (ct.kind == CppType::Struct && !ct.structName.empty()) def.deps.push_back(ct.structName);
+      else if (ct.kind == CppType::Array && ct.hasElem && ct.elem && ct.elem->kind == CppType::Struct)
+        def.deps.push_back(ct.elem->structName);
+      else if (ct.kind == CppType::Variant)
+        for (const auto& a : ct.alternatives)
+          if (a.kind == CppType::Struct) def.deps.push_back(a.structName);
+      def.fields.push_back(std::move(f));
+    }
+  }
+  structs_.push_back(std::move(def));
+  return name;
+}
+
+inline CppType CppGenerator::inferArray(const asvJSONValue* v,
+                                        const std::string& path,
+                                        const std::string& hint) {
+  CppType t;
+  t.kind = CppType::Array;
+  const size_t n = v->arr ? v->arr->size() : 0;
+
+  // Empty array: unknown element type, emit a documented placeholder.
+  if (n == 0) {
+    CppType elem;
+    elem.kind = CppType::Scalar;
+    elem.type = effNull();
+    if (isC()) t.type = "void*";
+    else t.type = "std::vector<" + effNull() + ">";
+    t.elem = std::make_shared<CppType>(elem);
+    t.hasElem = true;
+    return t;
+  }
+
+  // Array of identifier strings -> enum.
+  if (opts_.emitEnums && enumArrayLike(v)) {
+    std::vector<std::string> vals;
+    std::vector<const asvJSONValue*> srcs;
+    for (const auto& c : *v->arr) { vals.push_back(c->str_data); srcs.push_back(c.get()); }
+    std::string en = registerEnum(vals, path, hint, srcs, /*singular=*/true);
+    CppType elem;
+    elem.kind = CppType::Enum;
+    elem.type = enumTypeName(en);
+    elem.enumName = en;
+    std::string suffix;
+    t.type = containerOf(enumTypeName(en), n, suffix);
+    t.suffix = suffix;
+    t.elem = std::make_shared<CppType>(elem);
+    t.hasElem = true;
+    return t;
+  }
+
+  // Array of objects sharing one key set -> std::vector<Struct>.
+  bool allObj = true;
+  for (const auto& c : *v->arr) if (!c || c->type != asvJSONValue::OBJECT) { allObj = false; break; }
+  if (allObj) {
+    // Union of keys so mixed record shapes still compile.
+    std::vector<std::string> keys;
+    std::set<std::string> keySet;
+    for (const auto& c : *v->arr)
+      for (const auto& [k, cc] : *c->obj) if (keySet.insert(k).second) keys.push_back(k);
+    std::string sname = uniqueName(cppPascal(cppSingular(hint.empty() ? opts_.rootName : hint), "Item"));
+    StructDef def;
+    def.name = sname;
+    def.src = v->arr->front().get();
+    def.commentSrc = def.src;
+    for (const auto& k : keys) {
+      const asvJSONValue* sample = nullptr;
+      for (const auto& c : *v->arr) { auto* f = c->get(k); if (f) { sample = f; break; } }
+      Field f;
+      f.name = cppIdent(k);
+      std::string childPath = path.empty() ? k : path + "." + k;
+      CppType ct = sample ? inferType(sample, childPath, k)
+                          : CppType{};
+      f.type = ct.type;
+      f.suffix = ct.suffix;
+      f.src = sample;
+      if (opts_.emitDefaults && sample) { std::string lit; valueLiteral(sample, ct, lit); f.init = lit; }
+      if (ct.kind == CppType::Struct && !ct.structName.empty()) def.deps.push_back(ct.structName);
+      def.fields.push_back(std::move(f));
+    }
+    structs_.push_back(std::move(def));
+    CppType elem;
+    elem.kind = CppType::Struct;
+    elem.type = sname;
+    elem.structName = sname;
+    // Reuse the same if all keys identical, else still one union struct.
+    std::string suffix;
+    t.type = containerOf(sname, n, suffix);
+    t.suffix = suffix;
+    t.elem = std::make_shared<CppType>(elem);
+    t.hasElem = true;
+    return t;
+  }
+
+  // Homogeneous element type -> container; mixed -> vector<variant<...>>.
+  CppType first = inferType(v->arr->front().get(), path, hint);
+  bool same = true;
+  for (size_t i = 1; i < n && same; i++) {
+    CppType cur = inferType(v->arr->at(i).get(), path, hint);
+    if (cur.type != first.type || cur.suffix != first.suffix) same = false;
+  }
+  if (same) {
+    std::string suffix;
+    t.type = containerOf(first.type, n, suffix);
+    t.suffix = suffix;
+    t.elem = std::make_shared<CppType>(first);
+    t.hasElem = true;
+    return t;
+  }
+
+  // Mixed: std::vector<std::variant<...>> (C style falls back to void*).
+  if (isC()) {
+    t.type = "void*";
+    return t;
+  }
+  usedVariant_ = true;
+  std::vector<CppType> alts;
+  for (const auto& c : *v->arr) {
+    CppType cur = inferType(c.get(), path, hint);
+    bool found = false;
+    for (const auto& a : alts) if (a.type == cur.type) { found = true; break; }
+    if (!found) alts.push_back(cur);
+  }
+  std::string vt = "std::variant<";
+  for (size_t i = 0; i < alts.size(); i++) { if (i) vt += ", "; vt += alts[i].type; }
+  vt += ">";
+  t.kind = CppType::Variant;
+  t.type = "std::vector<" + vt + ">";
+  t.alternatives = std::move(alts);
+  return t;
+}
+
+inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string& path,
+                                       const std::string& hint, const asvJSONValue* commentSrc) {
+  CppType t;
+  if (!v) { t.type = effNull(); return t; }
+  switch (v->type) {
+    case asvJSONValue::NULL_VAL: t.type = effNull(); return t;
+    case asvJSONValue::BOOL_VAL: t.type = "bool"; return t;
+    case asvJSONValue::INT: t.type = opts_.intType; return t;
+    case asvJSONValue::DOUBLE: t.type = "double"; return t;
+    case asvJSONValue::STRING: t.type = effString(); return t;
+    case asvJSONValue::DATETIME: t.type = effDateTime(); return t;
+    case asvJSONValue::BINARY: t.type = effBinary(); return t;
+    case asvJSONValue::OBJECTID:
+    case asvJSONValue::REGEX:
+    case asvJSONValue::TIMESTAMP:
+    case asvJSONValue::EXTENSION:
+    case asvJSONValue::CUSTOM_TAG: t.type = effString(); return t;
+    case asvJSONValue::ARRAY: return inferArray(v, path, hint);
+    case asvJSONValue::OBJECT: {
+      uintptr_t key = reinterpret_cast<uintptr_t>(v);
+      if (busyObjects_.count(std::to_string(key))) {
+        // Recursive reference: break the cycle with a pointer.
+        usedUniquePtr_ = true;
+        t.kind = CppType::Struct;
+        t.structName = cppPascal(hint.empty() ? opts_.rootName : hint, "Node");
+        t.type = isC() ? (t.structName + "*") : ("std::unique_ptr<" + t.structName + ">");
+        return t;
+      }
+      busyObjects_.insert(std::to_string(key));
+      std::string name = registerStruct(v, path, hint, commentSrc);
+      busyObjects_.erase(std::to_string(key));
+      t.kind = CppType::Struct;
+      t.structName = name;
+      t.type = name;
+      return t;
+    }
+    default: t.type = effString(); return t;
+  }
+}
+
+inline void CppGenerator::valueLiteral(const asvJSONValue* v, const CppType& t,
+                                       std::string& out) const {
+  if (!v) { out += "{}"; return; }
+  if (t.kind == CppType::Enum) {
+    out += t.enumName;
+    if (enumQualified()) out += "::";
+    out += cppIdent(v->str_data, "Value");
+    return;
+  }
+  if (t.kind == CppType::Struct || t.kind == CppType::Variant) { out += "{}"; return; }
+  if (t.kind == CppType::Array) {
+    if (t.hasElem && t.elem &&
+        (t.elem->kind == CppType::Struct || t.elem->kind == CppType::Variant)) {
+      out += "{}";
+      return;
+    }
+    out += '{';
+    if (v->type == asvJSONValue::ARRAY && v->arr && t.hasElem) {
+      bool first = true;
+      for (const auto& e : *v->arr) {
+        if (!first) out += ", ";
+        first = false;
+        valueLiteral(e.get(), *t.elem, out);
+      }
+    }
+    out += '}';
+    return;
+  }
+  switch (v->type) {
+    case asvJSONValue::NULL_VAL: out += isC() ? "0" : "nullptr"; break;
+    case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
+    case asvJSONValue::INT: out += std::to_string(static_cast<long long>(v->num)); break;
+    case asvJSONValue::DOUBLE: {
+      double d = v->dbl;
+      if (std::isnan(d) || std::isinf(d)) { out += "0.0"; break; }
+      std::string s; fmtDoubleVal(d, s);
+      if (s.find_first_of(".eE") == std::string::npos) s += ".0";
+      out += s;
+      break;
+    }
+    case asvJSONValue::STRING:
+    case asvJSONValue::DATETIME:
+    case asvJSONValue::BINARY:
+    case asvJSONValue::OBJECTID:
+    case asvJSONValue::REGEX:
+    case asvJSONValue::TIMESTAMP:
+    case asvJSONValue::EXTENSION:
+    case asvJSONValue::CUSTOM_TAG:
+      if (v->type == asvJSONValue::DATETIME) { out += std::to_string(static_cast<long long>(v->timestamp)); break; }
+      if (v->type == asvJSONValue::BINARY || v->type == asvJSONValue::EXTENSION) { out += "{}"; break; }
+      out += '"';
+      appendJsonEscaped(out, v->str_data);
+      out += '"';
+      break;
+    default: out += "{}"; break;
+  }
+}
+
+inline void CppGenerator::renderStruct(const StructDef& s, std::string& out) const {
+  const asvJSONValue* cs = s.commentSrc ? s.commentSrc : s.src;
+  if (cs && cs->comments) cppEmitComments(out, cs->comments->leading, 0, opts_);
+  out += isC() ? "typedef struct " : "struct ";
+  out += s.name;
+  out += " {";
+  if (cs) cppEmitTrailing(out, cs, opts_);
+  out += '\n';
+  for (const auto& f : s.fields) {
+    if (f.src && f.src->comments) cppEmitComments(out, f.src->comments->leading, 1, opts_);
+    out += std::string(static_cast<size_t>(opts_.indentWidth), ' ');
+    out += f.type;
+    out += ' ';
+    out += f.name;
+    out += f.suffix;
+    if (!f.init.empty() && !isC()) { out += " = "; out += f.init; }
+    out += ';';
+    if (f.src) cppEmitTrailing(out, f.src, opts_);
+    out += '\n';
+  }
+  if (cs && cs->comments) cppEmitComments(out, cs->comments->closing, 1, opts_);
+  out += '}';
+  if (isC()) { out += ' '; out += s.name; out += ';'; }
+  else out += ';';
+  out += '\n';
+}
+
+inline void CppGenerator::renderEnum(const EnumDef& e, std::string& out) const {
+  if (isC()) out += "enum ";
+  else if (opts_.useEnumClass) out += "enum class ";
+  else out += "enum ";
+  out += e.name;
+  out += " {\n";
+  for (size_t i = 0; i < e.values.size(); i++) {
+    const auto& [en, src] = e.values[i];
+    if (src && src->comments && opts_.emitComments)
+      cppEmitComments(out, src->comments->leading, 1, opts_);
+    out += std::string(static_cast<size_t>(opts_.indentWidth), ' ');
+    out += en;
+    out += ',';
+    if (src) cppEmitTrailing(out, src, opts_);
+    out += '\n';
+  }
+  out += "};\n";
+}
+
+inline void CppGenerator::topoVisit(size_t idx) {
+  if (idx == static_cast<size_t>(-1)) return;
+  StructDef& s = structs_[idx];
+  if (s.registered) return;
+  s.registered = true;
+  for (const auto& d : s.deps) topoVisit(findStruct(d));
+  order_.push_back(s.name);
+}
+
+inline std::string CppGenerator::run(const asvJSONValue* root) {
+  if (!root) return std::string();
+  CppType top;
+  bool topIsStruct = false;
+  std::string topName;
+
+  if (root->type == asvJSONValue::OBJECT && root->obj) {
+    if (opts_.unwrapRootSingleKey && root->obj->size() == 1) {
+      const auto& kv = *root->obj->begin();
+      const std::string& key = kv.first;
+      const asvJSONValue* val = kv.second.get();
+      if (val && val->type == asvJSONValue::OBJECT) {
+        topName = registerStruct(val, key, key, root);
+        top.kind = CppType::Struct;
+        top.type = topName;
+        top.structName = topName;
+        topIsStruct = true;
+      } else if (val && val->type == asvJSONValue::ARRAY) {
+        top = inferType(val, key, key);
+        topName = uniqueName(cppPascal(key, opts_.rootName.c_str()));
+      } else {
+        topName = registerStruct(root, "", opts_.rootName);
+        topIsStruct = true;
+      }
+    } else {
+      topName = registerStruct(root, "", opts_.rootName);
+      topIsStruct = true;
+    }
+  } else {
+    top = inferType(root, "", opts_.rootName);
+    topName = uniqueName(cppPascal(opts_.rootName, "Document"));
+  }
+
+  for (size_t i = 0; i < structs_.size(); i++) topoVisit(i);
+
+  std::string out;
+  if (opts_.emitIncludes) {
+    out += "// Generated by asvJSON++ toCpp()\n";
+    if (isC()) {
+      out += "#include <stdbool.h>\n";
+      out += "#include <stdint.h>\n";
+      out += "#include <time.h>\n\n";
+    } else {
+      out += "#include <array>\n";
+      out += "#include <cstdint>\n";
+      out += "#include <ctime>\n";
+      out += "#include <string>\n";
+      if (usedVariant_) out += "#include <variant>\n";
+      if (usedUniquePtr_) out += "#include <memory>\n";
+      out += "#include <vector>\n\n";
+    }
+  }
+  if (!isC() && opts_.forwardDeclare && !structs_.empty()) {
+    for (const auto& s : structs_) out += "struct " + s.name + ";\n";
+    out += '\n';
+  }
+  for (const auto& e : enums_) renderEnum(e, out);
+  if (!enums_.empty()) out += '\n';
+  for (const auto& name : order_) {
+    size_t idx = findStruct(name);
+    if (idx != static_cast<size_t>(-1)) renderStruct(structs_[idx], out);
+  }
+  if (!topIsStruct) {
+    out += isC() ? "typedef " : "using ";
+    if (isC()) { out += top.type; out += ' '; out += topName; out += top.suffix; out += ';'; }
+    else { out += topName; out += " = "; out += top.type; out += top.suffix; out += ';'; }
+    out += '\n';
+  }
+  if (root->comments && opts_.emitComments)
+    cppEmitComments(out, root->comments->footing, 0, opts_);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+inline std::string asvJSON::toCpp(const CppWriteOptions& opts) const {
+  if (!root) return std::string();
+  CppGenerator gen(opts);
+  return gen.run(root.get());
+}
+
+inline void asvJSONValue::toCpp(std::string& out, const CppWriteOptions& opts) const {
+  CppGenerator gen(opts);
+  out += gen.run(this);
+}
+
+// ---------------------------------------------------------------------------
+// fromCpp() -- pragmatic C/C++ declaration reader
+// ---------------------------------------------------------------------------
+
+namespace cppread {
+
+struct Tok {
+  enum Kind { Ident, Number, Str, Char, Punct, Comment, End } kind = End;
+  std::string text;   // decoded text for Str/Char; raw spelling otherwise
+  int line = 0;
+  bool block = false; // Comment: true for /* ... */
+};
+
+inline bool cppRdIdentStart(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+inline bool cppRdIdentChar(char c) {
+  return cppRdIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+inline std::string cppRdStripNumSuffix(std::string s) {
+  while (!s.empty()) {
+    char c = s.back();
+    if (c == 'f' || c == 'F' || c == 'u' || c == 'U' || c == 'l' || c == 'L') s.pop_back();
+    else break;
+  }
+  return s;
+}
+
+inline std::vector<Tok> cppRdLex(std::string_view in) {
+  std::vector<Tok> out;
+  int line = 1;
+  size_t i = 0, n = in.size();
+  while (i < n) {
+    char c = in[i];
+    if (c == '\n') { line++; i++; continue; }
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
+    if (c == '#') { // preprocessor directive: drop the whole line
+      while (i < n && in[i] != '\n') i++;
+      continue;
+    }
+    if (c == '/' && i + 1 < n && in[i + 1] == '/') {
+      i += 2;
+      size_t s = i;
+      while (i < n && in[i] != '\n') i++;
+      Tok t; t.kind = Tok::Comment; t.line = line; t.block = false;
+      t.text.assign(in.data() + s, i - s);
+      out.push_back(std::move(t));
+      continue;
+    }
+    if (c == '/' && i + 1 < n && in[i + 1] == '*') {
+      i += 2;
+      size_t s = i;
+      int sl = line;
+      while (i + 1 < n && !(in[i] == '*' && in[i + 1] == '/')) { if (in[i] == '\n') line++; i++; }
+      Tok t; t.kind = Tok::Comment; t.line = sl; t.block = true;
+      t.text.assign(in.data() + s, i - s);
+      i += 2;
+      out.push_back(std::move(t));
+      continue;
+    }
+    if (c == '"' || c == '\'') {
+      char q = c;
+      int sl = line;
+      i++;
+      std::string val;
+      while (i < n && in[i] != q) {
+        if (in[i] == '\\' && i + 1 < n) {
+          char e = in[i + 1];
+          i += 2;
+          switch (e) {
+            case 'n': val += '\n'; break;
+            case 't': val += '\t'; break;
+            case 'r': val += '\r'; break;
+            case '0': val += '\0'; break;
+            case '\\': val += '\\'; break;
+            case '\'': val += '\''; break;
+            case '"': val += '"'; break;
+            default: val += e; break;
+          }
+        } else {
+          if (in[i] == '\n') line++;
+          val += in[i++];
+        }
+      }
+      if (i < n) i++;
+      Tok t; t.kind = (q == '"' ? Tok::Str : Tok::Char); t.line = sl; t.text = std::move(val);
+      out.push_back(std::move(t));
+      continue;
+    }
+    if ((c >= '0' && c <= '9') ||
+        (c == '.' && i + 1 < n && in[i + 1] >= '0' && in[i + 1] <= '9')) {
+      size_t s = i;
+      while (i < n && (cppRdIdentChar(in[i]) || in[i] == '.' ||
+             ((in[i] == '+' || in[i] == '-') && i > s && (in[i - 1] == 'e' || in[i - 1] == 'E'))))
+        i++;
+      Tok t; t.kind = Tok::Number; t.line = line;
+      t.text.assign(in.data() + s, i - s);
+      out.push_back(std::move(t));
+      continue;
+    }
+    if (cppRdIdentStart(c)) {
+      size_t s = i;
+      while (i < n && cppRdIdentChar(in[i])) i++;
+      Tok t; t.kind = Tok::Ident; t.line = line;
+      t.text.assign(in.data() + s, i - s);
+      out.push_back(std::move(t));
+      continue;
+    }
+    Tok t; t.kind = Tok::Punct; t.line = line;
+    if (c == ':' && i + 1 < n && in[i + 1] == ':') { t.text = "::"; i += 2; }
+    else { t.text.assign(1, c); i++; }
+    out.push_back(std::move(t));
+  }
+  Tok e; e.kind = Tok::End; e.line = line;
+  out.push_back(std::move(e));
+  return out;
+}
+
+struct TypeRef {
+  enum Kind { Scalar, Struct, Enum, Array, Variant, Optional, Map, Unknown } kind = Unknown;
+  enum ScalarKind { SNone, SInt, SDouble, SBool, SString, SNull } scalar = SNone;
+  std::string name;  // scalar spelling or named type (last identifier)
+  std::shared_ptr<TypeRef> elem;
+  std::shared_ptr<TypeRef> value;  // map value type
+  std::vector<std::shared_ptr<TypeRef>> alts; // variant alternatives
+  size_t arrayLen = 0;
+  bool hasLen = false;
+};
+
+struct FieldDef {
+  std::string name;
+  TypeRef type;
+  std::vector<Tok> init;
+  bool hasInit = false;
+  std::vector<Comment> leading;
+  std::vector<Comment> trailing;
+};
+
+struct StructDef {
+  std::string name;
+  std::vector<FieldDef> fields;
+  std::vector<Comment> leading;
+  std::vector<Comment> closing;
+};
+
+struct EnumDef {
+  std::string name;
+  std::vector<std::string> members;
+};
+
+struct AliasDef {
+  std::string name;
+  TypeRef type;
+  int order = 0;
+};
+
+inline bool cppRdIsQual(const std::string& s) {
+  return s == "const" || s == "volatile" || s == "static" || s == "constexpr" ||
+         s == "consteval" || s == "constinit" || s == "mutable" || s == "inline" ||
+         s == "extern" || s == "register" || s == "typename" || s == "struct" ||
+         s == "class" || s == "enum" || s == "signed" || s == "friend" ||
+         s == "virtual" || s == "thread_local";
+}
+
+inline TypeRef::ScalarKind cppRdClassify(const std::string& n) {
+  if (n == "bool") return TypeRef::SBool;
+  if (n == "double" || n == "float") return TypeRef::SDouble;
+  if (n == "char" || n == "wchar_t" || n == "char16_t" || n == "char32_t" ||
+      n == "string" || n == "string_view" || n == "basic_string")
+    return TypeRef::SString;
+  if (n == "int" || n == "long" || n == "short" || n == "unsigned" || n == "signed" ||
+      n == "size_t" || n == "ssize_t" || n == "time_t" || n == "int8_t" ||
+      n == "int16_t" || n == "int32_t" || n == "int64_t" || n == "uint8_t" ||
+      n == "uint16_t" || n == "uint32_t" || n == "uint64_t" || n == "intptr_t" ||
+      n == "uintptr_t")
+    return TypeRef::SInt;
+  if (n == "void" || n == "nullptr_t") return TypeRef::SNull;
+  return TypeRef::SNone;
+}
+
+inline long long cppRdIntToks(const std::vector<const Tok*>& v, size_t b, size_t e) {
+  std::string s;
+  for (size_t k = b; k < e; k++)
+    if (v[k]->kind == Tok::Number) s = v[k]->text;
+  if (s.empty()) return -1;
+  try { return std::stoll(cppRdStripNumSuffix(s)); } catch (...) { return -1; }
+}
+
+// Forward declaration for template recursion.
+inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_t e) {
+  TypeRef ty;
+  size_t i = b;
+  while (i < e && v[i]->kind == Tok::Ident && cppRdIsQual(v[i]->text)) i++;
+  if (i + 3 < e && v[i]->kind == Tok::Ident && v[i]->text == "std" &&
+      v[i + 1]->kind == Tok::Punct && v[i + 1]->text == "::" &&
+      v[i + 2]->kind == Tok::Ident &&
+      v[i + 3]->kind == Tok::Punct && v[i + 3]->text == "<") {
+    const std::string tn = v[i + 2]->text;
+    size_t j = i + 4;
+    int d = 1;
+    size_t close = e;
+    std::vector<std::pair<size_t, size_t>> groups;
+    size_t gs = j;
+    for (; j < e; j++) {
+      if (v[j]->kind != Tok::Punct) continue;
+      if (v[j]->text == "<") d++;
+      else if (v[j]->text == ">") { d--; if (d == 0) { groups.push_back({gs, j}); close = j; break; } }
+      else if (d == 1 && v[j]->text == ",") { groups.push_back({gs, j}); gs = j + 1; }
+    }
+    if (close == e) { ty.kind = TypeRef::Unknown; ty.name = "std::" + tn; return ty; }
+    if (tn == "vector" || tn == "list" || tn == "deque" || tn == "set" || tn == "unordered_set") {
+      ty.kind = TypeRef::Array;
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+    } else if (tn == "array") {
+      ty.kind = TypeRef::Array;
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (groups.size() >= 2) {
+        long long c = cppRdIntToks(v, groups[1].first, groups[1].second);
+        if (c >= 0) { ty.arrayLen = static_cast<size_t>(c); ty.hasLen = true; }
+      }
+    } else if (tn == "variant") {
+      ty.kind = TypeRef::Variant;
+      for (auto& g : groups) ty.alts.push_back(std::make_shared<TypeRef>(cppRdParseTypeV(v, g.first, g.second)));
+    } else if (tn == "optional") {
+      ty.kind = TypeRef::Optional;
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+    } else if (tn == "map" || tn == "unordered_map") {
+      ty.kind = TypeRef::Map;
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (groups.size() >= 2) ty.value = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[1].first, groups[1].second));
+    } else if (tn == "pair") {
+      ty.kind = TypeRef::Array;
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+    } else {
+      ty.kind = TypeRef::Unknown;
+      ty.name = "std::" + tn;
+    }
+    return ty;
+  }
+  std::string name;
+  for (size_t k = i; k < e; k++)
+    if (v[k]->kind == Tok::Ident) name = v[k]->text;
+  ty.name = name;
+  TypeRef::ScalarKind sk = cppRdClassify(name);
+  if (sk != TypeRef::SNone) { ty.kind = TypeRef::Scalar; ty.scalar = sk; }
+  else { ty.kind = TypeRef::Unknown; }
+  return ty;
+}
+
+inline TypeRef cppRdParseType(const std::vector<Tok>& t, size_t b, size_t e) {
+  std::vector<const Tok*> v;
+  for (size_t k = b; k < e; k++)
+    if (t[k].kind != Tok::Comment) v.push_back(&t[k]);
+  return cppRdParseTypeV(v, 0, v.size());
+}
+
+inline bool cppRdBraceGroup(const std::vector<Tok>& init) {
+  size_t b = 0, e = init.size();
+  while (b < e && init[b].kind == Tok::Comment) b++;
+  while (e > b && init[e - 1].kind == Tok::Comment) e--;
+  return e > b && init[b].kind == Tok::Punct && init[b].text == "{" &&
+         init[e - 1].kind == Tok::Punct && init[e - 1].text == "}";
+}
+
+inline std::vector<std::vector<Tok>> cppRdInitGroups(const std::vector<Tok>& init) {
+  std::vector<std::vector<Tok>> out;
+  size_t b = 0, e = init.size();
+  while (b < e && init[b].kind == Tok::Comment) b++;
+  if (b >= e || !(init[b].kind == Tok::Punct && init[b].text == "{")) return out;
+  int d = 0;
+  size_t close = e;
+  for (size_t i = b; i < e; i++) {
+    if (init[i].kind != Tok::Punct) continue;
+    if (init[i].text == "{") d++;
+    else if (init[i].text == "}") { d--; if (d == 0) { close = i; break; } }
+  }
+  if (close == e) return out;
+  std::vector<Tok> cur;
+  int pd = 0, ad = 0, bd = 0, brd = 0;
+  for (size_t i = b + 1; i < close; i++) {
+    const Tok& tk = init[i];
+    if (tk.kind == Tok::Comment) { if (!cur.empty()) cur.push_back(tk); continue; }
+    if (tk.kind == Tok::Punct) {
+      if (tk.text == "(") pd++;
+      else if (tk.text == ")") { if (pd > 0) pd--; }
+      else if (tk.text == "<") ad++;
+      else if (tk.text == ">") { if (ad > 0) ad--; }
+      else if (tk.text == "[") brd++;
+      else if (tk.text == "]") { if (brd > 0) brd--; }
+      else if (tk.text == "{") bd++;
+      else if (tk.text == "}") { if (bd > 0) bd--; }
+      else if (tk.text == "," && pd == 0 && ad == 0 && bd == 0 && brd == 0) {
+        out.push_back(cur); cur.clear(); continue;
+      }
+    }
+    cur.push_back(tk);
+  }
+  bool empty = true;
+  for (auto& x : cur) if (x.kind != Tok::Comment) { empty = false; break; }
+  if (!empty || out.empty()) out.push_back(cur);
+  return out;
+}
+
+inline std::string cppRdLastIdent(const std::vector<Tok>& toks) {
+  std::string r;
+  for (auto& tk : toks) {
+    if (tk.kind != Tok::Ident) continue;
+    if (cppIsKeyword(tk.text) && tk.text != "true" && tk.text != "false" && tk.text != "nullptr")
+      continue;
+    r = tk.text;
+  }
+  return r;
+}
+
+inline const Tok* cppRdFirstVal(const std::vector<Tok>& toks) {
+  for (auto& tk : toks) { if (tk.kind == Tok::Comment) continue; return &tk; }
+  return nullptr;
+}
+
+struct Reader {
+  const std::vector<Tok>& t;
+  size_t p = 0;
+  const CppReadOptions& opts;
+  std::vector<StructDef> structs;
+  std::vector<EnumDef> enums;
+  std::vector<AliasDef> aliases;
+  std::vector<Comment> pending;
+  int order = 0;
+
+  Reader(const std::vector<Tok>& toks, const CppReadOptions& o) : t(toks), opts(o) {}
+
+  // --- token helpers ---
+  const Tok& cur() const { return t[p]; }
+  bool eof() const { return t[p].kind == Tok::End; }
+  bool isP(const char* s) const { return t[p].kind == Tok::Punct && t[p].text == s; }
+  bool isKw(const char* s) const { return t[p].kind == Tok::Ident && t[p].text == s; }
+  void adv() { if (t[p].kind != Tok::End) p++; }
+
+  void skipTrivia() {
+    while (t[p].kind == Tok::Comment) {
+      if (opts.includeComments && t[p].text.find("Generated by asvJSON++") == std::string::npos)
+        pending.push_back(Comment{t[p].text, t[p].block});
+      p++;
+    }
+  }
+
+  std::vector<Comment> takePending() {
+    std::vector<Comment> r = std::move(pending);
+    pending.clear();
+    return r;
+  }
+
+  void skipBalanced(const char* o, const char* c) {
+    adv();
+    int d = 1;
+    while (!eof() && d > 0) {
+      if (isP(o)) d++;
+      else if (isP(c)) d--;
+      adv();
+    }
+  }
+
+  void skipToSemi() {
+    while (!eof() && !isP(";")) {
+      if (isP("{")) { skipBalanced("{", "}"); continue; }
+      adv();
+    }
+    if (isP(";")) adv();
+  }
+
+  void skipTemplateParams() {
+    adv(); // template
+    skipTrivia();
+    if (isP("<")) skipBalanced("<", ">");
+  }
+
+  void skipBases() {
+    adv(); // ':'
+    int angle = 0, paren = 0;
+    while (!eof()) {
+      if (isP("<")) angle++;
+      else if (isP(">")) { if (angle > 0) angle--; }
+      else if (isP("(")) paren++;
+      else if (isP(")")) { if (paren > 0) paren--; }
+      else if (angle == 0 && paren == 0 && (isP("{") || isP(";") || isP("="))) return;
+      adv();
+    }
+  }
+
+  bool looksLikeNestedDef() const {
+    if (!(t[p].kind == Tok::Ident &&
+          (t[p].text == "struct" || t[p].text == "class" || t[p].text == "enum")))
+      return false;
+    size_t q = p + 1;
+    int ang = 0;
+    while (q < t.size()) {
+      const Tok& tk = t[q];
+      if (tk.kind == Tok::Comment || tk.kind == Tok::End) { q++; if (tk.kind == Tok::End) return false; continue; }
+      if (tk.kind == Tok::Punct) {
+        if (tk.text == "<") ang++;
+        else if (tk.text == ">") { if (ang > 0) ang--; }
+        else if (ang == 0) {
+          if (tk.text == "{") return true;
+          if (tk.text == ";" || tk.text == "=" || tk.text == "(") return false;
+        }
+      }
+      q++;
+    }
+    return false;
+  }
+
+  const StructDef* findStruct(const std::string& n) const {
+    for (auto& s : structs) if (s.name == n) return &s;
+    return nullptr;
+  }
+  const EnumDef* findEnum(const std::string& n) const {
+    for (auto& e : enums) if (e.name == n) return &e;
+    return nullptr;
+  }
+
+  void registerStruct(StructDef def) {
+    if (def.name.empty()) return;
+    for (auto& s : structs) {
+      if (s.name == def.name) {
+        if (!def.fields.empty()) s = std::move(def);
+        return;
+      }
+    }
+    structs.push_back(std::move(def));
+  }
+
+  // --- parsing ---
+  void parseAll() {
+    while (!eof()) {
+      skipTrivia();
+      if (eof()) break;
+      if (cur().kind == Tok::Ident) {
+        const std::string s = cur().text;
+        if (s == "template") { skipTemplateParams(); continue; }
+        if ((s == "struct" || s == "class") && looksLikeNestedDef()) { parseStructDecl(); continue; }
+        if (s == "enum" && looksLikeNestedDef()) { parseEnumDecl(); continue; }
+        if (s == "typedef") { parseTypedef(); continue; }
+        if (s == "using") { parseUsing(); continue; }
+        if (s == "namespace") {
+          adv(); skipTrivia();
+          while (!eof() && !isP("{") && !isP(";")) adv();
+          if (isP("{")) skipBalanced("{", "}");
+          continue;
+        }
+      }
+      if (isP("{")) { skipBalanced("{", "}"); continue; }
+      if (isP(";")) { adv(); continue; }
+      adv();
+    }
+  }
+
+  std::unique_ptr<FieldDef> parseStructDecl() {
+    std::vector<Comment> lead = takePending();
+    adv(); // struct / class
+    skipTrivia();
+    std::string name;
+    if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
+    skipTrivia();
+    if (isP(":")) { skipBases(); skipTrivia(); }
+    if (isP(";")) { adv(); return nullptr; } // forward declaration
+    if (!isP("{")) { skipToSemi(); return nullptr; }
+    StructDef def;
+    def.name = name;
+    def.leading = std::move(lead);
+    return parseStructBody(def);
+  }
+
+  std::unique_ptr<FieldDef> parseStructBody(StructDef& def) {
+    adv(); // '{'
+    while (!eof()) {
+      skipTrivia();
+      if (isP("}")) {
+        def.closing = takePending();
+        adv();
+        std::vector<Tok> trail;
+        int d2 = 0;
+        while (!eof()) {
+          if (cur().kind == Tok::Punct) {
+            const std::string& s2 = cur().text;
+            if (s2 == "{" || s2 == "(" || s2 == "[") d2++;
+            else if (s2 == "}" || s2 == ")" || s2 == "]") { if (d2 == 0) break; d2--; }
+            else if (s2 == ";" && d2 == 0) break;
+          }
+          trail.push_back(cur());
+          adv();
+        }
+        if (isP(";")) adv();
+        std::unique_ptr<FieldDef> extra;
+        if (def.name.empty()) {
+          for (auto& tk : trail) if (tk.kind == Tok::Ident) { def.name = tk.text; break; }
+        } else {
+          const size_t none = static_cast<size_t>(-1);
+          size_t np = none, eq2 = none;
+          for (size_t k = 0; k < trail.size(); k++) {
+            if (eq2 == none && trail[k].kind == Tok::Punct && trail[k].text == "=") eq2 = k;
+            if (eq2 == none && trail[k].kind == Tok::Ident) np = k;
+          }
+          if (np != none) {
+            extra.reset(new FieldDef());
+            extra->name = trail[np].text;
+            extra->type.kind = TypeRef::Unknown;
+            extra->type.name = def.name;
+            if (eq2 != none) {
+              extra->hasInit = true;
+              for (size_t k = eq2 + 1; k < trail.size(); k++) extra->init.push_back(trail[k]);
+            }
+          }
+        }
+        registerStruct(std::move(def));
+        return extra;
+      }
+      if (isP(";")) { adv(); continue; }
+      if (cur().kind == Tok::Ident) {
+        const std::string s = cur().text;
+        if (s == "public" || s == "private" || s == "protected") {
+          adv(); skipTrivia();
+          if (isP(":")) adv();
+          continue;
+        }
+        if (s == "template") { skipTemplateParams(); continue; }
+        if (s == "typedef") { parseTypedef(); continue; }
+        if (s == "using") { parseUsing(); continue; }
+        if (s == "friend" || s == "static_assert") { skipToSemi(); continue; }
+        if (looksLikeNestedDef()) {
+          if (s == "enum") parseEnumDecl();
+          else {
+            auto fld = parseStructDecl();
+            if (fld) def.fields.push_back(std::move(*fld));
+          }
+          continue;
+        }
+      }
+      parseMember(def);
+    }
+    return nullptr;
+  }
+
+  void parseMember(StructDef& def) {
+    std::vector<Comment> lead = takePending();
+    const size_t npos = static_cast<size_t>(-1);
+    size_t start = p, i = p;
+    int paren = 0, ang = 0, brk = 0, brace = 0;
+    bool sawEq = false, sawParen = false, methodBody = false;
+    size_t eq = npos, end = npos;
+    while (i < t.size()) {
+      const Tok& tk = t[i];
+      if (tk.kind == Tok::End) break;
+      if (tk.kind == Tok::Comment) { i++; continue; }
+      if (tk.kind == Tok::Punct) {
+        const std::string& s = tk.text;
+        if (s == "(") { if (paren == 0 && ang == 0 && brk == 0 && brace == 0) sawParen = true; paren++; }
+        else if (s == ")") { if (paren > 0) paren--; }
+        else if (s == "<") ang++;
+        else if (s == ">") { if (ang > 0) ang--; }
+        else if (s == "[") brk++;
+        else if (s == "]") { if (brk > 0) brk--; }
+        else if (s == "{") {
+          if (paren == 0 && ang == 0 && brk == 0) {
+            if (sawEq) brace++;
+            else {
+              int d = 1; i++;
+              while (i < t.size() && d > 0) {
+                if (t[i].kind == Tok::Punct && t[i].text == "{") d++;
+                else if (t[i].kind == Tok::Punct && t[i].text == "}") d--;
+                i++;
+              }
+              methodBody = true;
+              while (t[i].kind == Tok::Comment) i++;
+              if (t[i].kind == Tok::Punct && t[i].text == ";") i++;
+              break;
+            }
+          } else brace++;
+        }
+        else if (s == "}") { if (brace > 0) brace--; else break; }
+        else if (s == ";" && paren == 0 && ang == 0 && brk == 0 && brace == 0) { end = i; break; }
+        else if (s == "=" && paren == 0 && ang == 0 && brk == 0 && brace == 0 && !sawEq) { sawEq = true; eq = i; }
+      }
+      i++;
+    }
+    if (methodBody) { p = i; return; }
+    if (sawParen && !sawEq) { p = (end == npos) ? i : end + 1; return; }
+    size_t eqIdx = (eq == npos) ? ((end == npos) ? i : end) : eq;
+    size_t nameIdx = npos;
+    for (size_t k = eqIdx; k > start; k--) {
+      if (t[k - 1].kind == Tok::Ident) { nameIdx = k - 1; break; }
+    }
+    if (nameIdx == npos || nameIdx == start) {
+      if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
+      p = (end == npos) ? i : end + 1;
+      return;
+    }
+    FieldDef f;
+    f.name = t[nameIdx].text;
+    f.leading = std::move(lead);
+    f.type = cppRdParseType(t, start, nameIdx);
+    size_t suf = nameIdx + 1;
+    while (suf < eqIdx) {
+      if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
+        size_t j = suf + 1;
+        std::string num;
+        while (j < eqIdx && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
+          if (t[j].kind == Tok::Number) num = t[j].text;
+          j++;
+        }
+        TypeRef a;
+        a.kind = TypeRef::Array;
+        a.elem = std::make_shared<TypeRef>(f.type);
+        if (!num.empty()) {
+          try { a.arrayLen = static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num))); a.hasLen = true; } catch (...) {}
+        }
+        f.type = a;
+        suf = (j < eqIdx) ? j + 1 : eqIdx;
+      } else {
+        suf++;
+      }
+    }
+    size_t stop = (end == npos) ? i : end;
+    if (eq != npos) {
+      f.hasInit = true;
+      for (size_t k = eq + 1; k < stop; k++) f.init.push_back(t[k]);
+    }
+    if (end != npos) {
+      int semiLine = t[end].line;
+      size_t k = end + 1;
+      while (t[k].kind == Tok::Comment && t[k].line == semiLine) {
+        f.trailing.push_back(Comment{t[k].text, t[k].block});
+        k++;
+      }
+      p = k;
+    } else {
+      p = i;
+    }
+    def.fields.push_back(std::move(f));
+  }
+
+  void parseEnumDecl() {
+    takePending();
+    adv(); // enum
+    skipTrivia();
+    if (isKw("class") || isKw("struct")) adv();
+    skipTrivia();
+    std::string name;
+    if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
+    skipTrivia();
+    if (isP(":")) {
+      while (!eof() && !isP("{") && !isP(";")) adv();
+      skipTrivia();
+    }
+    if (isP(";")) { adv(); return; }
+    if (!isP("{")) { skipToSemi(); return; }
+    adv(); // '{'
+    EnumDef def;
+    def.name = name;
+    while (!eof() && !isP("}")) {
+      skipTrivia();
+      if (isP("}")) break;
+      if (isP(",")) { adv(); continue; }
+      if (cur().kind == Tok::Ident) {
+        def.members.push_back(cur().text);
+        adv();
+        skipTrivia();
+        if (isP("=")) {
+          adv();
+          while (!eof() && !isP(",") && !isP("}")) adv();
+        }
+      } else {
+        adv();
+      }
+    }
+    if (isP("}")) adv();
+    skipTrivia();
+    if (def.name.empty() && cur().kind == Tok::Ident) { def.name = cur().text; adv(); }
+    while (!eof() && !isP(";")) adv();
+    if (isP(";")) adv();
+    if (!def.name.empty()) enums.push_back(std::move(def));
+  }
+
+  void parseUsing() {
+    adv(); // using
+    skipTrivia();
+    if (isKw("namespace")) { skipToSemi(); return; }
+    std::string name;
+    if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
+    skipTrivia();
+    if (!isP("=")) { skipToSemi(); return; }
+    adv(); // '='
+    size_t b = p;
+    while (!eof() && !isP(";")) {
+      if (isP("{")) { skipBalanced("{", "}"); continue; }
+      adv();
+    }
+    size_t e = p;
+    if (isP(";")) adv();
+    AliasDef a;
+    a.name = name;
+    a.type = cppRdParseType(t, b, e);
+    a.order = order++;
+    if (!a.name.empty()) aliases.push_back(std::move(a));
+  }
+
+  void parseTypedef() {
+    takePending();
+    adv(); // typedef
+    skipTrivia();
+    if (isKw("struct") || isKw("class")) { parseStructDecl(); return; }
+    if (isKw("enum")) { parseEnumDecl(); return; }
+    size_t b = p;
+    while (!eof() && !isP(";")) {
+      if (isP("{")) { skipBalanced("{", "}"); continue; }
+      adv();
+    }
+    size_t e = p;
+    if (isP(";")) adv();
+    size_t nameIdx = static_cast<size_t>(-1);
+    for (size_t k = e; k > b; k--)
+      if (t[k - 1].kind == Tok::Ident) { nameIdx = k - 1; break; }
+    if (nameIdx == static_cast<size_t>(-1) || nameIdx == b) return;
+    AliasDef a;
+    a.name = t[nameIdx].text;
+    a.type = cppRdParseType(t, b, nameIdx);
+    a.order = order++;
+    aliases.push_back(std::move(a));
+  }
+
+  // --- materialization ---
+  void resolve(TypeRef& ty) const {
+    if (ty.kind != TypeRef::Unknown) return;
+    if (findStruct(ty.name)) { ty.kind = TypeRef::Struct; return; }
+    if (findEnum(ty.name)) { ty.kind = TypeRef::Enum; return; }
+    ty.kind = TypeRef::Scalar;
+    ty.scalar = cppRdClassify(ty.name);
+  }
+
+  static std::unique_ptr<asvJSONValue> mkStr(std::string s) {
+    return asvJSONValue::makeString(std::move(s));
+  }
+
+  std::unique_ptr<asvJSONValue> numberValue(const std::string& raw, bool asDouble) {
+    std::string s = cppRdStripNumSuffix(raw);
+    bool flt = asDouble;
+    for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
+    if (flt) {
+      try { return asvJSONValue::makeDouble(std::stod(s)); } catch (...) { return asvJSONValue::makeDouble(0.0); }
+    }
+    try { return asvJSONValue::makeInt(static_cast<int64_t>(std::stoll(s, nullptr, 0))); }
+    catch (...) { return asvJSONValue::makeInt(0); }
+  }
+
+  std::unique_ptr<asvJSONValue> materialize(const TypeRef& t,
+                                            const std::vector<Tok>& init,
+                                            bool hasInit, int depth) {
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("cpp: nesting too deep");
+    TypeRef rt = t;
+    resolve(rt);
+
+    bool grp = hasInit && cppRdBraceGroup(init);
+    std::vector<std::vector<Tok>> groups;
+    if (grp) groups = cppRdInitGroups(init);
+    bool onlyEmptyGroup = groups.size() == 1 && groups[0].empty();
+
+    if (rt.kind == TypeRef::Struct) {
+      auto o = asvJSONValue::makeObject();
+      const StructDef* sd = findStruct(rt.name);
+      if (sd) {
+        for (size_t idx = 0; idx < sd->fields.size(); idx++) {
+          const FieldDef& f = sd->fields[idx];
+          std::vector<Tok> fi;
+          bool hi = false;
+          if (grp && idx < groups.size() && !groups[idx].empty()) { fi = groups[idx]; hi = true; }
+          else { fi = f.init; hi = f.hasInit; }
+          auto child = materialize(f.type, fi, hi, depth + 1);
+          if (!child) continue;
+          if (opts.includeComments && (!f.leading.empty() || !f.trailing.empty())) {
+            child->comments.reset(new Comments());
+            child->comments->leading = f.leading;
+            child->comments->trailing = f.trailing;
+          }
+          o->obj->emplace(f.name, std::move(child));
+        }
+      }
+      return o;
+    }
+
+    if (rt.kind == TypeRef::Enum) {
+      if (hasInit && !grp) {
+        std::string v = cppRdLastIdent(init);
+        if (!v.empty()) return asvJSONValue::makeString(std::move(v));
+      }
+      return asvJSONValue::makeNull();
+    }
+
+    if (rt.kind == TypeRef::Array) {
+      auto a = asvJSONValue::makeArray();
+      TypeRef elem;
+      if (rt.elem) { elem = *rt.elem; resolve(elem); }
+      const EnumDef* ed = (elem.kind == TypeRef::Enum) ? findEnum(elem.name) : nullptr;
+      if (grp && !onlyEmptyGroup) {
+        for (auto& g : groups)
+          a->arr->push_back(materialize(elem, g, !g.empty(), depth + 1));
+      } else if (rt.hasLen) {
+        for (size_t k = 0; k < rt.arrayLen; k++) {
+          if (ed && ed->members.size() == rt.arrayLen)
+            a->arr->push_back(mkStr(ed->members[k]));
+          else
+            a->arr->push_back(materialize(elem, std::vector<Tok>(), false, depth + 1));
+        }
+      }
+      return a;
+    }
+
+    if (rt.kind == TypeRef::Variant) {
+      if (hasInit && !grp) {
+        const Tok* v = cppRdFirstVal(init);
+        if (v) {
+          for (auto& alt : rt.alts) {
+            TypeRef at = *alt;
+            resolve(at);
+            if (at.kind == TypeRef::Scalar) {
+              if (v->kind == Tok::Str && at.scalar == TypeRef::SString)
+                return mkStr(v->text);
+              if (v->kind == Tok::Number && (at.scalar == TypeRef::SInt || at.scalar == TypeRef::SDouble))
+                return numberValue(v->text, at.scalar == TypeRef::SDouble);
+              if ((v->text == "true" || v->text == "false") && at.scalar == TypeRef::SBool)
+                return asvJSONValue::makeBool(v->text == "true");
+            }
+            if (at.kind == TypeRef::Enum && v->kind == Tok::Ident)
+              return asvJSONValue::makeString(cppRdLastIdent(init));
+          }
+        }
+      }
+      if (grp && groups.size() == 1)
+        return materialize(rt.alts.empty() ? TypeRef{} : *rt.alts[0], groups[0], !groups[0].empty(), depth + 1);
+      return materialize(rt.alts.empty() ? TypeRef{} : *rt.alts[0], std::vector<Tok>(), false, depth + 1);
+    }
+
+    if (rt.kind == TypeRef::Optional) {
+      if (!hasInit) return asvJSONValue::makeNull();
+      const Tok* v = cppRdFirstVal(init);
+      if (v && v->kind == Tok::Ident &&
+          (v->text == "nullopt" || v->text == "NULL" || v->text == "nullptr"))
+        return asvJSONValue::makeNull();
+      return materialize(rt.elem ? *rt.elem : TypeRef{}, init, hasInit, depth + 1);
+    }
+
+    if (rt.kind == TypeRef::Map) return asvJSONValue::makeObject();
+
+    // scalar / unresolved
+    if (hasInit && !grp) {
+      const Tok* v = cppRdFirstVal(init);
+      if (v) {
+        if (v->kind == Tok::Str || v->kind == Tok::Char) return mkStr(v->text);
+        if (v->kind == Tok::Number) return numberValue(v->text, rt.scalar == TypeRef::SDouble);
+        if (v->kind == Tok::Ident) {
+          if (v->text == "true") return asvJSONValue::makeBool(true);
+          if (v->text == "false") return asvJSONValue::makeBool(false);
+          if (v->text == "nullptr" || v->text == "NULL") return asvJSONValue::makeNull();
+          std::string id = cppRdLastIdent(init);
+          if (!id.empty()) return asvJSONValue::makeString(std::move(id));
+        }
+      }
+    }
+    switch (rt.scalar) {
+      case TypeRef::SBool: return asvJSONValue::makeBool(false);
+      case TypeRef::SDouble: return asvJSONValue::makeDouble(0.0);
+      case TypeRef::SString: return asvJSONValue::makeString(std::string());
+      case TypeRef::SNull: return asvJSONValue::makeNull();
+      case TypeRef::SInt: return asvJSONValue::makeInt(0);
+      default: return asvJSONValue::makeNull();
+    }
+  }
+
+  void collectRefs(const TypeRef& t, std::set<std::string>& out) const {
+    if (t.kind == TypeRef::Struct) out.insert(t.name);
+    else if (t.kind == TypeRef::Unknown && findStruct(t.name)) out.insert(t.name);
+    if (t.elem) collectRefs(*t.elem, out);
+    if (t.value) collectRefs(*t.value, out);
+    for (auto& a : t.alts) if (a) collectRefs(*a, out);
+  }
+
+  std::unique_ptr<asvJSONValue> buildRoot() {
+    if (!aliases.empty()) {
+      const AliasDef* best = &aliases[0];
+      for (auto& a : aliases) if (a.order > best->order) best = &a;
+      return materialize(best->type, std::vector<Tok>(), false, 0);
+    }
+    if (structs.empty()) return nullptr;
+
+    std::set<std::string> referenced;
+    for (auto& s : structs)
+      for (auto& f : s.fields) collectRefs(f.type, referenced);
+
+    std::vector<const StructDef*> roots;
+    for (auto& s : structs) if (!referenced.count(s.name)) roots.push_back(&s);
+
+    auto wrap = [&](const std::vector<const StructDef*>& list) {
+      auto o = asvJSONValue::makeObject();
+      for (auto* s : list) {
+        TypeRef st;
+        st.kind = TypeRef::Struct;
+        st.name = s->name;
+        auto val = materialize(st, std::vector<Tok>(), false, 0);
+        if (opts.includeComments && val && (!s->leading.empty() || !s->closing.empty())) {
+          val->comments.reset(new Comments());
+          val->comments->leading = s->leading;
+          val->comments->closing = s->closing;
+        }
+        o->obj->emplace(s->name, std::move(val));
+      }
+      return o;
+    };
+
+    if (roots.size() == 1) {
+      const StructDef* s = roots[0];
+      if (opts.unwrapRootStruct && s->name == opts.rootName) {
+        TypeRef st;
+        st.kind = TypeRef::Struct;
+        st.name = s->name;
+        auto val = materialize(st, std::vector<Tok>(), false, 0);
+        if (val && opts.includeComments && (!s->leading.empty() || !s->closing.empty())) {
+          val->comments.reset(new Comments());
+          val->comments->leading = s->leading;
+          val->comments->closing = s->closing;
+        }
+        return val;
+      }
+      std::vector<const StructDef*> list = {s};
+      return wrap(list);
+    }
+    if (!roots.empty()) return wrap(roots);
+    return wrap(std::vector<const StructDef*>({&structs[0]}));
+  }
+};
+
+} // namespace cppread
+
+inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts) {
+  formatType = FormatType::Unknown;
+  if (input.empty()) { lastError = "empty input"; return false; }
+  try {
+    std::vector<cppread::Tok> toks = cppread::cppRdLex(input);
+    cppread::Reader rd(toks, opts);
+    rd.parseAll();
+    std::unique_ptr<asvJSONValue> val = rd.buildRoot();
+    if (!val) { lastError = "cpp: no type declarations found"; return false; }
+    root = std::move(val);
+    dirty_ = false;
+    formatType = FormatType::CPP;
+    return true;
+  } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  } catch (const std::exception& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  }
+}
+
+} // namespace asvJSONInternal
