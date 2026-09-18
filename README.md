@@ -1068,6 +1068,12 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.5 (2026-09-18)
+
+- **Fix (web, Bencode file upload):** the web tool failed on real `.torrent` files with `"bencode: dictionary key must be a byte string"`. The frontend read ALL uploaded files as UTF-8 text via `FileReader.readAsText`, corrupting binary byte strings (invalid UTF-8  ->  U+FFFD) before they reached the parser. Bencode is now a binary-capable input format: `loadFile` reads it (and MessagePack/BSON/CBOR/Protobuf/UBJSON) as an `ArrayBuffer` and uploads base64 with the `[Binary data - base64 encoded]` preamble. The server (`server.cpp`) and CLI (`convert.cpp`) now feed the decoded bytes to `fromBencode` when the request is binary, and text when it is not.
+- **Fix (web, Bencode text input):** Bencode stays a text-first format - the sample and pasted bencode text (no binary preamble) still take the text path, so round-trips like `Bencode -> Bencode` remain byte-identical.
+- **Version bump:** 1.25.4  ->  1.25.5
+
 ### 1.25.4 (2026-09-18)
 
 - **Fix (cpp, toCpp regression):** the C-mode empty-array placeholder `/* TODO: type */` would collapse to a bare name after comment stripping (`field;` - invalid C). It now emits `void* /* TODO: type */`, keeping the declaration compilable while marking the gap explicitly.

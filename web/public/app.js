@@ -76,6 +76,11 @@ function minifySample(s, fmt) {
 
 let _inputIsSample = false;
 
+// Input formats whose files must be uploaded as raw bytes (base64) rather than
+// decoded as UTF-8 text: Bencode byte strings and the compact binary formats
+// hold arbitrary bytes that readAsText() would corrupt.
+const _BINARY_INPUT_FORMATS = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON', 'Bencode'];
+
 // --- Samples ---
 async function loadSample(target) {
   const opt = parseFmt(target === 'input' ? inputFormat.value : outputFormat.value);
@@ -187,15 +192,31 @@ function swapFormats() {
 }
 
 // --- File upload ---
+function _ab2b64(buf) {
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000;
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += CHUNK)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  return btoa(bin);
+}
 function loadFile(event) {
   const file = event.target.files[0];
   if (!file) return;
+  const fromOpt = parseFmt(inputFormat.value);
+  const binCapable = _BINARY_INPUT_FORMATS.includes(fromOpt.name);
   const reader = new FileReader();
   reader.onload = e => {
-    inputArea.value = e.target.result;
-    inputStatus.textContent = `Loaded: ${file.name}`;
+    if (binCapable) {
+      inputArea.value = _BIN_PREFIX + _ab2b64(e.target.result);
+      inputStatus.textContent = `Loaded: ${file.name} (base64)`;
+    } else {
+      inputArea.value = e.target.result;
+      inputStatus.textContent = `Loaded: ${file.name}`;
+    }
   };
-  reader.readAsText(file);
+  if (binCapable) reader.readAsArrayBuffer(file);
+  else reader.readAsText(file);
   event.target.value = '';
 }
 
@@ -262,7 +283,12 @@ async function convert() {
   convertBtn.textContent = 'Converting...';
   setStatus('Converting...', '');
 
-  const isBinaryInput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'].includes(fromOpt.name);
+  // The 5 compact binary formats are always uploaded/provided as base64.
+  // Bencode is text-first: only treat it as binary when content carries the
+  // base64 preamble (i.e. a binary file was uploaded).
+  const binFormatsAlways = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'];
+  const isBinaryInput = binFormatsAlways.includes(fromOpt.name) ||
+    (fromOpt.name === 'Bencode' && text.startsWith('[Binary data'));
 
   // Strip binary preamble if present (e.g., "[Binary data - base64 encoded]\n\n...")
   let data = text;

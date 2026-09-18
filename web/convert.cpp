@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.25.4\n"
+        << "asvJSON++ Format Converter v1.25.5\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
@@ -164,7 +164,13 @@ int main(int argc, char** argv) {
       else if (fromFmt == "Dotenv") ok = j.fromDotenv(text);
       else if (fromFmt == "JavaProp") ok = j.fromJavaProp(text);
       else if (fromFmt == "Plist") ok = j.fromPlist(text);
-      else if (fromFmt == "Bencode") ok = j.fromBencode(text);
+      else if (fromFmt == "Bencode") {
+        if (binaryInput) {
+          ok = j.fromBencode(std::string_view(reinterpret_cast<const char*>(bin.data()), bin.size()));
+        } else {
+          ok = j.fromBencode(text);
+        }
+      }
       else if (fromFmt == "UDE") ok = j.fromUDE(text);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(text);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(text);

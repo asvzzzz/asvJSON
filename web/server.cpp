@@ -237,7 +237,14 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "Dotenv") ok = j.fromDotenv(textData);
       else if (fromFmt == "JavaProp") ok = j.fromJavaProp(textData);
       else if (fromFmt == "Plist") ok = j.fromPlist(textData);
-      else if (fromFmt == "Bencode") ok = j.fromBencode(textData);
+      else if (fromFmt == "Bencode") {
+        if (binaryInput) {
+          std::string_view bv(reinterpret_cast<const char*>(resolvedBin.data()), resolvedBin.size());
+          ok = j.fromBencode(bv);
+        } else {
+          ok = j.fromBencode(textData);
+        }
+      }
       else if (fromFmt == "UDE") ok = j.fromUDE(textData);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(textData);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(textData);
