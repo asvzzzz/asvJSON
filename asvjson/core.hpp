@@ -2024,6 +2024,19 @@ public:
 		return root ? root->get(key) : nullptr;
 	}
 
+	// Index access into a root array. Explicit size_t overload so that an
+	// integer literal (e.g. get(0)) is not implicitly converted to a null
+	// const char* and then to std::string_view (which would strlen(nullptr)).
+	// Without this overload get(0) resolved to get(std::string_view) and
+	// crashed; with it the integral conversion wins overload resolution.
+	[[nodiscard]] asvJSONValue* get(size_t idx) {
+		return root ? root->get(idx) : nullptr;
+	}
+
+	[[nodiscard]] const asvJSONValue* get(size_t idx) const {
+		return root ? root->get(idx) : nullptr;
+	}
+
 	// Iterator API: for (auto& [key, val] : doc) { ... }
 	[[nodiscard]] auto begin() noexcept {
 		return root ? root->begin() : asvJSONValue::ObjectMap::iterator{};

@@ -1066,6 +1066,11 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.24.1 (2026-09-18)
+
+- **Fix (core):** added `asvJSON::get(size_t)` overloads (const and non-const) so index access on a root array works directly. Previously a call like `j.get(0)` bound to `get(std::string_view)` via the null-pointer-constant conversion `0 -> const char*` and then `strlen(nullptr)`, crashing at runtime; now the integral conversion to `size_t` wins overload resolution and returns the element (or `nullptr` when the root is not an array or the index is out of range).
+- **Version bump:** 1.24.0  ->  1.24.1
+
 ### 1.24.0 (2026-09-18)
 
 - **New format - Plist (Apple XML Property List):** added `asvJSON::toPlist()` / `asvJSON::fromPlist(std::string_view)` (and `asvJSONValue::toPlist`) - the classic XML `.plist` files. Encoder emits an XML declaration, DOCTYPE and `<plist version="1.0">` wrapper (2-space indent) with `<dict>`/`<key>`, `<array>`, `<string>`, `<integer>`, `<real>` (`.0` appended to whole doubles), `<true/>`/`<false/>`, `<date>` (ISO-8601), and `<data>` (base64) elements. Decoder skips BOM/`<?xml?>`/`<!DOCTYPE>` (bracket-aware)/comments, unescapes entities and `&#NN;`/`&#xHH;` refs, tolerates whitespace-wrapped `<data>` base64, accepts a bare value root without the `<plist>` wrapper, and rejects malformed input strictly (`plist:` errors: non-numeric/overflowed `<integer>`/`<real>`, bad `<date>`, invalid base64, unterminated/missing/unknown elements, trailing content). NULL is lossy (`<string/>`); REGEX/TIMESTAMP/OBJECTID/EXTENSION/CUSTOM_TAG degrade to their underlying representation. Auto-detection (`fromAny`) is gated before the generic XML parser on a `<plist` root; wired into `readFromFileAny`/`writeToFileAny` (`.plist`), the web converter UI, and the examples. Added `testFromPlist`, `testToPlist`, `testPlistRoundTrip`, `testPlistFromAny`.

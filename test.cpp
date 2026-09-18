@@ -19968,6 +19968,38 @@ TEST(testKeyOrder) {
 	}
 }
 
+TEST(testGetIndexOverload) {
+	// Root array: get(index) returns elements; the explicit size_t overload
+	// wins for integer literals, so get(0) is no longer converted to a null
+	// const char* -> std::string_view (which used to strlen(nullptr)-crash).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("[10,20,30]")));
+		ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j.get((size_t)0)->getInt(), int64_t(10));
+		ASSERT_EQ(j.get((size_t)1)->getInt(), int64_t(20));
+		ASSERT_EQ(j.get((size_t)2)->getInt(), int64_t(30));
+		ASSERT(j.get(0)); // int literal must bind to get(size_t), not crash
+		ASSERT_EQ(j.get(0)->getInt(), int64_t(10));
+		ASSERT(!j.get((size_t)99)); // out of range -> nullptr
+	}
+	// Const overload works too
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("[true]")));
+		const asvJSON& cj = j;
+		ASSERT(cj.get(0));
+		ASSERT(cj.get(0)->getBool());
+	}
+	// Object root: get(int) returns nullptr instead of crashing
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{\"a\":1}")));
+		ASSERT(!j.get(0));
+		ASSERT(j.get("a"));
+	}
+}
+
 TEST(testReauditRegression) {
 	// YAML: tag-chain recursion is capped (a: !!int !!int ... 5) instead of
 	// overflowing the stack.
@@ -21136,6 +21168,7 @@ RUN(testUDEBlockScalarKeepChomping);
 
 	std::cout << "\n--- Key Order Tests ---\n";
 	RUN(testKeyOrder);
+	RUN(testGetIndexOverload);
 
 	std::cout << "\n--- Re-audit Regression Tests ---\n";
 	RUN(testReauditRegression);
