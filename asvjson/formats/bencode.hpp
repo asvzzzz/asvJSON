@@ -148,6 +148,56 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
       out += 'e';
       break;
     }
+    // Types with no native bencode representation are mapped to the closest
+    // form (documented lossy round-trips, mirrors the plist/BSON mappings):
+    //   BOOL -> integer 0/1, NULL -> empty byte string, DOUBLE -> decimal text,
+    //   DATETIME/TIMESTAMP -> integer seconds, OBJECTID/REGEX -> byte string,
+    //   EXTENSION -> raw bytes, CUSTOM_TAG -> its payload value.
+    case T::BOOL_VAL:
+      out += (v->flag ? "i1e" : "i0e");
+      break;
+    case T::NULL_VAL:
+      out += "0:";
+      break;
+    case T::DOUBLE: {
+      std::string txt;
+      if (std::isnan(v->dbl)) txt = "NaN";
+      else if (std::isinf(v->dbl)) txt = (v->dbl < 0) ? "-Infinity" : "Infinity";
+      else fmtDoubleVal(v->dbl, txt);
+      out += std::to_string(txt.size());
+      out += ':';
+      out += txt;
+      break;
+    }
+    case T::DATETIME:
+    case T::TIMESTAMP:
+      out += 'i';
+      out += std::to_string(v->timestamp);
+      out += 'e';
+      break;
+    case T::OBJECTID:
+      out += std::to_string(v->str_data.size());
+      out += ':';
+      out += v->str_data;
+      break;
+    case T::REGEX: {
+      size_t sep = v->str_data.find('\0');
+      std::string_view pat = (sep != std::string::npos) ? std::string_view(v->str_data).substr(0, sep)
+                                                       : std::string_view(v->str_data);
+      out += std::to_string(pat.size());
+      out += ':';
+      out.append(pat.data(), pat.size());
+      break;
+    }
+    case T::EXTENSION:
+      out += std::to_string(v->bin_data.size());
+      out += ':';
+      out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
+      break;
+    case T::CUSTOM_TAG:
+      if (v->custom_value) bencodeEncode(v->custom_value.get(), out);
+      else out += "0:";
+      break;
     case T::OBJECT: {
       if (v->obj->size() > asvJSONValue::MAX_OBJECT_SIZE)
         throw asvJSONError("bencode: dictionary too large");

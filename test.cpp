@@ -14371,28 +14371,49 @@ TEST(testToBencode) {
     ASSERT(j.parse(std::string("{\"list\":[1,\"x\"],\"n\":-5}")));
     ASSERT_EQ(j.toBencode(), std::string("d4:listli1e1:xe1:ni-5ee"));
   }
-  // Unsupported types throw
+  // Booleans -> integer 0/1 (bencode has no boolean type)
   {
     asvJSON j;
-    ASSERT(j.parse(std::string("{\"b\":true}")));
-    bool threw = false;
-    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
-    ASSERT(threw);
+    ASSERT(j.parse(std::string("{\"b\":true,\"c\":false}")));
+    ASSERT_EQ(j.toBencode(), std::string("d1:bi1e1:ci0ee"));
   }
+  // Null -> empty byte string
   {
     asvJSON j;
     j.putNull("n");
-    bool threw = false;
-    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
-    ASSERT(threw);
+    ASSERT_EQ(j.toBencode(), std::string("d1:n0:e"));
   }
+  // Doubles -> decimal byte string
   {
     asvJSON j;
     j.putDouble("d", 1.5);
-    bool threw = false;
-    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
-    ASSERT(threw);
+    ASSERT_EQ(j.toBencode(), std::string("d1:d3:1.5e"));
   }
+  // DATETIME -> integer seconds
+  {
+    asvJSON j;
+    j.putDateTime("t", 1700000000, 0);
+    ASSERT_EQ(j.toBencode(), std::string("d1:ti1700000000ee"));
+  }
+}
+
+TEST(testBencodeJson5) {
+  // User scenario: JSON5 -> bencode must not throw on bool/null/double values.
+  asvJSON j;
+  ASSERT(j.fromJSON5(std::string("{ active: true, name: \"asvJSON++\", ratio: 1.5,"
+                                 " missing: null, list: [1, 2.5, false] }")));
+  std::string enc = j.toBencode();
+  ASSERT_EQ(enc, std::string("d6:activei1e4:listli1e3:2.5i0ee7:missing0:"
+                             "4:name9:asvJSON++5:ratio3:1.5e"));
+  // Round-trip back through fromBencode
+  asvJSON j2;
+  ASSERT(j2.fromBencode(enc));
+  ASSERT_EQ(j2.getInt("active"), int64_t(1));
+  ASSERT_EQ(j2.getString("ratio"), std::string("1.5"));
+  ASSERT_EQ(j2.getString("missing"), std::string(""));
+  const asvJSONValue* arr = j2.get("list");
+  ASSERT(arr && arr->type == asvJSONValue::ARRAY);
+  ASSERT_EQ(arr->arr->size(), size_t(3));
 }
 
 TEST(testBencodeRoundTrip) {
@@ -21079,6 +21100,7 @@ RUN(testCBORFloat16);
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
 	RUN(testFromBencode);
 	RUN(testToBencode);
+	RUN(testBencodeJson5);
 	RUN(testBencodeRoundTrip);
 
 	std::cout << "\n--- UBJSON Tests ---\n";
