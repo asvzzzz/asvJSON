@@ -28,6 +28,13 @@ if(WIN32)
   target_link_libraries(asvjserver PRIVATE ws2_32)
 endif()
 
+# Copy the frontend next to the server binary on every build so the running
+# server serves the up-to-date web/public/ assets.
+add_custom_command(TARGET asvjserver POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_CURRENT_SOURCE_DIR}/web/public
+          $<TARGET_FILE_DIR:asvjserver>/public)
+
 if(MSVC)
   foreach(tgt examples test convert asvjserver)
     target_compile_options(${tgt} PRIVATE /MT$<$<CONFIG:Debug>:d>)
