@@ -413,8 +413,9 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
     CppType elem;
     elem.kind = CppType::Scalar;
     if (isC()) {
-      elem.type = "/* TODO: type */";
-      t.type = "/* TODO: type */";
+      // void* keeps the declaration compilable; the note makes the gap visible.
+      elem.type = "void*";
+      t.type = "void* /* TODO: type */";
     } else {
       elem.type = "std::monostate";
       t.type = "std::vector<std::monostate>";

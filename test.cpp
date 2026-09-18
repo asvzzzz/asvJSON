@@ -12008,7 +12008,7 @@ TEST(testToCpp) {
     CppWriteOptions co;
     co.style = CppWriteOptions::Style::C;
     std::string cs = j.toCpp(co);
-    ASSERT(cs.find("/* TODO: type */ empty;") != std::string::npos);
+    ASSERT(cs.find("void* /* TODO: type */ empty;") != std::string::npos);
     ASSERT(s.find("std::array<int, 3> nums = {1, 2, 3};") != std::string::npos);
     CppWriteOptions o;
     o.useStdArray = false;

@@ -1068,12 +1068,17 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.4 (2026-09-18)
+
+- **Fix (cpp, toCpp regression):** the C-mode empty-array placeholder `/* TODO: type */` would collapse to a bare name after comment stripping (`field;` - invalid C). It now emits `void* /* TODO: type */`, keeping the declaration compilable while marking the gap explicitly.
+- **Version bump:** 1.25.3  ->  1.25.4
+
 ### 1.25.3 (2026-09-18)
 
 - **Fix (cpp, fromCpp):** multiple declarators per member declaration now all parse (`int x, y;`, `std::string p, q = "hi";`, `double m = 1.5, n;`, `struct Inner { ... } a, b;`). Previously only the first declarator produced a field. A trailing empty segment (`int a, ;`) is skipped safely: `parseMember` always advances past the terminating `;`, so the body loop can never stall.
 - **Fix (cpp, fromCpp):** the emitted `INT64_MIN` form `(-9223372036854775807LL - 1)` now round-trips - `cppRdScalarLiteral` recognizes the `NUMBER - NUMBER` pattern (unsigned arithmetic, two's-complement safe) in addition to the boundary literal `-9223372036854775808`.
 - **Fix (cpp preprocessor, fromCpp):** `#if` evaluates real boolean expressions now - paren-less `defined X`, `defined(X)`, `!`, `&&`, `||` and parentheses; `#if defined(FOO) && 0` is correctly false and `#if 0 || defined(FOO)` true (previously only the first `defined(...)` was honored).
-- **Fix (cpp, toCpp):** the empty-array placeholder is now `std::vector<std::monostate>` in C++ (with `#include <variant>`), and a visible `/* TODO: type */` in C mode - compile-valid in both, clearer than the old `std::vector<std::nullptr_t>` / `void*`.
+- **Fix (cpp, toCpp):** the empty-array placeholder is now `std::vector<std::monostate>` in C++ (with `#include <variant>`), and `void* /* TODO: type */` in C mode - compile-valid in both, clearer than the old `std::vector<std::nullptr_t>` / plain `void*`. The C spelling keeps a real type (`void*`) so the declaration stays syntactically valid after comment stripping.
 - **Version bump:** 1.25.2  ->  1.25.3
 
 ### 1.25.2 (2026-09-18)
