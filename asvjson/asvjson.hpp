@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.17.0 - Main entry point
+// asvJSON++ v1.20.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
@@ -7,7 +7,7 @@
 // ASVJSON_DISABLE_PROTOBUF, ASVJSON_DISABLE_TOML, ASVJSON_DISABLE_SEXPR,
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
 // ASVJSON_DISABLE_RON,
-// ASVJSON_DISABLE_CPP,
+// ASVJSON_DISABLE_CPP, ASVJSON_DISABLE_DOTENV,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -79,6 +79,10 @@
 
 #ifndef ASVJSON_DISABLE_CPP
 #include "formats/cpp.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_DOTENV
+#include "formats/dotenv.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -261,6 +265,15 @@ inline bool asvJSON::fromAny(std::string_view input) {
     if (fromINI(s)) return true;
   }
 
+  // Dotenv: flat KEY=VALUE lines (no [section] headers). Only attempted after
+  // the section-style TOML/INI paths above, so a `[section]` document is never
+  // mistaken for dotenv.
+#ifndef ASVJSON_DISABLE_DOTENV
+  if (s.find('=') != std::string_view::npos && s.find('[') == std::string_view::npos) {
+    if (fromDotenv(s)) return true;
+  }
+#endif
+
   // CSV: multiple lines with high delimiter density
   {
     size_t nl = 0, dl = 0;
@@ -301,7 +314,10 @@ static inline std::string asvjsonExtLower(const std::string& s) {
 
 static inline std::string asvjsonExtractExt(const std::string& filename) {
   auto pos = filename.rfind('.');
-  if (pos == std::string::npos || pos == 0) return "";
+  if (pos == std::string::npos) return "";
+  if (pos == 0 && filename.size() <= 1) return "";
+  // A leading-dot basename such as ".env" has pos == 0; still expose the
+  // suffix as the extension so dotfiles can be dispatched by name.
   auto ext = filename.substr(pos + 1);
   // also strip .gz / .bz2 / .xz suffix
   if (ext == "gz" || ext == "bz2" || ext == "xz") {
@@ -343,6 +359,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "ron")  { formatType = FormatType::RON;      return fromRON(content); }
   if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") { formatType = FormatType::CPP; return fromCpp(content); }
   if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
+  if (ext == "env" || ext == "dotenv") { formatType = FormatType::Dotenv; return fromDotenv(content); }
 
   // Unknown extension - auto-detect from content
   return fromAny(content);
@@ -400,6 +417,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "ron") content = toRON(pretty);
   else if (ext == "hpp" || ext == "h") content = toCpp();
   else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
+  else if (ext == "env" || ext == "dotenv") content = toDotenv();
   else content = serialize(pretty);
 
   std::ofstream out(filename, std::ios::binary);

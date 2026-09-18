@@ -13708,6 +13708,167 @@ TEST(testINIDottedKeyRoundTrip) {
   }
 }
 
+TEST(testFromDotenv) {
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("PORT=8080\nDEBUG=true\nRATIO=1.5\nEMPTY=null\nNAME=hello\n")));
+    ASSERT(j.get("PORT") != nullptr && j.get("PORT")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("PORT"), int64_t(8080));
+    ASSERT_EQ(j.getBool("DEBUG"), true);
+    ASSERT(j.get("RATIO") != nullptr && j.get("RATIO")->type == asvJSONValue::DOUBLE);
+    ASSERT(j.get("EMPTY") != nullptr && j.get("EMPTY")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(std::string(j.getString("NAME")), std::string("hello"));
+  }
+  // export prefix and whitespace around '='
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("export APP = myapp\n  OTHER=42\n")));
+    ASSERT_EQ(std::string(j.getString("APP")), std::string("myapp"));
+    ASSERT_EQ(j.getInt("OTHER"), int64_t(42));
+  }
+  // Quoting: single literal, double escapes, inline comments
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("A='literal # not comment'\nB=\"line1\\nline2\"\nC=bare # trailing\nD=\"x\" # trailing too\n")));
+    ASSERT_EQ(std::string(j.getString("A")), std::string("literal # not comment"));
+    ASSERT_EQ(std::string(j.getString("B")), std::string("line1\nline2"));
+    ASSERT_EQ(std::string(j.getString("C")), std::string("bare"));
+    ASSERT_EQ(std::string(j.getString("D")), std::string("x"));
+  }
+  // Multiline double-quoted value
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("M=\"first\nsecond\nthird\"\n")));
+    ASSERT_EQ(std::string(j.getString("M")), std::string("first\nsecond\nthird"));
+  }
+  // Duplicate keys: last wins
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("K=1\nK=2\n")));
+    ASSERT_EQ(j.getInt("K"), int64_t(2));
+  }
+  // Leading-zero / hex / overflow literals stay strings
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("Z=007\nH=0x1F\nBIG=99999999999999999999999\n")));
+    ASSERT(j.get("Z") != nullptr && j.get("Z")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("Z")), std::string("007"));
+    ASSERT_EQ(std::string(j.getString("H")), std::string("0x1F"));
+    ASSERT(j.get("BIG") != nullptr && j.get("BIG")->type == asvJSONValue::STRING);
+    ASSERT(j.get("BIG")->raw_number);
+  }
+  // Errors
+  {
+    asvJSON j;
+    ASSERT(!j.fromDotenv(std::string("NOEQUALS\n")));
+    ASSERT(!j.fromDotenv(std::string("=value\n")));
+    ASSERT(!j.fromDotenv(std::string("A=\"unterminated\n")));
+    ASSERT(!j.fromDotenv(std::string("A=\"x\" junk\n")));
+  }
+  // Bare '#' at value start is an inline comment -> empty string
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("E=# just a comment\n")));
+    ASSERT_EQ(std::string(j.getString("E")), std::string(""));
+  }
+}
+
+TEST(testToDotenv) {
+  // Scalars
+  {
+    asvJSON j;
+    j.putInt("PORT", 8080);
+    j.putBool("DEBUG", true);
+    j.putString("NAME", "My App");
+    j.putNull("NONE");
+    std::string out = j.toDotenv();
+    ASSERT(out.find("PORT=8080\n") != std::string::npos);
+    ASSERT(out.find("DEBUG=true\n") != std::string::npos);
+    ASSERT(out.find("NAME=\"My App\"\n") != std::string::npos);
+    ASSERT(out.find("NONE=null\n") != std::string::npos);
+  }
+  // Strings that look like other types are quoted
+  {
+    asvJSON j;
+    j.putString("S", "42");
+    std::string out = j.toDotenv();
+    ASSERT(out.find("S=\"42\"\n") != std::string::npos);
+  }
+  // Non-object root throws
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[1,2,3]")));
+    bool threw = false;
+    try { j.toDotenv(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+  // Invalid key throws
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"bad key\":1}")));
+    bool threw = false;
+    try { j.toDotenv(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+}
+
+TEST(testDotenvRoundTrip) {
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"HOST\":\"localhost\",\"PORT\":5432,\"DEBUG\":false,\"RATIO\":0.25,\"EMP\":null,\"TXT\":\"a b#c=d\"}")));
+    std::string env = j.toDotenv();
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT_EQ(std::string(j2.getString("HOST")), std::string("localhost"));
+    ASSERT_EQ(j2.getInt("PORT"), int64_t(5432));
+    ASSERT_EQ(j2.getBool("DEBUG"), false);
+    ASSERT(j2.get("RATIO") != nullptr && j2.get("RATIO")->type == asvJSONValue::DOUBLE);
+    ASSERT(j2.get("EMP") != nullptr && j2.get("EMP")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(std::string(j2.getString("TXT")), std::string("a b#c=d"));
+  }
+  // Nested object/array survive as JSON text (lossy type, lossless text)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"cfg\":{\"a\":1},\"arr\":[1,2,3]}")));
+    std::string env = j.toDotenv();
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT_EQ(std::string(j2.getString("cfg")), std::string("{\"a\":1}"));
+    ASSERT_EQ(std::string(j2.getString("arr")), std::string("[1,2,3]"));
+  }
+  // Multiline string round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"M\":\"l1\\nl2\"}")));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    ASSERT_EQ(std::string(j2.getString("M")), std::string("l1\nl2"));
+  }
+}
+
+TEST(testDotenvComments) {
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("# leading\nPORT=8080 # trailing\n# footing\n")));
+    auto* v = j.get("PORT");
+    ASSERT(v != nullptr && v->comments);
+    ASSERT_EQ(v->comments->leading.size(), size_t(1));
+    ASSERT_EQ(v->comments->leading[0].text, std::string(" leading"));
+    ASSERT_EQ(v->comments->trailing.size(), size_t(1));
+    ASSERT_EQ(v->comments->trailing[0].text, std::string(" trailing"));
+    ASSERT(j.getRoot()->comments);
+    ASSERT_EQ(j.getRoot()->comments->footing.size(), size_t(1));
+    // Round-trip
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    auto* w = j2.get("PORT");
+    ASSERT(w != nullptr && w->comments);
+    ASSERT_EQ(w->comments->leading.size(), size_t(1));
+    ASSERT_EQ(w->comments->trailing.size(), size_t(1));
+    ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -20028,6 +20189,12 @@ RUN(testCBORFloat16);
 	RUN(testINITableOrder);
 	RUN(testINIKeyLeadingBracket);
 	RUN(testINIDottedKeyRoundTrip);
+
+	std::cout << "\n--- Dotenv Serialization Tests ---\n";
+	RUN(testFromDotenv);
+	RUN(testToDotenv);
+	RUN(testDotenvRoundTrip);
+	RUN(testDotenvComments);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

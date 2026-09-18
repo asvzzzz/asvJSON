@@ -1445,6 +1445,34 @@ void example_from_ini() {
 	std::cout << std::endl;
 }
 
+void example_to_dotenv() {
+	std::cout << "=== Dotenv Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"APP_NAME":"My App","PORT":8080,"DEBUG":true,"SECRET":"s3cr3t","RATIO":0.5})"));
+	std::cout << json.toDotenv() << std::endl;
+}
+
+void example_from_dotenv() {
+	std::cout << "=== Dotenv Input ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input =
+		"# application settings\n"
+		"export APP_NAME=\"My App\"\n"
+		"PORT=8080\n"
+		"DEBUG=true # verbose\n"
+		"EMPTY=null\n";
+	if (json.fromDotenv(input)) {
+		std::cout << "  APP_NAME=" << json.getString("APP_NAME")
+		          << " PORT=" << json.getInt("PORT")
+		          << " DEBUG=" << json.getBool("DEBUG")
+		          << " isNull=" << (json.get("EMPTY") && json.get("EMPTY")->type == asvJSONValue::NULL_VAL)
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_ude_strings() {
 	std::cout << "=== UDE String Escapes ===" << std::endl;
 
@@ -1840,6 +1868,8 @@ int main() {
 	example_from_json5();
 	example_to_ini();
 	example_from_ini();
+	example_to_dotenv();
+	example_from_dotenv();
 	example_to_ude();
 	example_from_ude();
 	example_ude_strings();

@@ -59,6 +59,7 @@ MIT license - see the `LICENSE` file for details.
 - S-Expression - `toSexpr()` / `fromSexpr()` - Lisp-style nested lists `(key "value" (nested 1 2 3))` with heuristic object/array detection, `;` comments, `nil`/`#t`/`#f` literals
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
+- Dotenv - `toDotenv()` / `fromDotenv()` - flat `KEY=VALUE` environment files with an optional `export` prefix, `#` comments (line and inline), single-quoted literal values, double-quoted values with C-style escapes (may span lines), and INI-style bare-value type inference
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
 - C++ codegen - `toCpp()` / `fromCpp()` - generate C++17 `struct`/`enum` declarations from a parsed value tree, and parse C++ declarations back into a value tree: nested structs per object, `std::array<T,N>` (or `std::vector<T>`) for homogeneous arrays, `std::vector<std::variant<...>>` for mixed arrays, and enums inferred from identifier-string arrays (object-map enums via `enumPaths`/`enumNames`); a C-style output mode emits `typedef struct` / C arrays / `enum`; comments carry over as `//` / `/* */`
@@ -261,6 +262,8 @@ int main() {
 | `bool fromRON(std::string_view input)` | Parse RON string (structs, tuples, maps, enums, options, ranges, comments). |
 | `std::string toCpp(const CppWriteOptions& opts = {}) const` | Generate C++ `struct`/`enum` declarations from the value tree (modern C++17 or C style). |
 | `bool fromCpp(std::string_view input, const CppReadOptions& opts = {})` | Parse C++ `struct`/`enum` declarations into the value tree. |
+| `std::string toDotenv() const` | Serialize to Dotenv (`.env`) - flat `KEY=VALUE` lines; nested objects/arrays are written as quoted JSON text. |
+| `bool fromDotenv(std::string_view input)` | Parse a Dotenv (`.env`) string (`export` prefix, quoted values, inline comments, type inference). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -984,7 +987,26 @@ retries = 3
 
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
+### Dotenv  -  environment configuration files
+
+`toDotenv()` / `fromDotenv()`  -  flat `KEY=VALUE` files used for environment variables.
+
+```
+# Application settings
+export APP_NAME="My App"
+PORT=8080
+DEBUG=true # verbose
+EMPTY=null
+```
+
+**Features:** optional `export ` prefix, `#` line comments and inline comments, single-quoted literal values, double-quoted values with C-style escapes (`\n`, `\r`, `\t`, `\\`, `\"`, `\'`, `\$`) that may span multiple lines, INI-style bare-value type inference (null/bool/int/double/datetime, with leading-zero/hex/overflow literals kept as exact strings), duplicate keys last-wins, and comment preservation on YAML-style round-trips (leading/trailing/footing). `toDotenv()` requires an object root; nested objects/arrays have no dotenv syntax and are emitted as their compact JSON text inside a quoted string (lossless text, but they decode back as strings). Auto-detection (`fromAny`, `.env`/`.env` files) is wired in and only attempted for flat `=`-containing input with no `[section]` headers.
+
 ## Changelog
+
+### 1.20.0 (2026-09-18)
+
+- **New format - Dotenv (`.env`):** added `asvJSON::toDotenv()` / `asvJSON::fromDotenv(std::string_view)` (and `asvJSONValue::toDotenv`) - flat `KEY=VALUE` environment files. Decoder handles an optional `export ` prefix, `#` line/inline comments, single-quoted literal values, double-quoted values with C-style escapes that may span multiple lines, bare-value type inference (null/bool/int/double/datetime; leading-zero, hex and overflowing numeric literals stay exact strings), duplicate-key last-wins, and comment preservation (leading/trailing/footing via the shared `Comments` metadata). Encoder requires an object root and writes nested objects/arrays as compact quoted JSON text. Wired into `fromAny`, `readFromFileAny`/`writeToFileAny` (`.env`/`.dotenv`), the web converter UI, and the examples. Added `testFromDotenv`, `testToDotenv`, `testDotenvRoundTrip`, `testDotenvComments`.
+- **Version bump:** 1.19.1  ->  1.20.0
 
 ### 1.19.1 (2026-09-18)
 

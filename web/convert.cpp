@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.19.0\n"
+        << "asvJSON++ Format Converter v1.20.0\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
-            "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, UDE, JSONLines,\n"
+            "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, UDE, JSONLines,\n"
             "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
             "Outputs: ... plus CPP (C++ structs/enums) and CPP_C (C structs/enums)\n"
            "         (empty from=JSON, to=JSON)\n";
@@ -161,6 +161,7 @@ int main(int argc, char** argv) {
       else if (fromFmt == "CSV") ok = j.fromCSV(text);
       else if (fromFmt == "TOML") ok = j.fromTOML(text);
       else if (fromFmt == "INI") ok = j.fromINI(text);
+      else if (fromFmt == "Dotenv") ok = j.fromDotenv(text);
       else if (fromFmt == "UDE") ok = j.fromUDE(text);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(text);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(text);
@@ -203,6 +204,7 @@ int main(int argc, char** argv) {
       else if (toFmt == "CSV") result = j.toCSV();
       else if (toFmt == "TOML") result = j.toTOML(req.optBool("pretty", true));
       else if (toFmt == "INI") result = j.toINI(req.optBool("pretty", true));
+      else if (toFmt == "Dotenv") result = j.toDotenv();
       else if (toFmt == "UDE") result = j.toUDE();
       else if (toFmt == "JSONLines") result = j.toJSONLines();
       else if (toFmt == "Sexpr") result = j.toSexpr();
