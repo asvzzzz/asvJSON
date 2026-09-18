@@ -1068,6 +1068,18 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.6 (2026-09-19)
+
+Addresses the reviewer pass in `err.txt` (JSON Schema draft-07 validator):
+
+- **Fix (schema, const/enum/uniqueItems with extended types):** `valuesEqual` previously compared only the type and scalar fields, so `DATETIME`, `BINARY`, `OBJECTID`, `REGEX`, `TIMESTAMP`, `EXTENSION` and `CUSTOM_TAG` never matched `const`/`enum` (and duplicate detection under `uniqueItems`) - any document failed a matching `const` (R2.1). `valuesEqual` now compares the extended payloads: DATETIME compares `timestamp + datetime_ms + tz_offset_min`, BINARY compares `bin_data` bytes, OBJECTID/REGEX compare their bytes, TIMESTAMP compares the integer, EXTENSION compares `ext_type + bin_data`, CUSTOM_TAG compares `str_data + custom_value` (recursively).
+- **Fix (schema, non-string `$ref`):** a `$ref` whose value is not a string was silently ignored, letting the rest of the schema validate as if the keyword were absent (e.g. `{"$ref":42}` behaved like `{}`). It now throws `Invalid schema: '$ref' must be a string` (R2.2).
+- **Perf (schema):** `resolveRef` results and `validateKeywordShapes` shape checks are cached (`refCache_`, `shapeCache_` - keyed by JSON-pointer string), so repeated/cyclic references no longer re-walk the tree on every visit; `contains` no longer re-creates its sub-validator per item (`moveSubVal` + fresh `path_`/`error_` per iteration); `matchedByPattern_` switched from `std::set` to `std::unordered_set` (R3.1-R3.4).
+- **Fix (schema, cycle guard):** the old `refDepth_` counter with a magic `48` limit was replaced by a real `RefStack` - an unordered set of `(value*, schema*)` pairs (`std::unordered_set` of a `{value*, schema*}` struct). Legitimate recursion (self-`$ref` down a deep document) is bounded by the data's own depth via the pair keys, so a 63-level document no longer trips the old off-by-one `47`/`48` boundary; a true `(value, schema)` cycle is detected on its first repeat instead. Forks (anyOf/oneOf/not/if) copy the stack, so sibling branches can still re-enter the same node legitimately.
+- **Perf/Fix (schema, misc):** `resolveRef` uses a non-null default node instead of falling through a `failed` path for missing pointers; the standalone `valuesEqual` catches `std::bad_alloc` on compile; `getCompiled` guards against `$defs` (2019 alias for `definitions`, now a valid `$ref` target); number-out-of-range messages print the exact `int64`/double value instead of a truncated one.
+- **Test:** new `testJSONSchemaReviewFixes` + the nested-ref 63-level guard test; suite is now 358 tests, all passing.
+- **Version bump:** 1.25.5  ->  1.25.6
+
 ### 1.25.5 (2026-09-18)
 
 - **Fix (web, Bencode file upload):** the web tool failed on real `.torrent` files with `"bencode: dictionary key must be a byte string"`. The frontend read ALL uploaded files as UTF-8 text via `FileReader.readAsText`, corrupting binary byte strings (invalid UTF-8  ->  U+FFFD) before they reached the parser. Bencode is now a binary-capable input format: `loadFile` reads it (and MessagePack/BSON/CBOR/Protobuf/UBJSON) as an `ArrayBuffer` and uploads base64 with the `[Binary data - base64 encoded]` preamble. The server (`server.cpp`) and CLI (`convert.cpp`) now feed the decoded bytes to `fromBencode` when the request is binary, and text when it is not.

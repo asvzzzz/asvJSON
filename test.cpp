@@ -17348,6 +17348,117 @@ TEST(testJSONSchemaExtras) {
 	}
 }
 
+TEST(testJSONSchemaReviewFixes) {
+	// R2.1: extended-type equality in const (valuesEqual previously returned
+	// false for DATETIME/BINARY/..., so const never matched).
+	{
+		const uint8_t bb[] = {1, 2, 3};
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":null})")));
+		ASSERT(schema.setByPointer("/const", asvJSONValue::makeBinary(bb, 3)));
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", asvJSONValue::makeBinary(bb, 3)));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	{
+		const uint8_t same[] = {1, 2, 3};
+		const uint8_t diff[] = {9, 8};
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":null})")));
+		ASSERT(schema.setByPointer("/const", asvJSONValue::makeBinary(same, 3)));
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", asvJSONValue::makeBinary(diff, 2)));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+	}
+	// DATETIME const compares timestamp + milliseconds + tz offset.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":null})")));
+		ASSERT(schema.setByPointer("/const", asvJSONValue::makeDateTime(1700000000, 250, -180)));
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", asvJSONValue::makeDateTime(1700000000, 250, -180)));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+		asvJSON doc2;
+		ASSERT(doc2.setByPointer("/", asvJSONValue::makeDateTime(1700000000, 250, 0)));
+		ASSERT(!doc2.validate(schema, err));
+	}
+	// R2.1: uniqueItems detects equal extended-typed items (slow path now uses
+	// the fixed valuesEqual instead of default-false).
+	{
+		const uint8_t bb[] = {7, 7, 7};
+		const uint8_t dd[] = {7, 7, 8};
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"type":"array","uniqueItems":true})")));
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", asvJSONValue::makeArray()));
+		auto* root = doc.getRoot();
+		root->arr->emplace_back(asvJSONValue::makeBinary(bb, 3));
+		root->arr->emplace_back(asvJSONValue::makeBinary(bb, 3));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		root->arr->back() = asvJSONValue::makeBinary(dd, 3);
+		ASSERT(doc.validate(schema, err));
+	}
+	// Unique portableOBJECTID / REGEX const parity. makeObjectId takes 12 raw
+	// bytes (e.g. a 12-char literal), NOT the 24-char hex form.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"const":null})")));
+		ASSERT(schema.setByPointer("/const", asvJSONValue::makeObjectId("507f1f77bcf6")));
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", asvJSONValue::makeObjectId("507f1f77bcf6")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+		asvJSON doc2;
+		ASSERT(doc2.setByPointer("/", asvJSONValue::makeObjectId("507f1f77bcf7")));
+		ASSERT(!doc2.validate(schema, err));
+	}
+	// R2.2: a non-string $ref is an invalid schema, not silently ignored.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"$ref":42})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(err.find("$ref") != std::string::npos);
+	}
+	// $defs (2019-09 alias of definitions) resolves as a $ref target.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"$defs":{"n":{"type":"number"}},"$ref":"#/$defs/n"})")));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+	// R2.1a/5: legitimate deep recursion past the old 48-deep cap. The
+	// (value,schema) pair-­keyed cycle guard allows exactly as many levels as
+	// the data has; a plain depth counter would reject a 63-level document.
+	{
+		asvJSON schema;
+		ASSERT(schema.parse(std::string_view(R"({"definitions":{"node":{"type":"object","properties":{"value":{"type":"number"},"child":{"$ref":"#/definitions/node"}},"required":["value"]}},"$ref":"#/definitions/node"})")));
+		const int LVLS = 63;
+		std::unique_ptr<asvJSONValue> node;
+		for (int d = LVLS - 1; d >= 0; --d) {
+			auto n = asvJSONValue::makeObject();
+			auto iv = std::make_unique<asvJSONValue>();
+			iv->type = asvJSONValue::INT;
+			iv->num = d;
+			n->obj->emplace("value", std::move(iv));
+			if (node) n->obj->emplace("child", std::move(node));
+			node = std::move(n);
+		}
+		asvJSON doc;
+		ASSERT(doc.setByPointer("/", std::move(node)));
+		std::string err;
+		ASSERT(doc.validate(schema, err));
+	}
+}
+
 TEST(testJSONPath) {
 	// -- dot notation --
 	{
@@ -21390,6 +21501,7 @@ RUN(testUDEBlockScalarKeepChomping);
 	std::cout << "\n--- JSON Schema Tests ---\n";
 	RUN(testJSONSchema);
 	RUN(testJSONSchemaExtras);
+	RUN(testJSONSchemaReviewFixes);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testJSONPath);

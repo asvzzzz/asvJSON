@@ -14,8 +14,8 @@
 #include <limits>
 #include <memory>
 #include <cmath>
+#include <functional>
 #include <regex>
-#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -29,8 +29,10 @@ public:
     if (!schema) return true;
     static const asvJSONValue kNull; // default-constructed node is NULL_VAL
     rootSchema_ = schema;
-    refDepth_ = std::make_shared<int>(0);
+    refStack_ = std::make_shared<RefStack>();
     patternCache_ = std::make_shared<PatternCache>();
+    shapeCache_ = std::make_shared<ShapeCache>();
+    refCache_ = std::make_shared<RefCache>();
     return validateNode(value ? value : &kNull, schema);
   }
 
@@ -46,16 +48,34 @@ private:
   const asvJSONValue* rootSchema_ = nullptr;
   std::string error_;
   std::string path_;
+  // The set of (value, schema) pairs currently being resolved through a $ref.
   // Shared by every sub-validator forked by anyOf/oneOf/not/if/contains (and
-  // copied into them), so it tracks how deeply nested $ref resolution currently
-  // is across the WHOLE validation, not just along one linear ref chain. A
-  // self-/mutually-referential schema (e.g. `{"$ref":"#"}`,
+  // copied into them), so cycle detection is exact across the WHOLE
+  // validation. A self-/mutually-referential schema (`{"$ref":"#"}`,
   // `"a":{"$ref":"#/definitions/a"}`, or a cycle reached again from inside an
   // anyOf/oneOf/not/if branch) would otherwise recurse forever through
-  // validateNode and overflow the stack. Cap at MAX_NESTING_DEPTH like the
-  // parsers do; a legitimate recursive schema follows the document's finite
-  // depth, so a chain deeper than MAX_NESTING_DEPTH is necessarily a loop.
-  std::shared_ptr<int> refDepth_ = std::make_shared<int>(0);
+  // validateNode and overflow the stack.
+  //
+  // This keyed guard is strictly more precise than a depth counter: a
+  // legitimate recursive schema consumes one distinct (value, schema) pair per
+  // data level (bounded by the parsers' MAX_NESTING_DEPTH = 48, so the stack
+  // can never grow past it), while an actual loop must revisit the same value
+  // against the same schema and is caught on the first repetition. A plain
+  // depth cap, by contrast, would spuriously reject deep (but acyclic) data
+  // and needed the magic 48.
+  struct RefKey {
+    const asvJSONValue* value;
+    const asvJSONValue* schema;
+    bool operator==(const RefKey& o) const { return value == o.value && schema == o.schema; }
+  };
+  struct RefKeyHash {
+    size_t operator()(const RefKey& k) const {
+      return std::hash<const asvJSONValue*>()(k.value) ^
+             (std::hash<const asvJSONValue*>()(k.schema) << 1);
+    }
+  };
+  using RefStack = std::unordered_set<RefKey, RefKeyHash>;
+  std::shared_ptr<RefStack> refStack_;
   // Compiled-regex cache shared across the whole validation so repeated
   // `pattern` / `patternProperties` evaluations compile each unique regex once
   // per validate() call instead of once per string node / per object.
@@ -64,6 +84,22 @@ private:
     std::unordered_set<std::string> bad;
   };
   std::shared_ptr<PatternCache> patternCache_;
+  // Cached keyword-shape checks. The shape of a schema is static, so the
+  // structural validation in validateKeywordShapes runs once per schema node
+  // (instead of once per value validated against it). Schemas are shared
+  // between every sub-validator (like patternCache_), so an anyOf over a large
+  // document pays one O(K) pass instead of one per branch per value.
+  using ShapeCache = std::unordered_map<const asvJSONValue*, bool>;
+  std::shared_ptr<ShapeCache> shapeCache_;
+  // Cached local $ref resolution: the target of a given ref string depends
+  // only on rootSchema_, so a frequently-hit pointer (e.g. a recursive schema
+  // on a large document) is walked once instead of once per reference.
+  struct RefCacheEntry {
+    const asvJSONValue* target = nullptr;
+    bool failed = false;
+  };
+  using RefCache = std::unordered_map<std::string, RefCacheEntry>;
+  std::shared_ptr<RefCache> refCache_;
 
   void setError(const std::string& msg) {
     if (!error_.empty()) return;
@@ -155,23 +191,35 @@ private:
   const asvJSONValue* resolveRef(std::string_view ref) const {
     if (ref.empty() || ref[0] != '#') return nullptr;
     ref.remove_prefix(1);
-    if (ref.empty()) return rootSchema_;
-    if (ref[0] != '/') return nullptr;
-    ref.remove_prefix(1);
-    const asvJSONValue* cur = rootSchema_;
-    // JSON Pointer reference tokens are the pieces between '/' (the first may
-    // be an empty string, correctly resolving to the object key "").
-    while (true) {
-      auto slash = ref.find('/');
-      std::string_view seg = (slash == std::string_view::npos) ? ref : ref.substr(0, slash);
-      if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
-      auto it = cur->obj->find(decodePointerToken(seg));
-      if (it == cur->obj->end()) return nullptr;
-      cur = it->second.get();
-      if (slash == std::string_view::npos) break;
-      ref.remove_prefix(slash + 1);
+    const std::string cacheKey(ref.data(), ref.size());
+    if (refCache_) {
+      auto ci = refCache_->find(cacheKey);
+      if (ci != refCache_->end()) return ci->second.failed ? nullptr : ci->second.target;
     }
-    return cur;
+    const asvJSONValue* cur = nullptr;
+    bool failed = true;
+    if (ref.empty()) {
+      cur = rootSchema_;       // "#" -- whole-schema identity ref
+      failed = false;
+    } else if (ref[0] == '/') {
+      ref.remove_prefix(1);
+      cur = rootSchema_;
+      failed = false;
+      // JSON Pointer reference tokens are the pieces between '/' (the first may
+      // be an empty string, correctly resolving to the object key "").
+      while (true) {
+        auto slash = ref.find('/');
+        std::string_view seg = (slash == std::string_view::npos) ? ref : ref.substr(0, slash);
+        if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) { failed = true; break; }
+        auto it = cur->obj->find(decodePointerToken(seg));
+        if (it == cur->obj->end()) { failed = true; break; }
+        cur = it->second.get();
+        if (slash == std::string_view::npos) break;
+        ref.remove_prefix(slash + 1);
+      }
+    }
+    if (refCache_) (*refCache_)[cacheKey] = {cur, failed};
+    return failed ? nullptr : cur;
   }
 
   static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
@@ -189,6 +237,19 @@ private:
       case asvJSONValue::INT: return a->num == b->num;
       case asvJSONValue::DOUBLE: return a->dbl == b->dbl;
       case asvJSONValue::STRING: return a->str_data == b->str_data;
+      case asvJSONValue::DATETIME: return a->timestamp == b->timestamp &&
+                                          a->datetime_ms == b->datetime_ms &&
+                                          a->tz_offset_min == b->tz_offset_min;
+      case asvJSONValue::BINARY: return a->bin_data == b->bin_data;
+      case asvJSONValue::OBJECTID: return a->str_data == b->str_data;
+      case asvJSONValue::REGEX: return a->str_data == b->str_data;
+      case asvJSONValue::TIMESTAMP: return a->num == b->num;
+      case asvJSONValue::EXTENSION: return a->ext_type == b->ext_type && a->bin_data == b->bin_data;
+      case asvJSONValue::CUSTOM_TAG:
+        if (a->str_data != b->str_data) return false;
+        if (static_cast<bool>(a->custom_value) != static_cast<bool>(b->custom_value)) return false;
+        if (a->custom_value) return valuesEqual(a->custom_value.get(), b->custom_value.get());
+        return true;
       case asvJSONValue::ARRAY: {
         if (!a->arr || !b->arr) return a->arr == b->arr;
         if (a->arr->size() != b->arr->size()) return false;
@@ -237,6 +298,15 @@ private:
     if (v->type == asvJSONValue::INT) return static_cast<double>(v->num);
     if (v->type == asvJSONValue::DOUBLE) return v->dbl;
     return 0;
+  }
+
+  // Error-message rendering of a number: int64 is printed exactly (the double
+  // conversion above would corrupt values like 9223372036854775807 in the
+  // diagnostic); doubles keep the compact to_string spelling.
+  static std::string numberToStr(const asvJSONValue* v) {
+    if (!v) return "0";
+    if (v->type == asvJSONValue::INT) return std::to_string(v->num);
+    return std::to_string(getNumberValue(v));
   }
 
   // Exact cross-type int64/double ordering. Avoids the precision loss of
@@ -338,6 +408,13 @@ private:
       patternCache_->bad.insert(pat);
       valid = false;
       return nullptr;
+    } catch (const std::bad_alloc&) {
+      // A pathological pattern (e.g. an exploding ECMAScript construct) can
+      // exhaust memory while std::regex builds its NFA table. Remember it as
+      // bad so we do not retry, and fail closed.
+      patternCache_->bad.insert(pat);
+      valid = false;
+      return nullptr;
     }
   }
 
@@ -345,6 +422,12 @@ private:
   // non-array `enum`, a negative `minLength`, a non-numeric `minimum`).
   // Malformed schemas fail validation instead of being silently ignored.
   bool validateKeywordShapes(const asvJSONValue* schema) {
+    if (auto r = schemaGet(schema, "$ref")) {
+      if (r->type != asvJSONValue::STRING) {
+        setError("Invalid schema: '$ref' must be a string");
+        return false;
+      }
+    }
     if (auto t = schemaGet(schema, "type")) {
       bool okShape = t->type == asvJSONValue::STRING;
       if (t->type == asvJSONValue::ARRAY && t->arr) {
@@ -475,8 +558,9 @@ private:
         return false;
       }
     }
-    // properties / patternProperties / definitions -- objects of schemas.
-    static const char* const schemaMaps[] = {"properties", "patternProperties", "definitions"};
+    // properties / patternProperties / definitions / $defs -- objects of schemas.
+    // ($defs is 2019-09+, aliased to draft-07 `definitions` for $ref targets.)
+    static const char* const schemaMaps[] = {"properties", "patternProperties", "definitions", "$defs"};
     for (const char* k : schemaMaps) {
       if (auto n = schemaGet(schema, k)) {
         if (n->type != asvJSONValue::OBJECT) {
@@ -535,28 +619,51 @@ private:
     return true;
   }
 
+  // Cached wrapper around validateKeywordShapes: the shape of a schema object
+  // is static, so each node's structural check runs once per validate() call
+  // instead of once per value that passes through it. Since the cache is
+  // shared with forked sub-validators, an anyOf/oneOf/not branch on the same
+  // schema costs no revalidation. A cached failure is re-run only to
+  // regenerate this validator's own error message (failures abort validation
+  // and execute once, so the repetition is negligible).
+  bool shapesOk(const asvJSONValue* schema) {
+    if (shapeCache_) {
+      auto it = shapeCache_->find(schema);
+      if (it != shapeCache_->end()) {
+        if (it->second) return true;
+        (void)validateKeywordShapes(schema); // rebuild error_ for this validator
+        return false;
+      }
+    }
+    bool ok = validateKeywordShapes(schema);
+    if (shapeCache_) (*shapeCache_)[schema] = ok;
+    return ok;
+  }
+
   bool validateNode(const asvJSONValue* value, const asvJSONValue* schema) {
     if (isBoolTrue(schema)) return true;
     if (isBoolFalse(schema)) { setError("False schema rejects all values"); return false; }
     if (!schema || schema->type != asvJSONValue::OBJECT) return true;
 
-    if (schemaHas(schema, "$ref")) {
-      auto refNode = schemaGet(schema, "$ref");
-      if (refNode && refNode->type == asvJSONValue::STRING) {
-        auto resolved = resolveRef(refNode->str_data);
-        if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
-        if (*refDepth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
-          setError("Circular $ref detected at: " + refNode->str_data);
-          return false;
-        }
-        (*refDepth_)++;
-        bool ok = validateNode(value, resolved);
-        (*refDepth_)--;
-        return ok;
+    if (auto refNode = schemaGet(schema, "$ref")) {
+      if (refNode->type != asvJSONValue::STRING) {
+        setError("Invalid schema: '$ref' must be a string");
+        return false;
       }
+      auto resolved = resolveRef(refNode->str_data);
+      if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
+      RefKey key{value, resolved};
+      if (refStack_ && refStack_->count(key) != 0) {
+        setError("Circular $ref detected at: " + refNode->str_data);
+        return false;
+      }
+      if (refStack_) refStack_->insert(key);
+      bool ok = validateNode(value, resolved);
+      if (refStack_) refStack_->erase(key);
+      return ok;
     }
 
-    if (!validateKeywordShapes(schema)) return false;
+    if (!shapesOk(schema)) return false;
 
     const asvJSONValue* typeNode = schemaGet(schema, "type");
     if (!schemaPassesTypeCheck(value, typeNode)) {
@@ -621,8 +728,10 @@ private:
           SchemaValidator subVal;
           subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_;
-          subVal.refDepth_ = refDepth_;
+          subVal.refStack_ = refStack_;
           subVal.patternCache_ = patternCache_;
+          subVal.shapeCache_ = shapeCache_;
+          subVal.refCache_ = refCache_;
           if (subVal.validateNode(value, sub.get())) return true;
         }
         setError("Does not match any schema in anyOf");
@@ -638,8 +747,10 @@ private:
           SchemaValidator subVal;
           subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_;
-          subVal.refDepth_ = refDepth_;
+          subVal.refStack_ = refStack_;
           subVal.patternCache_ = patternCache_;
+          subVal.shapeCache_ = shapeCache_;
+          subVal.refCache_ = refCache_;
           if (subVal.validateNode(value, sub.get())) matches++;
         }
         if (matches != 1) {
@@ -655,8 +766,10 @@ private:
         SchemaValidator subVal;
         subVal.rootSchema_ = rootSchema_;
         subVal.path_ = path_;
-        subVal.refDepth_ = refDepth_;
+        subVal.refStack_ = refStack_;
         subVal.patternCache_ = patternCache_;
+        subVal.shapeCache_ = shapeCache_;
+        subVal.refCache_ = refCache_;
         if (subVal.validateNode(value, node)) {
           setError("Matches the 'not' schema");
           return false;
@@ -670,8 +783,10 @@ private:
         SchemaValidator ifVal;
         ifVal.rootSchema_ = rootSchema_;
         ifVal.path_ = path_;
-        ifVal.refDepth_ = refDepth_;
+        ifVal.refStack_ = refStack_;
         ifVal.patternCache_ = patternCache_;
+        ifVal.shapeCache_ = shapeCache_;
+        ifVal.refCache_ = refCache_;
         bool cond = ifVal.validateNode(value, ifNode);
         if (cond && schemaHas(schema, "then")) {
           return validateNode(value, schemaGet(schema, "then"));
@@ -760,9 +875,9 @@ private:
     if (minNode && isNumberType(minNode) &&
         (strictMin ? compareNumbers(value, minNode) <= 0 : compareNumbers(value, minNode) < 0)) {
       if (strictMin) {
-        setError("Value " + std::to_string(getNumberValue(value)) + " is not greater than exclusiveMinimum " + std::to_string(getNumberValue(minNode)));
+        setError("Value " + numberToStr(value) + " is not greater than exclusiveMinimum " + numberToStr(minNode));
       } else {
-        setError("Value " + std::to_string(getNumberValue(value)) + " is less than minimum " + std::to_string(getNumberValue(minNode)));
+        setError("Value " + numberToStr(value) + " is less than minimum " + numberToStr(minNode));
       }
       return false;
     }
@@ -770,9 +885,9 @@ private:
     if (maxNode && isNumberType(maxNode) &&
         (strictMax ? compareNumbers(value, maxNode) >= 0 : compareNumbers(value, maxNode) > 0)) {
       if (strictMax) {
-        setError("Value " + std::to_string(getNumberValue(value)) + " is not less than exclusiveMaximum " + std::to_string(getNumberValue(maxNode)));
+        setError("Value " + numberToStr(value) + " is not less than exclusiveMaximum " + numberToStr(maxNode));
       } else {
-        setError("Value " + std::to_string(getNumberValue(value)) + " is greater than maximum " + std::to_string(getNumberValue(maxNode)));
+        setError("Value " + numberToStr(value) + " is greater than maximum " + numberToStr(maxNode));
       }
       return false;
     }
@@ -794,7 +909,7 @@ private:
           isMultiple = std::fabs(remainder) <= tolerance || std::fabs(remainder - mof) <= tolerance;
         }
         if (!isMultiple) {
-          setError("Value " + std::to_string(getNumberValue(value)) + " is not a multiple of " + std::to_string(getNumberValue(node)));
+          setError("Value " + numberToStr(value) + " is not a multiple of " + numberToStr(node));
           return false;
         }
       }
@@ -890,12 +1005,16 @@ private:
       auto node = schemaGet(schema, "contains");
       if (node && items) {
         bool found = false;
+        // Build the probing validator once; only its path changes per item.
+        SchemaValidator subVal;
+        subVal.rootSchema_ = rootSchema_;
+        subVal.refStack_ = refStack_;
+        subVal.patternCache_ = patternCache_;
+        subVal.shapeCache_ = shapeCache_;
+        subVal.refCache_ = refCache_;
         for (size_t i = 0; i < count; i++) {
-          SchemaValidator subVal;
-          subVal.rootSchema_ = rootSchema_;
           subVal.path_ = path_ + "/" + std::to_string(i);
-          subVal.refDepth_ = refDepth_;
-          subVal.patternCache_ = patternCache_;
+          subVal.error_.clear();
           if (subVal.validateNode((*items)[i].get(), node)) { found = true; break; }
         }
         if (!found) {
@@ -982,7 +1101,7 @@ private:
       const asvJSONValue* patternPropsSchema = schemaGet(schema, "patternProperties");
       const asvJSONValue* additionalPropsSchema = schemaGet(schema, "additionalProperties");
 
-      std::set<std::string> matchedByPattern;
+      std::unordered_set<std::string> matchedByPattern;
 
       if (patternPropsSchema && patternPropsSchema->type == asvJSONValue::OBJECT && patternPropsSchema->obj) {
         struct CompiledPattern {
