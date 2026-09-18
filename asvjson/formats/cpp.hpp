@@ -27,10 +27,13 @@
 
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace asvJSONInternal {
@@ -54,7 +57,8 @@ inline bool cppIsKeyword(std::string_view s) {
     "true","try","typedef","typeid","typename","union","unsigned","using",
     "virtual","void","volatile","wchar_t","while","xor","xor_eq",
     "int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t","uint32_t",
-    "uint64_t","size_t","time_t","ssize_t"
+    "uint64_t","size_t","time_t","ssize_t",
+    "final","import","module","override"
   };
   for (const char* k : kw) if (s == k) return true;
   return false;
@@ -103,6 +107,16 @@ inline std::string cppPascal(std::string_view raw, const char* fallback = "Type"
 
 // Naive singularization for element type names ("items" -> "item").
 inline std::string cppSingular(std::string w) {
+  static const char* const keep[] = {
+    "series", "species", "status", "data", "analysis", "basis", "crisis",
+    "news", "means", "index", "matrix", "vertex", "appendix"
+  };
+  for (const char* k : keep) if (w == k) return w;
+  if (w.size() > 3 && w.compare(w.size() - 3, 3, "sis") == 0) return w;
+  if (w.size() > 4 && w.compare(w.size() - 3, 3, "ies") == 0)
+    return w.substr(0, w.size() - 3) + "y";            // cities -> city
+  if (w.size() > 3 && w.compare(w.size() - 4, 4, "sses") == 0)
+    return w.substr(0, w.size() - 2);                  // classes -> class
   if (w.size() > 1 && w.back() == 's' && w[w.size() - 2] != 's') w.pop_back();
   return w;
 }
@@ -220,14 +234,14 @@ private:
       std::string cand = base + std::to_string(i);
       if (usedNames_.insert(cand).second) return cand;
     }
-    return base;
+    throw asvJSONError("cpp: could not allocate a unique type name for '" + base + "'");
   }
 
   std::string registerEnum(const std::vector<std::string>& rawValues,
                            const std::string& path, const std::string& hint,
                            const std::vector<const asvJSONValue*>& srcs, bool singular) {
     std::string sig;
-    for (const auto& v : rawValues) { sig += v; sig += '\x1F'; }
+    for (const auto& v : rawValues) { sig += std::to_string(v.size()); sig += ':'; sig += v; sig += ';'; }
     auto it = enumBySig_.find(sig);
     if (it != enumBySig_.end()) return enums_[it->second].name;
 
@@ -282,6 +296,7 @@ private:
   std::string containerOf(const std::string& elem, size_t n, std::string& suffixOut);
 
   void valueLiteral(const asvJSONValue* v, const CppType& t, std::string& out) const;
+  static std::string cppIntLiteral(long long n);
   void renderStruct(const StructDef& s, std::string& out) const;
   void renderEnum(const EnumDef& e, std::string& out) const;
   void topoVisit(size_t idx);
@@ -292,10 +307,25 @@ private:
   std::vector<EnumDef> enums_;
   std::map<std::string, size_t> enumBySig_;
   std::set<std::string> usedNames_;
-  std::set<std::string> busyObjects_;
+  std::unordered_set<const void*> busyObjects_;
+  std::unordered_map<const asvJSONValue*, CppType> objTypeCache_;
+  std::unordered_map<std::string, size_t> structIndex_;
   std::vector<std::string> order_;
   bool usedVariant_ = false;
   bool usedUniquePtr_ = false;
+};
+
+// Scope guard: removes an object pointer from busyObjects_ on scope exit, so an
+// exception (e.g. std::bad_alloc) never leaves the object "stuck" as busy.
+class CppGeneratorBusyGuard {
+  std::unordered_set<const void*>& set_;
+  const void* key_;
+public:
+  CppGeneratorBusyGuard(std::unordered_set<const void*>& set, const void* key)
+    : set_(set), key_(key) {}
+  CppGeneratorBusyGuard(const CppGeneratorBusyGuard&) = delete;
+  CppGeneratorBusyGuard& operator=(const CppGeneratorBusyGuard&) = delete;
+  ~CppGeneratorBusyGuard() { set_.erase(key_); }
 };
 
 inline std::string CppGenerator::containerOf(const std::string& elem, size_t n,
@@ -309,7 +339,8 @@ inline std::string CppGenerator::containerOf(const std::string& elem, size_t n,
 }
 
 inline size_t CppGenerator::findStruct(const std::string& name) const {
-  for (size_t i = 0; i < structs_.size(); i++) if (structs_[i].name == name) return i;
+  auto it = structIndex_.find(name);
+  if (it != structIndex_.end()) return it->second;
   return static_cast<size_t>(-1);
 }
 
@@ -507,8 +538,10 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
     case asvJSONValue::CUSTOM_TAG: t.type = effString(); return t;
     case asvJSONValue::ARRAY: return inferArray(v, path, hint);
     case asvJSONValue::OBJECT: {
-      uintptr_t key = reinterpret_cast<uintptr_t>(v);
-      if (busyObjects_.count(std::to_string(key))) {
+      auto cac = objTypeCache_.find(v);
+      if (cac != objTypeCache_.end()) return cac->second;
+      const void* key = static_cast<const void*>(v);
+      if (busyObjects_.count(key)) {
         // Recursive reference: break the cycle with a pointer.
         usedUniquePtr_ = true;
         t.kind = CppType::Struct;
@@ -516,12 +549,13 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
         t.type = isC() ? (t.structName + "*") : ("std::unique_ptr<" + t.structName + ">");
         return t;
       }
-      busyObjects_.insert(std::to_string(key));
+      busyObjects_.insert(key);
+      CppGeneratorBusyGuard guard(busyObjects_, key);
       std::string name = registerStruct(v, path, hint, commentSrc);
-      busyObjects_.erase(std::to_string(key));
       t.kind = CppType::Struct;
       t.structName = name;
       t.type = name;
+      objTypeCache_.emplace(v, t);
       return t;
     }
     default: t.type = effString(); return t;
@@ -559,10 +593,13 @@ inline void CppGenerator::valueLiteral(const asvJSONValue* v, const CppType& t,
   switch (v->type) {
     case asvJSONValue::NULL_VAL: out += isC() ? "0" : "nullptr"; break;
     case asvJSONValue::BOOL_VAL: out += v->flag ? "true" : "false"; break;
-    case asvJSONValue::INT: out += std::to_string(static_cast<long long>(v->num)); break;
+    case asvJSONValue::INT:
+      out += cppIntLiteral(static_cast<long long>(v->num));
+      break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
-      if (std::isnan(d) || std::isinf(d)) { out += "0.0"; break; }
+      if (std::isnan(d)) { out += "(0.0 / 0.0)"; break; }
+      if (std::isinf(d)) { out += (d < 0 ? "(-1.0 / 0.0)" : "(1.0 / 0.0)"); break; }
       std::string s; fmtDoubleVal(d, s);
       if (s.find_first_of(".eE") == std::string::npos) s += ".0";
       out += s;
@@ -576,7 +613,7 @@ inline void CppGenerator::valueLiteral(const asvJSONValue* v, const CppType& t,
     case asvJSONValue::TIMESTAMP:
     case asvJSONValue::EXTENSION:
     case asvJSONValue::CUSTOM_TAG:
-      if (v->type == asvJSONValue::DATETIME) { out += std::to_string(static_cast<long long>(v->timestamp)); break; }
+      if (v->type == asvJSONValue::DATETIME) { out += cppIntLiteral(static_cast<long long>(v->timestamp)); break; }
       if (v->type == asvJSONValue::BINARY || v->type == asvJSONValue::EXTENSION) { out += "{}"; break; }
       out += '"';
       appendJsonEscaped(out, v->str_data);
@@ -584,6 +621,13 @@ inline void CppGenerator::valueLiteral(const asvJSONValue* v, const CppType& t,
       break;
     default: out += "{}"; break;
   }
+}
+
+// Render an integer constant that always compiles (INT64_MIN would otherwise
+// produce -9223372036854775808, which is not a valid long long literal).
+inline std::string CppGenerator::cppIntLiteral(long long n) {
+  if (n == (std::numeric_limits<long long>::min)()) return "(-9223372036854775807LL - 1)";
+  return std::to_string(n);
 }
 
 inline void CppGenerator::renderStruct(const StructDef& s, std::string& out) const {
@@ -674,6 +718,7 @@ inline std::string CppGenerator::run(const asvJSONValue* root) {
     topName = uniqueName(cppPascal(opts_.rootName, "Document"));
   }
 
+  for (size_t i = 0; i < structs_.size(); i++) structIndex_[structs_[i].name] = i;
   for (size_t i = 0; i < structs_.size(); i++) topoVisit(i);
 
   std::string out;
@@ -693,8 +738,11 @@ inline std::string CppGenerator::run(const asvJSONValue* root) {
       out += "#include <vector>\n\n";
     }
   }
-  if (!isC() && opts_.forwardDeclare && !structs_.empty()) {
-    for (const auto& s : structs_) out += "struct " + s.name + ";\n";
+  if (opts_.forwardDeclare && !structs_.empty()) {
+    for (const auto& s : structs_) {
+      if (isC()) out += "typedef struct " + s.name + " " + s.name + ";\n";
+      else out += "struct " + s.name + ";\n";
+    }
     out += '\n';
   }
   for (const auto& e : enums_) renderEnum(e, out);
@@ -758,18 +806,89 @@ inline std::string cppRdStripNumSuffix(std::string s) {
   return s;
 }
 
+// Parse exactly four hex digits (for \uXXXX); returns 0xFFFFFFFF on failure.
+inline uint32_t cppRdHex4(std::string_view s) {
+  if (s.size() < 4) return 0xFFFFFFFFu;
+  uint32_t v = 0;
+  for (size_t k = 0; k < 4; k++) {
+    char c = s[k];
+    v <<= 4;
+    if (c >= '0' && c <= '9') v |= static_cast<uint32_t>(c - '0');
+    else if (c >= 'a' && c <= 'f') v |= static_cast<uint32_t>(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v |= static_cast<uint32_t>(c - 'A' + 10);
+    else return 0xFFFFFFFFu;
+  }
+  return v;
+}
+
+// Append a Unicode code point as UTF-8 (for decoded \uXXXX escapes).
+inline void cppRdUtf8(std::string& out, uint32_t cp) {
+  if (cp <= 0x7F) {
+    out += static_cast<char>(cp);
+  } else if (cp <= 0x7FF) {
+    out += static_cast<char>(0xC0 | (cp >> 6));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else if (cp <= 0xFFFF) {
+    out += static_cast<char>(0xE0 | (cp >> 12));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else {
+    out += static_cast<char>(0xF0 | (cp >> 18));
+    out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  }
+}
+
 inline std::vector<Tok> cppRdLex(std::string_view in,
                                  std::map<std::string, std::vector<Tok>>* macros = nullptr) {
   std::vector<Tok> out;
   int line = 1;
   size_t i = 0, n = in.size();
+  // Conditional-compilation stack: {branch active, branch already taken}.
+  std::vector<std::pair<bool, bool>> cond;
+  // True when an enclosing #if/#ifdef/#elif branch is inactive (preprocessor
+  // content below it is skipped and #define/#undef there are not honored).
+  auto condSkipped = [&]() {
+    for (auto& cc : cond) if (!cc.first) return true;
+    return false;
+  };
+  auto condParentActive = [&]() {
+    for (size_t ci = 0; ci + 1 < cond.size(); ci++) if (!cond[ci].first) return false;
+    return true;
+  };
+  // Pragmatic #if expression: "0" -> false, "1" -> true, `defined(X)` /
+  // `!defined(X)` by the macros seen so far, anything else -> true
+  // (conservative: never silently drops live code).
+  auto condEval = [&](const std::string& logical, size_t cs) {
+    size_t k = cs;
+    while (k < logical.size() && (logical[k] == ' ' || logical[k] == '\t')) k++;
+    std::string expr = logical.substr(k);
+    while (!expr.empty() && (expr.back() == ' ' || expr.back() == '\t' || expr.back() == '\r'))
+      expr.pop_back();
+    if (expr == "0") return false;
+    if (expr == "1") return true;
+    size_t o = expr.find("defined");
+    if (o != std::string::npos) {
+      size_t bo = expr.find('(', o);
+      size_t eo = expr.find(')', o);
+      if (bo != std::string::npos && eo > bo) {
+        std::string nm = expr.substr(bo + 1, eo - bo - 1);
+        bool neg = o > 0 && expr[o - 1] == '!';
+        bool d = macros && macros->count(nm) > 0;
+        return neg ? !d : d;
+      }
+    }
+    return true;
+  };
   while (i < n) {
     char c = in[i];
     if (c == '\n') { line++; i++; continue; }
     if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
     if (c == '#') {
       // Preprocessor directive: consume the logical line (honoring `\`
-      // continuations) and capture object-like `#define NAME repl` macros.
+      // continuations), track conditional-compilation state, and capture
+      // object-like `#define NAME repl` macros only in active branches.
       size_t j = i;
       std::string logical;
       while (j < n) {
@@ -792,35 +911,82 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
         size_t ds = q;
         while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
-        if (logical.compare(ds, q - ds, "define") == 0) {
-          while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
-          size_t ns = q;
-          while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
-          std::string name = logical.substr(ns, q - ns);
-          bool functionLike = (q < logical.size() && logical[q] == '(');
-          if (!name.empty() && !functionLike) {
+        const std::string w = logical.substr(ds, q - ds);
+        if (w == "if") {
+          bool t = condEval(logical, q);
+          bool parentA = !condSkipped();
+          bool act = t && parentA;
+          cond.push_back({act, act});
+        } else if (w == "ifdef" || w == "ifndef") {
+          size_t k = q;
+          while (k < logical.size() && (logical[k] == ' ' || logical[k] == '\t')) k++;
+          std::string nm = logical.substr(k);
+          while (!nm.empty() && (nm.back() == ' ' || nm.back() == '\t' || nm.back() == '\r'))
+            nm.pop_back();
+          bool d = macros->count(nm) > 0;
+          bool t = (w == "ifdef") ? d : !d;
+          bool parentA = !condSkipped();
+          bool act = t && parentA;
+          cond.push_back({act, act});
+        } else if (w == "else") {
+          if (!cond.empty()) {
+            bool parentA = condParentActive();
+            bool newA = parentA && !cond.back().second;
+            cond.back().second = cond.back().second || newA;
+            cond.back().first = newA;
+          }
+        } else if (w == "elif") {
+          if (!cond.empty()) {
+            bool parentA = condParentActive();
+            bool newA = parentA && !cond.back().second && condEval(logical, q);
+            cond.back().second = cond.back().second || newA;
+            cond.back().first = newA;
+          }
+        } else if (w == "endif") {
+          if (!cond.empty()) cond.pop_back();
+        } else if (w == "define") {
+          if (!condSkipped()) {
+            while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+            size_t ns = q;
+            while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
+            std::string name = logical.substr(ns, q - ns);
+            bool functionLike = (q < logical.size() && logical[q] == '(');
+            if (!name.empty() && !functionLike) {
+            std::vector<Tok> rtoks;
             while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
             std::string repl = logical.substr(q);
             while (!repl.empty() &&
                    (repl.back() == ' ' || repl.back() == '\t' || repl.back() == '\r'))
               repl.pop_back();
             if (!repl.empty()) {
-              std::vector<Tok> rtoks = cppRdLex(repl, nullptr);
+              rtoks = cppRdLex(repl, nullptr);
               if (!rtoks.empty() && rtoks.back().kind == Tok::End) rtoks.pop_back();
-              if (!rtoks.empty()) (*macros)[name] = std::move(rtoks);
             }
+            (*macros)[name] = std::move(rtoks);
+          }
+          }
+        } else if (w == "undef") {
+          if (!condSkipped()) {
+            while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+            size_t ns = q;
+            while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
+            std::string nm = logical.substr(ns, q - ns);
+            if (!nm.empty()) macros->erase(nm);
           }
         }
       }
       continue;
     }
+    bool skipTok = condSkipped();
     if (c == '/' && i + 1 < n && in[i + 1] == '/') {
       i += 2;
       size_t s = i;
       while (i < n && in[i] != '\n') i++;
-      Tok t; t.kind = Tok::Comment; t.line = line; t.block = false;
-      t.text.assign(in.data() + s, i - s);
-      out.push_back(std::move(t));
+      if (!skipTok) {
+        Tok t; t.kind = Tok::Comment; t.line = line; t.block = false;
+        t.text.assign(in.data() + s, i - s);
+        out.push_back(std::move(t));
+      }
       continue;
     }
     if (c == '/' && i + 1 < n && in[i + 1] == '*') {
@@ -828,10 +994,13 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       size_t s = i;
       int sl = line;
       while (i + 1 < n && !(in[i] == '*' && in[i + 1] == '/')) { if (in[i] == '\n') line++; i++; }
-      Tok t; t.kind = Tok::Comment; t.line = sl; t.block = true;
-      t.text.assign(in.data() + s, i - s);
+      if (i + 1 >= n) throw asvJSONError("cpp: unterminated block comment at line " + std::to_string(sl));
+      if (!skipTok) {
+        Tok t; t.kind = Tok::Comment; t.line = sl; t.block = true;
+        t.text.assign(in.data() + s, i - s);
+        out.push_back(std::move(t));
+      }
       i += 2;
-      out.push_back(std::move(t));
       continue;
     }
     if (c == '"' || c == '\'') {
@@ -851,6 +1020,40 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             case '\\': val += '\\'; break;
             case '\'': val += '\''; break;
             case '"': val += '"'; break;
+            case 'x': {
+              int hv = 0, cnt = 0;
+              while (cnt < 2 && i < n) {
+                char hc = in[i];
+                int d = -1;
+                if (hc >= '0' && hc <= '9') d = hc - '0';
+                else if (hc >= 'a' && hc <= 'f') d = hc - 'a' + 10;
+                else if (hc >= 'A' && hc <= 'F') d = hc - 'A' + 10;
+                if (d < 0) break;
+                hv = hv * 16 + d; i++; cnt++;
+              }
+              val += static_cast<char>(hv);
+              break;
+            }
+            case 'u': {
+              uint32_t u1 = (i + 4 <= n) ? cppRdHex4(std::string_view(in.data() + i, 4)) : 0xFFFFFFFFu;
+              if (u1 == 0xFFFFFFFFu)
+                throw asvJSONError("cpp: invalid \\u escape at line " + std::to_string(sl));
+              i += 4;
+              uint32_t cp = u1;
+              if (u1 >= 0xD800 && u1 <= 0xDBFF) {
+                if (i + 6 <= n && in[i] == '\\' && in[i + 1] == 'u') {
+                  uint32_t u2 = cppRdHex4(std::string_view(in.data() + i + 2, 4));
+                  if (u2 != 0xFFFFFFFFu && u2 >= 0xDC00 && u2 <= 0xDFFF) {
+                    cp = 0x10000 + ((u1 - 0xD800) << 10) + (u2 - 0xDC00);
+                    i += 6;
+                  } else cp = 0xFFFD;
+                } else cp = 0xFFFD;
+              } else if (u1 >= 0xDC00 && u1 <= 0xDFFF) {
+                cp = 0xFFFD;
+              }
+              cppRdUtf8(val, cp);
+              break;
+            }
             default: val += e; break;
           }
         } else {
@@ -858,9 +1061,12 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
           val += in[i++];
         }
       }
-      if (i < n) i++;
-      Tok t; t.kind = (q == '"' ? Tok::Str : Tok::Char); t.line = sl; t.text = std::move(val);
-      out.push_back(std::move(t));
+      if (i >= n) throw asvJSONError("cpp: unterminated string literal at line " + std::to_string(sl));
+      i++; // closing quote
+      if (!skipTok) {
+        Tok t; t.kind = (q == '"' ? Tok::Str : Tok::Char); t.line = sl; t.text = std::move(val);
+        out.push_back(std::move(t));
+      }
       continue;
     }
     if ((c >= '0' && c <= '9') ||
@@ -869,23 +1075,31 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       while (i < n && (cppRdIdentChar(in[i]) || in[i] == '.' ||
              ((in[i] == '+' || in[i] == '-') && i > s && (in[i - 1] == 'e' || in[i - 1] == 'E'))))
         i++;
-      Tok t; t.kind = Tok::Number; t.line = line;
-      t.text.assign(in.data() + s, i - s);
-      out.push_back(std::move(t));
+      if (!skipTok) {
+        Tok t; t.kind = Tok::Number; t.line = line;
+        t.text.assign(in.data() + s, i - s);
+        out.push_back(std::move(t));
+      }
       continue;
     }
     if (cppRdIdentStart(c)) {
       size_t s = i;
       while (i < n && cppRdIdentChar(in[i])) i++;
-      Tok t; t.kind = Tok::Ident; t.line = line;
-      t.text.assign(in.data() + s, i - s);
-      out.push_back(std::move(t));
+      if (!skipTok) {
+        Tok t; t.kind = Tok::Ident; t.line = line;
+        t.text.assign(in.data() + s, i - s);
+        out.push_back(std::move(t));
+      }
       continue;
     }
-    Tok t; t.kind = Tok::Punct; t.line = line;
-    if (c == ':' && i + 1 < n && in[i + 1] == ':') { t.text = "::"; i += 2; }
-    else { t.text.assign(1, c); i++; }
-    out.push_back(std::move(t));
+    if (!skipTok) {
+      Tok t; t.kind = Tok::Punct; t.line = line;
+      if (c == ':' && i + 1 < n && in[i + 1] == ':') { t.text = "::"; i += 2; }
+      else { t.text.assign(1, c); i++; }
+      out.push_back(std::move(t));
+    } else {
+      i++;
+    }
   }
   Tok e; e.kind = Tok::End; e.line = line;
   out.push_back(std::move(e));
@@ -954,10 +1168,20 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
     if (neg) s.insert(s.begin(), '-');
     if (flt) {
       try { return asvJSONValue::makeDouble(std::stod(s)); }
-      catch (...) { return asvJSONValue::makeDouble(0.0); }
+      catch (...) { return asvJSONValue::makeString(cppRdStripNumSuffix(tk->text)); }
     }
-    try { return asvJSONValue::makeInt(static_cast<int64_t>(std::stoll(s, nullptr, 0))); }
-    catch (...) { return asvJSONValue::makeInt(0); }
+    // Boundary constant: -9223372036854775808 is valid but not a literal.
+    if (s == "-9223372036854775808")
+      return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
+    try {
+      std::string::size_type pos = 0;
+      long long v = std::stoll(s, &pos, 0);
+      if (pos == s.size()) return asvJSONValue::makeInt(static_cast<int64_t>(v));
+    } catch (const std::out_of_range&) {}
+    catch (...) {}
+    // Overflow or a partially-consumed literal ("08"): preserve the value as a
+    // string instead of silently zeroing it.
+    return asvJSONValue::makeString(cppRdStripNumSuffix(tk->text));
   }
   if (tk->kind == Tok::Ident) {
     if (tk->text == "true") return asvJSONValue::makeBool(true);
@@ -1009,7 +1233,7 @@ inline bool cppRdIsQual(const std::string& s) {
   return s == "const" || s == "volatile" || s == "static" || s == "constexpr" ||
          s == "consteval" || s == "constinit" || s == "mutable" || s == "inline" ||
          s == "extern" || s == "register" || s == "typename" || s == "struct" ||
-         s == "class" || s == "enum" || s == "signed" || s == "friend" ||
+         s == "class" || s == "enum" || s == "friend" ||
          s == "virtual" || s == "thread_local";
 }
 
@@ -1026,6 +1250,36 @@ inline TypeRef::ScalarKind cppRdClassify(const std::string& n) {
       n == "uintptr_t")
     return TypeRef::SInt;
   if (n == "void" || n == "nullptr_t") return TypeRef::SNull;
+  return TypeRef::SNone;
+}
+
+// Classify a whole type region by the identifiers it contains, so multi-word
+// types classify correctly (`signed char` -> int, `unsigned long long` -> int).
+inline TypeRef::ScalarKind cppRdClassifyRegion(const std::vector<const Tok*>& v,
+                                               size_t b, size_t e) {
+  bool anyInt = false, anyFloat = false, anyChar = false, anyBool = false;
+  bool anyStr = false, anyVoid = false;
+  for (size_t k = b; k < e; k++) {
+    if (v[k]->kind != Tok::Ident) continue;
+    const std::string& s = v[k]->text;
+    if (s == "bool") anyBool = true;
+    else if (s == "float" || s == "double") anyFloat = true;
+    else if (s == "char" || s == "wchar_t" || s == "char16_t" || s == "char32_t") anyChar = true;
+    else if (s == "string" || s == "string_view" || s == "basic_string") anyStr = true;
+    else if (s == "void" || s == "nullptr_t") anyVoid = true;
+    else if (s == "int" || s == "long" || s == "short" ||
+             s == "signed" || s == "unsigned" || s == "size_t" || s == "ssize_t" ||
+             s == "time_t" || s == "int8_t" || s == "int16_t" || s == "int32_t" ||
+             s == "int64_t" || s == "uint8_t" || s == "uint16_t" || s == "uint32_t" ||
+             s == "uint64_t" || s == "intptr_t" || s == "uintptr_t")
+      anyInt = true;
+  }
+  if (anyBool) return TypeRef::SBool;
+  if (anyFloat) return TypeRef::SDouble;
+  if (anyInt) return TypeRef::SInt;
+  if (anyChar) return TypeRef::SString;
+  if (anyStr) return TypeRef::SString;
+  if (anyVoid) return TypeRef::SNull;
   return TypeRef::SNone;
 }
 
@@ -1075,6 +1329,11 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
     } else if (tn == "optional") {
       ty.kind = TypeRef::Optional;
       if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+    } else if (tn == "unique_ptr" || tn == "shared_ptr") {
+      // Pointer wrappers melt to their pointee so recursive structs (which
+      // toCpp() emits as std::unique_ptr<T>) round-trip as values.
+      if (!groups.empty()) ty = cppRdParseTypeV(v, groups[0].first, groups[0].second);
+      else { ty.kind = TypeRef::Unknown; ty.name = "std::" + tn; }
     } else if (tn == "map" || tn == "unordered_map") {
       ty.kind = TypeRef::Map;
       if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
@@ -1088,11 +1347,15 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
     }
     return ty;
   }
+  // Strip both leading and trailing qualifiers (`Foo const field;`, which C
+  // and some C++ styles use). The leading strip is above; trailing here.
+  size_t et = e;
+  while (et > i && v[et - 1]->kind == Tok::Ident && cppRdIsQual(v[et - 1]->text)) et--;
   std::string name;
-  for (size_t k = i; k < e; k++)
+  for (size_t k = i; k < et; k++)
     if (v[k]->kind == Tok::Ident) name = v[k]->text;
   ty.name = name;
-  TypeRef::ScalarKind sk = cppRdClassify(name);
+  TypeRef::ScalarKind sk = cppRdClassifyRegion(v, i, et);
   if (sk != TypeRef::SNone) { ty.kind = TypeRef::Scalar; ty.scalar = sk; }
   else { ty.kind = TypeRef::Unknown; }
   return ty;
@@ -1305,7 +1568,9 @@ struct Reader {
     }
   }
 
-  std::unique_ptr<FieldDef> parseStructDecl() {
+  // Returns the "extra declarators" declared after the closing brace
+  // (e.g. `struct Foo { ... } a, b;` -> fields a and b).
+  std::vector<FieldDef> parseStructDecl() {
     std::vector<Comment> lead = takePending();
     adv(); // struct / class
     skipTrivia();
@@ -1313,15 +1578,15 @@ struct Reader {
     if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
     skipTrivia();
     if (isP(":")) { skipBases(); skipTrivia(); }
-    if (isP(";")) { adv(); return nullptr; } // forward declaration
-    if (!isP("{")) { skipToSemi(); return nullptr; }
+    if (isP(";")) { adv(); return {}; } // forward declaration
+    if (!isP("{")) { skipToSemi(); return {}; }
     StructDef def;
     def.name = name;
     def.leading = std::move(lead);
     return parseStructBody(def);
   }
 
-  std::unique_ptr<FieldDef> parseStructBody(StructDef& def) {
+  std::vector<FieldDef> parseStructBody(StructDef& def) {
     adv(); // '{'
     while (!eof()) {
       skipTrivia();
@@ -1341,29 +1606,53 @@ struct Reader {
           adv();
         }
         if (isP(";")) adv();
-        std::unique_ptr<FieldDef> extra;
+        std::vector<FieldDef> extras;
         if (def.name.empty()) {
           for (auto& tk : trail) if (tk.kind == Tok::Ident) { def.name = tk.text; break; }
         } else {
-          const size_t none = static_cast<size_t>(-1);
-          size_t np = none, eq2 = none;
+          // `struct Foo { ... } a, b, c = {};` - one declarator per
+          // top-level comma-separated segment.
+          std::vector<std::pair<size_t, size_t>> segs;
+          size_t segStart = 0, dP = 0, dA = 0, dB = 0, dBr = 0;
           for (size_t k = 0; k < trail.size(); k++) {
-            if (eq2 == none && trail[k].kind == Tok::Punct && trail[k].text == "=") eq2 = k;
-            if (eq2 == none && trail[k].kind == Tok::Ident) np = k;
-          }
-          if (np != none) {
-            extra.reset(new FieldDef());
-            extra->name = trail[np].text;
-            extra->type.kind = TypeRef::Unknown;
-            extra->type.name = def.name;
-            if (eq2 != none) {
-              extra->hasInit = true;
-              for (size_t k = eq2 + 1; k < trail.size(); k++) extra->init.push_back(trail[k]);
+            if (trail[k].kind != Tok::Punct) continue;
+            const std::string& s2 = trail[k].text;
+            if (s2 == "(") dP++;
+            else if (s2 == ")") { if (dP > 0) dP--; }
+            else if (s2 == "<") dA++;
+            else if (s2 == ">") { if (dA > 0) dA--; }
+            else if (s2 == "[") dBr++;
+            else if (s2 == "]") { if (dBr > 0) dBr--; }
+            else if (s2 == "{") dB++;
+            else if (s2 == "}") { if (dB > 0) dB--; }
+            else if (s2 == "," && dP == 0 && dA == 0 && dB == 0 && dBr == 0) {
+              segs.push_back({segStart, k}); segStart = k + 1;
             }
+          }
+          segs.push_back({segStart, trail.size()});
+          for (auto& [sb, se] : segs) {
+            if (sb >= se) continue;
+            size_t eq2 = static_cast<size_t>(-1);
+            for (size_t k = sb; k < se; k++)
+              if (trail[k].kind == Tok::Punct && trail[k].text == "=") { eq2 = k; break; }
+            size_t nameI = static_cast<size_t>(-1);
+            size_t lim = (eq2 == static_cast<size_t>(-1)) ? se : eq2;
+            for (size_t k = lim; k > sb; k--)
+              if (trail[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+            if (nameI == static_cast<size_t>(-1)) continue;
+            FieldDef f;
+            f.name = trail[nameI].text;
+            f.type.kind = TypeRef::Unknown;
+            f.type.name = def.name;
+            if (eq2 != static_cast<size_t>(-1)) {
+              f.hasInit = true;
+              for (size_t k = eq2 + 1; k < se; k++) f.init.push_back(trail[k]);
+            }
+            extras.push_back(std::move(f));
           }
         }
         registerStruct(std::move(def));
-        return extra;
+        return extras;
       }
       if (isP(";")) { adv(); continue; }
       if (cur().kind == Tok::Ident) {
@@ -1380,15 +1669,15 @@ struct Reader {
         if (looksLikeNestedDef()) {
           if (s == "enum") parseEnumDecl();
           else {
-            auto fld = parseStructDecl();
-            if (fld) def.fields.push_back(std::move(*fld));
+            auto flds = parseStructDecl();
+            for (auto& f : flds) def.fields.push_back(std::move(f));
           }
           continue;
         }
       }
       parseMember(def);
     }
-    return nullptr;
+    return {};
   }
 
   void parseMember(StructDef& def) {
@@ -1397,7 +1686,9 @@ struct Reader {
     size_t start = p, i = p;
     int paren = 0, ang = 0, brk = 0, brace = 0;
     bool sawEq = false, sawParen = false, methodBody = false;
-    size_t eq = npos, end = npos;
+    size_t end = npos;
+    std::vector<size_t> commas;
+    bool parsedAny = false;
     while (i < t.size()) {
       const Tok& tk = t[i];
       if (tk.kind == Tok::End) break;
@@ -1428,65 +1719,107 @@ struct Reader {
           } else brace++;
         }
         else if (s == "}") { if (brace > 0) brace--; else break; }
+        else if (s == "," && paren == 0 && ang == 0 && brk == 0 && brace == 0) {
+          if (commas.empty() || commas.back() != i) commas.push_back(i);
+        }
         else if (s == ";" && paren == 0 && ang == 0 && brk == 0 && brace == 0) { end = i; break; }
-        else if (s == "=" && paren == 0 && ang == 0 && brk == 0 && brace == 0 && !sawEq) { sawEq = true; eq = i; }
+        else if (s == "=" && paren == 0 && ang == 0 && brk == 0 && brace == 0 && !sawEq) { sawEq = true; }
       }
       i++;
     }
     if (methodBody) { p = i; return; }
     if (sawParen && !sawEq) { p = (end == npos) ? i : end + 1; return; }
-    size_t eqIdx = (eq == npos) ? ((end == npos) ? i : end) : eq;
-    size_t nameIdx = npos;
-    for (size_t k = eqIdx; k > start; k--) {
-      if (t[k - 1].kind == Tok::Ident) { nameIdx = k - 1; break; }
-    }
-    if (nameIdx == npos || nameIdx == start) {
-      if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
-      p = (end == npos) ? i : end + 1;
-      return;
-    }
-    FieldDef f;
-    f.name = t[nameIdx].text;
-    f.leading = std::move(lead);
-    f.type = cppRdParseType(t, start, nameIdx);
-    size_t suf = nameIdx + 1;
-    while (suf < eqIdx) {
-      if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
-        size_t j = suf + 1;
-        std::string num;
-        while (j < eqIdx && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
-          if (t[j].kind == Tok::Number) num = t[j].text;
-          j++;
-        }
-        TypeRef a;
-        a.kind = TypeRef::Array;
-        a.elem = std::make_shared<TypeRef>(f.type);
-        if (!num.empty()) {
-          try { a.arrayLen = static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num))); a.hasLen = true; } catch (...) {}
-        }
-        f.type = a;
-        suf = (j < eqIdx) ? j + 1 : eqIdx;
-      } else {
-        suf++;
-      }
-    }
     size_t stop = (end == npos) ? i : end;
-    if (eq != npos) {
-      f.hasInit = true;
-      for (size_t k = eq + 1; k < stop; k++) f.init.push_back(t[k]);
-    }
-    if (end != npos) {
-      int semiLine = t[end].line;
-      size_t k = end + 1;
-      while (t[k].kind == Tok::Comment && t[k].line == semiLine) {
-        f.trailing.push_back(Comment{t[k].text, t[k].block});
-        k++;
-      }
-      p = k;
+    // Split the declaration at top-level commas into one segment per
+    // declarator (`int a = 1, b = 2;` -> [a], [b]).
+    std::vector<std::pair<size_t, size_t>> segs;
+    if (commas.empty()) {
+      segs.push_back({start, stop});
     } else {
-      p = i;
+      size_t s0 = start;
+      for (size_t c : commas) { segs.push_back({s0, c}); s0 = c + 1; }
+      segs.push_back({s0, stop});
     }
-    def.fields.push_back(std::move(f));
+    TypeRef base;
+    bool baseSet = false;
+    for (size_t si = 0; si < segs.size(); si++) {
+      const size_t sb = segs[si].first;
+      const size_t se = segs[si].second;
+      if (sb >= se) continue;
+      size_t seq = npos;
+      {
+        int P = 0, A = 0, B = 0, Br = 0;
+        for (size_t k = sb; k < se; k++) {
+          if (t[k].kind != Tok::Punct) continue;
+          const std::string& s2 = t[k].text;
+          if (s2 == "(") P++;
+          else if (s2 == ")") { if (P > 0) P--; }
+          else if (s2 == "<") A++;
+          else if (s2 == ">") { if (A > 0) A--; }
+          else if (s2 == "[") B++;
+          else if (s2 == "]") { if (B > 0) B--; }
+          else if (s2 == "{") Br++;
+          else if (s2 == "}") { if (Br > 0) Br--; }
+          else if (s2 == "=" && P == 0 && A == 0 && B == 0 && Br == 0) { seq = k; break; }
+        }
+      }
+      size_t lim = (seq == npos) ? se : seq;
+      size_t nameI = npos;
+      for (size_t k = lim; k > sb; k--)
+        if (t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+      if (nameI == npos) {
+        if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
+        continue;
+      }
+      FieldDef f;
+      f.name = t[nameI].text;
+      f.leading = (si == 0) ? std::move(lead) : std::vector<Comment>{};
+      if (baseSet) {
+        f.type = base;
+      } else {
+        f.type = cppRdParseType(t, sb, nameI);
+        base = f.type;
+        baseSet = true;
+      }
+      size_t suf = nameI + 1;
+      while (suf < lim) {
+        if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
+          size_t j = suf + 1;
+          std::string num;
+          while (j < lim && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
+            if (t[j].kind == Tok::Number) num = t[j].text;
+            j++;
+          }
+          TypeRef a;
+          a.kind = TypeRef::Array;
+          a.elem = std::make_shared<TypeRef>(f.type);
+          if (!num.empty()) {
+            try { a.arrayLen = static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num))); a.hasLen = true; } catch (...) {}
+          }
+          f.type = a;
+          suf = (j < lim) ? j + 1 : lim;
+        } else {
+          suf++;
+        }
+      }
+      if (seq != npos) {
+        f.hasInit = true;
+        for (size_t k = seq + 1; k < se; k++) f.init.push_back(t[k]);
+      }
+      def.fields.push_back(std::move(f));
+      parsedAny = true;
+      if (si + 1 == segs.size() && end != npos) {
+        FieldDef& lastField = def.fields.back();
+        int semiLine = t[end].line;
+        size_t k = end + 1;
+        while (t[k].kind == Tok::Comment && t[k].line == semiLine) {
+          lastField.trailing.push_back(Comment{t[k].text, t[k].block});
+          k++;
+        }
+        p = k;
+      }
+    }
+    if (!parsedAny) p = (end == npos) ? i : end + 1;
   }
 
   void parseEnumDecl() {
@@ -1596,10 +1929,17 @@ struct Reader {
     bool flt = asDouble;
     for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (flt) {
-      try { return asvJSONValue::makeDouble(std::stod(s)); } catch (...) { return asvJSONValue::makeDouble(0.0); }
+      try { return asvJSONValue::makeDouble(std::stod(s)); } catch (...) { return asvJSONValue::makeString(cppRdStripNumSuffix(raw)); }
     }
-    try { return asvJSONValue::makeInt(static_cast<int64_t>(std::stoll(s, nullptr, 0))); }
-    catch (...) { return asvJSONValue::makeInt(0); }
+    if (s == "-9223372036854775808")
+      return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
+    try {
+      std::string::size_type pos = 0;
+      long long v = std::stoll(s, &pos, 0);
+      if (pos == s.size()) return asvJSONValue::makeInt(static_cast<int64_t>(v));
+    } catch (const std::out_of_range&) {}
+    catch (...) {}
+    return asvJSONValue::makeString(cppRdStripNumSuffix(raw));
   }
 
   std::unique_ptr<asvJSONValue> materialize(const TypeRef& t,
@@ -1731,8 +2071,9 @@ struct Reader {
 
   std::unique_ptr<asvJSONValue> buildRoot() {
     if (!aliases.empty()) {
+      // First-declared (lowest order) alias wins - not the last one seen.
       const AliasDef* best = &aliases[0];
-      for (auto& a : aliases) if (a.order > best->order) best = &a;
+      for (auto& a : aliases) if (a.order < best->order) best = &a;
       return materialize(best->type, std::vector<Tok>(), false, 0);
     }
     if (structs.empty()) return nullptr;
@@ -1788,6 +2129,7 @@ struct Reader {
 inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts) {
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
+  dirty_ = false;
   try {
     std::map<std::string, std::vector<cppread::Tok>> macros;
     std::vector<cppread::Tok> toks = cppread::cppRdLex(input, &macros);

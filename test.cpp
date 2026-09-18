@@ -12054,6 +12054,53 @@ TEST(testToCpp) {
     ASSERT(s.find("std::string b;") != std::string::npos);
     ASSERT(s.find("int a = ") == std::string::npos);
   }
+  // Mixed (variant) array of objects: repeated inferType visits share one
+  // registered struct per shape (dedup regression, review #1).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"mix":[{"a":1},{"a":2,"b":3},"x"]})")));
+    CppWriteOptions o;
+    o.unwrapRootSingleKey = false;
+    std::string s = j.toCpp(o);
+    auto count = [&s](const char* sub) {
+      int c = 0; const char* p = s.c_str();
+      while ((p = strstr(p, sub))) { c++; p += strlen(sub); }
+      return c;
+    };
+    ASSERT(count("struct Mix {") == 1);
+    ASSERT(count("struct Mix2 {") == 1);
+    ASSERT(count("struct Mix3 {") == 0);
+    ASSERT(s.find("std::vector<std::variant<Mix, Mix2, std::string>> mix = {};")
+             != std::string::npos);
+  }
+  // INT64_MIN emits an evaluable literal, not a compile-time overflow (#3).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"min":-9223372036854775808})")));
+    CppWriteOptions o;
+    o.intType = "long long";
+    std::string s = j.toCpp(o);
+    ASSERT(s.find("long long min = (-9223372036854775807LL - 1);") != std::string::npos);
+    ASSERT(s.find("-9223372036854775808") == std::string::npos);
+  }
+  // NaN / +/-Infinity emit evaluable doubles, not silent 0.0 (#10).
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{x: Infinity, y: -Infinity, z: NaN}")));
+    std::string s = j.toCpp(CppWriteOptions{});
+    ASSERT(s.find("double x = (1.0 / 0.0);") != std::string::npos);
+    ASSERT(s.find("double y = (-1.0 / 0.0);") != std::string::npos);
+    ASSERT(s.find("double z = (0.0 / 0.0);") != std::string::npos);
+  }
+  // C style forward-declares use `typedef struct X X;` form (#13).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"node":{"v":1,"next":{"v":2}}})")));
+    CppWriteOptions o;
+    o.style = CppWriteOptions::Style::C;
+    std::string s = j.toCpp(o);
+    ASSERT(s.find("typedef struct Node Node;") != std::string::npos);
+  }
 }
 
 TEST(testFromCpp) {
@@ -12146,6 +12193,65 @@ TEST(testFromCpp) {
     ASSERT(!bad.fromCpp(std::string_view("this is not c++\n")));
     ASSERT(!bad.getLastError().empty());
   }
+  // Multiple declarators per member declaration (#2).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Inner { int v = 7; } ia, ib = {};\n"
+      "struct Document {\n"
+      "  int x, y;\n"
+      "  std::string p, q = \"hi\";\n"
+      "  double m = 1.5, n;\n"
+      "  Inner innerA, innerB;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"x":0,"y":0,"p":"","q":"hi","m":1.5,"n":0,)"
+                               R"("innerA":{"v":7},"innerB":{"v":7}})"));
+  }
+  // East-const qualifiers and multi-word signed types (#4).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  int const ec = 5;\n"
+      "  signed char sc;\n"
+      "  unsigned long long big = 18446744073709551615ull;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"ec":5,"sc":0,"big":"18446744073709551615"})"));
+  }
+  // Overflowing integer literal preserves its spelling instead of 0 (#5).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  unsigned long long u = 18446744073709551613ull;\n"
+      "  int partial = 08;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"u":"18446744073709551613","partial":"08"})"));
+  }
+  // std::unique_ptr/shared_ptr members melt to their pointee (#7).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Child { int k = 1; };\n"
+      "struct Document {\n"
+      "  std::unique_ptr<Child> c;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"c":{"k":1}})"));
+  }
+  // \xNN / \uNNNN escapes decode; unterminated literals fail cleanly (#11).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::string s = \"\\x41\\u0042\";\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"s":"AB"})"));
+    asvJSON bad;
+    ASSERT(!bad.fromCpp(std::string_view("struct Document { std::string s = \"abc; };\n")));
+    ASSERT(bad.getLastError().find("unterminated string") != std::string::npos);
+  }
 }
 
 TEST(testFromCppArraySizeGuard) {
@@ -12219,6 +12325,61 @@ TEST(testFromCppDefineMacros) {
       "  int y = 7;\n"
       "};\n")));
     ASSERT_EQ(b.serialize(), std::string_view(R"({"x":42,"y":7})"));
+  }
+  // #if 0 hides #define; active branches still register (#12).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#if 0\n"
+      "#define HIDDEN 42\n"
+      "#endif\n"
+      "#define VISIBLE 7\n"
+      "struct Document {\n"
+      "  int hidden = HIDDEN;\n"
+      "  int visible = VISIBLE;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"hidden":"HIDDEN","visible":7})"));
+  }
+  // #ifdef / #else choose the active branch.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define FEATURE\n"
+      "#ifdef FEATURE\n"
+      "#define VAL 1\n"
+      "#else\n"
+      "#define VAL 2\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":1})"));
+  }
+  // #if defined(X) evaluates from previously-registered macros.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define ON\n"
+      "#if defined(ON)\n"
+      "#define VAL 3\n"
+      "#else\n"
+      "#define VAL 4\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":3})"));
+  }
+  // #undef removes a macro: VALUE expands to nothing, field keeps its default.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define TEMP 9\n"
+      "#undef TEMP\n"
+      "struct Document {\n"
+      "  int x = TEMP;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":"TEMP"})"));
   }
 }
 

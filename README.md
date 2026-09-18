@@ -1066,6 +1066,17 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.2 (2026-09-18)
+
+- **Fix (cpp, fromCpp):** multiple declarators per member declaration now all parse (`int x, y;`, `std::string p, q = "hi";`, `double m = 1.5, n;`, `struct Inner { ... } a, b;`). Previously only the first declarator produced a field.
+- **Fix (cpp, fromCpp):** qualified and multi-word types classify correctly: east-const (`int const a = 5`), and `signed char` / `unsigned long long` no longer lose their integer kind (they were mis-typed as strings when `signed`/`unsigned` was stripped as a leading qualifier). `std::unique_ptr<T>` / `std::shared_ptr<T>` members now melt to their pointee so `toCpp()` output round-trips.
+- **Fix (cpp, fromCpp):** integer overflows and partially-prefixed literals (e.g. `18446744073709551615ull`, `08`) previously became silent 0; they now fall back to the literal's spelling as a string.
+- **Fix (cpp, fromCpp lexer):** unterminated string/block-comment literals now fail with a line-anchored `cpp:` error instead of silently consuming the input. `\xNN` and `\uNNNN` escapes (incl. surrogate pairs, via U+FFFD for lone surrogates) decode in string literals.
+- **Fix (cpp, fromCpp preprocessor):** conditional compilation stacks now implemented - `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` (with pragmatic `defined(X)`/`0`/`1` evaluation) gate `#define`/`#undef` and token emission; `#undef` removes a macro; `#define X` (no replacement) registers for `#ifdef`. Hidden `#define` bodies no longer leak.
+- **Fix (cpp, toCpp):** mixed arrays of objects no longer emit duplicate struct definitions - repeated `inferType` visits of the same node reuse the registered struct (`std::unordered_map<const asvJSONValue*, CppType>` cache + `CppGeneratorBusyGuard`). Also: `INT64_MIN` emits `(-9223372036854775807LL - 1)` instead of a compile-error literal; computed `NaN`/`±Infinity` emit `(0.0 / 0.0)` / `(1.0 / 0.0)` / `(-1.0 / 0.0)` instead of silent `0.0`; C style forward-declarations use `typedef struct X X;`; `uniqueName` throws rather than silently degrading after heavy collisions.
+- **Fix (cpp, internals):** `findStruct` is now O(1) via an index map; the busy-guard set and per-object type cache reset per `run()`; enum signatures use length-prefixed components (no `\x1F` collision).
+- **Version bump:** 1.25.1  ->  1.25.2
+
 ### 1.25.1 (2026-09-18)
 
 - **Web fix:** removed the duplicate UBJSON entries from the "Text Formats" groups in the converter frontend selectors. UBJSON is a binary format and is (and always was) handled through base64 both ways, so it now only appears under "Binary Formats".
