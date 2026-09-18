@@ -1473,6 +1473,29 @@ void example_from_dotenv() {
 	std::cout << std::endl;
 }
 
+void example_to_bencode() {
+	std::cout << "=== Bencode Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"asvJSON++","formats":22,"tags":["json","c++"]})"));
+	std::cout << json.toBencode() << std::endl;
+	std::cout << std::endl;
+}
+
+void example_from_bencode() {
+	std::cout << "=== Bencode Input ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input = "d7:formatsi22e4:name9:asvJSON++4:tagsl4:json3:c++ee";
+	if (json.fromBencode(input)) {
+		std::cout << "  name=" << json.getString("name")
+		          << " formats=" << json.getInt("formats")
+		          << " tags[0]=" << json.getRoot()->get("tags")->arr->at(0)->getString()
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_ude_strings() {
 	std::cout << "=== UDE String Escapes ===" << std::endl;
 
@@ -1870,6 +1893,8 @@ int main() {
 	example_from_ini();
 	example_to_dotenv();
 	example_from_dotenv();
+	example_to_bencode();
+	example_from_bencode();
 	example_to_ude();
 	example_from_ude();
 	example_ude_strings();

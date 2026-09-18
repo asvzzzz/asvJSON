@@ -60,6 +60,7 @@ MIT license - see the `LICENSE` file for details.
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
 - Dotenv - `toDotenv()` / `fromDotenv()` - flat `KEY=VALUE` environment files with an optional `export` prefix, `#` comments (line and inline), single-quoted literal values, double-quoted values with C-style escapes (may span lines), and INI-style bare-value type inference
+- Bencode - `toBencode()` / `fromBencode()` - the BitTorrent encoding (integers, byte strings, lists, sorted-key dictionaries); byte strings decode to STRING when valid UTF-8 and to BINARY otherwise
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
 - C++ codegen - `toCpp()` / `fromCpp()` - generate C++17 `struct`/`enum` declarations from a parsed value tree, and parse C++ declarations back into a value tree: nested structs per object, `std::array<T,N>` (or `std::vector<T>`) for homogeneous arrays, `std::vector<std::variant<...>>` for mixed arrays, and enums inferred from identifier-string arrays (object-map enums via `enumPaths`/`enumNames`); a C-style output mode emits `typedef struct` / C arrays / `enum`; comments carry over as `//` / `/* */`
@@ -264,6 +265,8 @@ int main() {
 | `bool fromCpp(std::string_view input, const CppReadOptions& opts = {})` | Parse C++ `struct`/`enum` declarations into the value tree. |
 | `std::string toDotenv() const` | Serialize to Dotenv (`.env`) - flat `KEY=VALUE` lines; nested objects/arrays are written as quoted JSON text. |
 | `bool fromDotenv(std::string_view input)` | Parse a Dotenv (`.env`) string (`export` prefix, quoted values, inline comments, type inference). |
+| `std::string toBencode() const` | Serialize to Bencode (BitTorrent encoding; dictionary keys sorted as byte strings). |
+| `bool fromBencode(std::string_view input)` | Parse a Bencode string (integers, byte strings, lists, dictionaries). |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -1001,7 +1004,22 @@ EMPTY=null
 
 **Features:** optional `export ` prefix, `#` line comments and inline comments, single-quoted literal values, double-quoted values with C-style escapes (`\n`, `\r`, `\t`, `\\`, `\"`, `\'`, `\$`) that may span multiple lines, INI-style bare-value type inference (null/bool/int/double/datetime, with leading-zero/hex/overflow literals kept as exact strings), duplicate keys last-wins, and comment preservation on YAML-style round-trips (leading/trailing/footing). `toDotenv()` requires an object root; nested objects/arrays have no dotenv syntax and are emitted as their compact JSON text inside a quoted string (lossless text, but they decode back as strings). Auto-detection (`fromAny`, `.env`/`.env` files) is wired in and only attempted for flat `=`-containing input with no `[section]` headers.
 
+### Bencode  -  BitTorrent encoding
+
+`toBencode()` / `fromBencode()`  -  the encoding used by BitTorrent `.torrent` files.
+
+```
+d7:formatsi22e4:name9:asvJSON++4:tagsl4:json3:c++ee
+```
+
+**Format:** integers `i42e`, byte strings `4:spam`, lists `l...e`, dictionaries `d...e`. **Decoding:** integers become INT; byte strings become STRING when the bytes are valid UTF-8 and BINARY otherwise; lists become ARRAY; dictionaries become OBJECT. **Encoding:** INT/STRING/BINARY/ARRAY/OBJECT are supported and dictionaries are emitted with keys in ascending byte order (as the spec requires); booleans, null and doubles have no bencode representation and throw. Auto-detection (`fromAny`, `.torrent`/`.bencode` files) tries bencode first for input starting with a `d<digit>:` dictionary signature (before the YAML-like GOON/TOON parsers that would otherwise claim short colon-heavy input) and, in the binary path, only for that same signature; a full consuming parse is always required.
+
 ## Changelog
+
+### 1.21.0 (2026-09-18)
+
+- **New format - Bencode:** added `asvJSON::toBencode()` / `asvJSON::fromBencode(std::string_view)` (and `asvJSONValue::toBencode`) - the BitTorrent encoding. Decoder supports integers (`i42e`), byte strings (`4:spam`), lists (`l...e`) and dictionaries (`d...e`), rejecting leading zeros, negative zero, truncation, trailing content and int64 overflow; byte strings that are not valid UTF-8 decode to BINARY. Encoder emits INT/STRING/BINARY/ARRAY/OBJECT, sorts dictionary keys as byte strings, and throws for types bencode cannot represent (bool/null/double). Wired into `fromAny` (text and gated binary detection), `readFromFileAny`/`writeToFileAny` (`.torrent`/`.bencode`/`.benc`), the web converter UI, and the examples. Added `testFromBencode`, `testToBencode`, `testBencodeRoundTrip`.
+- **Version bump:** 1.20.0  ->  1.21.0
 
 ### 1.20.0 (2026-09-18)
 

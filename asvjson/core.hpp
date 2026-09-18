@@ -798,6 +798,7 @@ struct asvJSONValue {
 	void toRON(std::string& out, bool pretty = true) const;
 	void toCpp(std::string& out, const CppWriteOptions& opts = {}) const;
 	void toDotenv(std::string& out) const;
+	void toBencode(std::string& out) const;
 
 	[[nodiscard]] JsonProxy operator[](std::string_view key) noexcept;
 	[[nodiscard]] JsonProxy operator[](size_t idx) noexcept;
@@ -1091,6 +1092,7 @@ enum class FormatType {
   RON,
   CPP,
   Dotenv,
+  Bencode,
 };
 
 /// Thread safety:
@@ -1639,6 +1641,8 @@ public:
 	bool fromCpp(std::string_view input, const CppReadOptions& opts = {});
 	std::string toDotenv() const;
 	bool fromDotenv(std::string_view input);
+	std::string toBencode() const;
+	bool fromBencode(std::string_view input);
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;

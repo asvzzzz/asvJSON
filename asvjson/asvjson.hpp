@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.20.0 - Main entry point
+// asvJSON++ v1.21.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
@@ -7,7 +7,7 @@
 // ASVJSON_DISABLE_PROTOBUF, ASVJSON_DISABLE_TOML, ASVJSON_DISABLE_SEXPR,
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
 // ASVJSON_DISABLE_RON,
-// ASVJSON_DISABLE_CPP, ASVJSON_DISABLE_DOTENV,
+// ASVJSON_DISABLE_CPP, ASVJSON_DISABLE_DOTENV, ASVJSON_DISABLE_BENCODE,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -83,6 +83,10 @@
 
 #ifndef ASVJSON_DISABLE_DOTENV
 #include "formats/dotenv.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_BENCODE
+#include "formats/bencode.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -166,6 +170,13 @@ inline bool asvJSON::fromAny(std::string_view input) {
         }
       }
     }
+#ifndef ASVJSON_DISABLE_BENCODE
+    // Bencode dictionaries (".torrent" files) start with `d<digit>:`. Gated by
+    // that signature so it is not attempted for arbitrary binary data.
+    if (bencodeLooksLikeDictionary(input)) {
+      if (fromBencode(input)) return true;
+    }
+#endif
     if (fromMessagePack(std::string(input))) return true;
     if (fromCBOR(std::string(input))) return true;
     lastError = "Unable to detect binary format";
@@ -221,6 +232,15 @@ inline bool asvJSON::fromAny(std::string_view input) {
   if ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_') {
     if (s.find('(') != std::string_view::npos && fromRON(s)) return true;
   }
+
+#ifndef ASVJSON_DISABLE_BENCODE
+  // Bencode dictionaries: strong `d<digit>:` signature. Tried before the
+  // loose YAML-like formats (GOON/TOON) which otherwise claim short,
+  // colon-heavy inputs like "d1:ai1ee" as ordinary mappings.
+  if (bencodeLooksLikeDictionary(s)) {
+    if (fromBencode(s)) return true;
+  }
+#endif
 
   // YAML document markers
   if (s.size() >= 3 && s[0] == '-' && s[1] == '-' && s[2] == '-') {
@@ -302,6 +322,12 @@ inline bool asvJSON::fromAny(std::string_view input) {
   // RON (structs/maps/lists with Rust-like syntax)
   if (fromRON(s)) return true;
 
+#ifndef ASVJSON_DISABLE_BENCODE
+  // Bencode (BitTorrent encoding). Last because its grammar is loose enough
+  // to match short inputs; a full, consuming parse is required to succeed.
+  if (fromBencode(s)) return true;
+#endif
+
   lastError = "Unable to detect format";
   return false;
 }
@@ -360,6 +386,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") { formatType = FormatType::CPP; return fromCpp(content); }
   if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
   if (ext == "env" || ext == "dotenv") { formatType = FormatType::Dotenv; return fromDotenv(content); }
+  if (ext == "torrent" || ext == "bencode" || ext == "benc") { formatType = FormatType::Bencode; return fromBencode(content); }
 
   // Unknown extension - auto-detect from content
   return fromAny(content);
@@ -418,6 +445,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "hpp" || ext == "h") content = toCpp();
   else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
   else if (ext == "env" || ext == "dotenv") content = toDotenv();
+  else if (ext == "torrent" || ext == "bencode" || ext == "benc") content = toBencode();
   else content = serialize(pretty);
 
   std::ofstream out(filename, std::ios::binary);

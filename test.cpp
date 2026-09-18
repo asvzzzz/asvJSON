@@ -13869,6 +13869,147 @@ TEST(testDotenvComments) {
   }
 }
 
+TEST(testFromBencode) {
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("i42e")));
+    ASSERT(j.getRoot()->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(42));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("4:spam")));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), std::string("spam"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("l4:spami42ee")));
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(2));
+    ASSERT_EQ(std::string(j.getRoot()->arr->at(0)->getString()), std::string("spam"));
+    ASSERT_EQ(j.getRoot()->arr->at(1)->getInt(), int64_t(42));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("d3:bar4:spam3:fooi42ee")));
+    ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(std::string(j.getRoot()->get("bar")->getString()), std::string("spam"));
+    ASSERT_EQ(j.getRoot()->get("foo")->getInt(), int64_t(42));
+  }
+  // Negative integer
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("i-17e")));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(-17));
+  }
+  // Binary (non-UTF8) byte string -> BINARY
+  {
+    std::string in = "3:";
+    in.push_back((char)0xFF);
+    in.push_back((char)0x00);
+    in.push_back((char)0x7F);
+    asvJSON j;
+    ASSERT(j.fromBencode(in));
+    ASSERT(j.getRoot()->type == asvJSONValue::BINARY);
+    ASSERT_EQ(j.getRoot()->bin_data.size(), size_t(3));
+  }
+  // Errors
+  {
+    asvJSON j;
+    ASSERT(!j.fromBencode(std::string("i42")));
+    ASSERT(!j.fromBencode(std::string("i042e")));
+    ASSERT(!j.fromBencode(std::string("i-0e")));
+    ASSERT(!j.fromBencode(std::string("4:spa")));
+    ASSERT(!j.fromBencode(std::string("i1ei2e")));
+    ASSERT(!j.fromBencode(std::string("d1:ai1e")));
+    ASSERT(!j.fromBencode(std::string("i99999999999999999999999e")));
+    ASSERT(!j.fromBencode(std::string("")));
+  }
+}
+
+TEST(testToBencode) {
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"foo\":42,\"bar\":\"spam\"}")));
+    ASSERT_EQ(j.toBencode(), std::string("d3:bar4:spam3:fooi42ee"));
+  }
+  // Keys are sorted as byte strings
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"b\":1,\"a\":2,\"C\":3}")));
+    ASSERT_EQ(j.toBencode(), std::string("d1:Ci3e1:ai2e1:bi1ee"));
+  }
+  // Nested list / dictionary
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"list\":[1,\"x\"],\"n\":-5}")));
+    ASSERT_EQ(j.toBencode(), std::string("d4:listli1e1:xe1:ni-5ee"));
+  }
+  // Unsupported types throw
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"b\":true}")));
+    bool threw = false;
+    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    j.putNull("n");
+    bool threw = false;
+    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    j.putDouble("d", 1.5);
+    bool threw = false;
+    try { j.toBencode(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+}
+
+TEST(testBencodeRoundTrip) {
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"name\":\"asvJSON++\",\"formats\":22,\"tags\":[\"json\",\"c++\"],\"cfg\":{\"a\":[1,2,3]}}")));
+    std::string enc = j.toBencode();
+    asvJSON j2;
+    ASSERT(j2.fromBencode(enc));
+    ASSERT_EQ(std::string(j2.getString("name")), std::string("asvJSON++"));
+    ASSERT_EQ(j2.getInt("formats"), int64_t(22));
+    ASSERT_EQ(j2.getRoot()->get("tags")->arr->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get("cfg")->get("a")->arr->at(2)->getInt(), int64_t(3));
+  }
+  // Binary byte string round-trips exactly
+  {
+    std::string in = "2:";
+    in.push_back((char)0x80);
+    in.push_back((char)0xFF);
+    asvJSON j;
+    ASSERT(j.fromBencode(in));
+    ASSERT_EQ(j.toBencode(), in);
+  }
+  // fromAny auto-detects a bencode dictionary (text path)
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("d1:ai1ee")));
+    ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ(j.getRoot()->get("a")->getInt(), int64_t(1));
+  }
+  // fromAny auto-detects a binary bencode dictionary (torrent-like)
+  {
+    std::string in = "d6:pieces2:";
+    in.push_back((char)0xFF);
+    in.push_back((char)0x00);
+    in += "e";
+    asvJSON j;
+    ASSERT(j.fromAny(in));
+    ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT(j.getRoot()->get("pieces")->type == asvJSONValue::BINARY);
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -20195,6 +20336,11 @@ RUN(testCBORFloat16);
 	RUN(testToDotenv);
 	RUN(testDotenvRoundTrip);
 	RUN(testDotenvComments);
+
+	std::cout << "\n--- Bencode Serialization Tests ---\n";
+	RUN(testFromBencode);
+	RUN(testToBencode);
+	RUN(testBencodeRoundTrip);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
