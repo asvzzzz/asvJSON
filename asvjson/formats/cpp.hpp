@@ -758,7 +758,8 @@ inline std::string cppRdStripNumSuffix(std::string s) {
   return s;
 }
 
-inline std::vector<Tok> cppRdLex(std::string_view in) {
+inline std::vector<Tok> cppRdLex(std::string_view in,
+                                 std::map<std::string, std::vector<Tok>>* macros = nullptr) {
   std::vector<Tok> out;
   int line = 1;
   size_t i = 0, n = in.size();
@@ -766,8 +767,51 @@ inline std::vector<Tok> cppRdLex(std::string_view in) {
     char c = in[i];
     if (c == '\n') { line++; i++; continue; }
     if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
-    if (c == '#') { // preprocessor directive: drop the whole line
-      while (i < n && in[i] != '\n') i++;
+    if (c == '#') {
+      // Preprocessor directive: consume the logical line (honoring `\`
+      // continuations) and capture object-like `#define NAME repl` macros.
+      size_t j = i;
+      std::string logical;
+      while (j < n) {
+        size_t e = j;
+        while (e < n && in[e] != '\n') e++;
+        size_t k = e;
+        if (k > j && in[k - 1] == '\r') k--;
+        bool cont = (k > j && in[k - 1] == '\\');
+        size_t segEnd = cont ? k - 1 : e;
+        logical.append(in.data() + j, segEnd - j);
+        if (cont && e < n) { j = e + 1; line++; continue; }
+        j = e;
+        break;
+      }
+      i = j;
+      if (macros) {
+        size_t q = 0;
+        while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+        if (q < logical.size() && logical[q] == '#') q++;
+        while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+        size_t ds = q;
+        while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
+        if (logical.compare(ds, q - ds, "define") == 0) {
+          while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+          size_t ns = q;
+          while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
+          std::string name = logical.substr(ns, q - ns);
+          bool functionLike = (q < logical.size() && logical[q] == '(');
+          if (!name.empty() && !functionLike) {
+            while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
+            std::string repl = logical.substr(q);
+            while (!repl.empty() &&
+                   (repl.back() == ' ' || repl.back() == '\t' || repl.back() == '\r'))
+              repl.pop_back();
+            if (!repl.empty()) {
+              std::vector<Tok> rtoks = cppRdLex(repl, nullptr);
+              if (!rtoks.empty() && rtoks.back().kind == Tok::End) rtoks.pop_back();
+              if (!rtoks.empty()) (*macros)[name] = std::move(rtoks);
+            }
+          }
+        }
+      }
       continue;
     }
     if (c == '/' && i + 1 < n && in[i + 1] == '/') {
@@ -846,6 +890,81 @@ inline std::vector<Tok> cppRdLex(std::string_view in) {
   Tok e; e.kind = Tok::End; e.line = line;
   out.push_back(std::move(e));
   return out;
+}
+
+// Expand object-like macros captured from `#define` directives across a token
+// stream. `active` guards against recursive (self-referential) macros.
+inline std::vector<Tok> cppRdExpandMacros(const std::vector<Tok>& in,
+                                          const std::map<std::string, std::vector<Tok>>& macros,
+                                          std::set<std::string>& active, int depth) {
+  if (depth > 32) return in;
+  std::vector<Tok> out;
+  out.reserve(in.size());
+  for (const Tok& tk : in) {
+    if (tk.kind == Tok::Ident) {
+      auto it = macros.find(tk.text);
+      if (it != macros.end() && !active.count(tk.text)) {
+        active.insert(tk.text);
+        std::vector<Tok> rep = cppRdExpandMacros(it->second, macros, active, depth + 1);
+        active.erase(tk.text);
+        for (Tok& r : rep) out.push_back(std::move(r));
+        continue;
+      }
+    }
+    out.push_back(tk);
+  }
+  return out;
+}
+
+// Interpret a scalar initializer as a single literal: strips balanced outer
+// parentheses and a leading unary sign, then reads one number/string/char/
+// bool/null literal. Returns nullptr when the tokens are not a literal.
+inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& init,
+                                                        bool wantDouble) {
+  std::vector<const Tok*> v;
+  v.reserve(init.size());
+  for (const Tok& tk : init) if (tk.kind != Tok::Comment) v.push_back(&tk);
+  while (v.size() >= 2 && v.front()->kind == Tok::Punct && v.front()->text == "(" &&
+         v.back()->kind == Tok::Punct && v.back()->text == ")") {
+    int d = 0;
+    size_t match = v.size();
+    for (size_t k = 0; k < v.size(); k++) {
+      if (v[k]->kind != Tok::Punct) continue;
+      if (v[k]->text == "(") d++;
+      else if (v[k]->text == ")") { d--; if (d == 0) { match = k; break; } }
+    }
+    if (match != v.size() - 1) break;
+    v.erase(v.begin());
+    v.pop_back();
+  }
+  bool neg = false;
+  while (!v.empty() && v.front()->kind == Tok::Punct &&
+         (v.front()->text == "-" || v.front()->text == "+")) {
+    if (v.front()->text == "-") neg = !neg;
+    v.erase(v.begin());
+  }
+  if (v.size() != 1) return nullptr;
+  const Tok* tk = v[0];
+  if (tk->kind == Tok::Str || tk->kind == Tok::Char)
+    return asvJSONValue::makeString(std::string(tk->text));
+  if (tk->kind == Tok::Number) {
+    std::string s = cppRdStripNumSuffix(tk->text);
+    bool flt = wantDouble;
+    for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
+    if (neg) s.insert(s.begin(), '-');
+    if (flt) {
+      try { return asvJSONValue::makeDouble(std::stod(s)); }
+      catch (...) { return asvJSONValue::makeDouble(0.0); }
+    }
+    try { return asvJSONValue::makeInt(static_cast<int64_t>(std::stoll(s, nullptr, 0))); }
+    catch (...) { return asvJSONValue::makeInt(0); }
+  }
+  if (tk->kind == Tok::Ident) {
+    if (tk->text == "true") return asvJSONValue::makeBool(true);
+    if (tk->text == "false") return asvJSONValue::makeBool(false);
+    if (tk->text == "nullptr" || tk->text == "NULL") return asvJSONValue::makeNull();
+  }
+  return nullptr;
 }
 
 struct TypeRef {
@@ -1536,6 +1655,7 @@ struct Reader {
         for (auto& g : groups)
           a->arr->push_back(materialize(elem, g, !g.empty(), depth + 1));
       } else if (rt.hasLen) {
+        if (!asvJSONValue::checkArraySize(rt.arrayLen)) throw asvJSONError("CPP array too large");
         for (size_t k = 0; k < rt.arrayLen; k++) {
           if (ed && ed->members.size() == rt.arrayLen)
             a->arr->push_back(mkStr(ed->members[k]));
@@ -1584,17 +1704,11 @@ struct Reader {
 
     // scalar / unresolved
     if (hasInit && !grp) {
+      if (auto lit = cppRdScalarLiteral(init, rt.scalar == TypeRef::SDouble)) return lit;
       const Tok* v = cppRdFirstVal(init);
-      if (v) {
-        if (v->kind == Tok::Str || v->kind == Tok::Char) return mkStr(v->text);
-        if (v->kind == Tok::Number) return numberValue(v->text, rt.scalar == TypeRef::SDouble);
-        if (v->kind == Tok::Ident) {
-          if (v->text == "true") return asvJSONValue::makeBool(true);
-          if (v->text == "false") return asvJSONValue::makeBool(false);
-          if (v->text == "nullptr" || v->text == "NULL") return asvJSONValue::makeNull();
-          std::string id = cppRdLastIdent(init);
-          if (!id.empty()) return asvJSONValue::makeString(std::move(id));
-        }
+      if (v && v->kind == Tok::Ident) {
+        std::string id = cppRdLastIdent(init);
+        if (!id.empty()) return asvJSONValue::makeString(std::move(id));
       }
     }
     switch (rt.scalar) {
@@ -1675,7 +1789,12 @@ inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts)
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
   try {
-    std::vector<cppread::Tok> toks = cppread::cppRdLex(input);
+    std::map<std::string, std::vector<cppread::Tok>> macros;
+    std::vector<cppread::Tok> toks = cppread::cppRdLex(input, &macros);
+    if (!macros.empty()) {
+      std::set<std::string> active;
+      toks = cppread::cppRdExpandMacros(toks, macros, active, 0);
+    }
     cppread::Reader rd(toks, opts);
     rd.parseAll();
     std::unique_ptr<asvJSONValue> val = rd.buildRoot();

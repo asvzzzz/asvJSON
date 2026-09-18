@@ -931,6 +931,8 @@ std::cout << j.serialize();  // {"name":"PAC-MAN","window_size":[800,600],"fulls
 
 Supported constructs: `struct`/`class` definitions (public members; methods, access specifiers, bitfields, templates and bases skipped), C `typedef struct { ... } Name;`, nested `struct`s with a trailing declarator, `enum` / `enum class` (with optional underlying type and explicit values), `using Name = Type;` and `typedef` aliases, and forward references. Types: scalars (`int`, `double`, `bool`, `std::string`, `const char*`), `std::array<T,N>` and C `T[N]` arrays, `std::vector`/`std::list`/`std::deque`/`std::set` (dynamic), `std::variant<...>`, `std::optional<T>`, `std::map`/`std::unordered_map`, and `std::pair`. `//` and `/* */` comments are preserved on nodes when `includeComments` is set. A fixed `std::array<Enum,N>` left uninitialized with `N` equal to the enum's member count is filled with the member names in order (recovering enum arrays).
 
+Object-like `#define NAME replacement` macros are expanded across the declaration before parsing, so constants (including multi-line `\`-continued ones and chains) resolve in member initializers, array lengths (`T name[N]`, `std::array<T,N>`) and enum contexts; the replacement may be a number, string/char literal, `true`/`false`/`nullptr`, a parenthesized or unary-signed literal, or another macro. Function-like macros (`#define F(x) ...`) are left untouched. Scalar initializers also accept surrounding parentheses and a leading unary sign (`int n = (-1);`).
+
 **Root handling:** when an alias (`using`/`typedef`) exists, the last one in source order becomes the root; otherwise the root is the single struct not referenced by any other struct. A root named `rootName` (default `Document`) is unwrapped to its members; any other single struct is wrapped as `{ "Name": { ... } }`, and multiple roots are wrapped the same way.
 
 **Options (`CppReadOptions`):** `unwrapRootStruct` (unwrap a single root struct, default `true`), `materializeDefaults` (use member initializers, default `true`), `includeComments` (attach parsed comments, default `true`), `strict` (throw instead of skipping unparsable members, default `false`), and `rootName` (default `"Document"`). Disable the whole feature with `ASVJSON_DISABLE_CPP`.
@@ -983,6 +985,11 @@ retries = 3
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 
 ## Changelog
+
+### 1.19.1 (2026-09-18)
+
+- **Fix - `fromCpp()` ignored `#define` constants:** object-like `#define NAME replacement` macros are now captured by the lexer (including multi-line `\`-continued definitions) and expanded across the token stream before parsing, so constants resolve in member initializers and array lengths (`T name[N]`, `std::array<T,N>`) instead of being emitted as identifier strings. Replacements may be numbers, string/char literals, `true`/`false`/`nullptr`, parenthesized or unary-signed literals, or other macros; function-like macros are left untouched. Scalar initializers now also accept surrounding parentheses and a leading unary sign. Added `testFromCppDefineMacros`.
+- **Version bump:** 1.19.0  ->  1.19.1
 
 ### 1.19.0 (2026-09-17)
 

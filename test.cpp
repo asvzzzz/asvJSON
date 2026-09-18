@@ -374,6 +374,13 @@ TEST(testParseValidateUTF8) {
 	}
 }
 
+TEST(testParseLeadingZeroNumber) {
+	// Bare unquoted leading-zero numbers are invalid JSON (regression M1).
+	asvJSON j;
+	ASSERT(!j.parse(std::string_view(R"({"a":007})")));
+	ASSERT_EQ(j.getLastError(), std::string("Invalid number: leading zero not allowed"));
+}
+
 TEST(testNegativeDateTime) {
 	// Pre-1970 timestamps cannot be converted by gmtimeSafe; must not crash
 	asvJSON json;
@@ -12141,6 +12148,80 @@ TEST(testFromCpp) {
   }
 }
 
+TEST(testFromCppArraySizeGuard) {
+  // Array size exceeding MAX_ARRAY_SIZE must be rejected (regression C1).
+  asvJSON bad;
+  ASSERT(!bad.fromCpp(std::string_view("struct S { int big[2000000]; };")));
+  ASSERT(!bad.getLastError().empty());
+}
+
+TEST(testFromCppDefineMacros) {
+  // Object-like #define constants resolve in member initializers.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define MAX_LEN 256\n"
+      "\n"
+      "struct GameConfig {\n"
+      "    std::array<int, 2> window_size = {800, 600};\n"
+      "    std::string window_title = \"PAC-MAN\";\n"
+      "    bool fullscreen = false;\n"
+      "    int len = MAX_LEN;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"GameConfig":{"window_size":[800,600],)"
+                               R"("window_title":"PAC-MAN","fullscreen":false,"len":256}})"));
+  }
+  // Literal kinds: parentheses, unary minus, double, string, bool.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define WIDTH (800)\n"
+      "#define HEIGHT 600\n"
+      "#define NEG -1\n"
+      "#define REAL 2.5\n"
+      "#define NAME \"hero\"\n"
+      "#define FLAG true\n"
+      "struct Document {\n"
+      "  int w = WIDTH;\n"
+      "  int h = HEIGHT;\n"
+      "  int n = NEG;\n"
+      "  double r = REAL;\n"
+      "  std::string name = NAME;\n"
+      "  bool flag = FLAG;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"w":800,"h":600,"n":-1,"r":2.5,"name":"hero","flag":true})"));
+  }
+  // Macro chains and macros used as array lengths.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define N 3\n"
+      "#define COUNT N\n"
+      "struct Document {\n"
+      "  std::array<int, COUNT> v = {1, 2, 3};\n"
+      "  int c[N] = {4, 5, 6};\n"
+      "  int d[N];\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"v":[1,2,3],"c":[4,5,6],"d":[0,0,0]})"));
+  }
+  // Backslash line continuation and function-like macros (left untouched).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define VALUE \\\n"
+      "  42\n"
+      "#define ADD(a, b) ((a) + (b))\n"
+      "struct Document {\n"
+      "  int x = VALUE;\n"
+      "  int y = 7;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":42,"y":7})"));
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -19592,6 +19673,7 @@ int main() {
 	RUN(testParseEmptyArray);
 	RUN(testParseUTF8BOM);
 	RUN(testParseValidateUTF8);
+	RUN(testParseLeadingZeroNumber);
 	RUN(testNegativeDateTime);
 	
 	std::cout << "\n--- Put Tests ---\n";
@@ -19920,6 +20002,8 @@ RUN(testCBORFloat16);
 	RUN(testRONComments);
   RUN(testToCpp);
   RUN(testFromCpp);
+  RUN(testFromCppArraySizeGuard);
+  RUN(testFromCppDefineMacros);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
