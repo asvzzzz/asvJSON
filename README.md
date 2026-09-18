@@ -1066,6 +1066,11 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.1 (2026-09-18)
+
+- **Web fix:** removed the duplicate UBJSON entries from the "Text Formats" groups in the converter frontend selectors. UBJSON is a binary format and is (and always was) handled through base64 both ways, so it now only appears under "Binary Formats".
+- **Version bump:** 1.25.0  ->  1.25.1
+
 ### 1.25.0 (2026-09-18)
 
 - **Bencode lossy mappings (core):** `toBencode()` no longer throws on value types bencode cannot represent; BOOL -> integer 0/1, NULL -> empty byte string, DOUBLE -> decimal text byte string, DATETIME/TIMESTAMP -> integer seconds, OBJECTID/REGEX -> byte string, EXTENSION -> raw bytes, CUSTOM_TAG -> payload value (documented lossy). JSON5 (and any other format that can produce booleans/null/doubles) now converts to bencode instead of failing with `bencode: unsupported value type`.
