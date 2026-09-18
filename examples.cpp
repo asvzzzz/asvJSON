@@ -1496,6 +1496,29 @@ void example_from_bencode() {
 	std::cout << std::endl;
 }
 
+void example_to_ubjson() {
+	std::cout << "=== UBJSON Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"asvJSON++","formats":22,"tags":["json","c++"]})"));
+	auto bytes = json.toUBJSON();
+	for (uint8_t b : bytes) printf("%02X ", b);
+	std::cout << std::endl;
+	std::cout << std::endl;
+}
+
+void example_from_ubjson() {
+	std::cout << "=== UBJSON Input ===" << std::endl;
+
+	asvJSON json;
+	// {i-1 "a" i-42} -> {"a":42}
+	const uint8_t raw[] = {'{', 'i', 0x01, 'a', 'i', 0x2A, '}'};
+	if (json.fromUBJSON(raw, sizeof(raw))) {
+		std::cout << "  a=" << json.getInt("a") << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_ude_strings() {
 	std::cout << "=== UDE String Escapes ===" << std::endl;
 
@@ -1895,6 +1918,8 @@ int main() {
 	example_from_dotenv();
 	example_to_bencode();
 	example_from_bencode();
+	example_to_ubjson();
+	example_from_ubjson();
 	example_to_ude();
 	example_from_ude();
 	example_ude_strings();

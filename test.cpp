@@ -14010,6 +14010,277 @@ TEST(testBencodeRoundTrip) {
   }
 }
 
+static std::string ubjBytes(const asvJSON& j) {
+  auto v = j.toUBJSON();
+  return std::string(v.begin(), v.end());
+}
+
+TEST(testFromUBJSON) {
+  // int8 / uint8 / int16 / int32 / int64 big-endian markers
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("i\xFB", 2)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(-5));
+    ASSERT(j.fromUBJSON(std::string("U\xFA", 2)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(250));
+    ASSERT(j.fromUBJSON(std::string("I\x03\xE8", 3)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(1000));
+    ASSERT(j.fromUBJSON(std::string("l\x00\x01\x11\x70", 5)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(70000));
+    ASSERT(j.fromUBJSON(std::string("L\x00\x00\x00\x00\xB2\xD0\x5E\x00", 9)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(3000000000LL));
+  }
+  // float64 (D) and float32 (d) with is_float32 flagged
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("D\x3F\xF0\x00\x00\x00\x00\x00\x00", 9)));
+    ASSERT_EQ(j.getRoot()->getDouble(), 1.0);
+    ASSERT(j.fromUBJSON(std::string("d\x3F\x80\x00\x00", 5)));
+    ASSERT_EQ(j.getRoot()->getDouble(), 1.0);
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::DOUBLE);
+    ASSERT(ubjBytes(j)[0] == 'd'); // float32 re-encodes as d
+  }
+  // String via S + length-type marker
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("S", 1) + std::string("i\x03", 2) + "foo"));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "foo");
+    ASSERT(j.fromUBJSON(std::string("S", 1) + std::string("l\x00\x00\x00\x03", 5) + "bar"));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "bar");
+  }
+  // H (high-precision number) stays a STRING with exact text
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("H", 1) + std::string("i\x06", 2) + "12.345"));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "12.345");
+  }
+  // C char -> 1-char string
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("C", 1) + "A"));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "A");
+  }
+  // Bool and null
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("T", 1)));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::BOOL_VAL);
+    ASSERT_EQ(j.getRoot()->getBool(), true);
+    ASSERT(j.fromUBJSON(std::string("F", 1)));
+    ASSERT_EQ(j.getRoot()->getBool(), false);
+    ASSERT(j.fromUBJSON(std::string("Z", 1)));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::NULL_VAL);
+  }
+  // Object keys have no S marker: { i-1 "a" i-42 }
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("{", 1) + std::string("i\x01", 2) + "a" + std::string("i\x2A", 2) + "}"));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+    ASSERT_EQ(j.getInt("a"), int64_t(42));
+  }
+  // Unbounded array/object closed by ] / }
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[", 1) + std::string("i\x01", 2) + std::string("i\x02", 2) + std::string("i\x03", 2) + "]"));
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->arr->at(2)->getInt(), int64_t(3));
+  }
+  // Counted containers: [ # i-3 ...
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[#i\x03", 4) + std::string("i\x01", 2) + std::string("i\x02", 2) + std::string("i\x03", 2)));
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(3));
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(std::string("{#", 2) + std::string("i\x01", 2) + std::string("i\x01", 2) + "a" + std::string("i\x05", 2)));
+    ASSERT_EQ(j2.getInt("a"), int64_t(5));
+  }
+  // Typed containers: [$i#n values without markers; $[ / ${ nesting
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$i#i\x02", 6) + std::string("\x01", 1) + std::string("\x02", 1)));
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->arr->at(1)->getInt(), int64_t(2));
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(std::string("[$S#i\x01", 6) + std::string("i\x03", 2) + "foo"));
+    ASSERT_EQ(j2.getRoot()->arr->size(), size_t(1));
+    ASSERT_EQ(std::string(j2.getRoot()->arr->at(0)->getString()), "foo");
+    asvJSON j3; // nested container item (full value, own open/close markers)
+    ASSERT(j3.fromUBJSON(std::string("[$[#i\x01", 6) + std::string("[", 1) + std::string("i\x07", 2) + "]"));
+    ASSERT_EQ(j3.getRoot()->arr->size(), size_t(1));
+    ASSERT_EQ(j3.getRoot()->arr->at(0)->arr->at(0)->getInt(), int64_t(7));
+  }
+  // Typed object {$i#n key rawvalue; fixed $T keys-without-values; $Z nulls
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("{$i#", 4) + std::string("i\x01", 2) + std::string("i\x01", 2) + "a" + std::string("\x07", 1)));
+    ASSERT_EQ(j.getInt("a"), int64_t(7));
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(std::string("{$T#", 4) + std::string("i\x02", 2) + std::string("i\x01", 2) + "a" + std::string("i\x01", 2) + "b"));
+    ASSERT_EQ(j2.getBool("a"), true);
+    ASSERT_EQ(j2.getBool("b"), true);
+    asvJSON j3;
+    ASSERT(j3.fromUBJSON(std::string("{$Z#", 4) + std::string("i\x02", 2) + std::string("i\x01", 2) + "a" + std::string("i\x01", 2) + "b"));
+    ASSERT_EQ(j3.get("a")->type, asvJSONValue::NULL_VAL);
+    ASSERT_EQ(j3.get("b")->type, asvJSONValue::NULL_VAL);
+  }
+  // Binary convention [$U#n raw bytes -> BINARY
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$U#i\x03", 6) + std::string("\x01\x02\x03", 3)));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::BINARY);
+    ASSERT_EQ(j.getRoot()->bin_data.size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->bin_data[0], uint8_t(1));
+    ASSERT_EQ(j.getRoot()->bin_data[2], uint8_t(3));
+  }
+  // Noop markers are skipped inside containers without consuming count slots
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[", 1) + std::string("i\x01", 2) + "N" + std::string("i\x02", 2) + "]"));
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->arr->at(0)->getInt(), int64_t(1));
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(std::string("[#i\x02", 4) + std::string("i\x01", 2) + "N" + std::string("i\x02", 2)));
+    ASSERT_EQ(j2.getRoot()->arr->size(), size_t(2));
+    asvJSON j3; // top-level noop -> null
+    ASSERT(j3.fromUBJSON(std::string("N", 1)));
+    ASSERT_EQ(j3.getRoot()->type, asvJSONValue::NULL_VAL);
+  }
+  // Error cases all return false (never throw)
+  {
+    asvJSON j;
+    ASSERT(!j.fromUBJSON(std::string("", 0)));
+    ASSERT(!j.fromUBJSON(std::string("i", 1)));
+    ASSERT(!j.fromUBJSON(std::string("I\x00", 2)));
+    ASSERT(!j.fromUBJSON(std::string("L\x00\x00\x00\x00\x00\x00\x00", 8)));
+    ASSERT(!j.fromUBJSON(std::string("x", 1)));
+    ASSERT(!j.fromUBJSON(std::string("[$i\x01", 5) + std::string("\x05", 1)));
+    ASSERT(!j.fromUBJSON(std::string("[$U#i\x03\x01\x02", 8)));
+    ASSERT(!j.fromUBJSON(std::string("i\x01\xFF", 3)));
+    ASSERT(!j.fromUBJSON(std::string("[", 1) + std::string("i\x01", 2)));
+    ASSERT(!j.fromUBJSON(std::string("{", 1) + std::string("i\x01", 2) + "a" + std::string("i\x05", 2) + std::string("\x00", 1)));
+    ASSERT(!j.fromUBJSON(std::string("Z", 1) + "\xFF"));
+    ASSERT(!j.fromUBJSON(std::string("S", 1) + std::string("i\x05", 2) + "ab"));
+  }
+}
+
+TEST(testToUBJSON) {
+  // Numbers pick the smallest int type; big-endian layout
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[-5,5,255,1000,70000,3000000000,1000000000000000]")));
+    std::string exp =
+      "[" +
+      std::string("i\xFB", 2) +
+      std::string("i\x05", 2) +
+      std::string("U\xFF", 2) +
+      std::string("I\x03\xE8", 3) +
+      std::string("l\x00\x01\x11\x70", 5) +
+      std::string("L\x00\x00\x00\x00\xB2\xD0\x5E\x00", 9) +
+      std::string("L\x00\x03\x8D\x7E\xA4\xC6\x80\x00", 9) +
+      "]";
+    ASSERT_EQ(ubjBytes(j), exp);
+  }
+  // Double -> D float64
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[1.0,3.5]")));
+    std::string exp = "[" +
+      std::string("D\x3F\xF0\x00\x00\x00\x00\x00\x00", 9) +
+      std::string("D\x40\x0C\x00\x00\x00\x00\x00\x00", 9) + "]";
+    ASSERT_EQ(ubjBytes(j), exp);
+  }
+  // String -> S + length marker + bytes
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[\"hi\"]")));
+    ASSERT_EQ(ubjBytes(j), std::string("[S", 2) + std::string("i\x02", 2) + "hi]");
+  }
+  // Object keys: length-prefixed bare strings (no S marker)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":42,\"b\":1}")));
+    std::string exp = "{" +
+      std::string("i\x01", 2) + "a" + std::string("i\x2A", 2) +
+      std::string("i\x01", 2) + "b" + std::string("i\x01", 2) + "}";
+    ASSERT_EQ(ubjBytes(j), exp);
+  }
+  // Binary -> [$U#n raw bytes convention
+  {
+    asvJSON j;
+    uint8_t data[] = {0x01, 0x02, 0x03, 0xFF};
+    j.putBinary("data", data, 4);
+    std::string exp = "{" +
+      std::string("i\x04", 2) + "data" +
+      std::string("[$U#i\x04", 6) + std::string("\x01\x02\x03\xFF", 4) + "}";
+    ASSERT_EQ(ubjBytes(j), exp);
+  }
+  // Null / bool
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[null,true,false]")));
+    ASSERT_EQ(ubjBytes(j), std::string("[ZTF]", 5));
+  }
+}
+
+TEST(testUBJSONRoundTrip) {
+  // Nested round trip, including a long string (>127 chars -> l length)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"name\":\"asvJSON++\",\"formats\":22,\"tags\":[\"json\",\"c++\"],\"cfg\":{\"a\":[1,2,3]}}")));
+    auto bytes = j.toUBJSON();
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(bytes.data(), bytes.size()));
+    ASSERT_EQ(std::string(j2.getString("name")), std::string("asvJSON++"));
+    ASSERT_EQ(j2.getInt("formats"), int64_t(22));
+    ASSERT_EQ(j2.getRoot()->get("tags")->arr->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get("cfg")->get("a")->arr->at(2)->getInt(), int64_t(3));
+    // Re-encode is byte-identical (cheap canonical form)
+    ASSERT_EQ(j2.toUBJSON(), bytes);
+  }
+  // Long string exercises the l (int32) length marker
+  {
+    std::string big(300, 'x');
+    asvJSON j;
+    j.putString("s", big);
+    auto bytes = j.toUBJSON();
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(bytes.data(), bytes.size()));
+    ASSERT_EQ(std::string(j2.getString("s")), big);
+  }
+  // Binary round-trips byte-for-byte
+  {
+    std::string blob = "\x00\x01\x80\xFF\xFE";
+    asvJSON j;
+    j.putBinary("blob", reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
+    auto bytes = j.toUBJSON();
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(bytes.data(), bytes.size()));
+    ASSERT_EQ(j2.getRoot()->get("blob")->type, asvJSONValue::BINARY);
+    ASSERT_EQ(j2.getRoot()->get("blob")->bin_data.size(), blob.size());
+    for (size_t i = 0; i < blob.size(); i++)
+      ASSERT_EQ(j2.getRoot()->get("blob")->bin_data[i], uint8_t(blob[i]));
+  }
+  // writeToFileAny/readFromFileAny via .ubj extension
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":{\"b\":[1,2,\"three\"]}}")));
+    ASSERT(j.writeToFileAny("test_output.ubj"));
+    asvJSON j2;
+    ASSERT(j2.readFromFileAny("test_output.ubj"));
+    ASSERT_EQ(j2.serialize(), j.serialize());
+    std::remove("test_output.ubj");
+  }
+  // Explicit fromUBJSON only: fromAny on plain JSON does not trip UBJSON
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("{\"a\":1}")));
+    ASSERT(j.getFormatType() == FormatType::JSON);
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -20341,6 +20612,11 @@ RUN(testCBORFloat16);
 	RUN(testFromBencode);
 	RUN(testToBencode);
 	RUN(testBencodeRoundTrip);
+
+	std::cout << "\n--- UBJSON Tests ---\n";
+	RUN(testFromUBJSON);
+	RUN(testToUBJSON);
+	RUN(testUBJSONRoundTrip);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

@@ -787,6 +787,7 @@ struct asvJSONValue {
 	void toMessagePack(std::vector<uint8_t>& out) const;
 	void toCBOR(std::vector<uint8_t>& out) const;
 	void toBSON(std::vector<uint8_t>& out) const;
+	void toUBJSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
 	void toXML(std::string& out, const std::string& name, int indent) const;
 	void toYAML(std::string& out, bool pretty = true) const;
@@ -1093,6 +1094,7 @@ enum class FormatType {
   CPP,
   Dotenv,
   Bencode,
+  UBJSON,
 };
 
 /// Thread safety:
@@ -2367,6 +2369,8 @@ public:
 	bool fromCBOR(const void* data, size_t size);
 	std::vector<uint8_t> toBSON() const;
 	bool fromBSON(const void* data, size_t size);
+	std::vector<uint8_t> toUBJSON() const;
+	bool fromUBJSON(const void* data, size_t size);
 	std::vector<uint8_t> toProtobuf(const std::string& schemaJson = "") const;
 	bool fromProtobuf(const void* data, size_t size, const std::string& schemaJson = "");
 	std::string toProtobufText() const;
@@ -2434,6 +2438,7 @@ public:
 	bool fromMessagePack(const std::string& data);
 	bool fromBSON(const std::string& data);
 	bool fromCBOR(const std::string& data);
+	bool fromUBJSON(const std::string& data);
 	bool fromProtobuf(const std::string& data, const std::string& schemaJson = "");
 };
 

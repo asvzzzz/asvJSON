@@ -221,7 +221,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     } else {
       // For binary formats with text input, decode base64
       std::vector<uint8_t> resolvedBin = binData;
-      if (!binaryInput && (fromFmt == "MessagePack" || fromFmt == "BSON" || fromFmt == "CBOR" || fromFmt == "Protobuf")) {
+      if (!binaryInput && (fromFmt == "MessagePack" || fromFmt == "BSON" || fromFmt == "CBOR" || fromFmt == "Protobuf" || fromFmt == "UBJSON")) {
         resolvedBin = base64Decode(stripBinaryPreamble(textData));
       }
 
@@ -248,12 +248,13 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "BSON") ok = j.fromBSON(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "CBOR") ok = j.fromCBOR(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "Protobuf") ok = j.fromProtobuf(resolvedBin.data(), resolvedBin.size());
+      else if (fromFmt == "UBJSON") ok = j.fromUBJSON(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "CPP" || fromFmt == "CPP_C") ok = j.fromCpp(textData);
       else return jsonMsg(false, "", false, "Unknown input format: " + fromFmt);
       if (!ok) return jsonMsg(false, "", false, j.getLastError());
     }
 
-    outBinary = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf");
+    outBinary = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf" || toFmt == "UBJSON");
 
     if (outBinary) {
       std::vector<uint8_t> binOut;
@@ -261,6 +262,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (toFmt == "CBOR") binOut = j.toCBOR();
       else if (toFmt == "BSON") binOut = j.toBSON();
       else if (toFmt == "Protobuf") binOut = j.toProtobuf();
+      else if (toFmt == "UBJSON") binOut = j.toUBJSON();
 
       return jsonMsg(true, base64Encode(binOut), true, "");
     }

@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.21.0 - Main entry point
+// asvJSON++ v1.22.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
@@ -8,6 +8,7 @@
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
 // ASVJSON_DISABLE_RON,
 // ASVJSON_DISABLE_CPP, ASVJSON_DISABLE_DOTENV, ASVJSON_DISABLE_BENCODE,
+// ASVJSON_DISABLE_UBJSON,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -87,6 +88,10 @@
 
 #ifndef ASVJSON_DISABLE_BENCODE
 #include "formats/bencode.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_UBJSON
+#include "formats/ubjson.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -365,6 +370,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "bson") { formatType = FormatType::BSON; return fromBSON(content); }
   if (ext == "mp" || ext == "msgpack" || ext == "msg") { formatType = FormatType::MessagePack; return fromMessagePack(content); }
   if (ext == "cbor") { formatType = FormatType::CBOR; return fromCBOR(content); }
+  if (ext == "ubj" || ext == "ubjson") { formatType = FormatType::UBJSON; return fromUBJSON(content); }
   if (ext == "pb" || ext == "protobuf" || ext == "proto") { formatType = FormatType::Protobuf; return fromProtobuf(content); }
 
   // Text formats - use string_view dispatch
@@ -412,6 +418,13 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   }
   if (ext == "cbor") {
     auto data = toCBOR();
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return out.good();
+  }
+  if (ext == "ubj" || ext == "ubjson") {
+    auto data = toUBJSON();
     std::ofstream out(filename, std::ios::binary);
     if (!out.is_open()) { const_cast<asvJSON*>(this)->lastError = "Failed to open file: " + filename; return false; }
     out.write(reinterpret_cast<const char*>(data.data()), data.size());

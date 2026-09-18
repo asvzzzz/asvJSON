@@ -60,6 +60,7 @@ MIT license - see the `LICENSE` file for details.
 - JSON5 - `toJSON5()` / `fromJSON5()` - JSON superset with unquoted keys, single-quoted strings, trailing commas, hex/octal/binary numbers, leading decimal, plus sign, comments, NaN/Infinity literals, Unicode identifiers, `\u{...}` code point escapes, extended whitespace (Zs), ES5 escape sequences (`\v`, `\0`, `\xHH`), control character validation, and MongoDB Extended JSON for special types
 - INI - `toINI()` / `fromINI()` - classic initialization file format with sections, key-value pairs, `;`/`#` comments, quoted values, escape sequences, line continuation, and dot-notation section nesting
 - Dotenv - `toDotenv()` / `fromDotenv()` - flat `KEY=VALUE` environment files with an optional `export` prefix, `#` comments (line and inline), single-quoted literal values, double-quoted values with C-style escapes (may span lines), and INI-style bare-value type inference
+- UBJSON - `toUBJSON()` / `fromUBJSON()` - Universal Binary JSON (ubjson.org), big-endian markers for int8/uint8/int16/int32/int64, float32/float64, strings (`S`), null/bool, homogeneous typed containers (counted and optimized `$`-type with explicit counts), and the standard binary blob convention (`[$U#...` decodes to BINARY); object keys are written as bare length-prefixed strings; no magic header so `fromAny()` does not auto-detect it (use `fromUBJSON()` or the `.ubj` extension)
 - Bencode - `toBencode()` / `fromBencode()` - the BitTorrent encoding (integers, byte strings, lists, sorted-key dictionaries); byte strings decode to STRING when valid UTF-8 and to BINARY otherwise
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
@@ -267,6 +268,9 @@ int main() {
 | `bool fromDotenv(std::string_view input)` | Parse a Dotenv (`.env`) string (`export` prefix, quoted values, inline comments, type inference). |
 | `std::string toBencode() const` | Serialize to Bencode (BitTorrent encoding; dictionary keys sorted as byte strings). |
 | `bool fromBencode(std::string_view input)` | Parse a Bencode string (integers, byte strings, lists, dictionaries). |
+| `std::vector<uint8_t> toUBJSON() const` | Serialize to UBJSON (big-endian; no magic header, so `fromAny()` will not auto-detect it). |
+| `bool fromUBJSON(const void* data, size_t size)` | Parse UBJSON from raw bytes. |
+| `bool fromUBJSON(const std::string& data)` | Parse UBJSON from `std::string`. |
 | `bool writeToFile(const std::string& filename, bool pretty = false) const` | Write JSON to file. |
 | `bool readFromFile(const std::string& filename)` | Read and parse JSON from file. |
 
@@ -421,6 +425,9 @@ Convenience methods combining dot-path lookup with type extraction.
 | `std::vector<uint8_t> toBSON() const` | Serialise to BSON. |
 | `bool fromBSON(const uint8_t* data, size_t size)` | Parse BSON from raw bytes. |
 | `bool fromBSON(const std::string& data)` | Parse BSON from `std::string`. |
+| `std::vector<uint8_t> toUBJSON() const` | Serialise to UBJSON (Universal Binary JSON). |
+| `bool fromUBJSON(const uint8_t* data, size_t size)` | Parse UBJSON from raw bytes. |
+| `bool fromUBJSON(const std::string& data)` | Parse UBJSON from `std::string`. |
 | `static std::vector<uint8_t> messagePackFromString(const std::string& json)` | JSON string -> MessagePack. |
 | `static std::string stringFromMessagePack(const uint8_t* data, size_t len)` | MessagePack -> JSON string. |
 | `static std::vector<uint8_t> cborFromString(const std::string& json)` | JSON string -> CBOR. |
@@ -1014,7 +1021,24 @@ d7:formatsi22e4:name9:asvJSON++4:tagsl4:json3:c++ee
 
 **Format:** integers `i42e`, byte strings `4:spam`, lists `l...e`, dictionaries `d...e`. **Decoding:** integers become INT; byte strings become STRING when the bytes are valid UTF-8 and BINARY otherwise; lists become ARRAY; dictionaries become OBJECT. **Encoding:** INT/STRING/BINARY/ARRAY/OBJECT are supported and dictionaries are emitted with keys in ascending byte order (as the spec requires); booleans, null and doubles have no bencode representation and throw. Auto-detection (`fromAny`, `.torrent`/`.bencode` files) tries bencode first for input starting with a `d<digit>:` dictionary signature (before the YAML-like GOON/TOON parsers that would otherwise claim short colon-heavy input) and, in the binary path, only for that same signature; a full consuming parse is always required.
 
+### UBJSON  -  Universal Binary JSON
+
+`toUBJSON()` / `fromUBJSON()`  -  the compact binary encoding defined at ubjson.org; a direct binary sibling of JSON.
+
+```
+{ i 0x01 a  i 0x2A }        // {"a":42}
+S i 0x03 f o o              // "foo"
+[ $ U # i 0x03 <bytes...>   // binary blob (decodes to BINARY)
+```
+
+**Format:** big-endian markers `Z` (null), `N` (noop), `T`/`F` (bool), `i`/`U`/`I`/`l`/`L` (int8/uint8/int16/int32/int64), `d`/`D` (float32/float64), `H` (high-precision number, kept as an exact STRING to avoid precision loss), `C` (1-char string), `S` (string), `[` (array) and `{` (object). **Encoding:** numbers use the smallest fitting integer type; strings are written as `S <len-type><len><bytes>`; object keys are bare length-prefixed strings (no `S` marker); containers are emitted in the simple unoptimized `[...]`/`{...}` form, and BINARY is written with the spec's binary-data convention `[$U#<len><bytes>`. **Decoding:** all containers are accepted - unoptimized, counted (`[#<n>`), and optimized/typed (`[$<type>#<n>`); a typed uint8 array `[$U#...` decodes to BINARY; `$` without a `#` count is rejected; `N` noops are skipped inside containers. DATETIME encodes as float64 seconds, TIMESTAMP as int64 seconds, REGEX as its string, and OBJECTID/EXTENSION payloads as binary blobs (intentional - see the JSON representation for lossless forms). UBJSON has no magic leading bytes, so `fromAny()` does not auto-detect it - call `fromUBJSON()` directly or use the `.ubj`/`.ubjson` file extensions.
+
 ## Changelog
+
+### 1.22.0 (2026-09-18)
+
+- **New format - UBJSON:** added `asvJSON::toUBJSON()` / `asvJSON::fromUBJSON(const void*, size_t)` / `asvJSON::fromUBJSON(const std::string&)` (and `asvJSONValue::toUBJSON`) - Universal Binary JSON (ubjson.org). Encoder emits big-endian `Z`/`N`/`T`/`F`/`i`/`U`/`I`/`l`/`L`/`d`/`D`/`C`/`S` markers, chooses the smallest fitting integer type, writes strings as `S <len><bytes>`, object keys as bare length-prefixed strings, simple unoptimized containers, and BINARY via the `[$U#<len><bytes>` binary-data convention. Decoder accepts unoptimized, counted (`[#<n>`) and optimized/typed (`[$<type>#<n>`, `$` without a count rejected) containers, skips `N` noops, decodes `[$U#` to BINARY, keeps `H` (high-precision) values as exact STRINGs, makes `C` a 1-char string, and enforces depth/size/truncation limits. No `fromAny` auto-detection (UBJSON shares JSON's `{`/`[` lead bytes); wired into `readFromFileAny`/`writeToFileAny` (`.ubj`/`.ubjson`), the web converter UI (binary/base64, like CBOR/MessagePack), and the examples. Added `testFromUBJSON`, `testToUBJSON`, `testUBJSONRoundTrip`.
+- **Version bump:** 1.21.0  ->  1.22.0
 
 ### 1.21.0 (2026-09-18)
 

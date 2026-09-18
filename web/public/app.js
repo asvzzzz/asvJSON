@@ -78,7 +78,7 @@ let _inputIsSample = false;
 async function loadSample(target) {
   const opt = parseFmt(target === 'input' ? inputFormat.value : outputFormat.value);
   const fmt = opt.name;
-  const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'];
+  const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'];
 
   if (SAMPLES[opt.pretty ? fmt : fmt + '_minify'] || SAMPLES[fmt]) {
     let sample = SAMPLES[opt.pretty ? fmt : fmt + '_minify'] || SAMPLES[fmt];
@@ -130,6 +130,7 @@ const FORMAT_INFO = {
   INI: 'Initialization file - sections with key=value pairs',
   Dotenv: 'Dotenv - flat KEY=VALUE environment configuration',
   Bencode: 'Bencode - BitTorrent encoding (integers, byte strings, lists, dicts)',
+  UBJSON: 'Universal Binary JSON - compact binary encoding of JSON values',
   UDE: 'Unified Data Exchange - header, multi-doc, anchors, tags',
   JSONLines: 'One JSON value per line - streaming-friendly',
   Sexpr: 'S-expressions - Lisp-style parenthesized notation',
@@ -175,7 +176,7 @@ function swapFormats() {
   outputStatus.textContent = 'Formats swapped';
   // Wrap output with binary preamble if output format is binary and no preamble yet
   const outFmt = parseFmt(outputFormat.value).name;
-  const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'];
+  const binaryFmts = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'];
   if (binaryFmts.includes(outFmt) && outputArea.value.length > 0 && !outputArea.value.startsWith(_BIN_PREFIX)) {
     outputArea.value = _BIN_PREFIX + outputArea.value;
   }
@@ -218,9 +219,9 @@ function downloadOutput() {
     toml: 'toml', ini: 'ini', ude: 'ude', jsonlines: 'jsonl', sexpr: 'sexpr', ron: 'ron',
     toon: 'toon', tron: 'tron', goon: 'goon', protobuftext: 'txt',
     cpp: 'hpp', cpp_c: 'h',
-    messagepack: 'msgpack', bson: 'bson', cbor: 'cbor', protobuf: 'bin' };
+    messagepack: 'msgpack', bson: 'bson', cbor: 'cbor', protobuf: 'bin', ubjson: 'ubj' };
   const ext = extMap[fmt] || 'txt';
-  const isBinaryOutput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'].includes(fmtOpt.name);
+  const isBinaryOutput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'].includes(fmtOpt.name);
 
   let blob;
   if (isBinaryOutput && (_lastBinary || outputArea.value.startsWith(_BIN_PREFIX))) {
@@ -228,7 +229,7 @@ function downloadOutput() {
     const val = outputArea.value;
     const b64 = val.startsWith(_BIN_PREFIX) ? val.slice(_BIN_PREFIX.length) : val;
     const bin = Uint8Array.from(atob(b64.trim()), c => c.charCodeAt(0));
-    const mimeMap = { messagepack: 'application/msgpack', bson: 'application/bson', cbor: 'application/cbor', protobuf: 'application/x-protobuf' };
+    const mimeMap = { messagepack: 'application/msgpack', bson: 'application/bson', cbor: 'application/cbor', protobuf: 'application/x-protobuf', ubjson: 'application/ubjson' };
     blob = new Blob([bin], { type: mimeMap[fmt] || 'application/octet-stream' });
   } else {
     blob = new Blob([outputArea.value], { type: 'text/plain' });
@@ -256,7 +257,7 @@ async function convert() {
   convertBtn.textContent = 'Converting...';
   setStatus('Converting...', '');
 
-  const isBinaryInput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf'].includes(fromOpt.name);
+  const isBinaryInput = ['MessagePack', 'BSON', 'CBOR', 'Protobuf', 'UBJSON'].includes(fromOpt.name);
 
   // Strip binary preamble if present (e.g., "[Binary data - base64 encoded]\n\n...")
   let data = text;

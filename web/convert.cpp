@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.21.0\n"
+        << "asvJSON++ Format Converter v1.22.0\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"
@@ -92,8 +92,8 @@ int main(int argc, char** argv) {
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
-            "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, Bencode, UDE, JSONLines,\n"
-            "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
+"Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, Bencode, UBJSON, UDE, JSONLines,\n"
+"         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
             "Outputs: ... plus CPP (C++ structs/enums) and CPP_C (C structs/enums)\n"
            "         (empty from=JSON, to=JSON)\n";
       return 0;
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
       } else {
         text = req.getString("data");
         // For binary formats, decode base64 text to binary
-        if (fromFmt == "MessagePack" || fromFmt == "BSON" || fromFmt == "CBOR" || fromFmt == "Protobuf") {
+        if (fromFmt == "MessagePack" || fromFmt == "BSON" || fromFmt == "CBOR" || fromFmt == "Protobuf" || fromFmt == "UBJSON") {
           bin = base64Decode(stripPreamble(text));
         }
       }
@@ -175,6 +175,7 @@ int main(int argc, char** argv) {
       else if (fromFmt == "BSON") { ok = j.fromBSON(bin.data(), bin.size()); }
       else if (fromFmt == "CBOR") { ok = j.fromCBOR(bin.data(), bin.size()); }
       else if (fromFmt == "Protobuf") { ok = j.fromProtobuf(bin.data(), bin.size()); }
+      else if (fromFmt == "UBJSON") { ok = j.fromUBJSON(bin.data(), bin.size()); }
       else if (fromFmt == "CPP" || fromFmt == "CPP_C") ok = j.fromCpp(text);
       else { std::cout << jsonError("Unknown input format: " + fromFmt); return 1; }
 
@@ -186,7 +187,7 @@ int main(int argc, char** argv) {
     }
 
     // Serialize output
-    bool binaryOutput = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf");
+    bool binaryOutput = (toFmt == "MessagePack" || toFmt == "BSON" || toFmt == "CBOR" || toFmt == "Protobuf" || toFmt == "UBJSON");
 
     if (binaryOutput) {
       std::vector<uint8_t> binOut;
@@ -194,6 +195,7 @@ int main(int argc, char** argv) {
       else if (toFmt == "CBOR") binOut = j.toCBOR();
       else if (toFmt == "BSON") binOut = j.toBSON();
       else if (toFmt == "Protobuf") binOut = j.toProtobuf();
+      else if (toFmt == "UBJSON") binOut = j.toUBJSON();
 
       std::cout << jsonSuccess(base64Encode(binOut), true);
     } else {
