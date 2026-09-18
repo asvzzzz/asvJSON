@@ -13869,6 +13869,247 @@ TEST(testDotenvComments) {
   }
 }
 
+TEST(testFromJavaProp) {
+  // '=', ':' and whitespace separators, leading whitespace, type inference
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("A=hello\nPORT=8080\nDEBUG=true\nRATIO=1.5\nEMPTY=null\n")));
+    ASSERT_EQ(std::string(j.getString("A")), std::string("hello"));
+    ASSERT(j.get("PORT") != nullptr && j.get("PORT")->type == asvJSONValue::INT);
+    ASSERT_EQ(j.getInt("PORT"), int64_t(8080));
+    ASSERT_EQ(j.getBool("DEBUG"), true);
+    ASSERT(j.get("RATIO") != nullptr && j.get("RATIO")->type == asvJSONValue::DOUBLE);
+    ASSERT(j.get("EMPTY") != nullptr && j.get("EMPTY")->type == asvJSONValue::NULL_VAL);
+  }
+  // Colon and whitespace separators; key trailing whitespace before a
+  // separator is ignored
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("c:3\nkey   = value\nfruits apple, banana\n k=v\n")));
+    ASSERT_EQ(j.getInt("c"), int64_t(3));
+    ASSERT_EQ(std::string(j.getString("key")), std::string("value"));
+    ASSERT_EQ(std::string(j.getString("fruits")), std::string("apple, banana"));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("v"));
+  }
+  // Escapes incl. \uXXXX surrogate pairs; a mid-value '#' stays data
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("msg=hello\\nworld\nbs=C:\\\\path\nhex=\\u0041\nsur=\\uD83E\\uDD2A\nf=\\f\nx=\\d\nsp=a\\ b\nhash=v#not-comment\n")));
+    ASSERT_EQ(std::string(j.getString("msg")), std::string("hello\nworld"));
+    ASSERT_EQ(std::string(j.getString("bs")), std::string("C:\\path"));
+    ASSERT_EQ(std::string(j.getString("hex")), std::string("A"));
+    ASSERT_EQ(std::string(j.getString("sur")), std::string("\xF0\x9F\xA4\xAA"));
+    ASSERT_EQ(std::string(j.getString("f")), std::string("\f"));
+    ASSERT_EQ(std::string(j.getString("x")), std::string("d"));
+    ASSERT_EQ(std::string(j.getString("sp")), std::string("a b"));
+    ASSERT_EQ(std::string(j.getString("hash")), std::string("v#not-comment"));
+  }
+  // Line continuation: trailing backslash joins the next line and its leading
+  // whitespace is dropped
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("long=first\\\nsecond\nlead=first\\\n   second\n")));
+    ASSERT_EQ(std::string(j.getString("long")), std::string("firstsecond"));
+    ASSERT_EQ(std::string(j.getString("lead")), std::string("firstsecond"));
+  }
+  // Duplicate keys: last wins
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("K=1\nK=2\n")));
+    ASSERT_EQ(j.getInt("K"), int64_t(2));
+  }
+  // Comments both markers; leading comments attach to the next value, a lone
+  // key line yields an empty value, empty values stay strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("# app config\n! generated\nPORT=8080\nLONE\nE=\nfoot #trailing text on its own line\n")));
+    auto* v = j.get("PORT");
+    ASSERT(v != nullptr && v->comments);
+    ASSERT_EQ(v->comments->leading.size(), size_t(2));
+    ASSERT_EQ(v->comments->leading[0].text, std::string("app config"));
+    ASSERT_EQ(v->comments->leading[1].text, std::string("generated"));
+    ASSERT(j.get("LONE") != nullptr && j.get("LONE")->type == asvJSONValue::STRING);
+    ASSERT_EQ(j.getString("LONE"), std::string(""));
+    ASSERT(j.get("E") != nullptr && j.get("E")->type == asvJSONValue::STRING);
+    ASSERT_EQ(j.getString("E"), std::string(""));
+    ASSERT_EQ(std::string(j.getString("foot")), std::string("#trailing text on its own line"));
+  }
+  // Leading-zero / hex / overflow literals stay strings
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("Z=007\nH=0x1F\nBIG=99999999999999999999999\n")));
+    ASSERT(j.get("Z") != nullptr && j.get("Z")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("Z")), std::string("007"));
+    ASSERT_EQ(std::string(j.getString("H")), std::string("0x1F"));
+    ASSERT(j.get("BIG") != nullptr && j.get("BIG")->type == asvJSONValue::STRING);
+    ASSERT(j.get("BIG")->raw_number);
+  }
+  // Tabs and CRLF physical lines
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("a\t=\tb\r\nb=2\r\n")));
+    ASSERT_EQ(std::string(j.getString("a")), std::string("b"));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+  }
+  // BOM is stripped
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("\xEF\xBB\xBF" "a=1\n")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // format type is recorded
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("a=1\n")));
+    ASSERT(j.getFormatType() == FormatType::JavaProp);
+  }
+}
+
+TEST(testToJavaProp) {
+  // Scalars
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"PORT\":8080,\"DEBUG\":true,\"NAME\":\"My App\",\"NONE\":null,\"RATIO\":0.5}")));
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("PORT=8080\n") != std::string::npos);
+    ASSERT(out.find("DEBUG=true\n") != std::string::npos);
+    ASSERT(out.find("NAME=My App\n") != std::string::npos);
+    ASSERT(out.find("NONE=null\n") != std::string::npos);
+    ASSERT(out.find("RATIO=0.5\n") != std::string::npos);
+  }
+  // Value escaping: newline/tab/backslash/leading space
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"M\":\"l1\\nl2\",\"T\":\"a\\tb\",\"BS\":\"C:\\\\tmp\",\"LS\":\" x\"}")));
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("M=l1\\nl2\n") != std::string::npos);
+    ASSERT(out.find("T=a\\tb\n") != std::string::npos);
+    ASSERT(out.find("BS=C:\\\\tmp\n") != std::string::npos);
+    ASSERT(out.find("LS=\\ x\n") != std::string::npos);
+  }
+  // Key escaping (space and '=' are terminators)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"my key\":\"x\",\"a=b\":\"1\"}")));
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("my\\ key=x\n") != std::string::npos);
+    ASSERT(out.find("a\\=b=1\n") != std::string::npos);
+  }
+  // Empty string value emits `K=`; nested objects/arrays emit JSON text
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"E\":\"\",\"cfg\":{\"a\":1},\"arr\":[1,2,3]}")));
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("E=\n") != std::string::npos);
+    ASSERT(out.find("cfg={\"a\":1}\n") != std::string::npos);
+    ASSERT(out.find("arr=[1,2,3]\n") != std::string::npos);
+  }
+  // Non-object root throws; empty key throws
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("[1,2,3]")));
+    bool threw = false;
+    try { j.toJavaProp(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"\":1}")));
+    bool threw = false;
+    try { j.toJavaProp(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
+}
+
+TEST(testJavaPropRoundTrip) {
+  // Scalars, escaping and key escaping survive a round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"PORT\":5432,\"DEBUG\":false,\"M\":\"l1\\nl2\\t\\r\",\"LS\":\"  x\",\"BS\":\"C:\\\\d\",\"my key\":\"\",\"a=:b\":\"ok\"}")));
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    ASSERT_EQ(j2.getInt("PORT"), int64_t(5432));
+    ASSERT_EQ(j2.getBool("DEBUG"), false);
+    ASSERT_EQ(std::string(j2.getString("M")), std::string("l1\nl2\t\r"));
+    ASSERT_EQ(std::string(j2.getString("LS")), std::string("  x"));
+    ASSERT_EQ(std::string(j2.getString("BS")), std::string("C:\\d"));
+    ASSERT_EQ(std::string(j2.getString("my key")), std::string(""));
+    ASSERT_EQ(std::string(j2.getString("a=:b")), std::string("ok"));
+  }
+  // Nested object/array survive as JSON text (lossy type, lossless text)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"cfg\":{\"a\":1},\"arr\":[1,2,3]}")));
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    ASSERT_EQ(std::string(j2.getString("cfg")), std::string("{\"a\":1}"));
+    ASSERT_EQ(std::string(j2.getString("arr")), std::string("[1,2,3]"));
+  }
+  // Comments round-trip and toJavaProp() output is re-parse stable
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("# leading\nPORT=8080\n# footing\n")));
+    auto* v = j.get("PORT");
+    ASSERT(v != nullptr && v->comments);
+    ASSERT_EQ(v->comments->leading.size(), size_t(1));
+    ASSERT_EQ(v->comments->leading[0].text, std::string("leading"));
+    ASSERT(j.getRoot()->comments && j.getRoot()->comments->footing.size() == size_t(1));
+    std::string once = j.toJavaProp();
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(once));
+    auto* w = j2.get("PORT");
+    ASSERT(w != nullptr && w->comments);
+    ASSERT_EQ(w->comments->leading.size(), size_t(1));
+    ASSERT_EQ(w->comments->leading[0].text, std::string("leading"));
+    ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
+    ASSERT_EQ(j2.toJavaProp(), once);
+  }
+}
+
+TEST(testJavaPropFromAny) {
+  // '!' comment line hands the document to JavaProp (dotenv rejects it)
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("! header\nport:8080\nhost=localhost\n")));
+    ASSERT(j.getFormatType() == FormatType::JavaProp);
+    ASSERT_EQ(j.getInt("port"), int64_t(8080));
+    ASSERT_EQ(std::string(j.getString("host")), std::string("localhost"));
+  }
+  // Unspaced ':' separator (dotenv needs '=')
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("key:value\nother:x")));
+    ASSERT(j.getFormatType() == FormatType::JavaProp);
+    ASSERT_EQ(std::string(j.getString("key")), std::string("value"));
+  }
+  // ':' followed by a space is left for YAML, not claimed as JavaProp
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("x: y\nz: w\n")));
+    ASSERT(j.getFormatType() != FormatType::JavaProp);
+    ASSERT(j.getFormatType() == FormatType::YAML);
+  }
+  // Plain '=' documents are claimed by dotenv first (JavaProp is the
+  // fallback for documents dotenv cannot parse)
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("# c\nk=1\n")));
+    ASSERT(j.getFormatType() == FormatType::Dotenv);
+  }
+  // '.properties' file extension dispatch round-trips
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"A\":\"b\",\"C\":3}")));
+    ASSERT(j.writeToFileAny("javaprop_test.properties"));
+    asvJSON j2;
+    ASSERT(j2.readFromFileAny("javaprop_test.properties"));
+    ASSERT(j2.getFormatType() == FormatType::JavaProp);
+    ASSERT_EQ(std::string(j2.getString("A")), std::string("b"));
+    ASSERT_EQ(j2.getInt("C"), int64_t(3));
+    std::remove("javaprop_test.properties");
+  }
+}
+
 TEST(testFromBencode) {
   {
     asvJSON j;
@@ -20607,6 +20848,12 @@ RUN(testCBORFloat16);
 	RUN(testToDotenv);
 	RUN(testDotenvRoundTrip);
 	RUN(testDotenvComments);
+
+	std::cout << "\n--- Java Properties Serialization Tests ---\n";
+	RUN(testFromJavaProp);
+	RUN(testToJavaProp);
+	RUN(testJavaPropRoundTrip);
+	RUN(testJavaPropFromAny);
 
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
 	RUN(testFromBencode);

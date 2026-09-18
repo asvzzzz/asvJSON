@@ -235,6 +235,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "TOML") ok = j.fromTOML(textData);
       else if (fromFmt == "INI") ok = j.fromINI(textData);
       else if (fromFmt == "Dotenv") ok = j.fromDotenv(textData);
+      else if (fromFmt == "JavaProp") ok = j.fromJavaProp(textData);
       else if (fromFmt == "Bencode") ok = j.fromBencode(textData);
       else if (fromFmt == "UDE") ok = j.fromUDE(textData);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(textData);
@@ -276,6 +277,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     else if (toFmt == "TOML") result = j.toTOML(pretty);
     else if (toFmt == "INI") result = j.toINI(pretty);
     else if (toFmt == "Dotenv") result = j.toDotenv();
+    else if (toFmt == "JavaProp") result = j.toJavaProp();
     else if (toFmt == "Bencode") result = j.toBencode();
     else if (toFmt == "UDE") result = j.toUDE();
     else if (toFmt == "JSONLines") result = j.toJSONLines();

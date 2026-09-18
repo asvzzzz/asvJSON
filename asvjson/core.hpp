@@ -800,6 +800,7 @@ struct asvJSONValue {
 	void toCpp(std::string& out, const CppWriteOptions& opts = {}) const;
 	void toDotenv(std::string& out) const;
 	void toBencode(std::string& out) const;
+	void toJavaProp(std::string& out) const;
 
 	[[nodiscard]] JsonProxy operator[](std::string_view key) noexcept;
 	[[nodiscard]] JsonProxy operator[](size_t idx) noexcept;
@@ -1095,6 +1096,7 @@ enum class FormatType {
   Dotenv,
   Bencode,
   UBJSON,
+  JavaProp,
 };
 
 /// Thread safety:
@@ -1645,6 +1647,8 @@ public:
 	bool fromDotenv(std::string_view input);
 	std::string toBencode() const;
 	bool fromBencode(std::string_view input);
+	std::string toJavaProp() const;
+	bool fromJavaProp(std::string_view input);
 
 	std::string serialize(bool pretty = false) const {
 		std::string out;

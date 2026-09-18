@@ -1,0 +1,472 @@
+#pragma once
+// Java .properties serialization/parsing for asvJSON++.
+//
+// The classic Java properties format -- flat key/value pairs:
+//
+//   # comment
+//   ! also-a-comment
+//   name = My App
+//   port: 8080
+//   fruits apple, banana
+//
+// Separators: '=', ':', or the first whitespace. '#'/'!' comment lines.
+// '\' line continuation joins a physical line with the next (the backslash
+// plus the next line's leading whitespace are dropped). Escapes: \\ \t \n \r
+// \f and \uXXXX (surrogate pairs combined into 4-byte UTF-8). There is no
+// quoting and no inline comment stripping -- a '#' mid-value is plain data.
+// An unescaped trailing whitespace run of a value is stripped on load (the
+// JDK behavior); leading whitespace of a value is skipped.
+//
+// Bare values are type-inferred (null/bool/int/double/datetime/string) like
+// dotenv/INI. Duplicate keys follow last-wins. Comments are preserved via the
+// shared `Comments` metadata (leading/footing) and re-emitted by toJavaProp().
+//
+// Nested objects and arrays have no .properties syntax: toJavaProp() writes
+// their compact JSON text as an escaped bare value (a documented lossy
+// round-trip -- the text survives but decodes back as a string).
+
+#include "../core.hpp"
+
+#include <cerrno>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace asvJSONInternal {
+
+// Infer a typed value from a bare .properties string. Mirrors the INI/dotenv
+// convention: JSON-shaped numbers only, leading-zero/hex literals kept as
+// text, out-of-range numbers preserved as raw_number strings.
+inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
+  if (s == "null") return asvJSONValue::makeNull();
+  if (s == "true" || s == "True" || s == "TRUE") return asvJSONValue::makeBool(true);
+  if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
+  {
+    time_t ts = 0; int ms = 0; int tz = 0;
+    if (tryParseDateTime(s, ts, &ms, &tz))
+      return asvJSONValue::makeDateTime(ts, ms, tz);
+  }
+  if (!s.empty()) {
+    size_t i0 = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+    if (s.size() > i0 + 1 && s[i0] == '0' && s[i0 + 1] >= '0' && s[i0 + 1] <= '9')
+      return asvJSONValue::makeString(s.data(), s.size());
+    if (s.size() > i0 + 1 && s[i0] == '0' && (s[i0 + 1] == 'x' || s[i0 + 1] == 'X'))
+      return asvJSONValue::makeString(s.data(), s.size());
+    errno = 0;
+    char* end = nullptr;
+    long long ll = std::strtoll(s.c_str(), &end, 10);
+    if (end && *end == 0 && end == s.c_str() + s.size()) {
+      if (errno == ERANGE) {
+        auto v = asvJSONValue::makeStringView(std::string_view(s));
+        if (v) v->raw_number = true;
+        return v;
+      }
+      return asvJSONValue::makeInt(static_cast<int64_t>(ll));
+    }
+    errno = 0;
+    double d = std::strtod(s.c_str(), &end);
+    if (end && *end == 0 && end == s.c_str() + s.size()) {
+      if (errno == ERANGE) return asvJSONValue::makeStringView(std::string_view(s));
+      return asvJSONValue::makeDouble(d);
+    }
+  }
+  return asvJSONValue::makeString(s.data(), s.size());
+}
+
+inline void javapropAppendCp(std::string& out, uint32_t cp) {
+  if (cp < 0x80) { out += static_cast<char>(cp); return; }
+  if (cp < 0x800) {
+    out += static_cast<char>(0xC0 | (cp >> 6));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+    return;
+  }
+  if (cp >= 0xD800 && cp <= 0xDFFF) { out += "\xEF\xBF\xBD"; return; } // lone surrogate
+  if (cp < 0x10000) {
+    out += static_cast<char>(0xE0 | (cp >> 12));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+    return;
+  }
+  out += static_cast<char>(0xF0 | (cp >> 18));
+  out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+  out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+  out += static_cast<char>(0x80 | (cp & 0x3F));
+}
+
+inline int javapropHexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Process Java escape sequences: `\t \n \r \f \\` and `\uXXXX` (a high
+// surrogate immediately followed by a low `\uYYYY` is combined into a 4-byte
+// codepoint). Any other `\x` collapses to the bare character `x`.
+inline std::string javapropUnescape(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  while (i < s.size()) {
+    if (s[i] != '\\' || i + 1 >= s.size()) { out += s[i]; i++; continue; }
+    char e = s[i + 1];
+    switch (e) {
+      case 't': out += '\t'; i += 2; break;
+      case 'n': out += '\n'; i += 2; break;
+      case 'r': out += '\r'; i += 2; break;
+      case 'f': out += '\f'; i += 2; break;
+      case '\\': out += '\\'; i += 2; break;
+      case 'u': {
+        if (i + 6 <= s.size()) {
+          uint32_t cp = 0;
+          bool ok = true;
+          for (int k = 0; k < 4; k++) {
+            int h = javapropHexDigit(s[i + 2 + k]);
+            if (h < 0) { ok = false; break; }
+            cp = (cp << 4) | static_cast<uint32_t>(h);
+          }
+          if (ok) {
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 12 <= s.size() &&
+                s[i + 6] == '\\' && s[i + 7] == 'u') {
+              uint32_t lo = 0;
+              bool ok2 = true;
+              for (int k = 0; k < 4; k++) {
+                int h = javapropHexDigit(s[i + 8 + k]);
+                if (h < 0) { ok2 = false; break; }
+                lo = (lo << 4) | static_cast<uint32_t>(h);
+              }
+              if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+                uint32_t cp2 = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                javapropAppendCp(out, cp2);
+                i += 12;
+                break;
+              }
+            }
+            javapropAppendCp(out, cp);
+            i += 6;
+            break;
+          }
+        }
+        out += 'u';
+        i += 2;
+        break;
+      }
+      default: out += e; i += 2; break;
+    }
+  }
+  return out;
+}
+
+// Join physical lines into logical lines: a physical line ending in an odd
+// number of backslashes is continued on the next line (the continuation
+// backslash and the next line's leading whitespace are dropped).
+inline std::vector<std::string> javapropLogicalLines(std::string_view input) {
+  std::vector<std::string> lines = splitLines(input);
+  std::vector<std::string> logical;
+  logical.reserve(lines.size());
+  size_t li = 0;
+  while (li < lines.size()) {
+    std::string cur = lines[li];
+    if (!cur.empty() && cur.back() == '\r') cur.pop_back();
+    for (;;) {
+      size_t bs = 0;
+      while (bs < cur.size() && cur[cur.size() - 1 - bs] == '\\') bs++;
+      if (bs % 2 == 0) break;            // no (unescaped) continuation
+      cur.pop_back();                    // drop the continuation backslash
+      if (li + 1 >= lines.size()) break; // trailing backslash at EOF
+      li++;
+      std::string next = lines[li];
+      if (!next.empty() && next.back() == '\r') next.pop_back();
+      size_t k = 0;
+      while (k < next.size() && (next[k] == ' ' || next[k] == '\t' || next[k] == '\r')) k++;
+      cur += next.substr(k);
+    }
+    logical.push_back(std::move(cur));
+    li++;
+  }
+  return logical;
+}
+
+inline void javapropWriteCommentLines(std::string& out, const std::vector<Comment>& list) {
+  for (const auto& c : list) {
+    std::string_view text(c.text);
+    size_t start = 0;
+    for (;;) {
+      size_t nl = text.find('\n', start);
+      std::string_view seg = text.substr(start, nl == std::string_view::npos ? text.size() - start : nl - start);
+      out += "# ";
+      out += seg;
+      out += '\n';
+      if (nl == std::string_view::npos) break;
+      start = nl + 1;
+    }
+  }
+}
+
+inline std::string javapropEscapeVal(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  // Leading whitespace of a value is skipped on load, so it must be escaped.
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+    out += (s[i] == ' ') ? "\\ " : "\\t";
+    i++;
+  }
+  for (; i < s.size(); i++) {
+    char c = s[i];
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '\t': out += "\\t"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\f': out += "\\f"; break;
+      default:   out += c; break;
+    }
+  }
+  return out;
+}
+
+inline std::string javapropEscapeKey(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '\t': out += "\\t"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\f': out += "\\f"; break;
+      case ' ':  out += "\\ "; break;
+      case '=':  out += "\\="; break;
+      case ':':  out += "\\:"; break;
+      case '#':  out += "\\#"; break;
+      case '!':  out += "\\!"; break;
+      default:   out += c; break;
+    }
+  }
+  return out;
+}
+
+inline void javapropFormatVal(const asvJSONValue* v, std::string& out) {
+  using T = asvJSONValue::Type;
+  switch (v->type) {
+    case T::STRING:
+      out += javapropEscapeVal(std::string_view(v->str_data));
+      break;
+    case T::INT:
+      out += std::to_string(v->num);
+      break;
+    case T::DOUBLE: {
+      std::string tmp;
+      fmtDoubleVal(v->dbl, tmp);
+      if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
+          tmp.find('E') == std::string::npos)
+        tmp += ".0";
+      out += tmp;
+      break;
+    }
+    case T::BOOL_VAL: out += v->flag ? "true" : "false"; break;
+    case T::NULL_VAL: out += "null"; break;
+    case T::DATETIME: {
+      std::string s;
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
+      out += javapropEscapeVal(s);
+      break;
+    }
+    case T::BINARY:
+    case T::EXTENSION:
+      out += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      break;
+    default: {
+      // Objects, arrays and other special types have no .properties syntax:
+      // emit their compact JSON text as an escaped bare value.
+      std::string s;
+      v->serialize(s, false);
+      out += javapropEscapeVal(s);
+      break;
+    }
+  }
+}
+
+inline void asvJSONValue::toJavaProp(std::string& out) const {
+  if (type != OBJECT || !obj)
+    throw asvJSONError("javaprop: root must be an object");
+  for (const auto& [key, val] : *obj) {
+    if (key.empty())
+      throw asvJSONError("javaprop: empty key");
+    if (val->comments && !val->comments->leading.empty())
+      javapropWriteCommentLines(out, val->comments->leading);
+    out += javapropEscapeKey(key);
+    out += '=';
+    javapropFormatVal(val.get(), out);
+    if (val->comments && !val->comments->trailing.empty()) {
+      out += '\n';
+      javapropWriteCommentLines(out, val->comments->trailing);
+    } else {
+      out += '\n';
+    }
+  }
+  if (comments && !comments->footing.empty())
+    javapropWriteCommentLines(out, comments->footing);
+}
+
+inline std::string asvJSON::toJavaProp() const {
+  std::string out;
+  if (root) root->toJavaProp(out);
+  return out;
+}
+
+// fromAny() heuristic: an '!' comment line, a '\u' escape, or a line with an
+// '=' separator or an unspaced ':' separator. Whitespace-separated pairs and
+// ':' followed by a space are not distinctive enough (YAML/TOON/... style) and
+// are left for the later YAML/GOON/TOON cascade.
+inline bool javapropLooksLike(std::string_view s) {
+  size_t p = 0;
+  int sig = 0;
+  int lines = 0;
+  while (p <= s.size() && lines < 16) {
+    size_t nl = s.find('\n', p);
+    if (nl == std::string_view::npos) nl = s.size();
+    std::string_view line = s.substr(p, nl - p);
+    size_t a = 0, b = line.size();
+    while (a < b && (line[a] == ' ' || line[a] == '\t' || line[a] == '\r')) a++;
+    while (b > a && (line[b - 1] == ' ' || line[b - 1] == '\t' || line[b - 1] == '\r')) b--;
+    line = line.substr(a, b - a);
+    if (!line.empty()) {
+      lines++;
+      if (line[0] == '!') { sig |= 4; break; }
+      if (line.find("\\u") != std::string_view::npos) { sig |= 8; break; }
+      for (size_t i = 0; i < line.size(); i++) {
+        char c = line[i];
+        if (c == '\\') { if (i + 1 < line.size()) i++; continue; }
+        if (c == '=') { sig |= 1; break; }
+        if (c == ':' && i + 1 < line.size() && line[i + 1] != ' ' && line[i + 1] != '\t') {
+          sig |= 2;
+          break;
+        }
+        if (c == ' ' || c == '\t') break; // whitespace-separated: not distinctive
+      }
+      if (sig) break;
+    }
+    if (nl == s.size()) break;
+    p = nl + 1;
+  }
+  return sig != 0;
+}
+
+inline bool asvJSON::fromJavaProp(std::string_view input) {
+  dirty_ = false;
+  formatType = FormatType::Unknown;
+  try {
+    if (input.size() >= 3 && (unsigned char)input[0] == 0xEF &&
+        (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+      input = input.substr(3);
+
+    auto obj = asvJSONValue::makeObject();
+    if (!obj) throw asvJSONError("out of memory");
+
+    std::vector<std::string> logical = javapropLogicalLines(input);
+    std::vector<Comment> pending;
+
+    for (const std::string& line : logical) {
+      size_t p = 0;
+      while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == '\f')) p++;
+      if (p >= line.size()) continue;
+      char c0 = line[p];
+      if (c0 == '#' || c0 == '!') {
+        Comment c;
+        std::string_view ct(line.data() + p + 1, line.size() - p - 1);
+        if (!ct.empty() && ct[0] == ' ') ct.remove_prefix(1);
+        c.text.assign(ct.data(), ct.size());
+        pending.push_back(std::move(c));
+        continue;
+      }
+
+      // Parse the key up to the first unescaped '=' / ':' / whitespace.
+      std::string key;
+      size_t q = p;
+      int sep = 0; // 0 none, 1 '=', 2 ':', 3 whitespace
+      std::string rawVal;
+      while (q < line.size()) {
+        char c = line[q];
+        if (c == '\\' && q + 1 < line.size()) {
+          const char* segStart = line.data() + q;
+          size_t segLen = 0;
+          while (q < line.size() && line[q] == '\\' && q + 1 < line.size()) {
+            segLen += 2;
+            q += 2;
+          }
+          key += javapropUnescape(std::string_view(segStart, segLen));
+          continue;
+        }
+        if (c == '=' || c == ':') { sep = (c == '=') ? 1 : 2; break; }
+        if (c == ' ' || c == '\t' || c == '\f') {
+          size_t q2 = q;
+          while (q2 < line.size() && (line[q2] == ' ' || line[q2] == '\t' || line[q2] == '\f')) q2++;
+          if (q2 < line.size() && (line[q2] == '=' || line[q2] == ':')) {
+            sep = (line[q2] == '=') ? 1 : 2;
+            q = q2;
+            break;
+          }
+          sep = 3;
+          rawVal.assign(line.data() + q2, line.size() - q2);
+          q = q2;
+          break;
+        }
+        key += c;
+        q++;
+      }
+      if (sep == 0) {
+        // No separator at all: the whole trimmed line is the key, value empty.
+        rawVal.clear();
+      } else if (sep == 1 || sep == 2) {
+        rawVal.assign(line.data() + q + 1, line.size() - q - 1);
+        size_t k = 0;
+        while (k < rawVal.size() && (rawVal[k] == ' ' || rawVal[k] == '\t' || rawVal[k] == '\f')) k++;
+        rawVal.erase(0, k);
+      }
+
+      // Strip unescaped trailing whitespace of the raw value (JDK behavior).
+      while (!rawVal.empty()) {
+        char c = rawVal.back();
+        if (c != ' ' && c != '\t' && c != '\f') break;
+        size_t e = rawVal.size() - 1;
+        size_t bs = 0;
+        while (bs < e && rawVal[e - 1 - bs] == '\\') bs++;
+        if (bs % 2 == 1) break; // escaped whitespace is data
+        rawVal.pop_back();
+      }
+
+      std::string value = javapropUnescape(rawVal);
+      auto val = javapropParseVal(value);
+      if (!val)
+        throw asvJSONError("javaprop: value too long");
+
+      if (!pending.empty()) {
+        val->comments.reset(new Comments());
+        val->comments->leading.swap(pending);
+        pending.clear();
+      }
+
+      auto it = obj->obj->find(key);
+      if (it == obj->obj->end()) obj->obj->emplace(key, std::move(val));
+      else it->second = std::move(val);
+    }
+
+    if (!pending.empty()) {
+      obj->comments.reset(new Comments());
+      obj->comments->footing.swap(pending);
+    }
+
+    root = std::move(obj);
+    formatType = FormatType::JavaProp;
+    return true;
+  } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  }
+}
+
+} // namespace asvJSONInternal

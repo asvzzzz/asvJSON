@@ -10,7 +10,7 @@
 
 <div class="header">
   <a href="https://github.com/asvzzzz/asvJSON" target="_blank" class="header-title">asvJSON++ Converter</a>
-    <div class="header-sub">23 formats - C++17 - header-only - v1.22.0</div>
+    <div class="header-sub">24 formats - C++17 - header-only - v1.23.0</div>
 </div>
 
 <div class="container">
@@ -31,6 +31,7 @@
           <option value="INI~pretty" title="Initialization file format with sections and key=value pairs">INI (pretty)</option>
           <option value="INI~minify" title="INI compact form">INI (minify)</option>
           <option value="Dotenv" title="Dotenv - flat KEY=VALUE environment configuration">Dotenv</option>
+          <option value="JavaProp" title="Java .properties - #/! comments, =/: separators, \u escapes">JavaProp</option>
           <option value="Bencode" title="Bencode - BitTorrent encoding (integers, byte strings, lists, dicts)">Bencode</option>
           <option value="UBJSON" title="Universal Binary JSON - compact binary encoding of JSON values">UBJSON</option>
           <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
@@ -56,7 +57,7 @@
       <button class="btn btn-sm" onclick="loadSample('input')">Sample</button>
       <button class="btn btn-sm" onclick="clearInput()">Clear</button>
       <span class="file-label">or <label class="file-link" for="fileInput">Upload file</label></span>
-      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.ude,.jsonl,.sexpr,.ron,.toon,.tron,.goon,.ubj,.ubjson,.msgpack,.bson,.cbor,.bin,.hpp,.h" onchange="loadFile(event)">
+      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.properties,.ude,.jsonl,.sexpr,.ron,.toon,.tron,.goon,.ubj,.ubjson,.msgpack,.bson,.cbor,.bin,.hpp,.h" onchange="loadFile(event)">
     </div>
     <textarea id="inputArea" placeholder="Paste your data here..."></textarea>
     <div class="panel-status" id="inputStatus">Ready</div>
@@ -84,6 +85,7 @@
           <option value="INI~pretty" title="Initialization file format with sections and key=value pairs">INI (pretty)</option>
           <option value="INI~minify" title="INI compact form">INI (minify)</option>
           <option value="Dotenv" title="Dotenv - flat KEY=VALUE environment configuration">Dotenv</option>
+          <option value="JavaProp" title="Java .properties - #/! comments, =/: separators, \u escapes">JavaProp</option>
           <option value="Bencode" title="Bencode - BitTorrent encoding (integers, byte strings, lists, dicts)">Bencode</option>
           <option value="UBJSON" title="Universal Binary JSON - compact binary encoding of JSON values">UBJSON</option>
           <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
