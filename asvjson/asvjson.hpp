@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.23.0 - Main entry point
+// asvJSON++ v1.24.0 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,
 // ASVJSON_DISABLE_TOON, ASVJSON_DISABLE_TRON, ASVJSON_DISABLE_GOON,
@@ -8,7 +8,7 @@
 // ASVJSON_DISABLE_JSON5, ASVJSON_DISABLE_INI, ASVJSON_DISABLE_UDE,
 // ASVJSON_DISABLE_RON,
 // ASVJSON_DISABLE_CPP, ASVJSON_DISABLE_DOTENV, ASVJSON_DISABLE_BENCODE,
-// ASVJSON_DISABLE_UBJSON, ASVJSON_DISABLE_JAVAPROP,
+// ASVJSON_DISABLE_UBJSON, ASVJSON_DISABLE_JAVAPROP, ASVJSON_DISABLE_PLIST,
 // ASVJSON_DISABLE_SCHEMA, ASVJSON_DISABLE_JSONPATH, ASVJSON_DISABLE_JSONSAX
 // before including this header to exclude specific formats.
 
@@ -96,6 +96,10 @@
 
 #ifndef ASVJSON_DISABLE_JAVAPROP
 #include "formats/javaprop.hpp"
+#endif
+
+#ifndef ASVJSON_DISABLE_PLIST
+#include "formats/plist.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_SCHEMA
@@ -205,6 +209,14 @@ inline bool asvJSON::fromAny(std::string_view input) {
 
   // XML: always starts with '<'
   if (f == '<') {
+    // Apple plist: an XML document declaring a <plist> root. Checked before
+    // the generic XML parser so plists are not claimed with the generic
+    // @attr/#text mapping.
+#ifndef ASVJSON_DISABLE_PLIST
+    if (plistLooksLike(s)) {
+      if (fromPlist(s)) return true;
+    }
+#endif
     if (fromXML(s)) return true;
   }
 
@@ -408,6 +420,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
   if (ext == "env" || ext == "dotenv") { formatType = FormatType::Dotenv; return fromDotenv(content); }
   if (ext == "torrent" || ext == "bencode" || ext == "benc") { formatType = FormatType::Bencode; return fromBencode(content); }
   if (ext == "properties" || ext == "props") { formatType = FormatType::JavaProp; return fromJavaProp(content); }
+  if (ext == "plist") { formatType = FormatType::Plist; return fromPlist(content); }
 
   // Unknown extension - auto-detect from content
   return fromAny(content);
@@ -475,6 +488,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   else if (ext == "env" || ext == "dotenv") content = toDotenv();
   else if (ext == "torrent" || ext == "bencode" || ext == "benc") content = toBencode();
   else if (ext == "properties" || ext == "props") content = toJavaProp();
+  else if (ext == "plist") content = toPlist();
   else content = serialize(pretty);
 
   std::ofstream out(filename, std::ios::binary);

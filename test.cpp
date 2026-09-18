@@ -14110,6 +14110,191 @@ TEST(testJavaPropFromAny) {
   }
 }
 
+TEST(testFromPlist) {
+  // Full hand-written plist: BOM, XML declaration, DOCTYPE, comments, entity
+  // and numeric escapes, line-wrapped <data>, all scalar types, nesting.
+  {
+    const char* p =
+      "\xEF\xBB\xBF" // UTF-8 BOM must be stripped
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+      "<!-- header comment -->\n"
+      "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n"
+      "  \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+      "<plist version=\"1.0\">\n"
+      "<dict>\n"
+      "  <!-- key comment -->\n"
+      "  <key>title</key>\n"
+      "  <string>a &amp; b &lt;&gt; &quot;q&quot; &apos;r&apos; &#x41;&#66;</string>\n"
+      "  <key>count</key>\n"
+      "  <integer>42</integer>\n"
+      "  <key>ratio</key>\n"
+      "  <real>3.25</real>\n"
+      "  <key>on</key>\n"
+      "  <true/>\n"
+      "  <key>off</key>\n"
+      "  <false/>\n"
+      "  <key>when</key>\n"
+      "  <date>2024-01-15T10:30:00Z</date>\n"
+      "  <key>blob</key>\n"
+      "  <data>\n"
+      "    AQID\n"
+      "    BAU=\n"
+      "  </data>\n"
+      "  <key>nested</key>\n"
+      "  <dict>\n"
+      "    <key>a</key>\n"
+      "    <array>\n"
+      "      <string>x</string>\n"
+      "      <integer>7</integer>\n"
+      "    </array>\n"
+      "  </dict>\n"
+      "</dict>\n"
+      "</plist>\n";
+    asvJSON j;
+    ASSERT(j.fromPlist(p));
+    ASSERT(j.getFormatType() == FormatType::Plist);
+    ASSERT_EQ(std::string(j.getString("title")), std::string("a & b <> \"q\" 'r' AB"));
+    ASSERT_EQ(j.getInt("count"), int64_t(42));
+    ASSERT_EQ(j.getDouble("ratio"), 3.25);
+    ASSERT(j.getBool("on"));
+    ASSERT(!j.getBool("off"));
+    ASSERT(j.isDateTime("when"));
+    std::vector<uint8_t> bin = j.getBinary("blob");
+    ASSERT(bin.size() == 5 && int(bin[0]) == 1 && int(bin[1]) == 2 && int(bin[4]) == 5);
+    auto* nestArr = j.getNested("nested.a");
+    ASSERT(nestArr && nestArr->type == asvJSONValue::ARRAY && nestArr->arr->size() == 2);
+    ASSERT_EQ(nestArr->get((size_t)1)->getInt(), int64_t(7));
+    ASSERT_EQ(std::string(nestArr->get((size_t)0)->getString()), std::string("x"));
+  }
+  // Bare value roots without the <plist> wrapper are accepted
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<array><integer>1</integer></array>")));
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->get((size_t)0)->getInt(), int64_t(1));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<string>solo</string>")));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), std::string("solo"));
+  }
+  // Malformed documents are rejected, never silently mis-parsed
+  {
+    const char* bad[] = {
+      "<plist><integer>abc</integer></plist>",
+      "<plist><integer>12x</integer></plist>",
+      "<plist><integer>9223372036854775808</integer></plist>",
+      "<plist><real></real></plist>",
+      "<plist><real>1.5x</real></plist>",
+      "<plist><date>not-a-date</date></plist>",
+      "<plist><data>!!!!</data></plist>",
+      "<plist><dict></plist>",
+      "<plist><dict><string>x</string></dict></plist>",
+      "<plist><string>unterminated</plist>",
+      "<plist><frobnicate/></plist>",
+      "<plist><dict><key>k</key><string>v</string></dict>junk</plist>",
+      "<plist/>",
+    };
+    for (const char* s : bad) {
+      asvJSON j;
+      ASSERT(!j.fromPlist(s));
+    }
+  }
+}
+
+TEST(testToPlist) {
+  asvJSON j;
+  ASSERT(j.parse(std::string("{\"name\":\"My App\",\"port\":8080}")));
+  j.getRoot()->obj->emplace("ratio", asvJSONValue::makeDouble(3.25));
+  j.getRoot()->obj->emplace("whole", asvJSONValue::makeDouble(5.0));
+  j.getRoot()->obj->emplace("on", asvJSONValue::makeBool(true));
+  j.getRoot()->obj->emplace("off", asvJSONValue::makeBool(false));
+  j.getRoot()->obj->emplace("empty", asvJSONValue::makeNull());
+  const uint8_t b[] = {1, 2, 3};
+  j.getRoot()->obj->emplace("blob", asvJSONValue::makeBinary(b, 3));
+  j.getRoot()->obj->emplace("when", asvJSONValue::makeDateTime(1705314600, 0, 0)); // 2024-01-15T10:30:00Z
+  std::string out = j.toPlist();
+  // header + wrapper
+  ASSERT(out.find("<?xml version=\"1.0\" encoding=\"UTF-8\"?>") != std::string::npos);
+  ASSERT(out.find("<plist version=\"1.0\">") != std::string::npos);
+  ASSERT(out.find("</plist>") != std::string::npos);
+  // scalar element forms
+  ASSERT(out.find("<string>My App</string>") != std::string::npos);
+  ASSERT(out.find("<integer>8080</integer>") != std::string::npos);
+  ASSERT(out.find("<real>3.25</real>") != std::string::npos);
+  ASSERT(out.find("<real>5.0</real>") != std::string::npos);
+  ASSERT(out.find("<true/>") != std::string::npos);
+  ASSERT(out.find("<false/>") != std::string::npos);
+  ASSERT(out.find("<string/>") != std::string::npos); // null is lossy -> empty string
+  ASSERT(out.find("<data>AQID</data>") != std::string::npos);
+  ASSERT(out.find("<date>2024-01-15T10:30:00Z</date>") != std::string::npos);
+}
+
+TEST(testPlistRoundTrip) {
+  // toPlist()/fromPlist() round-trips lossless types exactly
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string(R"({"brand":"x","model":"y","n":{"k":[1,2.5,true]}})")));
+    std::string pl = j.toPlist();
+    asvJSON k;
+    ASSERT(k.fromPlist(pl));
+    ASSERT_EQ(std::string(k.getString("brand")), std::string("x"));
+    ASSERT(k.serialize() == j.serialize());
+  }
+  // fromAny recognizes a <plist> XML document
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("<plist><dict><key>a</key><integer>1</integer></dict></plist>")));
+    ASSERT(j.getFormatType() == FormatType::Plist);
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+  }
+  // '.plist' file extension dispatch round-trips
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string(R"({"name":"app","version":"1.2","install":[true,false,3]})")));
+    ASSERT(j.writeToFileAny("plist_rt.plist"));
+    asvJSON k;
+    ASSERT(k.readFromFileAny("plist_rt.plist"));
+    ASSERT(k.getFormatType() == FormatType::Plist);
+    ASSERT_EQ(std::string(k.getString("name")), std::string("app"));
+    ASSERT_EQ(std::string(k.getString("version")), std::string("1.2"));
+    auto* inst = k.getNested("install");
+    ASSERT(inst && inst->type == asvJSONValue::ARRAY && inst->arr->size() == 3);
+    ASSERT(inst->get((size_t)0)->getBool());
+    ASSERT(!inst->get((size_t)1)->getBool());
+    ASSERT_EQ(inst->get((size_t)2)->getInt(), int64_t(3));
+    std::remove("plist_rt.plist");
+  }
+}
+
+TEST(testPlistFromAny) {
+  // '<plist' claims the document before the generic XML parser
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("<plist><array><string>a</string></array></plist>")));
+    ASSERT(j.getFormatType() == FormatType::Plist);
+    ASSERT_EQ(std::string(j.getRoot()->get((size_t)0)->getString()), std::string("a"));
+  }
+  // Generic XML without the <plist> tag stays with the XML parser
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("<root><a>1</a></root>")));
+    ASSERT(j.getFormatType() != FormatType::Plist);
+  }
+  // '.plist' extension dispatch
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":1,\"s\":\"x\"}")));
+    ASSERT(j.writeToFileAny("dispatch.plist"));
+    asvJSON k;
+    ASSERT(k.readFromFileAny("dispatch.plist"));
+    ASSERT(k.getFormatType() == FormatType::Plist);
+    ASSERT_EQ(k.getInt("a"), int64_t(1));
+    ASSERT_EQ(std::string(k.getString("s")), std::string("x"));
+    std::remove("dispatch.plist");
+  }
+}
+
 TEST(testFromBencode) {
   {
     asvJSON j;
@@ -20854,6 +21039,10 @@ RUN(testCBORFloat16);
 	RUN(testToJavaProp);
 	RUN(testJavaPropRoundTrip);
 	RUN(testJavaPropFromAny);
+	RUN(testFromPlist);
+	RUN(testToPlist);
+	RUN(testPlistRoundTrip);
+	RUN(testPlistFromAny);
 
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
 	RUN(testFromBencode);

@@ -1548,6 +1548,44 @@ void example_from_javaprop() {
 	std::cout << std::endl;
 }
 
+void example_to_plist() {
+	std::cout << "=== Apple Property List Output ===" << std::endl;
+
+	asvJSON json;
+	json.parse(std::string(R"({"name":"My App","port":8080,"debug":true})"));
+	const uint8_t b[] = {1, 2, 3};
+	json.getRoot()->obj->emplace("blob", asvJSONValue::makeBinary(b, 3));
+	std::cout << json.toPlist() << std::endl;
+}
+
+void example_from_plist() {
+	std::cout << "=== Apple Property List Input ===" << std::endl;
+
+	asvJSON json;
+	std::string_view input =
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		"<plist version=\"1.0\">\n"
+		"<dict>\n"
+		"  <key>name</key>\n"
+		"  <string>My App</string>\n"
+		"  <key>port</key>\n"
+		"  <integer>8080</integer>\n"
+		"  <key>debug</key>\n"
+		"  <true/>\n"
+		"  <key>message</key>\n"
+		"  <string>hello\\nworld</string>\n"
+		"</dict>\n"
+		"</plist>\n";
+	if (json.fromPlist(input)) {
+		std::cout << "  name=" << json.getString("name")
+		          << " port=" << json.getInt("port")
+		          << " debug=" << json.getBool("debug")
+		          << " message=" << json.getString("message")
+		          << std::endl;
+	}
+	std::cout << std::endl;
+}
+
 void example_ude_strings() {
 	std::cout << "=== UDE String Escapes ===" << std::endl;
 
@@ -1951,6 +1989,8 @@ int main() {
 	example_from_ubjson();
 	example_to_javaprop();
 	example_from_javaprop();
+	example_to_plist();
+	example_from_plist();
 	example_to_ude();
 	example_from_ude();
 	example_ude_strings();
