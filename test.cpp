@@ -12002,7 +12002,13 @@ TEST(testToCpp) {
     asvJSON j;
     ASSERT(j.parse(std::string_view(R"({"empty":[],"nums":[1,2,3]})")));
     std::string s = j.toCpp(CppWriteOptions{});
-    ASSERT(s.find("std::vector<std::nullptr_t> empty = {};") != std::string::npos);
+    ASSERT(s.find("std::vector<std::monostate> empty = {};") != std::string::npos);
+    ASSERT(s.find("#include <variant>") != std::string::npos);
+    // C mode: placeholder is a visible TODO (no compilable C type exists).
+    CppWriteOptions co;
+    co.style = CppWriteOptions::Style::C;
+    std::string cs = j.toCpp(co);
+    ASSERT(cs.find("/* TODO: type */ empty;") != std::string::npos);
     ASSERT(s.find("std::array<int, 3> nums = {1, 2, 3};") != std::string::npos);
     CppWriteOptions o;
     o.useStdArray = false;
@@ -12082,6 +12088,10 @@ TEST(testToCpp) {
     std::string s = j.toCpp(o);
     ASSERT(s.find("long long min = (-9223372036854775807LL - 1);") != std::string::npos);
     ASSERT(s.find("-9223372036854775808") == std::string::npos);
+    // Generated header round-trips: fromCpp restores INT64_MIN (#3).
+    asvJSON b;
+    ASSERT(b.fromCpp(s));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"min":-9223372036854775808})"));
   }
   // NaN / +/-Infinity emit evaluable doubles, not silent 0.0 (#10).
   {
@@ -12252,6 +12262,32 @@ TEST(testFromCpp) {
     ASSERT(!bad.fromCpp(std::string_view("struct Document { std::string s = \"abc; };\n")));
     ASSERT(bad.getLastError().find("unterminated string") != std::string::npos);
   }
+  // The toCpp INT64_MIN form `(-9223372036854775807LL - 1)` round-trips (#3).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  long long min = (-9223372036854775807LL - 1);\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"min":-9223372036854775808})"));
+  }
+  // A trailing empty / no-identifier segment (`int a, ;`) must never leave the
+    // body loop stuck: parseMember always advances past the `;` (review fix #1).
+    {
+      asvJSON b;
+      ASSERT(b.fromCpp(std::string_view("struct X { int a, ; };\n")));
+      ASSERT_EQ(b.serialize(), std::string_view(R"({"X":{"a":0}})"));
+      asvJSON b2;
+      ASSERT(b2.fromCpp(std::string_view("struct X { int a = 0, ; };\n")));
+      ASSERT_EQ(b2.serialize(), std::string_view(R"({"X":{"a":0}})"));
+      asvJSON b3;
+      ASSERT(b3.fromCpp(std::string_view("struct X { int a, /*c*/ ; };\n")));
+      ASSERT_EQ(b3.serialize(), std::string_view(R"({"X":{"a":0}})"));
+      asvJSON b4;
+      ASSERT(b4.fromCpp(std::string_view("struct X { , ; };\n")));
+      ASSERT_EQ(b4.serialize(), std::string_view(R"({"X":{}})"));
+    }
 }
 
 TEST(testFromCppArraySizeGuard) {
@@ -12380,6 +12416,62 @@ TEST(testFromCppDefineMacros) {
       "  int x = TEMP;\n"
       "};\n")));
     ASSERT_EQ(b.serialize(), std::string_view(R"({"x":"TEMP"})"));
+  }
+  // Paren-less `defined X`, plus real && / || evaluation of lone conditions.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define FOO\n"
+      "#if defined FOO\n"
+      "#define VAL 5\n"
+      "#else\n"
+      "#define VAL 6\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":5})"));
+  }
+  // `defined(FOO) && 0` must be false even when FOO is defined.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define FOO 1\n"
+      "#if defined(FOO) && 0\n"
+      "#define VAL 7\n"
+      "#else\n"
+      "#define VAL 8\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":8})"));
+  }
+  // `0 || defined(FOO)` must be true; `!defined(FOO)` false.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define FOO 1\n"
+      "#if 0 || defined(FOO)\n"
+      "#define VAL 9\n"
+      "#else\n"
+      "#define VAL 10\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":9})"));
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "#if !defined(BAR)\n"
+      "#define VAL 11\n"
+      "#else\n"
+      "#define VAL 12\n"
+      "#endif\n"
+      "struct Document {\n"
+      "  int x = VAL;\n"
+      "};\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"x":11})"));
   }
 }
 

@@ -923,7 +923,7 @@ std::cout << j.toCpp(o);
 | ARRAY of one type | `std::array<T, N>` (or `std::vector<T>` when `useStdArray = false`) |
 | ARRAY of objects | `std::array<Struct, N>` / `std::vector<Struct>` (union of keys; struct named from the field) |
 | ARRAY of mixed types | `std::vector<std::variant<...>>` |
-| empty ARRAY | `std::vector<std::nullptr_t>` placeholder (edit the type) |
+| empty ARRAY | `std::vector<std::monostate>` placeholder (edit the type) |
 | ARRAY of identifier strings | an `enum` (disable with `emitEnums = false`) |
 | INT / DOUBLE / BOOL | `int` / `double` / `bool` |
 | STRING | `std::string` (`stringType`) |
@@ -954,7 +954,9 @@ std::cout << j.serialize();  // {"name":"PAC-MAN","window_size":[800,600],"fulls
 
 Supported constructs: `struct`/`class` definitions (public members; methods, access specifiers, bitfields, templates and bases skipped), C `typedef struct { ... } Name;`, nested `struct`s with a trailing declarator, `enum` / `enum class` (with optional underlying type and explicit values), `using Name = Type;` and `typedef` aliases, and forward references. Types: scalars (`int`, `double`, `bool`, `std::string`, `const char*`), `std::array<T,N>` and C `T[N]` arrays, `std::vector`/`std::list`/`std::deque`/`std::set` (dynamic), `std::variant<...>`, `std::optional<T>`, `std::map`/`std::unordered_map`, and `std::pair`. `//` and `/* */` comments are preserved on nodes when `includeComments` is set. A fixed `std::array<Enum,N>` left uninitialized with `N` equal to the enum's member count is filled with the member names in order (recovering enum arrays).
 
-Object-like `#define NAME replacement` macros are expanded across the declaration before parsing, so constants (including multi-line `\`-continued ones and chains) resolve in member initializers, array lengths (`T name[N]`, `std::array<T,N>`) and enum contexts; the replacement may be a number, string/char literal, `true`/`false`/`nullptr`, a parenthesized or unary-signed literal, or another macro. Function-like macros (`#define F(x) ...`) are left untouched. Scalar initializers also accept surrounding parentheses and a leading unary sign (`int n = (-1);`).
+Object-like `#define NAME replacement` macros are expanded across the declaration before parsing, so constants (including multi-line `\`-continued ones and chains) resolve in member initializers, array lengths (`T name[N]`, `std::array<T,N>`) and enum contexts; the replacement may be a number, string/char literal, `true`/`false`/`nullptr`, a parenthesized or unary-signed literal, or another macro. Function-like macros (`#define F(x) ...`) are left untouched. Scalar initializers also accept surrounding parentheses and a leading unary sign (`int n = (-1);`); the `toCpp` form `(-9223372036854775807LL - 1)` for `INT64_MIN` parses back to the boundary value.
+
+`std::unique_ptr<T>` / `std::shared_ptr<T>` member types melt to their pointee, so generated headers round-trip. Note that a self-referential struct (`struct Node { std::unique_ptr<Node> next; };`) materializes its initializer tree up to the depth guard (`MAX_NESTING_DEPTH`) before erroring - expected for recursive structures with unbounded data.
 
 **Root handling:** when an alias (`using`/`typedef`) exists, the last one in source order becomes the root; otherwise the root is the single struct not referenced by any other struct. A root named `rootName` (default `Document`) is unwrapped to its members; any other single struct is wrapped as `{ "Name": { ... } }`, and multiple roots are wrapped the same way.
 
@@ -1066,9 +1068,15 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
-### 1.25.2 (2026-09-18)
+### 1.25.3 (2026-09-18)
 
-- **Fix (cpp, fromCpp):** multiple declarators per member declaration now all parse (`int x, y;`, `std::string p, q = "hi";`, `double m = 1.5, n;`, `struct Inner { ... } a, b;`). Previously only the first declarator produced a field.
+- **Fix (cpp, fromCpp):** multiple declarators per member declaration now all parse (`int x, y;`, `std::string p, q = "hi";`, `double m = 1.5, n;`, `struct Inner { ... } a, b;`). Previously only the first declarator produced a field. A trailing empty segment (`int a, ;`) is skipped safely: `parseMember` always advances past the terminating `;`, so the body loop can never stall.
+- **Fix (cpp, fromCpp):** the emitted `INT64_MIN` form `(-9223372036854775807LL - 1)` now round-trips - `cppRdScalarLiteral` recognizes the `NUMBER - NUMBER` pattern (unsigned arithmetic, two's-complement safe) in addition to the boundary literal `-9223372036854775808`.
+- **Fix (cpp preprocessor, fromCpp):** `#if` evaluates real boolean expressions now - paren-less `defined X`, `defined(X)`, `!`, `&&`, `||` and parentheses; `#if defined(FOO) && 0` is correctly false and `#if 0 || defined(FOO)` true (previously only the first `defined(...)` was honored).
+- **Fix (cpp, toCpp):** the empty-array placeholder is now `std::vector<std::monostate>` in C++ (with `#include <variant>`), and a visible `/* TODO: type */` in C mode - compile-valid in both, clearer than the old `std::vector<std::nullptr_t>` / `void*`.
+- **Version bump:** 1.25.2  ->  1.25.3
+
+### 1.25.2 (2026-09-18)
 - **Fix (cpp, fromCpp):** qualified and multi-word types classify correctly: east-const (`int const a = 5`), and `signed char` / `unsigned long long` no longer lose their integer kind (they were mis-typed as strings when `signed`/`unsigned` was stripped as a leading qualifier). `std::unique_ptr<T>` / `std::shared_ptr<T>` members now melt to their pointee so `toCpp()` output round-trips.
 - **Fix (cpp, fromCpp):** integer overflows and partially-prefixed literals (e.g. `18446744073709551615ull`, `08`) previously became silent 0; they now fall back to the literal's spelling as a string.
 - **Fix (cpp, fromCpp lexer):** unterminated string/block-comment literals now fail with a line-anchored `cpp:` error instead of silently consuming the input. `\xNN` and `\uNNNN` escapes (incl. surrogate pairs, via U+FFFD for lone surrogates) decode in string literals.

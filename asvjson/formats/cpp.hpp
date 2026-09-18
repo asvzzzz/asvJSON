@@ -412,9 +412,14 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
   if (n == 0) {
     CppType elem;
     elem.kind = CppType::Scalar;
-    elem.type = effNull();
-    if (isC()) t.type = "void*";
-    else t.type = "std::vector<" + effNull() + ">";
+    if (isC()) {
+      elem.type = "/* TODO: type */";
+      t.type = "/* TODO: type */";
+    } else {
+      elem.type = "std::monostate";
+      t.type = "std::vector<std::monostate>";
+      usedVariant_ = true;  // std::monostate comes from <variant>
+    }
     t.elem = std::make_shared<CppType>(elem);
     t.hasElem = true;
     return t;
@@ -860,26 +865,68 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
   // Pragmatic #if expression: "0" -> false, "1" -> true, `defined(X)` /
   // `!defined(X)` by the macros seen so far, anything else -> true
   // (conservative: never silently drops live code).
-  auto condEval = [&](const std::string& logical, size_t cs) {
+  auto condEval = [&](const std::string& logical, size_t cs) -> bool {
     size_t k = cs;
     while (k < logical.size() && (logical[k] == ' ' || logical[k] == '\t')) k++;
-    std::string expr = logical.substr(k);
-    while (!expr.empty() && (expr.back() == ' ' || expr.back() == '\t' || expr.back() == '\r'))
-      expr.pop_back();
-    if (expr == "0") return false;
-    if (expr == "1") return true;
-    size_t o = expr.find("defined");
-    if (o != std::string::npos) {
-      size_t bo = expr.find('(', o);
-      size_t eo = expr.find(')', o);
-      if (bo != std::string::npos && eo > bo) {
-        std::string nm = expr.substr(bo + 1, eo - bo - 1);
-        bool neg = o > 0 && expr[o - 1] == '!';
-        bool d = macros && macros->count(nm) > 0;
-        return neg ? !d : d;
+    const std::string expr = logical.substr(k);
+    size_t ep = 0;
+    // Minimal boolean expression evaluator for #if: `defined X` / `defined(X)`,
+    // numeric 0/1 literals, `!`, `&&`, `||`, parentheses. Unknown terms are
+    // treated as true (conservative - never silently drops live code).
+    std::function<bool()> prim, term, tri;
+    prim = [&]() -> bool {
+      while (ep < expr.size() && expr[ep] == ' ') ep++;
+      if (ep >= expr.size()) return true;
+      if (expr[ep] == '(') {
+        ep++;
+        bool v = tri();
+        while (ep < expr.size() && expr[ep] == ' ') ep++;
+        if (ep < expr.size() && expr[ep] == ')') ep++;
+        return v;
       }
-    }
-    return true;
+      if (expr[ep] == '!') { ep++; return !prim(); }
+      if (expr.compare(ep, 7, "defined") == 0) {
+        ep += 7;
+        while (ep < expr.size() && expr[ep] == ' ') ep++;
+        bool paren = false;
+        if (ep < expr.size() && expr[ep] == '(') { paren = true; ep++; }
+        while (ep < expr.size() && expr[ep] == ' ') ep++;
+        size_t s = ep;
+        while (ep < expr.size() && (std::isalnum((unsigned char)expr[ep]) || expr[ep] == '_')) ep++;
+        std::string nm = expr.substr(s, ep - s);
+        if (paren) {
+          while (ep < expr.size() && expr[ep] == ' ') ep++;
+          if (ep < expr.size() && expr[ep] == ')') ep++;
+        }
+        return macros && macros->count(nm) > 0;
+      }
+      if (expr[ep] == '0' &&
+          (ep + 1 >= expr.size() || !std::isalnum((unsigned char)expr[ep + 1]))) { ep++; return false; }
+      if (expr[ep] == '1' &&
+          (ep + 1 >= expr.size() || !std::isalnum((unsigned char)expr[ep + 1]))) { ep++; return true; }
+      // Unknown token: consume and stay true.
+      while (ep < expr.size() && (std::isalnum((unsigned char)expr[ep]) || expr[ep] == '_')) ep++;
+      return true;
+    };
+    term = [&]() -> bool {
+      bool v = prim();
+      while (true) {
+        while (ep < expr.size() && expr[ep] == ' ') ep++;
+        if (expr.compare(ep, 2, "&&") == 0) { ep += 2; v = prim() && v; }
+        else break;
+      }
+      return v;
+    };
+    tri = [&]() -> bool {
+      bool v = term();
+      while (true) {
+        while (ep < expr.size() && expr[ep] == ' ') ep++;
+        if (expr.compare(ep, 2, "||") == 0) { ep += 2; v = term() || v; }
+        else break;
+      }
+      return v;
+    };
+    return tri();
   };
   while (i < n) {
     char c = in[i];
@@ -1156,6 +1203,28 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
          (v.front()->text == "-" || v.front()->text == "+")) {
     if (v.front()->text == "-") neg = !neg;
     v.erase(v.begin());
+  }
+  if (v.size() == 3 && v[0]->kind == Tok::Number && v[1]->kind == Tok::Punct &&
+      v[1]->text == "-" && v[2]->kind == Tok::Number) {
+    // `(-9223372036854775807LL - 1)` - the toCpp INT64_MIN form. After paren
+    // and unary-sign stripping the tokens are NUMBER `-` NUMBER.
+    std::string sa = cppRdStripNumSuffix(v[0]->text);
+    std::string sb = cppRdStripNumSuffix(v[2]->text);
+    bool flt = wantDouble;
+    for (char c : sa) if (c == '.' || c == 'e' || c == 'E') flt = true;
+    for (char c : sb) if (c == '.' || c == 'e' || c == 'E') flt = true;
+    if (flt) {
+      try {
+        double a = std::stod(sa), b = std::stod(sb);
+        return asvJSONValue::makeDouble(neg ? -a : a - b);
+      } catch (...) { return nullptr; }
+    }
+    try {
+      unsigned long long a = std::stoull(sa, nullptr, 0);
+      unsigned long long b = std::stoull(sb, nullptr, 0);
+      unsigned long long r = (neg ? (0ull - a) : a) - b;
+      return asvJSONValue::makeInt(static_cast<int64_t>(r));
+    } catch (...) { return nullptr; }
   }
   if (v.size() != 1) return nullptr;
   const Tok* tk = v[0];
@@ -1808,7 +1877,12 @@ struct Reader {
       }
       def.fields.push_back(std::move(f));
       parsedAny = true;
-      if (si + 1 == segs.size() && end != npos) {
+    }
+    // Advance past the terminating `;` (and any same-line trailing comments).
+    // Done outside the segment loop so a trailing empty/no-identifier segment
+    // (`int a, ;`) can never leave p stuck and loop forever.
+    if (end != npos) {
+      if (parsedAny) {
         FieldDef& lastField = def.fields.back();
         int semiLine = t[end].line;
         size_t k = end + 1;
@@ -1817,9 +1891,12 @@ struct Reader {
           k++;
         }
         p = k;
+      } else {
+        p = end + 1;
       }
+    } else {
+      p = i;
     }
-    if (!parsedAny) p = (end == npos) ? i : end + 1;
   }
 
   void parseEnumDecl() {
