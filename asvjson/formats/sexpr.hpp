@@ -272,8 +272,15 @@ inline bool sexprTypeIsKey(int t) {
 inline std::string sexprKeyJson(const std::string& item, int type) {
   if (type == SEXPR_NUMBER || type == SEXPR_TRUE ||
       type == SEXPR_FALSE || type == SEXPR_NIL) {
-    // Bare JSON value -- wrap in quotes for JSON object key
-    return '"' + item + '"';
+    // Bare JSON value -- wrap in quotes for JSON object key. Escaped for
+    // uniformity even though current NUMBER tokens can only contain
+    // [0-9+-.eE] and TRUE/FALSE/NIL are empty strings.
+    std::string esc;
+    esc.reserve(item.size() + 2);
+    esc += '"';
+    appendJsonEscaped(esc, item);
+    esc += '"';
+    return esc;
   }
   return item;
 }
@@ -340,6 +347,15 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
 
   // JSON text for item i used as a VALUE: a marker-prefixed item used as data
   // must keep the marker byte (it was data, not a key).
+  //
+  // KNOWN QUIRK (issue #4): for hand-written input the marker is only "stuck"
+  // to the item when it was the LAST position holding a marker-prefixed string
+  // PLUS at least one more item follows at an even index. If a striped marker
+  // string is instead used as a VALUE (e.g. ("a" "\x01abc" 1 2) parses the
+  // group as a 4-item object and "\x01abc" lands in a value slot), the decoded
+  // value retains the literal \x01 byte. This only affects hand-written
+  // (non-encoder) input: the encoder always emits marked strings exclusively in
+  // key positions, so encoded data round-trips without the stray byte.
   auto valueJson = [&](size_t i) -> std::string {
     if (marked[i]) {
       std::string r;
@@ -450,8 +466,10 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     case asvJSONValue::INT: out += std::to_string(v->num); break;
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
-      if (std::isnan(d) || std::isinf(d))
-        throw asvJSONError("cannot serialize NaN/Infinity as S-Expression");
+      // NaN/Infinity are not valid S-Expression tokens. All sibling to*()
+      // serializers emit a placeholder rather than throwing -- the public
+      // contract is that to* returns a string and never throws (unlike from*).
+      if (std::isnan(d) || std::isinf(d)) { out += "nil"; break; }
       std::string r; fmtDoubleVal(d, r); out += r;
       break;
     }
@@ -590,6 +608,23 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
       out += '"';
       break;
     }
+    case asvJSONValue::CUSTOM_TAG: {
+      // Serialize through the $customTag Extended-JSON convention (same shape
+      // as toJSON), so the decoder's JSON object parser reconstructs it into a
+      // CUSTOM_TAG node on round-trip. Without this, CUSTOM_TAG fell through
+      // to `nil` and was silently lost; furthermore, in arrays at even positions
+      // the bare nil token triggered the key/value heuristic and corrupted shape.
+      out += "(\"";
+      out += SEXPR_KEY_MARK; out += "$customTag\" (\"";
+      out += SEXPR_KEY_MARK; out += "name\" \"";
+      appendJsonEscaped(out, v->str_data);
+      out += "\" \"";
+      out += SEXPR_KEY_MARK; out += "value\" ";
+      if (v->custom_value) sexprSerializeVal(v->custom_value.get(), out, depth + 1);
+      else out += "nil";
+      out += "))";
+      break;
+    }
     default: out += "nil"; break;
   }
 }
@@ -602,6 +637,11 @@ inline std::string asvJSON::toSexpr() const {
 }
 
 inline bool asvJSON::fromSexpr(std::string_view input) {
+  // Reset state up front (like the other from* parsers) so a parse failure at
+  // any point -- including in sexprTokenize -- never leaves stale data behind:
+  // getRoot()/getKeys() must reflect "we parsed the new input" semantics.
+  root = nullptr;
+  dirty_ = false;
   formatType = FormatType::Unknown;
   try {
     if (input.empty()) throw asvJSONError("empty input");
@@ -619,6 +659,11 @@ inline bool asvJSON::fromSexpr(std::string_view input) {
     if (ok) formatType = FormatType::SExpr;
     return ok;
   } catch (const asvJSONError& e) {
+    lastError = e.what();
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromCpp).
     lastError = e.what();
     return false;
   }

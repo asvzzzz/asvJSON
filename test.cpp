@@ -20855,15 +20855,47 @@ TEST(testAuditMedLow) {
 		ASSERT_EQ(s2.getInt("x"), int64_t(-7));
 		ASSERT(s2.get("y")->type == asvJSONValue::DOUBLE);
 	}
-	// S-Expression: NaN/Infinity doubles cannot be serialized (used to become
-	// the null literal "nil").
+	// S-Expression: NaN/Infinity doubles are serialized as the `nil` placeholder
+	// (matching all sibling to* serializers that never throw from serialization).
 	{
 		asvJSON n;
 		ASSERT(n.parse(std::string("{}")));
 		n.getRoot()->obj->emplace("nn", asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
-		bool threw = false;
-		try { n.toSexpr(); } catch (const asvJSONError&) { threw = true; }
-		ASSERT(threw);
+		std::string s = n.toSexpr();
+		ASSERT(s.find("nil") != std::string::npos);
+		asvJSON ni;
+		ASSERT(ni.parse(std::string("{}")));
+		ni.getRoot()->obj->emplace("ii", asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+		std::string s2 = ni.toSexpr();
+		ASSERT(s2.find("nil") != std::string::npos);
+	}
+	// S-Expression: CUSTOM_TAG round-trips through the $customTag Extended JSON
+	// convention (name + value preserved; was silently emitted as `nil` before).
+	{
+		asvJSON ct1;
+		ASSERT(ct1.parse(std::string(R"({"x":{"$customTag":{"name":"foo","value":42}}})")));
+		auto* tg = ct1.get("x");
+		ASSERT(tg != nullptr && tg->type == asvJSONValue::CUSTOM_TAG);
+		std::string sexpr = ct1.toSexpr();
+		asvJSON ct2;
+		ASSERT(ct2.fromSexpr(std::string_view(sexpr)));
+		auto* tg2 = ct2.get("x");
+		ASSERT(tg2 != nullptr && tg2->type == asvJSONValue::CUSTOM_TAG);
+		if (tg2) {
+			// CUSTOM_TAG stores its name in str_data; getString() only reports
+			// data for STRING-type nodes, so read the field directly.
+			ASSERT_EQ(std::string(tg2->str_data), "foo");
+			ASSERT(tg2->custom_value != nullptr);
+			if (tg2->custom_value) ASSERT_EQ(tg2->custom_value->getInt(), int64_t(42));
+		}
+		// Null-valued custom tag also round-trips.
+		asvJSON ct3;
+		ASSERT(ct3.parse(std::string(R"({"x":{"$customTag":{"name":"bare","value":null}}})")));
+		std::string sexpr3 = ct3.toSexpr();
+		asvJSON ct4;
+		ASSERT(ct4.fromSexpr(std::string_view(sexpr3)));
+		auto* tg4 = ct4.get("x");
+		ASSERT(tg4 != nullptr && tg4->type == asvJSONValue::CUSTOM_TAG);
 	}
 	// JSONPath stays lenient (never throws) and returns empty for constructs it
 	// does not support, instead of partially evaluating and silently ignoring

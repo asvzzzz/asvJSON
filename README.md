@@ -1068,6 +1068,14 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.8 (2026-09-19)
+
+Addresses two S-Expression serializer fixes (`asvjson/formats/sexpr.hpp`):
+
+- **Fix (Sexpr, NaN/Infinity serialization contract):** the DOUBLE case previously threw `asvJSONError("Cannot serialize NaN or Infinity")`, which broke parity with every other `to*()` serializer in the library - none of them throw out of a valid tree. It now emits the same `"nil"` placeholder used for null values (and consistent with how sibling formats handle non-finite doubles), so serialization never fails on this input; decoding behavior is unchanged (`nil` still reads back as null).
+- **Fix (Sexpr, CUSTOM_TAG encoder paren imbalance):** the S-expression emitted a spurious extra opening parenthesis before `"value"` - `("\x01$customTag" ("\x01name" "foo" (" \x01value" 42))` - producing unbalanced parens that only happened to parse back correctly by accident of where the reader's matching logic landed. The stray `(` is removed, so the inner object group is a clean flat two-key form: `("\x01$customTag" ("\x01name" "foo" "\x01value" 42))`.
+- **Test:** new coverage in `testAuditMedLow` - NaN and +Infinity now assert `"nil"` appears in the serialized S-expression (replacing a previous assertion that serialization must throw), plus round-trip checks for valued (`{"$customTag":{"name":"foo","value":42}}`) and null-valued custom tags through `$customTag` Extended JSON -> `toSexpr()` -> `fromSexpr()`, verifying the tag name, value type, and payload survive intact.
+
 ### 1.25.7 (2026-09-19)
 
 Addresses review + edge-case findings in the incremental JSON SAX/streaming parser (`JsonStreamParser`, `asvjson/formats/jsonsax.hpp`):
