@@ -27,6 +27,11 @@ namespace asvJSONInternal {
 // it should throw an exception (which will be caught and reported as an error).
 // The string_view parameters point into data valid only during the callback;
 // the handler must copy if it needs the data beyond the callback scope.
+// onError, in particular, MUST NOT throw: it is invoked both inside the
+// parsers' internal try/catch (where a throw is "delivered" a second time by
+// the same path) and on early-return validation paths that bypass it (where a
+// throw would escape parse()/feed() entirely). Handlers must treat onError as
+// a nothrow notification point.
 
 struct JsonSaxHandler {
   virtual ~JsonSaxHandler() = default;
@@ -166,6 +171,7 @@ private:
   bool parseObject() {
     if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
+    cntObject_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartObject();
     advance(); // consume '{'
     skip();
@@ -198,6 +204,7 @@ private:
   bool parseArray() {
     if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
+    cntArray_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartArray();
     advance(); // consume '['
     skip();
@@ -219,15 +226,9 @@ private:
 
   bool parseStringValue() {
     std::string raw = scanStringRaw();
-    // DateTime heuristic
-    if (raw.size() >= 20 && raw[4] == '-' && raw[7] == '-' && raw[10] == 'T') {
-      time_t ts; int ms = 0;
-      if (tryParseDateTime(raw, ts, &ms)) {
-        // Emit as string (SAX doesn't have a datetime event)
-        handler_->onStringValue(raw);
-        return true;
-      }
-    }
+    // Strings are always reported unescaped, even when the raw text happens to
+    // look like a datetime (SAX has no datetime event; the SAX contract is that
+    // callbacks receive decoded bytes, so there is no raw early-exit path).
     std::string unescaped;
     try { unescaped = unescapeJsonString(raw, true); }
     catch (const std::runtime_error&) { throw std::runtime_error("Invalid escape in string"); }
@@ -317,7 +318,11 @@ private:
       long long l = 0;
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, l);
       if (ec != std::errc() || ptr != buf + numLen) {
-        // Too large for int64 -- emit as double if possible, else fail
+        // int64 overflow. Documented divergence: the DOM parser preserves such a
+        // literal as a STRING with raw_number (exact text round-trip), while the
+        // SAX JSON parser has no raw-number event and degrades to a double --
+        // both are valid numbers, but the DOM keeps the literal verbatim. This
+        // is intentional: SAX consumers get a numeric value, not a raw string.
         std::string numStr(buf, numLen);
         errno = 0;
         char* end = nullptr;
@@ -410,6 +415,9 @@ public:
   // Feed a chunk of input data. Returns false on parse error.
   bool feed(std::string_view chunk) {
     if (error_) return false;
+    // An empty chunk is always a no-op (e.g. a read() returning 0); it must not
+    // be mistaken for "data after complete value".
+    if (chunk.empty()) return true;
     if (done_) { lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false; }
     buffer_.append(chunk.data(), chunk.size());
     needMore_ = false; // new data may resolve a paused token
@@ -491,20 +499,43 @@ public:
       return true;
     }
 
+    // Check UTF-8 BEFORE accepting a completed top-level value: a multibyte
+    // sequence may have been cut off by EOF even while the value (or a trailing
+    // comment holding those bytes) looked complete. The DOM parser rejects such
+    // input on entry; here it is rejected at the end of input.
     if (validateUTF8 && utf8Need_ != 0) {
       // A multibyte sequence was cut off at end of input.
       lastError_ = "Invalid UTF-8 in input"; error_ = true; handler_.onError(lastError_); return false;
     }
 
-    if (depth_ > 0 || state_ != State::TOP) {
-      // Empty input is the only content-less TOP allowed; a trailing line
-      // comment that was not followed by a newline is harmless.
-      if (!(state_ == State::TOP && depth_ == 0 && !hadValue_ &&
-            (buffer_.empty() || (pos_ >= buffer_.size() && tokenBuffer_.empty())))) {
-        lastError_ = "Incomplete input"; error_ = true; handler_.onError(lastError_); return false;
+    if (state_ == State::TAIL) {
+      // A '/' waiting for its second character at EOF never opened a comment:
+      // it is trailing data after the completed value ("Trailing chars" in the
+      // DOM/JSON parsers), not harmless whitespace.
+      if (pendingComment()) {
+        lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false;
       }
+      done_ = true;
+      return true;
     }
+
+    if (depth_ > 0 || state_ != State::TOP) {
+      // Still inside a container / mid-token at end of input: incomplete. The
+      // previous nested check was dead code -- it demanded state_ == TOP &&
+      // depth_ == 0, the exact opposite of this branch's precondition; reaching
+      // the end means the input never produced a complete document.
+      lastError_ = "Incomplete input"; error_ = true; handler_.onError(lastError_); return false;
+    }
+
+    // state_ == State::TOP && depth_ == 0 now. A real value must have been
+    // produced; empty input and comment-only input are rejected, matching the
+    // DOM parser and JsonSaxParser.
+    if (!hadValue_) {
+      lastError_ = "Empty input"; error_ = true; handler_.onError(lastError_); return false;
+    }
+
     state_ = State::DONE;
+    done_ = true;
     return true;
   }
 
@@ -525,6 +556,7 @@ private:
     LIT_NULL,      // inside "null"
     LINE_COMMENT,  // inside // comment
     BLOCK_COMMENT, // inside /* */ comment
+    TAIL,          // complete top-level value; only whitespace/comments may follow
     DONE,
     ERROR
   };
@@ -535,6 +567,9 @@ private:
   State state_ = State::TOP;
   int depth_ = 0;
   bool hadValue_ = false;
+  // Bound on the accumulated number token (tokenBuffer_ + in-buffer tail) so a
+  // pathological number cannot grow tokenBuffer_ without limit (DoS guard).
+  static constexpr size_t MAX_NUMBER_LEN = 4096;
   size_t tokenStart_ = 0;   // start of current token in buffer_
   std::string tokenBuffer_; // accumulated partial token data across chunks
   std::string lastError_;
@@ -576,9 +611,10 @@ private:
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
   }
 
-  static bool isValueStart(char c) {
+  bool isValueStart(char c) {
     return c == '"' || c == '{' || c == '[' || c == 't' || c == 'f' || c == 'n' ||
-           c == '-' || (c >= '0' && c <= '9') || c == 'N' || c == 'I';
+           c == '-' || (c >= '0' && c <= '9') ||
+           (c == 'N' || c == 'I') && allowNaNInfinity;
   }
 
   // Strict JSON number grammar: [-] int [. frac] [(e|E)[+|-] digits]. Rejects
@@ -650,6 +686,9 @@ private:
           break;
         case State::BLOCK_COMMENT:
           if (!processBlockComment()) return false;
+          break;
+        case State::TAIL:
+          if (!processTrailing()) return false;
           break;
         default:
           return true;
@@ -914,27 +953,18 @@ private:
           handler_.onKey(key);
           state_ = State::OBJ_COLON;
         } else {
-          // DateTime heuristic
-          bool emitted = false;
-          if (raw.size() >= 20 && raw[4] == '-' && raw[7] == '-' && raw[10] == 'T') {
-            time_t ts; int ms = 0;
-            if (tryParseDateTime(raw, ts, &ms)) {
-              handler_.onStringValue(raw);
-              emitted = true;
-            }
+          // Strings are always reported unescaped, even if the raw text looks
+          // like a datetime (no raw early-exit; SAX delivers decoded bytes).
+          if (raw.size() > asvJSONValue::MAX_STRING_LEN) {
+            setError("String too long");
+            return false;
           }
-          if (!emitted) {
-            if (raw.size() > asvJSONValue::MAX_STRING_LEN) {
-              setError("String too long");
-              return false;
-            }
-            try {
-              std::string unescaped = unescapeJsonString(raw, true);
-              handler_.onStringValue(unescaped);
-            } catch (...) {
-              setError("Invalid escape in string");
-              return false;
-            }
+          try {
+            std::string unescaped = unescapeJsonString(raw, true);
+            handler_.onStringValue(unescaped);
+          } catch (...) {
+            setError("Invalid escape in string");
+            return false;
           }
           return afterValue();
         }
@@ -982,14 +1012,27 @@ private:
       }
     }
     // End of buffer -- might need more data (e.g., exponent)
-    // Save partial and wait
-    tokenBuffer_.append(buffer_, tokenStart_, buffer_.size() - tokenStart_);
-    tokenStart_ = buffer_.size();
-    pos_ = buffer_.size();
+    // Save partial and wait -- but bounds-check the accumulated size so a
+    // number split across many chunks cannot grow tokenBuffer_ without limit.
+    {
+      size_t total = tokenBuffer_.size() + (buffer_.size() - tokenStart_);
+      if (total > MAX_NUMBER_LEN) {
+        setError("Number too large"); return false;
+      }
+      tokenBuffer_.append(buffer_, tokenStart_, buffer_.size() - tokenStart_);
+      tokenStart_ = buffer_.size();
+      pos_ = buffer_.size();
+    }
     return true; // need more data
   }
 
   bool emitPendingNumber() {
+    // Bound the accumulated number token so a pathological number split across
+    // many chunks cannot grow memory without limit.
+    size_t tailLen = (tokenStart_ <= pos_ && tokenStart_ <= buffer_.size()) ? (pos_ - tokenStart_) : 0;
+    if (tokenBuffer_.size() + tailLen > MAX_NUMBER_LEN) {
+      setError("Number too large"); return false;
+    }
     std::string numStr;
     if (!tokenBuffer_.empty()) {
       numStr = tokenBuffer_;
@@ -1021,10 +1064,12 @@ private:
         // ok
       } else if (ec == std::errc() && ptr != buf + len) {
         // A grammatically valid number the formatter did not fully consume:
-        // fall back to strtod.
+        // fall back to strtod, verifying it consumed everything.
         errno = 0;
-        d = std::strtod(numStr.c_str(), nullptr);
+        char* end = nullptr;
+        d = std::strtod(numStr.c_str(), &end);
         if (errno == ERANGE) { setError("Invalid number: out of range"); return false; }
+        if (end != numStr.c_str() + numStr.size()) { setError("Invalid number"); return false; }
       } else if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) {
         // Overflow honoring allowNaNInfinity, matching the DOM parser.
       } else {
@@ -1048,6 +1093,9 @@ private:
       long long l = 0;
       auto [ptr, ec] = std::from_chars(buf, buf + len, l);
       if (ec != std::errc() || ptr != buf + len) {
+        // int64 overflow: same documented divergence as the stateless parser --
+        // the DOM parser keeps the literal as a raw_number string, SAX emits it
+        // as a double (a JSON number either way, with type conversion).
         tokenBuffer_.clear();
         double d = std::strtod(numStr.c_str(), nullptr);
         handler_.onDoubleValue(d);
@@ -1077,6 +1125,18 @@ private:
     else if (state_ == State::LIT_FALSE) handler_.onBoolValue(false);
     else handler_.onNullValue();
     return afterValue();
+  }
+
+  // After a complete top-level value only whitespace/comments may follow. Any
+  // other byte (e.g. a second value) is trailing data after the value.
+  bool processTrailing() {
+    while (true) {
+      skipWsAndComments();
+      if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
+      if (pos_ >= buffer_.size()) return true; // need more data
+      if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a comment start
+      lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false;
+    }
   }
 
   bool processLineComment() {
@@ -1110,8 +1170,11 @@ private:
   bool afterValue() {
     hadValue_ = true;
     if (containerStack_.empty()) {
-      state_ = State::DONE;
-      done_ = true;
+      // A complete top-level value: do NOT set done_ here -- the remaining
+      // space in this chunk must still be scanned. processTrailing() below
+      // accepts only whitespace/comments until the end of input, so trailing
+      // garbage inside the same chunk is rejected ("Data after complete value").
+      state_ = State::TAIL;
       return true;
     }
     Frame& f = containerStack_.back();
@@ -1162,7 +1225,9 @@ public:
   }
 
   void onStringValue(std::string_view value) override {
-    auto v = asvJSONValue::makeString(value.data(), value.size());
+    // An empty string_view may carry data() == nullptr; makeString requires a
+    // valid pointer even for a zero-length value.
+    auto v = asvJSONValue::makeString(value.empty() ? "" : value.data(), value.size());
     addValue(std::move(v));
   }
 

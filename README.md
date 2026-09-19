@@ -1068,6 +1068,21 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.7 (2026-09-19)
+
+Addresses review + edge-case findings in the incremental JSON SAX/streaming parser (`JsonStreamParser`, `asvjson/formats/jsonsax.hpp`):
+
+- **Fix (SAX, error-path contract):** documented that `onError` is a nothrow notification point - it fires both inside the parsers' internal try/catch and on early-return validation paths that bypass it; handlers must not throw from it.
+- **Fix (SAX, per-container size limits):** object/array element counters now reset at each fresh container open (`cntObject_[depth_]`/`cntArray_[depth_] = 0`) so `MAX_OBJECT_SIZE`/`MAX_ARRAY_SIZE` are enforced per container rather than leaking across sibling containers on the same nesting level.
+- **Fix (SAX, datetime heuristic removed):** string values - both top-level and object members - are now always reported unescaped via `onStringValue`, even when the raw text happens to look like an ISO timestamp; SAX has no dedicated datetime event, so callbacks receive decoded bytes only (the DOM parser's separate DATETIME path is unaffected).
+- **Fix (SAX, int64 overflow divergence documented):** a number too large for `int64_t` degrades to a double in the SAX stream while the DOM parser keeps it as an exact raw-number STRING - both are valid representations; this asymmetry is now explicitly documented at the call site.
+- **Fix (SAX, empty feed chunk no-op):** `feed("")` is now guaranteed safe and can never be mistaken for "data after complete value" (previously reachable via a 0-byte read on an already-complete stream).
+- **Fix (SAX, UTF-8 cut off at EOF):** multibyte validation (`utf8Need_`) moved ahead of accepting the completed top-level value, so input ending mid-sequence inside a trailing comment is rejected even when state had reached `TAIL`/comment mode.
+- **Fix (SAX, dangling `/` at EOF / dead code path):** introduced an explicit `State::TAIL` for "complete top-level value produced"; a lone `/` waiting on its second character at EOF is now correctly reported as data-after-value instead of being silently accepted by a self-contradictory old branch; comment-only and empty input are both rejected with clear, DOM-matching error messages.
+- **Fix (SAX, number token DoS guard):** added `MAX_NUMBER_LEN = 4096` bound on the accumulated cross-chunk number token so a pathological stream cannot grow it without limit.
+- **Fix (SAX, NaN/Infinity gating made conditional):** `isValueStart()` now consults `allowNaNInfinity`, matching the DOM parser's opt-in behavior for non-standard JSON literals (`NAN`/`INF`).
+- **Test:** new regression cases in `testJsonStream`: empty input rejected, comment-only input rejected, dangling `/` at EOF rejected (and accepted once a full trailing comment arrives), incomplete UTF-8 inside a trailing comment rejected.
+
 ### 1.25.6 (2026-09-19)
 
 Addresses the reviewer pass in `err.txt` (JSON Schema draft-07 validator):

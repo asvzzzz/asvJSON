@@ -18289,11 +18289,32 @@ TEST(testJsonStream) {
 		ASSERT(errored);
 	}
 
-	// -- empty input --
+	// -- empty input rejected (DOM/SAX parity) --
 	{
-		JsonSaxHandler h;
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
 		JsonStreamParser sp(h);
-		ASSERT(sp.finish());
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- comment-only input rejected (DOM/SAX parity) --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("// comment"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
 	}
 
 	// -- single value --
@@ -18427,6 +18448,56 @@ TEST(testJsonStream) {
 		ASSERT(sp.finish());
 		ASSERT(got);
 		ASSERT_EQ(val, 2);
+	}
+
+	// -- regression: dangling '/' at EOF rejected (DOM/SAX parity) --
+	// feed("123 /") leaves a '/' awaiting a second comment character; at EOF it
+	// never became a comment, so it is trailing data after the complete value.
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("123 /"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- regression: incomplete UTF-8 at EOF inside a trailing comment rejected --
+	// feed("123 // \xc3") with validateUTF8 = true: the incremental scanner sets
+	// utf8Need_, and finish() must reject even though state_ is TAIL/LINE_COMMENT.
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		sp.validateUTF8 = true;
+		ASSERT(sp.feed("123 // \xc3"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- dangling '/' is fine when a comment then completes --
+	{
+		bool ok = false;
+		struct : JsonSaxHandler {
+			bool* o;
+			void onIntegerValue(int64_t v) override { *o = (v == 123); }
+		} h;
+		h.o = &ok;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("123 /"));
+		ASSERT(sp.feed("/ trailing"));
+		ASSERT(sp.finish());
+		ASSERT(ok);
 	}
 }
 
