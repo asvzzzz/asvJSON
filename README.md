@@ -1068,6 +1068,17 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.25.9 (2026-09-19)
+
+Addresses three must-fix bugs plus documentation gaps from a security/correctness review of the RFC 9535 JSONPath implementation (`asvjson/formats/jsonpath.hpp`):
+
+- **Fix (JSONPath, bracket-list partial results):** `jpExpandBracket` accumulated each valid list item's result into its output vector as it went; when a later item in the same `[a,b,c]` selector was invalid (bad number/escape/slice token, or an unrecognized token type), several early-exit paths used a bare `return`, leaving earlier items' already-appended results behind and leaking them out of the whole query. Every error exit inside that loop now rolls back to its pre-loop size before returning, so `$[0,!]` / `$[0,<out-of-range>]` on `[10,20,30]` correctly select nothing instead of silently returning `[10]`.
+- **Fix (JSONPath, `length()`/`count()` on a missing node):** `jpGetPropCount(nullptr)` returned 0 for a null ("Nothing") input, so `@.missing.length() == 0`, or selecting `.x.missing.length()` directly, could wrongly match/select as if the length were genuinely known to be zero. Per RFC 9535 a missing node is "Nothing", not an empty collection: it now returns -1 (sentinel) and both `jpApplyFunc` call sites already mapped negative results to "no value" (`nullptr`), so such filters no longer match and direct selections of the length yield nothing.
+- **Fix (JSONPath, filter-depth guard exception safety):** the manual `++filterDepth_ / --filterDepth_` pair around a nested parenthesized filter's recursive parse could leak an increment if that recursion exited non-locally; it is now held by a small RAII scope-guard struct (`FilterDepthGuard`) so the depth counter always unwinds exactly once regardless of how the guarded call exits.
+- **Docs (JSONPath):** documented in the file header, alongside the existing RFC-compliance notes: single-value (not nodelist) filter semantics for `count()`/`length()` comparisons and loose membership behavior of things like `@.a[*] == 5`; that `match()`/`search()` use ECMAScript `std::regex`, a superset of I-Regexp, with an explicit ReDoS warning for untrusted patterns; and that `query()`/`queryFirst()`, while lenient about malformed path segments (they select nothing rather than throwing), do not suppress out-of-memory exceptions from internal allocations on very large/deep trees.
+- **Test:** new regression blocks in `testJSONPathExtras`: an invalid selector appearing AFTER a comma no longer leaks the results of earlier valid items in the same bracket list; and `length()`/`count()` of a missing node now select nothing (never matching a bogus `== 0`) both as a filter operand and as a direct selection.
+- **Version bump:** 1.25.8 -> 1.25.9
+
 ### 1.25.8 (2026-09-19)
 
 Addresses two S-Expression serializer fixes (`asvjson/formats/sexpr.hpp`):

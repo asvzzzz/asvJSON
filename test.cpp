@@ -17822,6 +17822,24 @@ TEST(testJSONPathExtras) {
 		ASSERT_EQ(doc.query("$[99999999999999999999999999]").size(), size_t(0));
 		ASSERT_EQ(doc.query(R"($["\z"])").size(), size_t(0));
 	}
+	// -- regression: an invalid selector AFTER a comma must not leak the results of earlier valid items in the same bracket list --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10,20,30])")));
+		// '!' is not a legal bracket-list member: without rollback this would return [10] (the item before the comma), not []
+		ASSERT_EQ(doc.query("$[0,!]").size(), size_t(0));
+		// out-of-I-JSON-range index as the second list item: first item "0" resolves fine, then strict parse fails -> must still yield empty, not [10]
+		ASSERT_EQ(doc.query(R"($[0,99999999999999999999])").size(), size_t(0));
+	}
+	// -- regression: length()/count() of a MISSING node is Nothing (RFC 9535), never a real 0 that could match `== 0` filters --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"a":1})")));
+		auto r = doc.query("$[?(@.missing.length() == 0)]");
+		ASSERT_EQ(r.size(), size_t(0)); // before fix: @.missing -> nullptr -> length()==INT(0) matched this filter; now Nothing, so no match
+		auto r2 = doc.query("$.a.missing.length()");
+		ASSERT_EQ(r2.size(), size_t(0)); // selecting the length of a non-existent property yields nothing, not 0
+	}
 	// -- isValidPath is strict (RFC 9535 grammar + I-JSON ranges + step != 0) --
 	{
 		ASSERT(asvJSON::isValidPath("$"));

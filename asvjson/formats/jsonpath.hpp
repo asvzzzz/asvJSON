@@ -18,6 +18,27 @@
 //   - String literals follow the RFC escape rules, including \uXXXX escapes
 //     and surrogate pairs.
 //   - Slice semantics follow the RFC Normalize()/Bounds() algorithm exactly.
+//   - Filters are evaluated with single-value (not nodelist) semantics: a path
+//     fragment inside a filter resolves to at most one node, so count(x) means
+//     "x selected something" (1/0), not "number of nodes in x's result set";
+//     likewise `@.a[*] == 5` tests membership loosely rather than comparing the
+//     full nodelist per RFC §2.3.5.2.2. This is a deliberate design choice to
+//     keep the filter evaluator simple and allocation-light, not an oversight;
+//     paths that genuinely need multi-node comparison should be split into
+//     separate query() calls combined by caller code.
+//   - match()/search() use std::regex (ECMAScript), which is a superset of the
+//     RFC 9485 I-Regexp subset; patterns relying on lookahead/lookbehind or
+//     backreferences will compile here even though they are not valid I-Regexps.
+//     Untrusted, hand-crafted patterns carry ReDoS risk since std::regex has no
+//     timeout — validate/reject suspiciously nested quantifiers at your boundary
+//     before passing them in when the pattern source is untrusted. Invalid or
+//     otherwise rejected patterns simply yield false (no exception escapes).
+//   - query()/queryFirst() are lenient: malformed, unterminated, or otherwise
+//     invalid path segments select nothing rather than throwing; however they do
+//     not guard against out-of-memory conditions — std::bad_alloc (or similar)
+//     from internal allocations while evaluating deep/wide filters on very large
+//     trees can still propagate to the caller. Catch at your call site if that is
+//     a concern for untrusted inputs.
 
 #include "../core.hpp"
 #include <regex>
@@ -364,8 +385,10 @@ private:
   }
 };
 
+// Returns the RFC "length" of a node, or -1 (Nothing) when it has no length:
+// null/missing nodes, booleans, numbers. Callers treat <0 as Nothing and must not emit it.
 inline int jpGetPropCount(const asvJSONValue* n) {
-  if (!n) return 0;
+  if (!n) return -1;
   if (n->type == asvJSONValue::STRING) {
     int count = 0;
     const std::string& s = n->str_data;
@@ -623,6 +646,14 @@ class JPFilterEval {
   }
 
   struct BoolVal { bool val; };
+
+  // RAII guard: decrements filterDepth_ exactly once on scope exit, even if the
+  // guarded call (parseOr) throws or otherwise exits non-locally.
+  struct FilterDepthGuard {
+    int& depth_;
+    explicit FilterDepthGuard(int& d) : depth_(d) {}
+    ~FilterDepthGuard() { --depth_; }
+  };
 
   bool parseOr() {
     bool l = parseAnd();
@@ -882,8 +913,8 @@ class JPFilterEval {
       // overflow the stack on hand-crafted inputs.
       if (filterDepth_ >= 64) return false;
       ++filterDepth_;
+      FilterDepthGuard guard(filterDepth_);
       bool r = parseOr();
-      --filterDepth_;
       if (lex_.peek().type == TokType::RPAREN) lex_.next();
       return r;
     }
@@ -967,18 +998,18 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
 
     else if (inner.type == TokType::NUMBER) {
       lex.next();
-      if (!inner.ok) return;
+      if (!inner.ok) { out.resize(before); return; }
       if (lex.peek().type == TokType::COLON) {
         // Slice with an explicit start.
         int64_t start, end, step;
-        if (!jpParseIntStrict(inner.val, start)) return;
+        if (!jpParseIntStrict(inner.val, start)) { out.resize(before); return; }
         lex.next(); // consume ':'
         end = INT64_MAX;
         step = 1;
         bool hasEnd = false;
         Tok endTok = lex.peek();
         if (endTok.type == TokType::NUMBER) {
-          if (!endTok.ok || !jpParseIntStrict(endTok.val, end)) return;
+          if (!endTok.ok || !jpParseIntStrict(endTok.val, end)) { out.resize(before); return; }
           hasEnd = true;
           lex.next();
         }
@@ -986,7 +1017,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
           lex.next();
           Tok stepTok = lex.peek();
           if (stepTok.type == TokType::NUMBER) {
-            if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) return;
+            if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) { out.resize(before); return; }
             lex.next();
           }
         }
@@ -998,7 +1029,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       }
       else if (node && node->type == asvJSONValue::ARRAY && node->arr) {
         int64_t idx;
-        if (!jpParseIntStrict(inner.val, idx)) return;
+        if (!jpParseIntStrict(inner.val, idx)) { out.resize(before); return; }
         size_t ai;
         if (idx < 0) {
           size_t mag = static_cast<size_t>(-idx);
@@ -1015,7 +1046,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
 
     else if (inner.type == TokType::STRING) {
       lex.next();
-      if (!inner.ok) return;
+      if (!inner.ok) { out.resize(before); return; }
       const asvJSONValue* child = jpGetProp(node, inner.val);
       if (child) out.push_back(child);
     }
@@ -1027,7 +1058,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       bool hasStart = false, hasEnd = false;
       Tok endTok = lex.peek();
       if (endTok.type == TokType::NUMBER) {
-        if (!endTok.ok || !jpParseIntStrict(endTok.val, end)) return;
+        if (!endTok.ok || !jpParseIntStrict(endTok.val, end)) { out.resize(before); return; }
         hasEnd = true;
         lex.next();
       }
@@ -1035,7 +1066,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
         lex.next();
         Tok stepTok = lex.peek();
         if (stepTok.type == TokType::NUMBER) {
-          if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) return;
+          if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) { out.resize(before); return; }
           lex.next();
         }
       }
@@ -1064,7 +1095,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
     }
 
     else {
-      return;
+      out.resize(before); return; // invalid token mid-selector: discard partial results from earlier items
     }
 
     if (lex.peek().type == TokType::COMMA) { lex.next(); continue; }
