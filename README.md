@@ -1069,6 +1069,21 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.26.7 (2026-09-20)
+
+TOML audit fixes (`asvjson/formats/toml.hpp`) from the latest err.txt review. New regression assertions merged into the existing `testFromTOML` / `testToTOML` cases, suite stays at **375**:
+
+- **Fix (TOML decode, silent element loss):** `flushVal` in the inline-array parser called `parseTomlValue` without `strictTail`, so `[1 2]` (two bare tokens with no comma/newline) dropped the `2` and produced `[1]` -- `[1 2, 3]` became `[1, 3]`. `flushVal` now passes `strictTail = true`, matching the inline-table path; such input is a parse error instead of a silent loss.
+- **Fix (TOML decode, array-table guard collision):** `arrayTablePaths` tracked only the last dotted-path segment, so `[[a.x]]` registered the leaf name `x` and accidentally allowed `[[b.x]]` to append onto a statically-defined `b.x = []` (violating the TOML rule against appending to a statically-defined array). The guard now keyes on the full dotted path (`arrayTablePaths.insert/count(fullPath)`).
+- **Fix (TOML decode, multiline-string leading newline):** the block-style string openers trimmed `\r`/`\n` twice, so `"""` followed by a blank source line (content `\n\nhello` inside the delimiter) dropped both newlines instead of the spec-mandated single line break. Both `"""` and `'''` openers now trim exactly one line break (`\r\n` counts as one; a second `\n` stays as content).
+- **Docs (TOML, file header):** added a "Known limitations" block documenting the silent NULL drop (`{"a": null, "b": 1}` -> `b = 1`, `[1, null, 2]` -> `[1, 2]`) and the BINARY/DATETIME round-trip drift (both serialize to base64/date-time *strings* and decode as STRING -- not re-tagged -- including RFC 3339 `2024-01-01T00:00:00Z`).
+- **Chore (TOML encode, dead code):** folded the two identical branches in the compact `tomlEmitVal` path into one body.
+- **Chore (TOML decode, dead flag):** removed the never-set `inMlString` flag whose `if (!inMlString)` wrapper was always true (multiline-string continuations are assembled separately and never reach `stripComment`).
+- **Chore (TOML, key hardening):** `parseTomlKey` now throws on an unterminated quoted key instead of silently returning the accumulated prefix.
+- **Chore (TOML, Unicode):** deleted the local `appendCodepoint` and routed `consumeUnicodeEscape` through the shared `appendUtf8Codepoint` (same UTF-8 encoder as protobuf/UDE/plist). The `>= 0x110000` out-of-range case remains unreachable from TOML because `consumeUnicodeEscape` already bounds-checks before encoding.
+- **Chore (TOML, number tail):** removed the redundant `!isDelim(pos)` pre-check before `checkTailLen(pos)` in the number parser; with `strictTail` now forced at every `parseTomlValue` call site, `checkTailLen` alone rejects all trailing content.
+- **Version bump:** 1.26.6 -> 1.26.7
+
 ### 1.26.6 (2026-09-20)
 
 BSON audit fixes (`asvjson/formats/bson.hpp`) from the latest err.txt review. Four new regression tests, suite now at **375** (up from 371):

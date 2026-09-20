@@ -10618,6 +10618,23 @@ line2""")")));
     ASSERT(j.fromTOML(std::string_view(R"(str = """""" )")));
     ASSERT_EQ(std::string(j.getString("str")), std::string(""));
   }
+  // Only the FIRST line break after the opening delimiter is trimmed: with a
+  // blank line between the opener and the content, one \n is trimmed and the
+  // second stays as content ("\n\nhello" source -> value "\nhello")
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = """
+
+hello""")")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("\nhello"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = '''
+
+hello''')")));
+    ASSERT_EQ(std::string(j.getString("str")), std::string("\nhello"));
+  }
   // Hex number
   {
     asvJSON j;
@@ -10863,9 +10880,19 @@ key = "value" # inline comment)")));
     ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
   }
   // Unclosed multiline array is an error
+{
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [1,\n2,\n]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+  }
+  // JSON-invalid `[1 2]` inside an inline array is a parse error (the second
+  // element must not be silently dropped; matches the inline-table path)
   {
     asvJSON j;
-    ASSERT(!j.fromTOML(std::string_view("a = [1,\n2,3")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1 2]")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1 2, 3]")));
+    ASSERT(!j.fromTOML(std::string_view("a = [true false]")));
+    ASSERT(j.fromTOML(std::string_view("a = [1, 2]")));
   }
   // Separator comma between inline-table entries (was mis-rejected as
   // 'invalid key: unexpected character')
@@ -10973,6 +11000,11 @@ key = "value" # inline comment)")));
   {
     asvJSON j;
     ASSERT(!j.fromTOML(std::string_view("fruits = []\n[[fruits]]\nx = 1")));
+    // ... even when another [[path]] with the same leaf name was opened first
+    // (the array-table guard must track the full dotted path, not just the
+    // last segment -- `[[a.x]]` must not allow an append to the static b.x)
+    ASSERT(!j.fromTOML(std::string_view("a = {}\nb.x = []\n[[a.x]]\nt = 1\n[[b.x]]\ny = 2")));
+    ASSERT(!j.fromTOML(std::string_view("b.x = []\n[[a.x]]\n[[b.x]]")));
   }
   // A key/value pair must end at EOF/line: two pairs on one line is an error
   {

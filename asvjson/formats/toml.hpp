@@ -1,5 +1,14 @@
 #pragma once
 // TOML serialization/parsing for asvJSON++
+//
+// Known limitations (documented, not bugs):
+// - TOML has no null type: a NULL value is silently dropped by tomlVal(), both
+//   in objects ({"a": null, "b": 1} -> b = 1) and in arrays ([1, null, 2] ->
+//   [1, 2]).
+// - BINARY and DATETIME do not round-trip: toTOML() emits them as a base64
+//   string / formatted date-time string, and fromTOML() decodes both back as
+//   STRING (they cannot be retagged without an external schema). This includes
+//   the RFC 3339 form `t = 2024-01-01T00:00:00Z`, which decodes to STRING.
 
 #include "../core.hpp"
 
@@ -64,14 +73,6 @@ inline std::string tomlJsonEscape(std::string_view s) {
   return out;
 }
 
-// Convert Unicode codepoint to UTF-8
-inline void appendCodepoint(unsigned long cp, std::string& out) {
-  if (cp < 0x80) out += static_cast<char>(cp);
-  else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-  else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-  else if (cp < 0x110000) { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-}
-
 // Parse a Unicode escape: \uXXXX (hexDigits=4) or \UXXXXXXXX (hexDigits=8).
 // `s` is positioned just after the 'u'/'U'. Throws asvJSONError on malformed
 // input (bad/truncated hex digit, out-of-range, or an unpaired surrogate).
@@ -102,7 +103,7 @@ inline void consumeUnicodeEscape(std::string_view& s, int hexDigits, std::string
       }
       if (lok && low >= 0xDC00 && low <= 0xDFFF) {
         unsigned long combined = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-        appendCodepoint(combined, out);
+        appendUtf8Codepoint(out, static_cast<unsigned int>(combined));
         s.remove_prefix(6); // \u + 4 hex digits of the low surrogate
         return;
       }
@@ -113,7 +114,7 @@ inline void consumeUnicodeEscape(std::string_view& s, int hexDigits, std::string
     throw asvJSONError("unpaired surrogate in unicode escape");
   if (cp > 0x10FFFF)
     throw asvJSONError("unicode escape out of range");
-  appendCodepoint(cp, out);
+  appendUtf8Codepoint(out, static_cast<unsigned int>(cp));
 }
 
 // Quote a TOML key if not a valid bare key
@@ -231,7 +232,7 @@ inline std::string parseTomlKey(std::string_view& s) {
     s.remove_prefix(1);
     bool escape = false;
     for (;;) {
-      if (s.empty()) return key;
+      if (s.empty()) throw asvJSONError("unterminated quoted key");
       char c = s[0]; s.remove_prefix(1);
       if (escape) { escape = false;
         if (c == 'n') key += '\n';
@@ -253,7 +254,7 @@ inline std::string parseTomlKey(std::string_view& s) {
   } else if (s[0] == '\'') {
     s.remove_prefix(1);
     for (;;) {
-      if (s.empty()) return key;
+      if (s.empty()) throw asvJSONError("unterminated quoted key");
       char c = s[0]; s.remove_prefix(1);
       if (c == '\'') break;
       key += c;
@@ -489,11 +490,10 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   if (s.size() >= 3 && s[0] == '"' && s[1] == '"' && s[2] == '"') {
     s.remove_prefix(3);
     std::string val;
-    // Trim leading newline(s) per TOML spec
-    if (!s.empty() && (s[0] == '\n' || s[0] == '\r')) {
-      s.remove_prefix(1);
-      if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
-    }
+    // Trim the single line break immediately after the opening delimiter
+    // (LF or CRLF); a second \n keeps as content ("\n\n" -> "\n").
+    if (!s.empty() && s[0] == '\r') s.remove_prefix(1);
+    if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
     bool escape = false;
     for (;;) {
       if (s.empty()) throw asvJSONError("unterminated string");
@@ -546,11 +546,10 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   // Multi-line literal string '''...'''
   if (s.size() >= 3 && s[0] == '\'' && s[1] == '\'' && s[2] == '\'') {
     s.remove_prefix(3);
-    // Trim leading newline(s) per TOML spec
-    if (!s.empty() && (s[0] == '\n' || s[0] == '\r')) {
-      s.remove_prefix(1);
-      if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
-    }
+    // Trim the single line break immediately after the opening delimiter
+    // (LF or CRLF); a second \n keeps as content ("\n\n" -> "\n").
+    if (!s.empty() && s[0] == '\r') s.remove_prefix(1);
+    if (!s.empty() && s[0] == '\n') s.remove_prefix(1);
     std::string val;
     for (;;) {
       if (s.empty()) throw asvJSONError("unterminated string");
@@ -592,7 +591,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       if (!trimmed.empty()) {
         if (!first) json += ',';
         first = false;
-        json += parseTomlValue(std::string_view(trimmed), depth + 1);
+        json += parseTomlValue(std::string_view(trimmed), depth + 1, true);
       }
       cur.clear();
     };
@@ -918,8 +917,6 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
     }
   }
   // Check for trailing content after number
-  if (pos < s.size() && !isDelim(pos))
-    throw asvJSONError("invalid number: unexpected character after number");
   checkTailLen(pos);
   if (!clean.empty() && clean[0] == '+') clean.erase(0, 1);
   return clean;
@@ -943,13 +940,8 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
       // Compact: inline all nested objects as {key = val} tables
       for (const auto& [k, val] : *v->obj) {
         std::string qk = tomlQuoteKey(k);
-        if (val->type == T::OBJECT || (val->type == T::ARRAY && val->arr)) {
-          std::string vs = tomlVal(val.get());
-          if (!vs.empty()) out += qk + " = " + vs + "\n";
-        } else {
-          std::string vs = tomlVal(val.get());
-          if (!vs.empty()) out += qk + " = " + vs + "\n";
-        }
+        std::string vs = tomlVal(val.get());
+        if (!vs.empty()) out += qk + " = " + vs + "\n";
       }
     } else {
       // Expanded: use [section] headers for nested objects.
@@ -1105,7 +1097,6 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     std::unordered_set<std::string> tableDefs; // header-defined tables (redefinition guard)
 
     auto lines = splitLines(input);
-    bool inMlString = false; // inside a multiline string continuation
     // Dotted keys implicitly define every super-table they create; the [table]
     // header form may not later redefine those (unlike plain header paths,
     // whose implicit super-tables stay reopenable).
@@ -1120,19 +1111,18 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       }
     };
     bool stripInBasic = false, stripInLiteral = false; // persistent state for stripComment
-    // Paths that were opened by an array-of-tables header (`[[a.b]]`) -- the
-    // array lives at the parent key 'b'; sub-arrays nested per element bind
-    // through the last element, so only the deepest parent key is tracked.
+    // Paths that were opened by an array-of-tables header (`[[a.b]]`). The
+    // array lives at the parent key 'b'; the FULL dotted path is tracked so
+    // two different parents with the same leaf name (`[[a.x]]`, `[[b.x]]`)
+    // cannot collide and silently defeat the static-array guard below.
     std::unordered_set<std::string> arrayTablePaths;
     for (size_t lineNum = 0; lineNum < lines.size(); lineNum++) {
       std::string_view line = trimSV(lines[lineNum]);
       if (line.empty()) continue;
 
-      if (!inMlString) {
-        line = stripComment(line, stripInBasic, stripInLiteral);
-        line = trimSV(line);
-        if (line.empty()) continue;
-      }
+      line = stripComment(line, stripInBasic, stripInLiteral);
+      line = trimSV(line);
+      if (line.empty()) continue;
 
       // Table header [table] or [[array]]
       if (line[0] == '[') {
@@ -1193,7 +1183,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             // `[[...]]` header or a sub-array-of-tables header on the last
             // element is allowed.
             if (it != parent->obj->end() && it->second->type == asvJSONValue::ARRAY &&
-                !arrayTablePaths.count(last))
+                !arrayTablePaths.count(fullPath))
               throw asvJSONError("cannot append to statically defined array '" + fullPath + "'");
             asvJSONValue* arrVal;
             if (it == parent->obj->end()) {
@@ -1205,7 +1195,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             }
             arrVal->arr->push_back(asvJSONValue::makeObject());
             tableDefs.insert(fullPath);
-            arrayTablePaths.insert(last);
+            arrayTablePaths.insert(fullPath);
           } else {
             if (tableDefs.count(fullPath))
               throw asvJSONError("table '" + fullPath + "' already defined");
