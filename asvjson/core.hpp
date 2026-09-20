@@ -3252,6 +3252,9 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 		formatType = FormatType::MessagePack;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the custom-tag decode uses std::make_unique, matching the other from* parsers.
+	    lastError = e.what(); root = nullptr; return false;
+	}
 }
 
 inline bool asvJSON::fromCBOR(const void* data, size_t size) {

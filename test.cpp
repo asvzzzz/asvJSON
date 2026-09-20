@@ -2375,6 +2375,145 @@ TEST(testMessagePackObjectIdRegexTimestamp) {
 	ASSERT_EQ(tsV->num, 1234567890);
 }
 
+TEST(testMessagePackCustomTagRoundTrip) {
+	// CUSTOM_TAG must survive a MessagePack round-trip via the asvJSON-specific
+	// ext type 4 (msgpack name-string + msgpack value) instead of degrading to
+	// null like before the fix (was falling into default: -> 0xC0).
+	asvJSON json;
+	ASSERT(json.parse(std::string("{\"k\":{\"$customTag\":{\"name\":\"mytag\",\"value\":42}}}")));
+	auto* v0 = json.get("k");
+	ASSERT(v0 != nullptr && v0->type == asvJSONValue::CUSTOM_TAG); // sanity: the $customTag JSON path works.
+
+	std::vector<uint8_t> mp = json.toMessagePack();
+	asvJSON json2;
+	ASSERT(json2.fromMessagePack(mp.data(), mp.size()));
+	auto* v1 = json2.get("k");
+	ASSERT(v1 != nullptr);
+	ASSERT_EQ(v1->type, asvJSONValue::CUSTOM_TAG); // name preserved through the ext-4 [name, value] encoding.
+	ASSERT_EQ(v1->str_data, std::string("mytag"));
+	auto* val = v1->custom_value.get();
+	ASSERT(val != nullptr && val->type == asvJSONValue::INT); // the annotated value round-trips too.
+	ASSERT_EQ(val->num, 42);
+
+	// A null annotation value must also survive (emitted as an explicit nil).
+	asvJSON jn;
+	ASSERT(jn.parse(std::string("{\"k\":{\"$customTag\":{\"name\":\"empty\",\"value\":null}}}")));
+	std::vector<uint8_t> mpn = jn.toMessagePack();
+	asvJSON jn2;
+	ASSERT(jn2.fromMessagePack(mpn.data(), mpn.size()));
+	auto* vn = jn2.get("k");
+	ASSERT(vn != nullptr && vn->type == asvJSONValue::CUSTOM_TAG);
+
+	// A long tag name (> 31 chars) takes the str8 encoding inside the ext body.
+	asvJSON jl;
+	std::string longName(40, 'x');
+	ASSERT(jl.parse(std::string("{\"k\":{\"$customTag\":{\"name\":\"").append(longName).append("\",\"value\":[1,2]}}}")));
+	std::vector<uint8_t> mpl = jl.toMessagePack();
+	asvJSON jl2;
+	ASSERT(jl2.fromMessagePack(mpl.data(), mpl.size()));
+	auto* vl = jl2.get("k");
+	ASSERT(vl != nullptr && vl->type == asvJSONValue::CUSTOM_TAG);
+	ASSERT_EQ(vl->str_data, longName);
+	auto* av = vl->custom_value.get();
+	ASSERT(av != nullptr && av->type == asvJSONValue::ARRAY && av->arr->size() == 2);
+
+	// Malformed ext-4 bodies fall back to a plain EXTENSION (raw bytes, no
+	// partial decode / no lost siblings): body is not a name string at all...
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x01, 0x04, 0x01}; // ext8 len1 type4, body = fixint 1
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::EXTENSION && r->ext_type == 4);
+		ASSERT(r->bin_data.size() == 1 && r->bin_data[0] == 0x01);
+	}
+	// ...and the body is a name string with a truncated value.
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x02, 0x04, 0xA1, 'a'}; // ext8 len2 type4, body = str "a" (value missing)
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::EXTENSION && r->ext_type == 4);
+		ASSERT(r->bin_data.size() == 2);
+	}
+}
+
+TEST(testMessagePackCustomTagShortBody) {
+	// writeMsgPackExt picks fixextN when the ext body is exactly 2/4/8/16 bytes,
+	// and a custom-tag body (msgpack name-string + msgpack value) can hit those
+	// sizes for short tags -- the 0xD5/0xD6/0xD7/0xD8 branches must dispatch
+	// et==4 to the custom-tag decoder instead of degrading to a plain EXTENSION.
+	auto check = [](const char* jsonText, std::string expectName, int64_t expectInt, bool expectNull) {
+		asvJSON j;
+		if (!j.parse(std::string(jsonText))) throw std::runtime_error("short-body setup parse failed");
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		if (!j2.fromMessagePack(mp.data(), mp.size())) throw std::runtime_error("short-body round-trip failed");
+		auto* v = j2.get("k");
+		if (v == nullptr || v->type != asvJSONValue::CUSTOM_TAG)
+			throw std::runtime_error("custom tag with short body degraded to non-CUSTOM_TAG");
+		if (v->str_data != expectName) throw std::runtime_error("custom tag name lost");
+		if (expectNull) {
+			if (v->custom_value == nullptr || v->custom_value->type != asvJSONValue::NULL_VAL)
+				throw std::runtime_error("custom tag null value lost");
+		} else {
+			if (v->custom_value == nullptr || v->custom_value->type != asvJSONValue::INT || v->custom_value->num != expectInt)
+				throw std::runtime_error("custom tag int value lost");
+		}
+	};
+
+	// Empty name + null value: [0xA0 0xC0] = 2 bytes -> fixext2 (0xD5).
+	check("{\"k\":{\"$customTag\":{\"name\":\"\",\"value\":null}}}", "", 0, true);
+	// Empty name + int 0: [0xA0 0x00] = 2 bytes -> fixext2 (0xD5).
+	check("{\"k\":{\"$customTag\":{\"name\":\"\",\"value\":0}}}", "", 0, false);
+	// 8-char name + null: [0xA8 + 8 chars + 0xC0] = 10 bytes -> ext8 (0xC7), sanity that non-fixext lengths still work.
+	check("{\"k\":{\"$customTag\":{\"name\":\"abcdefgh\",\"value\":null}}}", "abcdefgh", 0, true);
+	// 2-char name + int 1: [0xA2 'a' 'a' 0x01] = 4 bytes -> fixext4 (0xD6).
+	check("{\"k\":{\"$customTag\":{\"name\":\"aa\",\"value\":1}}}", "aa", 1, false);
+	// 6-char name + null: [0xA6 + 6 chars + 0xC0] = 8 bytes -> fixext8 (0xD7).
+	check("{\"k\":{\"$customTag\":{\"name\":\"abcdef\",\"value\":null}}}", "abcdef", 0, true);
+	// 14-char name + null: [0xAE + 14 chars + 0xC0] = 16 bytes -> fixext16 (0xD8).
+	check("{\"k\":{\"$customTag\":{\"name\":\"abcdefghijklmn\",\"value\":null}}}", "abcdefghijklmn", 0, true);
+}
+
+TEST(testMessagePackDuplicateKeysLastWins) {
+	// Duplicate keys in every map encoding (fixmap/map16/map32) must keep the
+	// LAST value (same convention as the JSON parser), not silently drop it.
+	{
+		std::vector<uint8_t> raw = {0x82, 0xA1, 'a', 0x01, 0xA1, 'a', 0x02}; // fixmap(2): "a"->1, "a"->2
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(r->size(), static_cast<size_t>(1));
+		auto* v = r->get("a");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->num, 2); // last wins
+	}
+	{
+		std::vector<uint8_t> raw = {0xDE, 0x00, 0x02, 0xA1, 'b', 0x05, 0xA1, 'b', 0x06}; // map16(2): "b"->5, "b"->6
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(r->size(), static_cast<size_t>(1));
+		auto* v = r->get("b");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->num, 6); // last wins
+	}
+	{
+		std::vector<uint8_t> raw = {0xDF, 0x00, 0x00, 0x00, 0x02, 0xA1, 'c', 0x09, 0xA1, 'c', 0x0A}; // map32(2): "c"->9, "c"->10
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(r->size(), static_cast<size_t>(1));
+		auto* v = r->get("c");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->num, 10); // last wins
+	}
+}
+
 TEST(testMsgPackRegexFidelity) {
 	// REGEX is stored as "pattern\0options" (NUL-separated, see makeRegex) and
 	// emitted as an ext of whichever size fits (fixext1/2/4/8/16 or ext8/16/32).
@@ -8827,6 +8966,296 @@ TEST(testProtobufExtras) {
 		const uint8_t raw[] = {0x0A, 0x05, 0x00, 0x00, 0xC0, 0x3F, 0x00};
 		asvJSON json;
 		ASSERT(!json.fromProtobuf(raw, sizeof(raw), schemaJson));
+	}
+}
+
+TEST(testProtobufAuditFixes) {
+	// 1. Schema-less heuristic must not crash the whole decode on a LEN payload
+	// that starts like a message (tag with wire type 0) but holds an unterminated
+	// varint: it now falls back to the BINARY branch instead of aborting.
+	// wire: field 1 (unknown type, wire 2) len 0x02 payload {0x08, 0xFF}
+	// (`0x08` = tag field1 wt0, `0xFF` = unterminated varint).
+	{
+		const uint8_t raw[] = {0x0A, 0x02, 0x08, 0xFF};
+		asvJSON j;
+		ASSERT(j.fromProtobuf(raw, sizeof(raw)));
+		auto* v = j.getRoot()->get("1");
+		ASSERT(v != nullptr);
+		ASSERT(v->type == asvJSONValue::BINARY);
+	}
+	// 2. Varint 10th byte: must reject bits beyond the low bit (protobuf allows
+	// at most 10 bytes per varint), while a valid 10-byte varint still parses.
+	{
+		// 9x 0xFF then 0x7F: at shift 63 the 0x7F carries bits 1-6 -> overflow.
+		const uint8_t bad[] = {0x08, 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 0x7F};
+		asvJSON j;
+		ASSERT(!j.fromProtobuf(bad, sizeof(bad)));
+		// 9x 0xFF then 0x01 -> legal max unsigned varint (== -1 as int64).
+		const uint8_t good[] = {0x08, 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 0x01};
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(good, sizeof(good)));
+		auto* v = j2.getRoot()->get("1");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->num, int64_t(-1));
+	}
+	// 3. Mixed arrays in schema-less mode: homogeneous arrays round-trip as before;
+	// a mixed-typed array must not corrupt (all elements parsed as the first one's
+	// type) -- it now decodes with the unknown code "A".
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"k":[1,2,3]})"));
+		auto buf = j.toProtobuf();
+		ASSERT(buf.size() > 0);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* v = j2.getRoot()->get("k");
+		ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(v->arr->size(), size_t(3));
+		ASSERT_EQ(v->arr->at(0)->num, int64_t(1));
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"k":[1,"a",true]})"));
+		auto buf = j.toProtobuf();
+		ASSERT(buf.size() > 0);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+	}
+	// 4. Field number above 2^29-1 must be rejected (no forged truncation to a
+	// small legitimate-looking field number); the message decodes to an empty root.
+	{
+		// tag varint for field 536870912 (= 2^29) wire type 0, plus a trailing value byte
+		const uint8_t raw[] = {0x80,0x80,0x80,0x80,0x10, 0x01};
+		asvJSON j;
+		ASSERT(j.fromProtobuf(raw, sizeof(raw)));
+		ASSERT_EQ(j.getRoot()->obj->size(), size_t(0));
+	}
+	// 5. Schema-driven encode must throw on a type mismatch instead of silently
+	// emitting an empty field.
+	{
+		std::string schemaJson = R"({
+			"msg":{"id":1,"type":"string"}
+		})";
+		asvJSON j;
+		j.putInt("msg", 7);
+		bool threw = false;
+		try { (void)j.toProtobuf(schemaJson); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	{
+		std::string schemaJson = R"({
+			"sub":{"id":1,"type":"message","fields":{}}
+		})";
+		asvJSON j;
+		j.putInt("sub", 7);
+		bool threw = false;
+		try { (void)j.toProtobuf(schemaJson); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// 6. Text format: C-style hex and octal integer literals.
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("h: 0x1234\no: 01234\nn: -0x10\n"));
+		ASSERT(j2.isInt("h")); ASSERT_EQ(j2.getInt("h"), int64_t(0x1234));
+		ASSERT(j2.isInt("o")); ASSERT_EQ(j2.getInt("o"), int64_t(668)); // 01234 octal
+		ASSERT(j2.isInt("n")); ASSERT_EQ(j2.getInt("n"), int64_t(-16));
+	}
+	// Hex overflow beyond int64 is preserved as an exact literal (raw_number),
+	// same convention as decimal overflow.
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("big: 0x8000000000000000\n"));
+		auto* v = j2.getRoot()->get("big");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT(j2.serialize().find("0x8000000000000000") != std::string::npos);
+	}
+	// 7. Lone \u surrogates are replaced with U+FFFD (never invalid UTF-8);
+	// valid surrogate pairs still combine.
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("s: \"\\uD800\""));
+		std::string out = j2.serialize();
+		// U+FFFD = EF BF BD
+		ASSERT(out.find("\xEF\xBF\xBD") != std::string::npos);
+	}
+	{
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("s: \"\\uD83D\\uDE00\""));
+		std::string out = j2.serialize();
+		// U+1F600 = F0 9F 98 80
+		ASSERT(out.find("\xF0\x9F\x98\x80") != std::string::npos);
+	}
+	// 8. Base64 auto-detect: a genuine base64 string still round-trips, but a
+	// raw binary blob whose bytes all land in the base64 alphabet is no longer
+	// misread as base64 text (it must decode as the native raw message).
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":"hello"})"));
+		auto buf = j.toProtobuf();
+		std::string b64 = asvJSONInternal::encodeBase64(buf.data(), buf.size());
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(b64, ""));
+		ASSERT_EQ(std::string(j2.getString("a")), "hello");
+	}
+	{
+		// "QQQ=" looks like base64 (length%4==0, alphabet chars only) but is not
+		// the canonical base64 of its own decode; it must be treated as raw.
+		// Raw parse of the 4 bytes produces an empty object; a naive base64-first
+		// path decodes it to {"8":4}.
+		asvJSON j;
+		ASSERT(j.fromProtobuf(std::string("QQQ="), ""));
+		ASSERT(!j.getRoot()->hasKey("8"));
+	}
+}
+
+TEST(testProtobufAuditFixesRound2) {
+	// 1. Scientific notation without a decimal point must parse as a number, not
+	// a string. protoTextParseIdent used to swallow 'e'/'E' as an identifier
+	// character ("1e5" -> raw string; "1e+10" even stranded parsing on the '+').
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("a: 1e5\nb: 1e+10\nc: 1E+3\nd: 1e-5\ne: 2.5e10\n"));
+		ASSERT(j.getRoot()->hasKey("a"));
+		ASSERT(j.isDouble("a"));
+		ASSERT(j.getDouble("a") == 1e5);
+		ASSERT(j.getDouble("b") == 1e10);
+		ASSERT(j.getDouble("c") == 1e3);
+		ASSERT(j.getDouble("d") == 1e-5);
+		ASSERT(j.getDouble("e") == 2.5e10);
+		// Round-trip through the text serializer must survive (the whole message
+		// does not abort at the '+').
+		std::string txt = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(txt));
+		ASSERT(j2.getDouble("a") == 1e5); // re-parse may be INT; value must survive
+	}
+	// 2. Empty nested object in schema-less mode: {"a":{}} must round-trip as an
+	// empty object, not be miscast as an empty string.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":{}})"));
+		auto buf = j.toProtobuf();
+		ASSERT(buf.size() > 0);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* v = j2.getRoot()->get("a");
+		ASSERT(v != nullptr && v->type == asvJSONValue::OBJECT);
+		ASSERT(v->obj == nullptr || v->obj->empty());
+	}
+	// 3. Array-of-objects root: previously the elements were concatenated into a
+	// single stream (fields merged, name maps collided). It must now round-trip
+	// as a true ARRAY of the individual objects.
+	{
+		asvJSON j;
+		j.parse(std::string(R"([{"a":1},{"a":2}])"));
+		auto buf = j.toProtobuf();
+		ASSERT(buf.size() > 0);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), size_t(2));
+		ASSERT_EQ(j2.getRoot()->arr->at(0)->get("a")->num, int64_t(1));
+		ASSERT_EQ(j2.getRoot()->arr->at(1)->get("a")->num, int64_t(2));
+	}
+	{
+		// Elements with different keys must stay distinct (name maps no longer
+		// collide).
+		asvJSON j;
+		j.parse(std::string(R"([{"a":1},{"b":2}])"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), size_t(2));
+		ASSERT(j2.getRoot()->arr->at(0)->hasKey("a"));
+		ASSERT(j2.getRoot()->arr->at(1)->hasKey("b"));
+	}
+	{
+		// Empty array root round-trips as an empty array (the marker field alone
+		// encodes it).
+		asvJSON j;
+		j.parse(std::string("[]"));
+		auto buf = j.toProtobuf();
+		ASSERT(buf.size() > 0);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), size_t(0));
+	}
+	// 4. Reserved field 19000 must be skipped regardless of wire type. On a
+	// malformed input using wire type 0 (instead of the expected LEN), decoding
+	// must not desync: the following normal field still decodes.
+	{
+		// tag(field 19000, wire 0) = varint (19000<<3)|0 = 152000 = 0xC0 0xA3 0x09,
+		// value byte 0x01, then tag(field 1, wire 0) + value 7.
+		const uint8_t raw[] = {0xC0, 0xA3, 0x09, 0x01, 0x08, 0x07};
+		asvJSON j;
+		ASSERT(j.fromProtobuf(raw, sizeof(raw)));
+		auto* v = j.getRoot()->get("1");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->num, int64_t(7));
+	}
+	// 5. Lone sign in text format is rejected (was previously coerced to 0).
+	{
+		asvJSON j;
+		ASSERT(!j.fromProtobufText("-"));
+		ASSERT(!j.fromProtobufText("x: -\n"));
+	}
+	// 6. Reserved field 19000 whose value is TRUNCATED on a fixed-size wire type
+	// must stop the body decode (empty root) instead of letting the parser drift
+	// into the payload bytes. tag(field 19000, wire 1) = varint 152001 =
+	// 0xC1 0xA3 0x09, then only 4 bytes (needs 8), then a valid field 1 (wt 0).
+	{
+		const uint8_t raw[] = {0xC1, 0xA3, 0x09, 0xAA, 0xBB, 0xCC, 0xDD, 0x08, 0x07};
+		asvJSON j;
+		ASSERT(j.fromProtobuf(raw, sizeof(raw)));
+		ASSERT_EQ(j.getRoot()->obj->size(), size_t(0)); // body stopped; no desync into "1"
+	}
+	// 7. A bare "0x" with no hex digits is kept as a raw-number literal (the
+	// parser is not left pointing after a consumed prefix with no data).
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("h: 0x\n"));
+		auto* v = j.getRoot()->get("h");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+		ASSERT(v->str_data == "0x");
+	}
+	// 8. Protobuf text-format float suffix: "1.5f" is a float literal, parsed as
+	// the DOUBLE 1.5 (not a raw-number string "1.5f").
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("x: 1.5f\n"));
+		ASSERT(j.isDouble("x"));
+		ASSERT(j.getDouble("x") == 1.5);
+	}
+	// 9. The f/F suffix is only a float marker when it ends the token: an
+	// alphanumeric tail ("123field", "1e5x") must stay a raw-number literal, not
+	// split into a DOUBLE plus an orphaned identifier.
+	{
+		struct Chk { const char* in; bool isD; double d; const char* raw; };
+		// "123f" alone is a valid float (the reviewer's table: -> DOUBLE 123.0).
+		std::vector<Chk> cases = {
+			{"123field", false, 0.0, "123field"},
+			{"1e5x", false, 0.0, "1e5x"},
+			{"1.5fxyz", false, 0.0, "1.5fxyz"},
+			{"1e10foo", false, 0.0, "1e10foo"},
+			{"123f_", false, 0.0, "123f_"},
+		};
+		for (auto& c : cases) {
+			asvJSON j;
+			std::string msg = "x: "; msg += c.in; msg += "\n";
+			ASSERT(j.fromProtobufText(msg));
+			auto* v = j.getRoot()->get("x");
+			ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+			ASSERT(v->str_data == c.raw);
+		}
+		// True float suffixes still parse as doubles.
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText("a: 123f\nb: -2F\nc: 1.5f\n"));
+		ASSERT(j2.isDouble("a") && j2.getDouble("a") == 123.0);
+		ASSERT(j2.getDouble("b") == -2.0);
+		ASSERT(j2.getDouble("c") == 1.5);
 	}
 }
 
@@ -21615,7 +22044,7 @@ int main() {
 	RUN(testDateTimeDayValidity);
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
-	RUN(testMessagePackObjectIdRegexTimestamp);
+	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);
 	RUN(testMsgPackRegexFidelity);
 	RUN(testMsgpackExtras);
 	
@@ -21672,6 +22101,8 @@ RUN(testCBORFloat16);
 	RUN(testProtobufSchemaLessRoundTrip);
 	RUN(testProtobufTextArrayOfObjects);
 	RUN(testProtobufExtras);
+	RUN(testProtobufAuditFixes);
+	RUN(testProtobufAuditFixesRound2);
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);

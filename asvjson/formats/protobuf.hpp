@@ -1,6 +1,44 @@
 #pragma once
 // Protocol Buffers (wire format + text format) for asvJSON++
-// Supports schema-less dynamic encoding (field numbers as keys) and JSON-driven schema
+// Supports schema-less dynamic encoding (field numbers as keys) and JSON-driven schema.
+//
+// Known limitations (documented, not errors):
+// - NULL values are not serialized by the text format (protoTextSerializeVal
+//   skips them); a toProtobufText()/fromProtobufText() round-trip drops nulls.
+// - Protobuf groups (wire types 3/4) are deprecated and not supported; a
+//   group-typed field terminates the enclosing message frame.
+// - Arrays with mixed element types are not faithfully representable in the
+//   schema-less wire format: they are marked with the unknown type code "A"
+//   and decoded back per-element heuristically instead of as garbage ints.
+// - Text-format integer literals accept C-style forms (0x.. hex and leading-0
+//   octal); unpaired \u surrogate escapes are replaced with U+FFFD.
+// - Field numbers are limited to 2^29-1; malformed varints (unterminated or a
+//   10th byte carrying bits beyond the low bit) are rejected. A schema-less
+//   LEN payload that merely *starts* like a sub-message but then fails to
+//   parse falls back to the binary branch instead of aborting the decode.
+// - A schema-driven string/bytes/message field whose JSON value has a
+//   different type throws asvJSONError from toProtobuf() rather than silently
+//   encoding an empty field.
+// - A top-level JSON array is wrapped into a synthetic message (marker field
+//   19001 + repeated field 1) so the elements survive a schema-less round-trip
+//   intact; non-object array elements cannot be represented in the wrapper and
+//   are skipped. Fields in the reserved range 19000-19999 (the schema-less name
+//   map and the array-root marker) must not be used for user data.
+// - BINARY/EXTENSION values are serialized as quoted strings by the text
+//   format, so a toProtobufText()/fromProtobufText() round-trip turns them into
+//   STRING (the raw type is lost).
+// - Surface JSON values composed only of the sign of a number ("-", "+") are
+//   rejected on parse instead of being coerced to 0.
+// - toProtobuf() only encodes OBJECT and ARRAY roots. A scalar root (STRING,
+//   INT, DOUBLE, BOOL, ...) silently produces an empty buffer, and fromProtobuf
+//   rejects empty input, so a scalar-root round-trip yields false.
+// - The empty object root "{}" is not round-trippable with the wire format: it
+//   encodes to zero bytes, and fromProtobuf rejects length 0 input as invalid.
+//   Empty ARRAY roots round-trip via the 19001 wrapper marker; empty OBJECT
+//   roots have no wire representation (an empty protobuf message IS zero bytes,
+//   so this is inherent, not a bug). "{}" nested as a field is preserved (it is
+//   encoded with a schema-less "m" type code / decoded from a zero-length LEN).
+// - Text-format float literals accept a trailing f/F suffix ("1.5f").
 
 #include "../core.hpp"
 #include "../detail/base64.hpp"
@@ -18,6 +56,17 @@ namespace asvJSONInternal {
 // legitimate user field numbers (536870911 was previously used).
 inline constexpr int protoNameMapFieldNum = 19000;
 
+// Reserved field number of the synthetic array-root wrapper. An ARRAY root is
+// encoded as a message containing this marker field (wire type 0, value 1)
+// followed by repeated field 1 submessages (one per element); decoding unwraps
+// them back into an ARRAY. Stream-concatenating the raw messages would merge
+// the elements' fields (last-wins for scalars, colliding schema-less name maps)
+// and lose data.
+inline constexpr int protoArrayRootFieldNum = 19001;
+
+// Largest legal protobuf field number (2^29-1 per the spec).
+inline constexpr uint64_t protoMaxFieldNum = (1ULL << 29) - 1;
+
 inline void protoWriteVarint(std::vector<uint8_t>& out, uint64_t val) {
   while (val >= 0x80) {
     out.push_back(static_cast<uint8_t>((val & 0x7F) | 0x80));
@@ -31,6 +80,10 @@ inline uint64_t protoReadVarint(const uint8_t* data, size_t size, size_t& pos) {
   int shift = 0;
   while (pos < size) {
     uint8_t b = data[pos++];
+    // The 10th byte (shift == 63) can only contribute its low bit; any bits
+    // above it would overflow the 64-bit value and must be rejected (protobuf
+    // accepts at most 10 bytes per varint).
+    if (shift == 63 && (b & 0x7E)) throw asvJSONError("malformed varint: 10th byte overflow");
     val |= static_cast<uint64_t>(b & 0x7F) << shift;
     if (!(b & 0x80)) return val;
     shift += 7;
@@ -55,16 +108,34 @@ inline int protoReadTag(const uint8_t* data, size_t size, size_t& pos, int& fiel
   if (pos >= size) return -1;
   uint64_t tag = protoReadVarint(data, size, pos);
   uint64_t rawNum = tag >> 3;
-  // A field number that does not fit in int is invalid (max protobuf field
-  // number is 2^29-1); rejecting it prevents forged truncation to a small
-  // legitimate-looking field number.
-  if (rawNum > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
-      rawNum == 0) {
+  // A field number above the protobuf maximum (2^29-1) is invalid; rejecting
+  // it prevents forged truncation to a small legitimate-looking field number.
+  if (rawNum > protoMaxFieldNum || rawNum == 0) {
     fieldNum = -1;
     return -2;
   }
   fieldNum = static_cast<int>(rawNum);
   return static_cast<int>(tag & 7);
+}
+
+// Skip the value of a field whose contents we do not want to decode (reserved
+// fields like the schema-less name map / array-root marker). Advances pos past
+// the value bytes for any of the fixed/varint/length-delimited wire types;
+// returns false for groups (3/4) or when the payload is truncated, in which
+// case pos is left unchanged.
+inline bool protoSkipWireValue(const uint8_t* data, size_t size, size_t& pos, int wt) {
+  switch (wt) {
+    case 0: protoReadVarint(data, size, pos); return true;
+    case 1: if (pos + 8 > size) return false; pos += 8; return true;
+    case 5: if (pos + 4 > size) return false; pos += 4; return true;
+    case 2: {
+      uint64_t len = protoReadVarint(data, size, pos);
+      if (len > static_cast<uint64_t>(SIZE_MAX) || static_cast<size_t>(len) > size - pos) return false;
+      pos += static_cast<size_t>(len);
+      return true;
+    }
+    default: return false; // groups (3/4) not supported
+  }
 }
 
 // ======================= Schema types =======================
@@ -168,11 +239,19 @@ inline std::string protoSchemaLessTypeCode(const asvJSONValue* v) {
     case T::BINARY: case T::EXTENSION: return "y";
     case T::OBJECT: return "m";
     case T::ARRAY: {
-      if (!v->arr || v->arr->empty()) return "A";
-      const asvJSONValue* first = nullptr;
-      for (const auto& e : *v->arr) if (e) { first = e.get(); break; }
-      if (!first) return "A";
-      std::string c = protoSchemaLessTypeCode(first);
+      if (!v->arr) return "A";
+      // All elements must share one type code; a mixed-typed array is not
+      // representable in the wire format, so emit the unknown code ("A") and
+      // let the decoder fall back to per-element heuristics instead of
+      // silently mis-decoding every element as the first one's type.
+      std::string c;
+      for (const auto& e : *v->arr) {
+        if (!e) continue;
+        std::string ec = protoSchemaLessTypeCode(e.get());
+        if (c.empty()) c = ec;
+        else if (ec != c) return "A";
+      }
+      if (c.empty()) return "A";
       if (c == "s") return "S"; if (c == "i") return "I"; if (c == "d") return "D";
       if (c == "b") return "B"; if (c == "n") return "N"; if (c == "y") return "Y";
       if (c == "m") return "M";
@@ -305,7 +384,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
       std::string nm = "{";
       for (size_t i = 0; i < fields.size(); i++) {
         if (i > 0) nm += ",";
-        nm += '"' + std::to_string(i + 1) + "\":{\"n\":\"";
+        nm += "\"" + std::to_string(i + 1) + "\":{\"n\":\"";
         for (char c : fields[i].key) {
           if (c == '"') nm += "\\\"";
           else if (c == '\\') nm += "\\\\";
@@ -402,21 +481,23 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
 inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field) {
   if (!val) return;
   if (field.type == "string") {
-    std::string s;
-    if (val->type == asvJSONValue::STRING) s.assign(val->str_data.data(), val->str_data.size());
+    if (val->type != asvJSONValue::STRING)
+      throw asvJSONError("Protobuf encode: string field does not hold a string value");
+    const auto& s = val->str_data;
     protoWriteVarint(out, s.size());
     out.insert(out.end(), s.begin(), s.end());
   } else if (field.type == "bytes") {
     std::vector<uint8_t> bin;
     if (val->type == asvJSONValue::BINARY || val->type == asvJSONValue::EXTENSION) bin = val->getBinary();
     else if (val->type == asvJSONValue::STRING) bin.assign(val->str_data.begin(), val->str_data.end());
+    else throw asvJSONError("Protobuf encode: bytes field does not hold a binary value");
     protoWriteVarint(out, bin.size());
     out.insert(out.end(), bin.begin(), bin.end());
   } else if (field.type == "message") {
+    if (val->type != asvJSONValue::OBJECT)
+      throw asvJSONError("Protobuf encode: message field does not hold an object");
     std::vector<uint8_t> sub;
-    if (val->type == asvJSONValue::OBJECT) {
-      protoEncodeMessage(sub, val, field.schema.get());
-    }
+    protoEncodeMessage(sub, val, field.schema.get());
     protoWriteVarint(out, sub.size());
     out.insert(out.end(), sub.begin(), sub.end());
   } else {
@@ -430,8 +511,21 @@ inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
   if (root->type == asvJSONValue::OBJECT) {
     protoEncodeMessage(out, root, schema);
   } else if (root->type == asvJSONValue::ARRAY && root->arr) {
+    // A top-level array of objects can not be represented by a stream of
+    // concatenated messages (their fields would merge and the schema-less name
+    // maps would collide). Wrap the elements in a synthetic message: marker
+    // field 19001 (wire type 0, value 1) followed by repeated field 1, each a
+    // sub-message carrying one element. An empty array still emits the marker
+    // so the decoder recovers an empty ARRAY instead of nothing.
+    protoWriteTag(out, protoArrayRootFieldNum, 0);
+    protoWriteVarint(out, 1);
     for (const auto& elem : *root->arr) {
-      if (elem && elem->type == asvJSONValue::OBJECT) protoEncodeMessage(out, elem.get(), schema);
+      if (!elem || elem->type != asvJSONValue::OBJECT) continue;
+      protoWriteTag(out, 1, 2);
+      std::vector<uint8_t> sub;
+      protoEncodeMessage(sub, elem.get(), schema);
+      protoWriteVarint(out, sub.size());
+      out.insert(out.end(), sub.begin(), sub.end());
     }
   }
   return out;
@@ -514,7 +608,12 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
     if (wt < 0 || wt > 5 || fnum <= 0) break;
     if (wt == 3 || wt == 4) break;
     if (!schema && fnum == protoNameMapFieldNum) {
-      if (wt == 2) { uint64_t len = protoReadVarint(data, end, pos); if (len <= end - pos) pos += static_cast<size_t>(len); }
+      // Skip the embedded name map regardless of wire type. A varint-typed
+      // 19000 (malformed input) must advance past its value or the next
+      // iteration reads a tag out of the middle of it. If the value is
+      // truncated (a fixed-size field shorter than its width) stop the body
+      // decode rather than letting the parser drift.
+      if (!protoSkipWireValue(data, end, pos, wt)) break;
       continue;
     }
     std::string fname = std::to_string(fnum);
@@ -616,13 +715,26 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
 
       if (type == "message" || type.empty()) {
         if (depth > asvJSONValue::MAX_NESTING_DEPTH) { pos = end; return nullptr; }
-        auto obj = protoDecodeMessageBody(data, pos, end, type == "message" ? schema : nullptr, depth);
-        if (!obj) { pos = end; return nullptr; }
-        if (type == "message") { pos = end; return obj; }
-        // Schema-less unknown type: use the parsed sub-message only if it has
-        // structural content (via an embedded name map or real fields); otherwise
-        // fall through to the BINARY branch so byte strings stay opaque.
-        if (obj->obj && !obj->obj->empty()) { pos = end; return obj; }
+        if (type == "message") {
+          auto obj = protoDecodeMessageBody(data, pos, end, schema, depth);
+          if (!obj) { pos = end; return nullptr; }
+          pos = end; return obj;
+        }
+        // Schema-less unknown type: try interpreting the payload as a
+        // sub-message (embedded name map or structural fields). A blob that
+        // merely *starts* like a message - e.g. a byte string whose first byte
+        // looks like a valid tag followed by an unterminated varint - must not
+        // crash the whole decode with a malformed-varint error; on any trouble
+        // we fall through to the string/binary branch instead.
+        try {
+          size_t save = pos;
+          auto obj = protoDecodeMessageBody(data, save, end, nullptr, depth);
+          // Accept the object when it decoded as a message. A zero-length
+          // payload that decodes to nothing is a valid empty sub-message
+          // ({"a":{}}); a non-empty payload that produced no fields is left to
+          // the binary/string branch (NUL-prefixed byte strings).
+          if (obj && obj->obj && (!obj->obj->empty() || end == save)) { pos = end; return obj; }
+        } catch (const std::exception&) {}
       }
       if (type == "string") {
         size_t start = end - static_cast<size_t>(len);
@@ -684,6 +796,44 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
 
 inline std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t size, const ProtoSchema* schema, int depth = 0) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+  // Detect the array-root wrapper (marker field 19001 with varint value 1).
+  // If the top level is a wrapped array of submessages, collect the repeated
+  // field-1 elements into an ARRAY root; a plain message falls through to the
+  // normal body decoder.
+  {
+    size_t probe = 0;
+    bool arrayWrap = false;
+    while (probe < size) {
+      int fnum = 0; int wt = protoReadTag(data, size, probe, fnum);
+      if (wt < 0 || fnum <= 0) break;
+      if (fnum == protoArrayRootFieldNum && wt == 0) {
+        uint64_t v = protoReadVarint(data, size, probe);
+        if (v == 1) arrayWrap = true;
+        break;
+      }
+      if (!protoSkipWireValue(data, size, probe, wt)) break;
+    }
+    if (arrayWrap) {
+      auto arr = asvJSONValue::makeArray();
+      if (!arr) return nullptr;
+      size_t pos = 0;
+      while (pos < size) {
+        int fnum = 0; int wt = protoReadTag(data, size, pos, fnum);
+        if (wt < 0 || fnum <= 0) break;
+        if (fnum == protoArrayRootFieldNum || fnum != 1 || wt != 2) {
+          if (!protoSkipWireValue(data, size, pos, wt)) break;
+          continue;
+        }
+        uint64_t len = protoReadVarint(data, size, pos);
+        if (len > static_cast<uint64_t>(SIZE_MAX) || static_cast<size_t>(len) > size - pos) break;
+        size_t end = pos + static_cast<size_t>(len);
+        auto elem = protoDecodeMessageBody(data, pos, end, schema, depth + 1);
+        if (elem && arr && arr->arr) arr->arr->push_back(std::move(elem));
+        pos = end;
+      }
+      return arr;
+    }
+  }
   return protoDecodeMessageBody(data, 0, size, schema, depth);
 }
 
@@ -737,14 +887,25 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
             else if (h>='A'&&h<='F') cp=(cp<<4)|(h-'A'+10); }
           if (cp >= 0xD800 && cp <= 0xDBFF) {
             if (pos + 1 < text.size() && text[pos] == '\\' && text[pos + 1] == 'u') {
+              size_t loStart = pos;
               pos += 2; uint32_t lo = 0;
               for (int i = 0; i < 4 && pos < text.size(); i++) { char h = text[pos++];
                 if (h>='0'&&h<='9') lo=(lo<<4)|(h-'0');
                 else if (h>='a'&&h<='f') lo=(lo<<4)|(h-'a'+10);
                 else if (h>='A'&&h<='F') lo=(lo<<4)|(h-'A'+10); }
-              if (lo >= 0xDC00 && lo <= 0xDFFF)
+              if (lo >= 0xDC00 && lo <= 0xDFFF) {
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+              } else {
+                // Not a valid pair: rewind so the "\u..." is reparsed as its
+                // own escape, and emit U+FFFD for the lone high surrogate.
+                pos = loStart;
+                cp = 0xFFFD;
+              }
+            } else {
+              cp = 0xFFFD; // lone high surrogate
             }
+          } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            cp = 0xFFFD; // lone low surrogate
           }
           appendUtf8Codepoint(r, cp);
           break;
@@ -782,35 +943,128 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
     bool neg = (c == '-');
     if (c == '-' || c == '+') pos++;
     protoTextSkipWS(text, pos);
-    if (pos >= text.size()) { if (neg) return asvJSONValue::makeInt(0); return nullptr; }
-    std::string tmp = protoTextParseIdent(text, pos);
-    if (tmp == "inf" || tmp == "infinity" || tmp == "Inf" || tmp == "Infinity") {
-      return asvJSONValue::makeDouble(neg ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity());
+    if (pos >= text.size()) return nullptr; // lone sign: not a valid number
+    // Signed inf / infinity / nan words.
+    if (text[pos] == 'i' || text[pos] == 'I' || text[pos] == 'n' || text[pos] == 'N') {
+      std::string w = protoTextParseIdent(text, pos);
+      if (w == "inf" || w == "infinity" || w == "Inf" || w == "Infinity")
+        return asvJSONValue::makeDouble(neg ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity());
+      if (w == "nan" || w == "NaN") {
+        double v = std::numeric_limits<double>::quiet_NaN();
+        return asvJSONValue::makeDouble(neg ? -v : v);
+      }
+      return nullptr; // sign followed by a non-numeric identifier
     }
-    if (tmp == "nan" || tmp == "NaN") {
-      double v = std::numeric_limits<double>::quiet_NaN();
-      return asvJSONValue::makeDouble(neg ? -v : v);
+    // C-style hex integer literal: 0x...
+    if (text[pos] == '0' && pos + 1 < text.size() && (text[pos + 1] == 'x' || text[pos + 1] == 'X')) {
+      pos += 2;
+      std::string hnum; if (neg) hnum = '-'; hnum += "0x";
+      uint64_t hv = 0; bool ok = true; bool any = false;
+      while (pos < text.size()) {
+        unsigned char h = static_cast<unsigned char>(text[pos]);
+        unsigned d;
+        if (h >= '0' && h <= '9') d = h - '0';
+        else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
+        else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
+        else break;
+        if (hv > (std::numeric_limits<uint64_t>::max() - d) / 16) ok = false;
+        hv = hv * 16 + d;
+        hnum += static_cast<char>(h); any = true; pos++;
+      }
+      if (!any) {
+        // "0x" with no hex digits: return the bare literal as a raw number so
+        // the token is consumed (pos stays advanced) and no data is lost, same
+        // convention as a decimal token with trailing junk.
+        auto v = asvJSONValue::makeString(std::move(hnum));
+        if (v) v->raw_number = true;
+        return v;
+      }
+      // Trailing junk ("0x1z"): keep the whole run as a raw-number literal
+      // instead of silently truncating to the valid hex prefix.
+      if (pos < text.size() && (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
+        hnum += protoTextParseIdent(text, pos);
+        auto v = asvJSONValue::makeString(std::move(hnum));
+        if (v) v->raw_number = true;
+        return v;
+      }
+      if (ok && hv <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        return asvJSONValue::makeInt(neg ? -static_cast<int64_t>(hv) : static_cast<int64_t>(hv));
+      // Out-of-range integer: preserve the exact literal so the round-trip
+      // is lossless (same convention as the decimal overflow below).
+      auto v = asvJSONValue::makeString(std::move(hnum));
+      if (v) v->raw_number = true;
+      return v;
     }
-    std::string num;
-    if (neg) num = '-';
-    num += tmp;
-    bool hasDot = false; bool hasExp = false;
-    while (pos < text.size()) {
-      char ch = text[pos];
-      if (ch >= '0' && ch <= '9') { num += ch; pos++; }
-      else if (ch == '.' && !hasDot && !hasExp) { num += ch; hasDot = true; pos++; }
-      else if ((ch == 'e' || ch == 'E') && !hasExp) { num += ch; hasExp = true; pos++; }
-      else if ((ch == '+' || ch == '-') && hasExp && !num.empty() && (num.back() == 'e' || num.back() == 'E')) { num += ch; pos++; }
-      else break;
+    // Decimal / octal / scientific notation. Do NOT use protoTextParseIdent for
+    // the token: it greedily consumes 'e'/'E' as identifier characters, so
+    // "1e5" was swallowed whole (never treated as an exponent) and "1e+10"
+    // even stranded the position on the '+', aborting the whole message.
+    std::string mantissa;
+    bool sawInt = false, sawFrac = false, hasDot = false, hasExp = false;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') { mantissa += text[pos++]; sawInt = true; }
+    if (pos < text.size() && text[pos] == '.') {
+      mantissa += text[pos++]; hasDot = true;
+      while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') { mantissa += text[pos++]; sawFrac = true; }
     }
-    if (num.empty() || num == "-") return asvJSONValue::makeInt(0);
+    if (pos < text.size() && (text[pos] == 'e' || text[pos] == 'E')) {
+      size_t save = pos;
+      pos++;
+      std::string ex;
+      if (pos < text.size() && (text[pos] == '+' || text[pos] == '-')) ex += text[pos++];
+      size_t dStart = pos;
+      while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ex += text[pos++];
+      if (pos > dStart && !ex.empty()) { mantissa += 'e'; mantissa += ex; hasExp = true; }
+      else pos = save; // no digits after 'e': it is not an exponent
+    }
+    if (!sawInt && !sawFrac) return nullptr; // nothing numeric after the sign
+    std::string num; if (neg) num = '-'; num += mantissa;
+    // Protobuf text-format float suffix: "1.5f" is a float literal. Consume it
+    // and produce the DOUBLE the value names -- but only when the suffix is the
+    // whole tail of the token. A trailing alphanumeric run ("123field", "1e5x")
+    // must fall through to the junk branch below so it survives losslessly as a
+    // raw number instead of becoming a DOUBLE plus an orphaned identifier.
+    if (pos < text.size() && (text[pos] == 'f' || text[pos] == 'F') &&
+        (pos + 1 >= text.size() ||
+         (!std::isalnum(static_cast<unsigned char>(text[pos + 1])) && text[pos + 1] != '_'))) {
+      pos++;
+      return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
+    }
+    // Trailing alphanumeric junk ("123abc", "1e5x") is kept as part of the
+    // literal so it round-trips losslessly as a raw number instead of being
+    // silently split into a number plus a stray identifier.
+    if (pos < text.size() &&
+        (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
+      num += protoTextParseIdent(text, pos);
+      auto v = asvJSONValue::makeString(std::move(num));
+      if (v) v->raw_number = true;
+      return v;
+    }
+    // Octal literal (leading 0, only 0-7).
+    bool isOctal = !hasDot && !hasExp && mantissa.size() > 1 && mantissa[0] == '0';
+    if (isOctal) for (size_t i = 1; i < mantissa.size() && isOctal; i++)
+      if (mantissa[i] < '0' || mantissa[i] > '7') isOctal = false;
+    if (isOctal) {
+      uint64_t ov = 0;
+      bool ok = true;
+      for (size_t i = 1; i < mantissa.size(); i++) {
+        unsigned d = static_cast<unsigned>(mantissa[i] - '0');
+        if (ov > (std::numeric_limits<uint64_t>::max() - d) / 8) { ok = false; break; }
+        ov = ov * 8 + d;
+      }
+      if (ok && ov <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+        return asvJSONValue::makeInt(neg ? -static_cast<int64_t>(ov) : static_cast<int64_t>(ov));
+      std::string onum; if (neg) onum = '-'; onum += mantissa;
+      auto v = asvJSONValue::makeString(std::move(onum));
+      if (v) v->raw_number = true;
+      return v;
+    }
     if (hasDot || hasExp) return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
     long long l;
     auto [ip, iec] = std::from_chars(num.c_str(), num.c_str() + num.size(), l);
     if (iec == std::errc() && ip == num.c_str() + num.size()) return asvJSONValue::makeInt(l);
     // Out-of-range integer: preserve the exact literal so the round-trip is lossless
     // (same convention as core JSON and UDE).
-    auto v = asvJSONValue::makeStringView(std::string_view(num));
+    auto v = asvJSONValue::makeString(std::move(num));
     if (v) v->raw_number = true;
     return v;
   }
@@ -848,12 +1102,9 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
     if (pos < text.size()) pos++;
     return;
   }
-  bool first = true;
   while (pos < text.size()) {
     protoTextSkipWS(text, pos);
     if (pos >= text.size() || text[pos] == ']') { if (pos < text.size()) pos++; break; }
-    if (!first && text[pos] == ',') { pos++; protoTextSkipWS(text, pos); }
-    first = false;
     if (text[pos] == '{' || text[pos] == '<') {
       pos++;
       auto elem = asvJSONValue::makeObject();
@@ -1060,7 +1311,7 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
     root = protoDecodeRoot(static_cast<const uint8_t*>(data), size, schema.get());
     if (root) formatType = FormatType::Protobuf;
     return root != nullptr;
-  } catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
 }
 
 inline std::string asvJSON::toProtobufText() const {
@@ -1121,8 +1372,12 @@ inline std::string asvJSON::stringFromProtobuf(const uint8_t* data, size_t size)
 }
 
 inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& schemaJson) {
-  // Auto-detect base64: if data is all valid Base64 and length is multiple of 4,
-  // try base64 decoding first (common usage: passing base64-encoded protobuf)
+  // Auto-detect base64 (common usage: passing base64-encoded protobuf) but only
+  // when the string is made of base64 alphabet chars, its length is a multiple
+  // of 4, and it is the *canonical* base64 of its own decode (re-encode
+  // round-trip). The re-encode check prevents a genuine binary protobuf whose
+  // bytes happen to fall inside the base64 alphabet from being misread as
+  // base64 text.
   if (data.size() >= 4 && (data.size() % 4) == 0) {
     bool looksLikeBase64 = true;
     for (size_t i = 0; i < data.size(); i++) {
@@ -1135,7 +1390,13 @@ inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& sc
     if (looksLikeBase64) {
       auto decoded = decodeBase64Fast(data.data(), data.size());
       if (!decoded.empty()) {
-        if (fromProtobuf(static_cast<const void*>(decoded.data()), decoded.size(), schemaJson))
+        std::string enc = encodeBase64(decoded.data(), decoded.size());
+        // Accept only the canonical padded re-encode. The unpadded comparison
+        // is unreachable here (an unpadded input has length % 4 != 0 and never
+        // enters this branch), so it was removed.
+        bool canonical = (enc == data);
+        if (canonical &&
+            fromProtobuf(static_cast<const void*>(decoded.data()), decoded.size(), schemaJson))
           return true;
       }
     }
