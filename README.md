@@ -666,6 +666,7 @@ TRON features:
 - Objects with 1 property or 1 occurrence are serialized as plain JSON `{"key":val}`
 - Full round-trip: `toTRON()` then `fromTRON()` returns the original data
 - **Strict tokenizer**: unterminated quoted strings and unrecognized characters are rejected (`fromTRON()` returns `false`) instead of being silently skipped
+- **Regex values** serialize as `"__REGEX__<pattern>|<options>|"` (a mandatory trailing `|`; literal `|` inside the pattern/options is escaped as `\u007C`), so patterns with alternation round-trip correctly
 
 ### GOON
 
@@ -705,6 +706,12 @@ GOON features:
 - **Comments**: `#` to end of line
 - `#` prefix forces quoting to avoid comment ambiguity
 - Full round-trip: `toGOON()` then `fromGOON()` returns the original data
+- Quote/escape-aware key scanning: quoted keys that *end* with a backslash (`"a:b\\"`) or contain `[`/`]` round-trip correctly instead of being dropped
+- Strict decoding: an unrecognized line throws (returns `false` from `fromGOON`) rather than being silently discarded; a `- item` outside an array frame is an error
+- RLE repeat counts are range-checked with overflow detection (an over-limit `*N` throws instead of invoking `atoi` UB)
+- The dictionary is capped at 256 entries, so a huge document cannot grow an unbounded `$:` header
+- Empty roots (`{}`/`[]`) serialize as a single line and parse back
+- Known limitation: an empty BINARY/EXTENSION inside an *inline* `[...]` cell serializes as an empty string and decodes back as a STRING
 
 ### Protobuf
 

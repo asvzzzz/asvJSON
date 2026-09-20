@@ -10,12 +10,18 @@
 //   $: $1="value" then $1        -- dictionary references
 // Special types use __BASE64__/__EXT__ prefixes. Decoder builds intermediate
 // JSON then parses via the JSON parser; full round-trip via toGOON()/fromGOON().
+//
+// Known limitations: an empty BINARY/EXTENSION inside an *inline* `[...]` cell
+// serializes as an empty string (goonJsonText) and therefore decodes as a
+// STRING, not a BINARY/EXTENSION (the __BASE64__ path only applies to
+// unquoted/cell values); `+Infinity` / `+NaN` in manual input are plain
+// strings, not numbers.
 
 #include "../core.hpp"
 
 namespace asvJSONInternal {
 
-const size_t MAX_REPEAT_COUNT = 10000;
+inline constexpr size_t MAX_REPEAT_COUNT = 10000;
 
 class GoonDecodeError : public asvJSONError {
 public:
@@ -257,6 +263,10 @@ inline std::unordered_map<std::string, int> goonBuildDict(const asvJSONValue* ro
       if (a.first != b.first) return a.first > b.first;
       return a.second < b.second;
     });
+  // Cap the dictionary so a huge document cannot produce an unbounded `$:`
+  // header (the most valuable entries keep the smallest indices).
+  static constexpr size_t MAX_GOON_DICT_ENTRIES = 256;
+  if (cand.size() > MAX_GOON_DICT_ENTRIES) cand.resize(MAX_GOON_DICT_ENTRIES);
   std::unordered_map<std::string, int> dict;
   for (size_t i = 0; i < cand.size(); i++) dict[cand[i].second] = static_cast<int>(i);
   return dict;
@@ -715,6 +725,25 @@ static std::string goonQuoteInlineKeys(std::string_view s) {
   return std::string(s);
 }
 
+// Quote/escape-aware scan: returns the index of the first `target` that is
+// NOT inside a double-quoted JSON string. Inside quotes, `\` escapes the next
+// char (so `\"` never closes a quoted key); outside quotes `\` is literal, so a
+// bare key ending in `\` (e.g. `a\: v`) still finds its separator. Callers that
+// previously used a `content[ci-1] != '\\'` toggle mis-handled keys whose final
+// character was a backslash (`"foo:bar\\": v`), because the escaped quote was
+// never counted and the line was silently dropped.
+inline size_t goonFindUnquoted(std::string_view s, char target) {
+  bool inQ = false, esc = false;
+  for (size_t ci = 0; ci < s.size(); ci++) {
+    char c = s[ci];
+    if (esc) { esc = false; continue; }
+    if (inQ && c == '\\') { esc = true; continue; }
+    if (c == '"') { inQ = !inQ; continue; }
+    if (!inQ && c == target) return ci;
+  }
+  return std::string_view::npos;
+}
+
 // GOON -> JSON text converter (GOON decoder)
 inline std::string goonToJson(std::string_view input) {
   auto lines = splitLines(input);
@@ -913,14 +942,7 @@ inline std::string goonToJson(std::string_view input) {
   // the object path and silently produced "{}". Expanded to JSON here so
   // scalar roots round-trip exactly like the JSON layer.
   if (!rootIsArr) {
-    bool hasColon = false;
-    {
-      bool inQ = false;
-      for (size_t i = 0; i < firstContent.size(); i++) {
-        if (firstContent[i] == '"' && (i == 0 || firstContent[i - 1] != '\\')) inQ = !inQ;
-        else if (!inQ && firstContent[i] == ':') { hasColon = true; break; }
-      }
-    }
+    bool hasColon = goonFindUnquoted(firstContent, ':') != std::string_view::npos;
     bool looksScalar = !hasColon &&
       !firstContent.empty() && (firstContent[0] != '-' || minusScalar) &&
       firstContent[0] != '{' && firstContent[0] != '[' && firstContent[0] != ']' &&
@@ -982,15 +1004,8 @@ inline std::string goonToJson(std::string_view input) {
     {
       // The header's `[...]` must be found OUTSIDE any quoted key prefix
       // (alwaysQuoteKeys / keys containing `[`/`]` produce `"a[2]"[1]{b}:`).
-      size_t openB = std::string_view::npos;
-      {
-        bool inQh = false;
-        for (size_t ci = 0; ci < content.size(); ci++) {
-          if (content[ci] == '"' && (ci == 0 || content[ci - 1] != '\\')) { inQh = !inQh; continue; }
-          if (!inQh && content[ci] == '[') { openB = ci; break; }
-        }
-      }
-      if (openB != std::string_view::npos && openB < content.size() - 1) {
+      size_t openB = goonFindUnquoted(content, '[');
+      if (openB != std::string_view::npos && openB + 1 < content.size()) {
         size_t closeB = content.find(']', openB);
         if (closeB != std::string_view::npos) {
           size_t afterB = closeB + 1;
@@ -1070,10 +1085,13 @@ inline std::string goonToJson(std::string_view input) {
                   structured = true;
                 } else {
                   bool inQb = false;
+                  bool escb = false;
                   bool seenComma = false;
                   for (size_t ci2 = 0; ci2 < rc3.size(); ci2++) {
                     char cb2 = rc3[ci2];
-                    if (cb2 == '"' && (ci2 == 0 || rc3[ci2 - 1] != '\\')) { inQb = !inQb; continue; }
+                    if (escb) { escb = false; continue; }
+                    if (inQb && cb2 == '\\') { escb = true; continue; }
+                    if (cb2 == '"') { inQb = !inQb; continue; }
                     if (inQb) continue;
                     if (cb2 == ',') { seenComma = true; continue; }
                     if (cb2 == ':') {
@@ -1115,11 +1133,18 @@ inline std::string goonToJson(std::string_view input) {
                 while (dEnd < countStr.size() && (countStr[dEnd] == ' ' || countStr[dEnd] == '\t')) dEnd++;
                 if (de == ds || dEnd != countStr.size())
                   throw GoonDecodeError("GOON: invalid RLE repeat at line " + std::to_string(li + 1));
-                repeat = atoi(countStr.substr(ds, de - ds).c_str());
-                if (repeat < 1) repeat = 1;
-                else if (static_cast<size_t>(repeat) > MAX_REPEAT_COUNT) {
-                  throw GoonDecodeError("RLE repeat count exceeds limit of " + std::to_string(MAX_REPEAT_COUNT) + " at line " + std::to_string(li + 1));
-                }
+                // Parse with overflow detection: atoi() on an arbitrary digit
+                // run is UB on overflow (an unbounded count is not a
+                // representable int). strtol + errno turns it into an error.
+                errno = 0;
+                char* endp = nullptr;
+                long rcv = std::strtol(countStr.substr(ds, de - ds).c_str(), &endp, 10);
+                (void)endp;
+                const std::string errOver = "RLE repeat count exceeds limit of " + std::to_string(MAX_REPEAT_COUNT) + " at line " + std::to_string(li + 1);
+                if (errno == ERANGE) throw GoonDecodeError(errOver);
+                if (rcv < 1) repeat = 1;
+                else if (rcv > static_cast<long>(MAX_REPEAT_COUNT)) throw GoonDecodeError(errOver);
+                else repeat = static_cast<int>(rcv);
                 rowStr = rcont.substr(0, asterisk);
               }
 
@@ -1337,6 +1362,10 @@ int rindent = countIndent(rline);
 
     // List item: - value
     if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
+      // A `- x` line is only a valid list item inside an array frame; inside
+      // an object it would append a bare value into the mapping (invalid JSON).
+      if (curFrame.type != 'A')
+        throw GoonDecodeError("GOON: list item outside of array frame at line " + std::to_string(li + 1));
       addComma(stack, out);
       curFrame.first = false;
       out += expandCell(content.substr(2));
@@ -1344,6 +1373,8 @@ int rindent = countIndent(rline);
     }
     // Bare "-" means an inline object
     if (content == "-") {
+      if (curFrame.type != 'A')
+        throw GoonDecodeError("GOON: list item outside of array frame at line " + std::to_string(li + 1));
       addComma(stack, out);
       curFrame.first = false;
       out += '{';
@@ -1352,14 +1383,7 @@ int rindent = countIndent(rline);
     }
 
     // key: value
-    size_t colonPos = std::string_view::npos;
-    {
-      bool inQ = false;
-      for (size_t ci = 0; ci < content.size(); ci++) {
-        if (content[ci] == '"' && (ci == 0 || content[ci - 1] != '\\')) { inQ = !inQ; continue; }
-        if (!inQ && content[ci] == ':') { colonPos = ci; break; }
-      }
-    }
+    size_t colonPos = goonFindUnquoted(content, ':');
     if (colonPos != std::string_view::npos) {
       std::string_view key = content.substr(0, colonPos);
       while (!key.empty() && key.back() == ' ') key = key.substr(0, key.size() - 1);
@@ -1390,6 +1414,13 @@ int rindent = countIndent(rline);
       } else {
         out += '"' + keyStr + "\":" + expandCell(valPart);
       }
+    } else {
+      // toGOON() emits an empty root object/array as a bare `{}`/`[]` line
+      // whose (empty) content is implied by the already-open root frame.
+      // Any other separator-less line is not valid GOON in this context;
+      // previously it fell off the loop and was silently dropped (data loss).
+      if (!(curFrame.isRoot && li == firstLine && (content == "{}" || content == "[]")))
+        throw GoonDecodeError("GOON: unrecognized line " + std::to_string(li + 1) + " in object context");
     }
   }
 

@@ -8,6 +8,10 @@
 //   class B(A): z                -- inheritance (B = A's props + z)
 // Comments use `#` to end of line; trailing commas allowed. Full round-trip
 // via toTRON()/fromTRON().
+//
+// The encoder emits FLAT class definitions: inheritance (`class B(A):`) is fully
+// supported by the decoder, but re-serialized as an equivalent flat class (the
+// inherited properties are merged into the emitted class's property list).
 
 #include "../core.hpp"
 
@@ -37,8 +41,10 @@ inline std::string tronSchemaSignature(const asvJSONValue* v) {
 inline void tronDiscoverSchemas(const asvJSONValue* v,
     std::unordered_map<std::string, std::vector<std::string>>& firstKeys,
     std::unordered_map<std::string, size_t>& counts,
-    std::unordered_set<const asvJSONValue*>& visited) {
+    std::unordered_set<const asvJSONValue*>& visited,
+    int depth = 0) {
   if (!v) return;
+  if (!asvJSONValue::checkNestingDepth(depth)) return;
   if (v->type == asvJSONValue::OBJECT && !v->obj->empty()) {
     if (visited.count(v)) return;
     visited.insert(v);
@@ -52,10 +58,10 @@ inline void tronDiscoverSchemas(const asvJSONValue* v,
       firstKeys[sig] = std::move(orig);
     }
     for (const auto& [_, child] : *v->obj)
-      tronDiscoverSchemas(child.get(), firstKeys, counts, visited);
+      tronDiscoverSchemas(child.get(), firstKeys, counts, visited, depth + 1);
   } else if (v->type == asvJSONValue::ARRAY) {
     for (size_t i = 0; i < v->size(); i++)
-      tronDiscoverSchemas(v->get(i), firstKeys, counts, visited);
+      tronDiscoverSchemas(v->get(i), firstKeys, counts, visited, depth + 1);
   }
 }
 
@@ -76,11 +82,52 @@ inline bool tronLooksLikeMarker(std::string_view s) {
   return false;
 }
 
+// JSON-escape a string for embedding inside a TRON quoted value, additionally
+// turning any literal '|' into \u007C so raw '|' characters appear ONLY as the
+// outer __REGEX__ field separators (never in the pattern/options content). TRON
+// strings use strict JSON escaping, so \| is not valid there.
+inline void tronEscPipe(std::string& out, std::string_view s) {
+  const char* p = s.data();
+  const char* const end = p + s.size();
+  const char* run = p;
+  static constexpr char HEX[] = "0123456789abcdef";
+  while (p < end) {
+    unsigned char c = static_cast<unsigned char>(*p);
+    if (c == '|') {
+      if (p > run) out.append(run, static_cast<size_t>(p - run));
+      out += "\\u007C";
+      p++;
+      run = p;
+      continue;
+    }
+    if (c >= 0x20 && c != '"' && c != '\\') { p++; continue; }
+    if (p > run) out.append(run, static_cast<size_t>(p - run));
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: {
+        char buf[6] = {'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 0xF]};
+        out.append(buf, 6);
+        break;
+      }
+    }
+    p++;
+    run = p;
+  }
+  if (run < end) out.append(run, static_cast<size_t>(end - run));
+}
+
 inline void tronSerializeVal(const asvJSONValue* v,
     const std::unordered_map<std::string, std::string>& sigToClass,
     const std::unordered_map<std::string, std::vector<std::string>>& classKeys,
-    std::string& out, bool allowNaNInfinity = false) {
+    std::string& out, bool allowNaNInfinity = false, int depth = 0) {
   if (!v) { out += "null"; return; }
+  if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
   if (v->type >= asvJSONValue::DATETIME && v->type <= asvJSONValue::EXTENSION) {
     // Special types serialized as TRON values
     switch (v->type) {
@@ -99,20 +146,25 @@ inline void tronSerializeVal(const asvJSONValue* v,
         fmtObjectIdHexVal(v->str_data, out);
         out += '"';
         return;
-      case asvJSONValue::REGEX:
+      case asvJSONValue::REGEX: {
+        // Emit __REGEX__<P>|<O>| -- the pattern/options are JSON-escaped with
+        // any literal '|' as \u007C, so raw '|' chars only ever appear as field
+        // separators: the first is the pattern/options boundary and the last a
+        // mandatory terminator that disambiguates an options-free pattern that
+        // itself ends in '|'.
         out += "\"__REGEX__";
-        {
-          size_t sep = v->str_data.rfind('\0');
-          if (sep != std::string_view::npos) {
-            appendJsonEscaped(out, std::string_view(v->str_data.data(), sep));
-            out += '|';
-            appendJsonEscaped(out, std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1));
-          } else {
-            appendJsonEscaped(out, v->str_data);
-          }
-        }
+        size_t sep = v->str_data.rfind('\0');
+        std::string_view pat = (sep != std::string_view::npos)
+            ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
+        std::string_view opts = (sep != std::string_view::npos && sep + 1 < v->str_data.size())
+            ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)
+            : std::string_view();
+        tronEscPipe(out, pat);
+        out += '|';
+        if (!opts.empty()) { tronEscPipe(out, opts); out += '|'; }
         out += '"';
         return;
+      }
       case asvJSONValue::TIMESTAMP: {
         out += "\"__TS__";
         char buf[32];
@@ -155,7 +207,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
       out += '[';
       for (size_t i = 0; i < v->size(); i++) {
         if (i > 0) out += ',';
-        tronSerializeVal(v->get(i), sigToClass, classKeys, out, allowNaNInfinity);
+        tronSerializeVal(v->get(i), sigToClass, classKeys, out, allowNaNInfinity, depth + 1);
       }
       out += ']';
       break;
@@ -171,7 +223,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
           for (size_t i = 0; i < kit->second.size(); i++) {
             if (i > 0) out += ',';
             auto* child = v->getConst(kit->second[i]);
-            if (child) tronSerializeVal(child, sigToClass, classKeys, out, allowNaNInfinity);
+            if (child) tronSerializeVal(child, sigToClass, classKeys, out, allowNaNInfinity, depth + 1);
             else out += "null";
           }
           out += ')';
@@ -186,7 +238,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
         out += '"';
         appendJsonEscaped(out, k);
         out += "\":";
-        tronSerializeVal(child.get(), sigToClass, classKeys, out, allowNaNInfinity);
+        tronSerializeVal(child.get(), sigToClass, classKeys, out, allowNaNInfinity, depth + 1);
       }
       out += '}';
       break;
@@ -298,6 +350,14 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
     if (allowNaNInfinity && c == '+' && i + 8 < in.size() && in.substr(i + 1, 8) == "Infinity") {
       add(TronTokType::INF_VAL, "+Infinity");
       i += 9; continue;
+    }
+    if (allowNaNInfinity && c == '-' && i + 3 < in.size() && in.substr(i + 1, 3) == "NaN") {
+      add(TronTokType::NAN_VAL, "-NaN");
+      i += 4; continue;
+    }
+    if (allowNaNInfinity && c == '+' && i + 3 < in.size() && in.substr(i + 1, 3) == "NaN") {
+      add(TronTokType::NAN_VAL, "+NaN");
+      i += 4; continue;
     }
     if (c == '-' || (c >= '0' && c <= '9')) {
       size_t start = i;
@@ -438,9 +498,12 @@ struct TronParseState {
     std::vector<std::unique_ptr<asvJSONValue>> posArgs;
     std::unordered_map<std::string, std::unique_ptr<asvJSONValue>> namedArgs;
     bool namedMode = false;
+    bool needsSeparator = false;
     while (peek().type != TronTokType::RPAREN && peek().type != TronTokType::END) {
-      if (!posArgs.empty() || !namedArgs.empty()) {
-        if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); continue; }
+      if (needsSeparator) {
+        if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); needsSeparator = false; continue; }
+        if (peek().type == TronTokType::RPAREN) break;
+        throw asvJSONError("expected ',' or ')'");
       }
       skipNewlines();
       if ((peek().type == TronTokType::IDENT || peek().type == TronTokType::STRING) && pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::EQUALS) {
@@ -459,6 +522,7 @@ struct TronParseState {
         asvJSONValue* val = parseValue(depth + 1);
         posArgs.push_back(std::unique_ptr<asvJSONValue>(val));
       }
+      needsSeparator = true;
       skipNewlines();
     }
     if (!match(TronTokType::RPAREN)) throw asvJSONError("expected ')'");
@@ -470,9 +534,14 @@ struct TronParseState {
     // SyntaxError (missing values are not silently filled with null).
     if (posArgs.size() + namedArgs.size() < props.size())
       throw asvJSONError("not enough arguments for class " + className);
-    for (auto& kv : namedArgs) {
-      if (std::find(props.begin(), props.end(), kv.first) == props.end())
-        throw asvJSONError("unknown argument: " + kv.first);
+    if (!namedArgs.empty()) {
+      std::unordered_set<std::string> propSet;
+      propSet.reserve(props.size());
+      for (const auto& p : props) propSet.insert(p);
+      for (auto& kv : namedArgs) {
+        if (propSet.find(kv.first) == propSet.end())
+          throw asvJSONError("unknown argument: " + kv.first);
+      }
     }
     for (size_t i = 0; i < posArgs.size(); i++) {
       if (namedArgs.find(props[i]) != namedArgs.end())
@@ -543,20 +612,33 @@ asvJSONValue* TronParseState::parseValue(int depth) {
           return v.release();
         }
       }
-      // Check __REGEX__ prefix: pattern|options (options optional)
-      if (raw.size() > 9 && raw.compare(0, 9, "__REGEX__") == 0) {
-        std::string content(s.data() + 9, s.size() - 9);
-        size_t sep = content.rfind('|');
-        if (sep != std::string::npos) {
-          std::string pat = content.substr(0, sep);
-          std::string opts = content.substr(sep + 1);
-          auto v = asvJSONValue::makeRegex(pat.c_str(), opts.empty() ? nullptr : opts.c_str());
+      // Check __REGEX__ prefix: pattern|options|. The encoder emits the pattern and
+      // options as strict-JSON escapes with any literal '|' as \u007C, so raw
+      // '|' chars only ever separate fields: the first is the pattern/options
+      // boundary, the last a mandatory terminator. Splitting on the RAW token
+      // text (before tronUnescape) keeps those separators distinguishable from
+      // \u007C-escaped pipes; each side is then unescaped independently.
+      if (raw.size() >= 9 && raw.compare(0, 9, "__REGEX__") == 0) {
+        std::string content(raw.data() + 9, raw.size() - 9);
+        if (!content.empty()) {
+          size_t term = content.rfind('|');
+          if (term != std::string::npos && term > 0) {
+            size_t sep = content.find('|');
+            std::string pat = tronUnescape(content.substr(0, sep));
+            std::string opts = (sep != term) ? tronUnescape(content.substr(sep + 1, term - sep - 1)) : std::string();
+            auto v = asvJSONValue::makeRegex(pat.c_str(), opts.empty() ? nullptr : opts.c_str());
+            if (!v) throw asvJSONError("out of memory");
+            return v.release();
+          }
+          // No terminator: legacy format -- the whole content is the pattern
+          // (the old encoder emitted no separator when options were empty).
+          std::string pat = tronUnescape(content);
+          auto v = asvJSONValue::makeRegex(pat.c_str(), nullptr);
           if (!v) throw asvJSONError("out of memory");
           return v.release();
         }
-        auto v = asvJSONValue::makeRegex(content.c_str(), nullptr);
-        if (!v) throw asvJSONError("out of memory");
-        return v.release();
+        // An empty pattern cannot be a REGEX (makeRegex rejects it): fall
+        // through so a literal "__REGEX__" string stays a plain STRING.
       }
       // Check __BASE64__ prefix (payload may be empty)
       if (raw.size() >= 10 && raw.compare(0, 10, "__BASE64__") == 0) {
@@ -644,6 +726,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
 inline bool asvJSON::fromTRON(std::string_view input) {
   dirty_ = false;
   formatType = FormatType::Unknown;
+  if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
   try {
     auto toks = tronTokenize(input, allowNaNInfinity);
     TronParseState state(toks);

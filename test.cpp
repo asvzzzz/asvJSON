@@ -8633,6 +8633,120 @@ TEST(testGOONExtras) {
 		asvJSON j;
 		ASSERT(!j.fromGOON(std::string_view("$: $1=\"x\\u0000y\"\n")));
 	}
+	// Colon-in-key where the key *ends* in a backslash must round-trip: the
+	// quote/escape scan must count the closing quote even after `\\`.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("a:b\\", asvJSONValue::makeInt(7));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getInt("a:b\\"), int64_t(7));
+	}
+	// Quoted key ending in a JSON-escaped backslash, value on the same line.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("\"foo:bar\\\\\": 42\n")));
+		ASSERT_EQ(j.getInt("foo:bar\\"), int64_t(42));
+	}
+	// Quoted key containing `[` and ending in `\`; the `[` must be ignored
+	// inside the quotes (header `[...]` detection and colon detection both
+	// use quote-aware scanning).
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("\"weird[2]\\\\\": 43\n")));
+		ASSERT_EQ(j.getInt("weird[2]\\"), int64_t(43));
+	}
+	// A bare key ending in a backslash: the `\` outside quotes is literal, so
+	// the separator is still found after it.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a\\: 5\n")));
+		ASSERT_EQ(j.getInt("a\\"), int64_t(5));
+	}
+	// Unrecognized lines must error instead of being silently dropped.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("a: 1\norphan\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("a: 1\n  stray\n")));
+	}
+	// A list item outside an array frame is an error.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("a: 1\n- x\n")));
+	}
+	// Complex (flow) list items after a bare `[]:` header must stay inside the
+	// array (deferToMain path).
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("name[]:\n  - [1,2]\n  - [3,4]\n")));
+		ASSERT_EQ(std::string(j.serialize()), std::string("{\"name\":[[1,2],[3,4]]}"));
+	}
+	// Bare `-` object item followed by a sibling item at the same level.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("name[]:\n  -\n    a: 1\n    b: 2\n  - c\n")));
+		ASSERT_EQ(std::string(j.serialize()), std::string("{\"name\":[{\"a\":1,\"b\":2},\"c\"]}"));
+	}
+	// Mixed nested items round-trip through the encoder.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[{\"a\":1,\"b\":2},\"c\",[1,2]]")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.serialize()), std::string("[{\"a\":1,\"b\":2},\"c\",[1,2]]"));
+	}
+	// Empty root containers serialize as a bare `{}`/`[]` line and must parse.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		ASSERT(j.fromGOON(std::string_view(j.toGOON())));
+		ASSERT(j.getRoot()->obj->empty());
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[]")));
+		ASSERT(j.fromGOON(std::string_view(j.toGOON())));
+		ASSERT_EQ(j.getRoot()->size(), size_t(0));
+	}
+	// RLE repeat parsing must reject an overflowing count instead of invoking
+	// atoi() UB, and enforce MAX_REPEAT_COUNT.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("r[1]{b}:\n  x*9999999999999999999999999999\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("r[1]{b}:\n  x*10001\n")));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("r[2]{b}:\n  x*3\n")));
+		ASSERT_EQ(j.getRoot()->getConst("r")->size(), size_t(3));
+	}
+	// The dictionary is capped (a huge document cannot grow an unbounded $:
+	// header); entries beyond the cap are emitted literally and still round-trip.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		for (int k = 0; k < 300; k++) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "state%03d", k);
+			std::string val(buf);
+			j.getRoot()->obj->emplace(std::string("first.k") + std::to_string(k), asvJSONValue::makeStringView(val));
+			j.getRoot()->obj->emplace(std::string("second.k") + std::to_string(k), asvJSONValue::makeStringView(val));
+		}
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("$256=") == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.serialize()), std::string(j.serialize()));
+	}
 }
 
 TEST(testProtobufBasic) {
@@ -12011,6 +12125,125 @@ TEST(testTRONSpecialTypes) {
     ASSERT(j2.fromTRON(std::string_view(s)));
     ASSERT_EQ(j2.getRegexPattern("re"), "^abc$");
     ASSERT_EQ(j2.getRegexOptions("re"), "");
+  }
+}
+
+TEST(testTRONAudit) {
+  // 1. REGEX pattern containing '|' with EMPTY options round-trips losslessly.
+  //    The pre-fix encoder wrote "__REGEX__a|b" which the decoder split into
+  //    pattern "a", options "b" -- silent data corruption. Now '|' is escaped.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("a|b", ""));
+    std::string s = j.toTRON();
+    ASSERT(s.find("__REGEX__a\\u007Cb|") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* re = j2.getRoot()->getConst("re");
+    ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "a|b");
+    ASSERT_EQ(j2.getRegexOptions("re"), "");
+  }
+  // 2. REGEX pattern/options containing backslashes and '|' round-trip.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex("a\\|b", "im"));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* re = j2.getRoot()->getConst("re");
+    ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+    ASSERT_EQ(j2.getRegexPattern("re"), "a\\|b");
+    ASSERT_EQ(j2.getRegexOptions("re"), "im");
+  }
+  // A literal "__REGEX__" string (empty marker content) stays a plain STRING.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    j.getRoot()->arr->push_back(asvJSONValue::makeStringView(std::string_view("__REGEX__")));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* v = j2.getRoot()->get(static_cast<size_t>(0));
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string_view(v->str_data), std::string_view("__REGEX__"));
+  }
+  // 3. Instance arguments need a separating comma; missing ones are rejected
+  //    (previously A(1 2) silently parsed as A(1,2)).
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1 2)\n")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1\"x\")\n")));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("class A: x,y\nA(1\n2)\n")));
+  }
+  // Trailing comma still accepted.
+  {
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("class A: x,y\nA(1,2,)\n")));
+    ASSERT_EQ(j.getInt("x"), int64_t(1));
+    ASSERT_EQ(j.getInt("y"), int64_t(2));
+  }
+  // 4. Encoder depth guard: a document nested beyond MAX_NESTING_DEPTH is
+  //    truncated with null instead of being serialized unbounded (the pre-fix
+  //    encoder recursed without any depth check). A legal-depth doc still
+  //    round-trips.
+  {
+    auto build = [](int levels) {
+      auto node = asvJSONValue::makeArray();
+      asvJSONValue* cur = node.get();
+      for (int i = 0; i < levels; i++) {
+        auto child = asvJSONValue::makeArray();
+        if (i + 1 == levels) child->arr->push_back(asvJSONValue::makeInt(1));
+        cur->arr->push_back(std::move(child));
+        cur = cur->arr->back().get();
+      }
+      return node;
+    };
+    {
+      asvJSON j;
+      ASSERT(j.parse(std::string_view("[]")));
+      j.getRoot()->arr->push_back(build(45));
+      std::string s = j.toTRON();
+      asvJSON j2;
+      ASSERT(j2.fromTRON(std::string_view(s)));
+    }
+    {
+      asvJSON j;
+      ASSERT(j.parse(std::string_view("[]")));
+      j.getRoot()->arr->push_back(build(60));
+      std::string s = j.toTRON();
+      ASSERT(s.find("null") != std::string::npos);
+      asvJSON j2;
+      // The truncated document is still rejected by the strict decoder's own
+      // depth guard (the encoder emits up to MAX_NESTING_DEPTH levels).
+      ASSERT(!j2.fromTRON(std::string_view(s)));
+    }
+  }
+  // 5. -NaN round-trips with allowNaNInfinity (the tokenizer now accepts the
+  //    sign-bit NaN form that fmtNaNInfVal can emit).
+  {
+    asvJSON j;
+    j.putDouble("n", -std::numeric_limits<double>::quiet_NaN());
+    j.allowNaNInfinity = true;
+    std::string s = j.toTRON();
+    ASSERT(s.find("-NaN") != std::string::npos);
+    asvJSON j2;
+    j2.allowNaNInfinity = true;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(std::isnan(j2.getDouble("n")));
+  }
+  // 6. fromTRON rejects empty input explicitly.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("")));
   }
 }
 
@@ -22287,6 +22520,7 @@ RUN(testCBORFloat16);
 	RUN(testToTRONComprehensive);
 	RUN(testTRONExtras);
 	RUN(testTRONSpecialTypes);
+	RUN(testTRONAudit);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);
