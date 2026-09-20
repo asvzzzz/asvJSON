@@ -1,6 +1,27 @@
 #pragma once
 // BSON serialization/parsing for asvJSON++
+//
+// Known conventions (documented, not bugs):
+// - Duplicate document keys are last-wins (insert_or_assign), matching the JSON
+//   parser; BSON explicitly requires unique keys but the decoder stays lenient.
+// - Binary subtype 0x03 ("UUID old", a 4-byte length followed by the data) is
+//   only trusted when the declared length matches the enclosing payload; a
+//   mismatched length drops the 4-byte prefix and returns the remaining
+//   blen - 4 bytes as a plain BINARY (for blen < 4 the whole payload is kept),
+//   and the cursor is always realigned to the end of the binary block, so
+//   malformed input can never smuggle bytes past an inner length.
+// - BSON binary subtypes collide with asvJSON EXTENSION subtypes: 0x00 and
+//   0x05 decode back as BINARY (the extension type is lost) and 0x03 is
+//   consumed by the UUID(OLD) branch. EXTENSION values with ext_type in
+//   {0x00, 0x03, 0x05} therefore do not survive a BSON round-trip unmodified.
+// - Element type 0x06 (Undefined, deprecated by the spec) normalizes to null.
+// - Regex element (0x0B) options are stored verbatim; they are not validated
+//   against the spec's 'ilmsux' set or ordering (lenient read).
+// - String values (0x02) are length-prefixed, so an embedded NUL is technically
+//   invalid BSON; makeString strings are rejected by toBSON() rather than
+//   emitted, mirroring the key check.
 
+#include <charconv>
 #include "../core.hpp"
 
 namespace asvJSONInternal {
@@ -27,6 +48,11 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::STRING: {
+			// slen = size+1 must fit in uint32 (the +1 is the terminator), and
+			// BSON strings must not contain embedded NULs. Guard both before
+			// casting, mirroring the OBJECT/ARRAY length checks.
+			if (str_data.size() >= static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON string too large");
+			if (str_data.find('\0') != std::string::npos) throw asvJSONError("BSON string contains NUL byte");
 			out.push_back(0x02);
 			uint32_t slen = static_cast<uint32_t>(str_data.size()) + 1;
 			writeLE32(out, slen);
@@ -98,6 +124,9 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::BINARY: {
+			// A size that overflows uint32 would silently truncate the length
+			// field (the OBJECT/ARRAY branches already guard their sizes).
+			if (bin_data.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON binary too large");
 			out.push_back(0x05);
 			uint32_t blen = static_cast<uint32_t>(bin_data.size());
 			writeLE32(out, blen);
@@ -193,6 +222,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::EXTENSION: {
+			if (bin_data.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON extension too large");
 			out.push_back(0x05);
 			uint32_t blen = static_cast<uint32_t>(bin_data.size());
 			writeLE32(out, blen);
@@ -230,7 +260,6 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 	auto obj = asvJSONValue::makeObject();
 	if (!obj) throw asvJSONError("BSON alloc failed");
 	while (pos < docEnd) {
-		if (pos >= dataLen) throw asvJSONError("BSON unexpected end");
 		uint8_t elemType = data[pos++];
 		size_t keyStart = pos;
 		while (pos < docEnd && data[pos] != 0) pos++;
@@ -239,13 +268,12 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		if (keyLen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("BSON key too long");
 		std::string key(reinterpret_cast<const char*>(data + keyStart), keyLen);
 		pos++;
-		if (pos > docEnd) throw asvJSONError("BSON element past end");
 		switch (elemType) {
-			case 0x01: { if (pos + 8 > docEnd + 1) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->insert_or_assign(key, asvJSONValue::makeDouble(d)); break; }
+			case 0x01: { if (pos + 8 > docEnd) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); obj->obj->insert_or_assign(key, asvJSONValue::makeDouble(d)); break; }
 			case 0x02: {
-				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON string");
+				if (pos + 4 > docEnd) throw asvJSONError("BSON string");
 				uint32_t slen; readLE32(data, pos, slen);
-				if (slen < 1 || pos + slen > docEnd + 1) throw asvJSONError("BSON string invalid");
+				if (slen < 1 || pos + slen > docEnd) throw asvJSONError("BSON string invalid");
 				if (data[pos + slen - 1] != 0) throw asvJSONError("BSON string not NUL-terminated");
 				auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen - 1);
 				pos += slen;
@@ -254,12 +282,15 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x03: {
-				auto subObj = parseBSON(data, pos, dataLen, depth + 1);
+				// Pass the parent's docEnd as the limit so a nested document can
+				// never extend past its parent's boundary (otherwise a forged
+				// child size would be validated only against the whole buffer).
+				auto subObj = parseBSON(data, pos, docEnd, depth + 1);
 				obj->obj->insert_or_assign(key, std::move(subObj));
 				break;
 			}
 			case 0x04: {
-				auto subArr = parseBSON(data, pos, dataLen, depth + 1);
+				auto subArr = parseBSON(data, pos, docEnd, depth + 1);
 				if (subArr && subArr->obj && !subArr->obj->empty()) {
 					bool sequential = true;
 					char idxBuf[32];
@@ -291,54 +322,61 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x05: {
-				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary");
+				if (pos + 4 > docEnd) throw asvJSONError("BSON binary");
 				uint32_t blen; readLE32(data, pos, blen);
-				if (pos >= docEnd + 1) throw asvJSONError("BSON binary subtype");
+				if (pos >= docEnd) throw asvJSONError("BSON binary subtype");
 				uint8_t subtype = data[pos++];
-				if (pos + blen > docEnd + 1) throw asvJSONError("BSON binary overflow");
+				// The binary block is blen bytes right after the subtype byte.
+				// Validate that it is fully inside the document, then ALWAYS
+				// advance pos to blockEnd -- a malformed inner length (subtype
+				// 0x03) must never leave pos inside the blob, or the next
+				// element would be read out of attacker-controlled bytes.
+				size_t blockEnd = pos + blen;
+				size_t dataStart = pos;
+				size_t dataLen = blen;
+				if (blockEnd > docEnd) throw asvJSONError("BSON binary overflow");
+				if (subtype == 0x03 && blen >= 4) {
+					// UUID (old): the payload leads with a 4-byte length.
+					// Trust it only when it matches blen - 4; otherwise drop the
+					// 4-byte prefix and read the remaining blen - 4 bytes (the
+					// inner length cannot extend a read beyond the block).
+					if (pos + 4 > blockEnd) throw asvJSONError("BSON binary subtype 0x03 truncated");
+					uint32_t oldLen; readLE32(data, pos, oldLen);
+					if (oldLen == blen - 4) { dataStart = pos; dataLen = oldLen; }
+					else { dataStart = pos; dataLen = blen - 4; }
+				}
 				if (subtype == 0x05 || subtype == 0) {
-					auto val = asvJSONValue::makeBinary(data + pos, blen);
-					pos += blen;
+					auto val = asvJSONValue::makeBinary(data + dataStart, dataLen);
 					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->insert_or_assign(key, std::move(val));
 				} else if (subtype == 0x03) {
-					if (blen >= 4) {
-						if (pos + 4 > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 truncated");
-						uint32_t oldLen; readLE32(data, pos, oldLen);
-						if (pos + oldLen > docEnd + 1) throw asvJSONError("BSON binary subtype 0x03 overflow");
-						auto val = asvJSONValue::makeBinary(data + pos, oldLen);
-						pos += oldLen;
-						if (!val) throw asvJSONError("BSON binary too large");
-						obj->obj->insert_or_assign(key, std::move(val));
-					} else {
-						auto val = asvJSONValue::makeBinary(data + pos, blen);
-						pos += blen;
-						if (!val) throw asvJSONError("BSON binary too large");
-						obj->obj->insert_or_assign(key, std::move(val));
-					}
+					auto val = asvJSONValue::makeBinary(data + dataStart, dataLen);
+					if (!val) throw asvJSONError("BSON binary too large");
+					obj->obj->insert_or_assign(key, std::move(val));
 				} else {
-					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + pos, blen);
-					pos += blen;
+					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + dataStart, dataLen);
 					if (!val) throw asvJSONError("BSON extension too large");
 					obj->obj->insert_or_assign(key, std::move(val));
 				}
+				pos = blockEnd;
 				break;
 			}
-			case 0x06: obj->obj->insert_or_assign(key, asvJSONValue::makeNull()); break;
+			case 0x06: // Undefined (deprecated by the spec) normalizes to null, like 0x0A.
+				obj->obj->insert_or_assign(key, asvJSONValue::makeNull()); break;
 			case 0x07: {
-				if (pos + 12 > docEnd + 1) throw asvJSONError("BSON objectid");
+				if (pos + 12 > docEnd) throw asvJSONError("BSON objectid");
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += 12;
 				obj->obj->insert_or_assign(key, std::move(val));
 				break;
 			}
 			case 0x08: {
-				if (pos >= docEnd + 1) throw asvJSONError("BSON bool");
+				if (pos + 1 > docEnd) throw asvJSONError("BSON bool");
 				obj->obj->insert_or_assign(key, asvJSONValue::makeBool(data[pos++] != 0));
 				break;
 			}
 			case 0x09: {
-				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON datetime");
+				if (pos + 8 > docEnd) throw asvJSONError("BSON datetime");
 				uint64_t ms = 0;
 				for (int i = 0; i < 8; i++) ms |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
@@ -352,6 +390,9 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 			}
 			case 0x0A: obj->obj->insert_or_assign(key, asvJSONValue::makeNull()); break;
 			case 0x0B: {
+				// Pattern and options are NUL-terminated C strings. Options are
+				// stored verbatim -- the spec's 'ilmsux' set/order is not
+				// enforced (lenient read; see header).
 				size_t patStart = pos;
 				while (pos < docEnd && data[pos] != 0) pos++;
 				if (pos >= docEnd) throw asvJSONError("BSON regex missing pattern terminator");
@@ -371,13 +412,13 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x10: {
-				if (pos + 4 > docEnd + 1) throw asvJSONError("BSON int32");
+				if (pos + 4 > docEnd) throw asvJSONError("BSON int32");
 				uint32_t v; readLE32(data, pos, v);
 				obj->obj->insert_or_assign(key, asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(v))));
 				break;
 			}
 			case 0x11: {
-				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON timestamp");
+				if (pos + 8 > docEnd) throw asvJSONError("BSON timestamp");
 				uint32_t ts; readLE32(data, pos, ts);
 				uint32_t inc; readLE32(data, pos, inc);
 				// BSON timestamp = {t: uint32, i: uint32 increment}.
@@ -390,7 +431,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x12: {
-				if (pos + 8 > docEnd + 1) throw asvJSONError("BSON int64");
+				if (pos + 8 > docEnd) throw asvJSONError("BSON int64");
 				uint64_t v = 0;
 				for (int i = 0; i < 8; i++) v |= static_cast<uint64_t>(data[pos + i]) << (i * 8);
 				pos += 8;
@@ -398,7 +439,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x13: {
-				if (pos + 16 > docEnd + 1) throw asvJSONError("BSON decimal128: unexpected end");
+				if (pos + 16 > docEnd) throw asvJSONError("BSON decimal128: unexpected end");
 				pos += 16;
 				// Decimal128 is a 128-bit IEEE-754 decimal float that cannot be
 				// represented losslessly by this library; fail rather than silently

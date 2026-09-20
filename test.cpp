@@ -2035,6 +2035,101 @@ TEST(testBSONExtras) {
 	}
 }
 
+TEST(testBSONSubtype03Realignment) {
+	// Bug: subtype 0x03 ("UUID old") was parsed by trusting an inner length
+	// (oldLen) that is untethered from the enclosing blen.  When they diverge,
+	// pos was left in the middle of the block, so the NEXT element would be
+	// read from arbitrary bytes inside the payload.
+	// Correct behavior: always align to blockEnd; the inner length is honored
+	// only when it exactly matches blen - 4.
+	uint8_t data[] = {
+		0x1E, 0x00, 0x00, 0x00,       // int32 docSize = 30
+		// element "u": binary subtype 0x03, blen = 10, but claimed oldLen = 3
+		0x05, 'u', 0x00,
+		0x0A, 0x00, 0x00, 0x00,       // blen = 10
+		0x03,                          // subtype binary-old
+		0x03, 0x00, 0x00, 0x00,       // oldLen = 3  (mismatch: payload is 6 bytes)
+		0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // actual 6-byte payload
+		// element "n": int32 42 follows directly
+		0x10, 'n', 0x00,
+		42, 0x00, 0x00, 0x00,
+		0x00                           // document terminator
+	};
+	asvJSON json;
+	ASSERT(json.fromBSON(data, sizeof(data)));
+	ASSERT(json.getRoot()->size() == 2);
+	auto* u = json.getRoot()->get("u");
+	ASSERT(u != nullptr);
+	ASSERT_EQ(u->type, asvJSONValue::BINARY);
+	ASSERT_EQ(u->bin_data.size(), static_cast<size_t>(6));
+	auto* n = json.getRoot()->get("n");
+	ASSERT(n != nullptr);
+	ASSERT_EQ(n->type, asvJSONValue::INT);
+	ASSERT_EQ(n->num, 42);
+}
+
+TEST(testBSONStringNULGuard) {
+	// Bug: BSON strings must not contain embedded NUL bytes (only the trailing
+	// terminator), but the encoder accepted values containing one.  Keys were
+	// already guarded; values now throw too.
+	asvJSON json;
+	ASSERT(json.parse(std::string("{\"a\":\"x\\u0000y\"}")));
+	try {
+		auto bson = json.toBSON();
+		ASSERT(false);
+	} catch (const asvJSONError& e) {
+		ASSERT(std::string(e.what()).find("NUL") != std::string::npos);
+	}
+}
+
+TEST(testBSONNestedDocBound) {
+	// Bug: a nested document was parsed with the WHOLE BUFFER as limit, so a
+	// forged child docSize could be validated only against dataLen instead of
+	// the parent's own boundary.  Nested docs must not extend past docEnd.
+	// Top level: one element "d" = nested doc claiming size 999 (extends far
+	// past the real document).
+	uint8_t raw[] = {
+		0x0C, 0x00, 0x00, 0x00, // int32 docSize = 12
+		0x03, 'd', 0x00,        // type embedded-doc, key "d"
+		0x07, 0x00, 0x00, 0x00, // child docSize = 7  (also extends beyond parent)
+		0x0A, 'x', 0x00,        // child element: null "x"
+		0x00,                    // child terminator (only 1 byte, size claims 7)
+		0x00                     // parent terminator
+	};
+	// The nested doc claims 7 bytes (terminator-inclusive) but only 1 filler
+	// byte follows the child's element, so 0x0A 'x' 0x00 + 1 byte = 5; the
+	// claimed size walks past the parent's terminator.  OOB reads must throw.
+	asvJSON json;
+	ASSERT(!json.fromBSON(raw, sizeof(raw)));
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testBSONIntBounds) {
+	// Tightened bounds: a value whose bytes would lap over the document
+	// terminator (docEnd) must throw, not read the terminator as data.
+	{
+		// double element with only 4 of 8 payload bytes
+		uint8_t raw[] = {
+			0x0E, 0x00, 0x00, 0x00, // docSize = 14
+			0x01, 'd', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00
+		};
+		asvJSON json;
+		ASSERT(!json.fromBSON(raw, sizeof(raw)));
+	}
+	{
+		// int32 truncated
+		uint8_t raw[] = {
+			0x09, 0x00, 0x00, 0x00, // docSize = 9
+			0x10, 'c', 0x00,
+			0x01, 0x00, 0x00,
+			0x00
+		};
+		asvJSON json;
+		ASSERT(!json.fromBSON(raw, sizeof(raw)));
+	}
+}
+
 TEST(testISODateTime) {
 	{
 		asvJSON json;
@@ -22015,6 +22110,10 @@ int main() {
 	RUN(testBSONExtensionRoundTrip);
 	RUN(testBSONEmptyArrayRoundTrip);
 	RUN(testBSONExtras);
+	RUN(testBSONSubtype03Realignment);
+	RUN(testBSONStringNULGuard);
+	RUN(testBSONNestedDocBound);
+	RUN(testBSONIntBounds);
 
 	std::cout << "\n--- ISO 8601 DateTime Tests ---\n";
 	RUN(testISODateTime);

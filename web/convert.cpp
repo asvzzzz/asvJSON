@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--raw") == 0) { rawMode = true; continue; }
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       std::cout
-        << "asvJSON++ Format Converter v1.26.5\n"
+        << "asvJSON++ Format Converter v1.26.6\n"
            "Usage: '{\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"}' | convert.exe  (PowerShell)\n"
            "       echo {\"from\":\"YAML\",\"to\":\"JSON\",\"data\":\"key: val\"} | convert.exe  (cmd)\n"
            "       convert.exe --raw < input.txt  (raw output, no JSON wrapper)\n"

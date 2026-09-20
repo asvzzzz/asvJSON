@@ -1069,6 +1069,18 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.26.6 (2026-09-20)
+
+BSON audit fixes (`asvjson/formats/bson.hpp`) from the latest err.txt review. Four new regression tests, suite now at **375** (up from 371):
+
+- **Fix (BSON decode, subtype 0x03 poisoning):** the "binary old"/UUID subdocument type was decoded by trusting an inner length (`oldLen`) untethered from the enclosing `blen`. When they diverged, `pos` was left in the middle of the block and the *next* element was read from arbitrary bytes inside the payload (smuggling arbitrary values past the strict terminator check). The decoder now tracks `blockEnd = pos + blen`, honors `oldLen` only when it exactly matches `blen - 4` (falling back to the `blen - 4` payload otherwise), and **always** sets `pos = blockEnd`.
+- **Fix (BSON encode, silent truncation):** BINARY/EXTENSION/STRING length fields are written as 32-bit but `bin_data.size()` / `str_data.size()` were cast without a range check, silently truncating a length above `UINT32_MAX` (and overflowing on the string's `+1`). All three branches now throw `BSON ... too large` past the limit, matching the existing OBJECT/ARRAY guards.
+- **Fix (BSON decode, nested bound):** embedded documents were parsed with the *whole buffer* as their limit instead of the parent's `docEnd`, so a forged child size could be validated only against `dataLen`. Nested parses now receive the parent's `docEnd` as their limit.
+- **Fix (BSON decode, strict bounds):** element-bound checks were written as `pos + N > docEnd + 1`; the `+1` let a fixed-size value read the document terminator byte as data. All fixed-size branches (`0x01` double, `0x02` string, `0x07` objectid, `0x08` bool, `0x09` datetime, `0x10` int32, `0x11` timestamp, `0x12` int64, `0x13` decimal128) now check against `docEnd` itself.
+- **Fix (BSON encode, embedded NUL):** BSON strings may only contain the trailing `0x00` terminator; keys were already guarded, but a value `"a\0b"` serialized as formally invalid BSON. `toBSON()` now throws on an embedded NUL in a STRING value.
+- **Docs (BSON, file header):** documented the last-wins duplicate-key behavior, the subtype-0x03 realignment rule, EXTENSION subtype collisions (`0x00`/`0x03`/`0x05` decode as BINARY/UUID-ish), `0x06` Undefined normalizing to null, regex options stored verbatim (no `ilmsux` validation), and the STRING embedded-NUL rejection.
+- **Version bump:** 1.26.5 -> 1.26.6
+
 ### 1.26.5 (2026-09-20)
 
 Protobuf audit fixes, round 3 (`asvjson/formats/protobuf.hpp`) from the latest err.txt review. Same regression tests extended (`testProtobufAuditFixesRound2`, suite stays at **371**):
