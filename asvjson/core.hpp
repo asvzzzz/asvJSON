@@ -3267,6 +3267,9 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 		formatType = FormatType::CBOR;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers (see fromCpp).
+	    lastError = e.what(); root = nullptr; return false;
+	}
 }
 
 inline std::vector<uint8_t> asvJSON::toBSON() const {

@@ -1,5 +1,30 @@
 #pragma once
-// CSV serialization/parsing for asvJSON++
+// CSV (RFC 4180) serialization/parsing for asvJSON++
+//
+// Deliberate behaviors worth knowing (all audited -- see the csv.hpp review in
+// err.txt, v1.26.1):
+//
+// 1. Formula-injection guard is applied to BARE cells only. Text starting with
+//    '=', '+', '-', '@' gets a leading '\'' on output; a cell that must be
+//    quoted anyway (contains ',' / '"' / newline) is emitted as a plain
+//    quoted literal WITHOUT the guard, because spreadsheets treat "..." as an
+//    explicit text literal. Trade-off: "=foo" -> '=foo but "=foo,bar" ->
+//    "=foo,bar" (see testCsvSpecialTypesStayText).
+// 2. Hand-written '\''<char> loses the apostrophe. A bare cell typed as "'=x"
+//    decodes to "=x" (csvStripInjection strips the guard from every bare
+//    cell). Required so toCSV->fromCSV round-trips losslessly -- the encoder
+//    re-adds the apostrophe -- but a silent loss for hand-authored input, so
+//    keep apostrophe-leading text quoted ("'=x") if it must survive verbatim.
+// 3. Roots do not always round-trip to the same JSON shape:
+//      - an OBJECT whose single key holds an ARRAY flattens that key as a
+//        regular column of JSON text, so {"items":[{...}]} decodes back as
+//        an ARRAY of {items: "..."} rows (see testCsvSingleKeyArrayOfObjects);
+//      - a scalar root is a lone headerless data line that fromCSV re-reads as
+//        a header, so it does not round-trip (a scalar export is data-only).
+// 4. Cell typing follows the JSON number grammar plus a leading '+' extension.
+//    ".5" is NOT a number (JSON forbids "." without a leading digit) and stays
+//    STRING; "0"/"+0"/"-0" are INT 0. A STRING whose text would re-detect as a
+//    different type is quoted on output so the round-trip preserves STRING.
 
 #include "../core.hpp"
 
@@ -66,7 +91,7 @@ inline std::vector<std::pair<std::string, bool>> csvSplitLineQ(std::string_view 
 }
 
 /**
- * @brief Detect JSON value type from CSV cell string
+ * @brief JSON number shape gate for CSV cells
  */
 inline bool csvNumberShapeOk(std::string_view s, size_t nfirst) {
 	// JSON number shape gate: rejects forms a lenient strtod/from_chars accepts
@@ -93,6 +118,9 @@ inline bool csvNumberShapeOk(std::string_view s, size_t nfirst) {
 	return p == s.size();
 }
 
+/**
+ * @brief Detect JSON value type from CSV cell string
+ */
 inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 	if (s.empty() || s == "null" || s == "NULL" || s == "_") return asvJSONValue::makeNull();
 	if (s == "true" || s == "TRUE" || s == "T") return asvJSONValue::makeBool(true);
@@ -144,6 +172,10 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 			if (!csvNumberShapeOk(s, nfirst)) return asvJSONValue::makeString(s.data(), s.size());
 			double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			// from_chars reports result_out_of_range on double overflow (1e400) or
+			// total underflow (1e-400); ec2 != errc falls through to makeString,
+			// keeping the literal's text -- the same outcome as the strtod branch
+			// below (subnormal underflow is a real value, so from_chars succeeds).
 			auto [ptr2, ec2] = std::from_chars(b, s.data() + s.size(), d);
 			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
@@ -333,28 +365,37 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 		std::string s = cellValue(v);
 		bool textGuard = false;
 		bool quote = false;
-		if (v) {
-			auto d = csvDetectType(s);
-			switch (v->type) {
-				case T::STRING:
-				case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID:
-					textGuard = true;
+		if (v) switch (v->type) {
+			case T::STRING:
+			case T::REGEX: case T::BINARY: case T::EXTENSION: case T::OBJECTID:
+				textGuard = true;
+				{ // Re-detection is consulted only for the text-ish types. INT/BOOL/
+				  // DOUBLE/NULL/DATETIME/ARRAY/OBJECT cells already carry their fixed
+				  // text and are never quoted, so skipping csvDetectType -- which
+				  // allocates a throwaway asvJSONValue per call -- saves a heap
+				  // round-trip for every numeric cell in a large document.
+					auto d = csvDetectType(s);
 					// Quote when re-detection would change the type, and when it
 					// would promote a plain STRING to a raw_number (an int64-overflow
 					// literal like "99999999999999999999" decodes bare with the
 					// raw_number flag set, which alters JSON output). A source that
 					// already IS raw_number must stay bare so it keeps its flag.
 					quote = !d || d->type != T::STRING || (d->raw_number && !v->raw_number);
-					break;
-				default: break;
-			}
+				}
+				break;
+			default: break;
 		}
 		return csvEscape(s, quote, textGuard);
 	};
 
 	auto writeArrayOfObjects = [&](const std::vector<std::unique_ptr<asvJSONValue>>& items) {
 		if (items.empty()) return;
-		std::map<std::string, bool> keyMap;
+		// Column order = first-appearance order of each flattened key across the
+		// items (matches the ObjectMapT insertion order the JSON/YAML/INI paths
+		// preserve), not a lexicographic sort. Determinism is preserved by
+		// collecting from a stable traversal; dedup uses a separate set.
+		std::vector<std::string> keys;
+		std::unordered_set<std::string> keySeen;
 		std::unordered_set<const asvJSONValue*> visited;
 		auto collect = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
 						   std::unordered_set<const asvJSONValue*>& vis) -> void {
@@ -364,11 +405,12 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 				for (const auto& [k, val] : *v->obj)
 					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
-			} else { keyMap[prefix.empty() ? "value" : prefix] = true; }
+			} else {
+				std::string key = prefix.empty() ? "value" : prefix;
+				if (keySeen.insert(key).second) keys.push_back(std::move(key));
+			}
 		};
 		for (const auto& item : items) collect(collect, item.get(), "", visited);
-		std::vector<std::string> keys; keys.reserve(keyMap.size());
-		for (const auto& [k, _] : keyMap) keys.push_back(k);
 		for (size_t i = 0; i < keys.size(); i++) { if (i > 0) out += ','; out += csvEscape(keys[i]); }
 		out += '\n';
 		for (const auto& item : items) {
@@ -403,7 +445,11 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 	switch (type) {
 		case T::OBJECT: {
 			if (!obj || obj->empty()) return;
-			std::map<std::string, std::string> flat;
+			// Same first-appearance ordering as writeArrayOfObjects: columns follow
+			// the ObjectMapT insertion order of the flattened paths, not a
+			// lexicographic sort. Collision detection rides on the dedup set.
+			std::vector<std::pair<std::string, std::string>> flat;
+			std::unordered_set<std::string> flatSeen;
 			std::unordered_set<const asvJSONValue*> flattenVisited;
 			auto flatten = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
 							   std::unordered_set<const asvJSONValue*>& vis) -> void {
@@ -417,16 +463,21 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					std::string key = prefix.empty() ? "value" : prefix;
 					// Two different paths flattening onto one column would
 					// silently drop one value; reject instead of losing data.
-					if (!flat.emplace(key, csvCell(v)).second)
+					if (!flatSeen.insert(key).second)
 						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
+					flat.emplace_back(std::move(key), csvCell(v));
 				}
 			};
 			flatten(flatten, this, "", flattenVisited);
-			bool first = true;
-			for (const auto& [k, _] : flat) { if (!first) out += ','; out += csvEscape(k); first = false; }
+			for (size_t i = 0; i < flat.size(); i++) {
+				if (i > 0) out += ',';
+				out += csvEscape(flat[i].first);
+			}
 			out += '\n';
-			first = true;
-			for (const auto& [_, v] : flat) { if (!first) out += ','; out += v; first = false; }
+			for (size_t i = 0; i < flat.size(); i++) {
+				if (i > 0) out += ',';
+				out += flat[i].second;
+			}
 			out += '\n';
 			break;
 		}

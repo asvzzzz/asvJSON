@@ -1068,6 +1068,31 @@ S i 0x03 f o o              // "foo"
 
 ## Changelog
 
+### 1.26.1 (2026-09-20)
+
+CSV audit fixes (`asvjson/formats/csv.hpp`) from the err.txt review, plus one new regression test (suite now at **366**, up from 365):
+
+- **Perf (CSV, cell typing):** `toCSV` no longer builds a throwaway heap-allocated `asvJSONValue` (via `csvDetectType`) for every cell. Re-detection is consulted only for text-ish types (STRING / REGEX / BINARY / EXTENSION / OBJECTID) whose type actually needs quoting; INT/BOOL/DOUBLE/NULL/DATETIME/ARRAY/OBJECT cells always carry their fixed text and are never quoted, so a large numeric document avoids one allocation per cell.
+- **Docs (CSV, file header):** documented the three deliberately non-obvious behaviors the audit flagged -- (a) the formula-injection guard applies to **bare** cells only (a cell that must be quoted anyway - contains `,`/`"`/newline - is emitted as a plain quoted literal without the `'`), (b) a hand-written bare `'=`/`'+`/`'-`/`'@` cell loses its apostrophe on decode (required so toCSV->fromCSV round-trips losslessly; silent for hand-authored input), and (c) a root OBJECT whose single key holds an ARRAY flattens that key to a column of JSON text and decodes back as an ARRAY of `{key:"..."}` rows; scalar roots emit a headerless line that does not round-trip.
+- **Docs (CSV, comment placement):** the `@brief` doc comments now sit on their own functions -- `csvNumberShapeOk` got a matching `@brief JSON number shape gate for CSV cells` (the old "Detect type" text was misplaced there), and `csvDetectType` keeps `@brief Detect JSON value type from CSV cell string`; the `to_chars` branch of `csvDetectType` gained an explicit note that `result_out_of_range` (double overflow `1e400` / total underflow `1e-400`) falls through to a STRING exactly like the strtod branch below it.
+- **Change (CSV, flatten column order):** both flattening branches sorted the flattened-key union lexicographically via `std::map` -- the OBJECT-root path iterated its `flat` map directly, and `writeArrayOfObjects` gathered header keys the same way, so `{"b":1,"a":2}` emitted `a,b\n2,1` while the parsed document's real order was `b,a`. Both now collect first-appearance-order columns into a vector (dedup / collision detection via `std::unordered_set`), so header order follows ObjectMapT insertion order -- consistent with the JSON/YAML/INI round-trip paths (see err.txt csv.hpp "writeArrayOfObjects -- std::map (сортировка) вместо ObjectMapT").
+- **Test:** new `testCsvAuditCells` in the CSV runner: `.5` stays STRING (JSON has no leading-dot numbers, never re-forms as DOUBLE), `0`/`-0`/`+0` all decode to INT 0, and INT64_MIN (`-9223372036854775808`) survives a toCSV/fromCSV round trip as an exact INT.
+- **Version bump:** 1.26.0 -> 1.26.1
+
+### 1.26.0 (2026-09-20)
+
+CBOR audit fixes (`asvjson/formats/cbor.hpp`) plus exception-containment hardening of `fromCBOR` (`asvjson/core.hpp`). Seven new regression tests, bringing the suite to **365** (up from 358):
+
+- **Fix (CBOR, CUSTOM_TAG round-trip):** `CUSTOM_TAG` previously fell through to undefined on encode and was unrecognized on decode. It now encodes as CBOR tag **258** + array `[name(string), value]`, mirroring EXTENSION's existing tag-**257** layout; the name is required/always emitted, and a null `custom_value` emits an explicit CBOR null element (`0xF6`). The decoder validates (size-2 array with a string first item) before consuming so malformed input falls back to the untouched plain array instead of partial consumption -- matching JSON/YAML/Sexpr `$customTag` handling for annotations surviving round-trips.
+- **Fix (CBOR, byte-string/text length overflow):** `len64 > SIZE_MAX || pos + len64 > dataLen` was vulnerable to unsigned wraparound in the intermediate addition when `len64` is huge; replaced with a single always-safe comparison against remaining buffer size (`dataLen - pos`).
+- **Fix (CBOR, duplicate map keys):** previously used `emplace`, silently keeping first occurrence and dropping later duplicates' values; now uses `insert_or_assign` so last-wins, matching the JSON parser's convention.
+- **Fix (CBOR, tag 1 time_t boundary + millisecond carry):** upper-bound check compared against a double-rounded value of INT64_MAX that was itself one past any legal time_t, making the cast below it UB; now computes an exact representable bound strictly greater than every valid time_t and rejects at/above it. Rounding the fractional part up to exactly 1000 ms now carries into the next second (with an overflow check before the increment) instead of being silently clamped -- so a fractional-seconds value like `...999` no longer loses one second.
+- **Fix (CBOR, reserved simple values):** expanded the rejected "additional information" range from 28-30 to 28-31 to cover the full reserved range per RFC 8949 s3.2; also replaced an unqualified `pow` with `std::pow`.
+- **Fix (`fromCBOR`, exception containment):** added a `catch (const std::exception&)` clause alongside the existing asvJSONError handler so allocation failures / other standard exceptions no longer escape the public API, consistent with every other from*() parser's "return bool + set lastError" contract.
+- **Docs:** clarified in-code comments that OBJECTID's null-fallback branch is defensive (normal input can't reach it) and that DATETIME tag 1 intentionally does not encode tz_offset_min since an epoch instant has no recoverable local offset (expected data loss, matching other epoch-based formats).
+- **Test:** new regression blocks under a "CBOR v1.26.0 Audit Fixes" section in test.cpp: custom-tag round-trip (value present + null value), excessive-length byte-string/text rejection, duplicate-key last-wins in maps, tag 1 time_t upper-bound boundary and ms-carry rounding both directions, plus a check that non-asvJSONError standard exceptions thrown deep inside parsing are caught by fromCBOR rather than escaping.
+- **Version bump:** 1.25.9 -> 1.26.0
+
 ### 1.25.9 (2026-09-19)
 
 Addresses three must-fix bugs plus documentation gaps from a security/correctness review of the RFC 9535 JSONPath implementation (`asvjson/formats/jsonpath.hpp`):

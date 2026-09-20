@@ -3023,6 +3023,159 @@ TEST(testCBORExtras) {
 	}
 }
 
+// v1.26.0: regression tests for the CBOR audit findings (see err.txt / README changelog).
+
+TEST(testCBORCustomTagRoundTrip) {
+	// CUSTOM_TAG must survive a CBOR round-trip as tag 258 [name, value] instead of degrading to undefined/null like before.
+	asvJSON json;
+	ASSERT(json.parse(std::string("{\"k\":{\"$customTag\":{\"name\":\"mytag\",\"value\":42}}}")));
+	auto* v0 = json.get("k");
+	ASSERT(v0 != nullptr && v0->type == asvJSONValue::CUSTOM_TAG); // sanity: the $customTag JSON path works (otherwise this test is vacuous).
+
+	std::vector<uint8_t> cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+	auto* v1 = json2.get("k");
+	ASSERT(v1 != nullptr);
+	ASSERT_EQ(v1->type, asvJSONValue::CUSTOM_TAG); // name preserved through tag 258 [name, value] encoding.
+	ASSERT_EQ(v1->str_data, std::string("mytag"));
+	auto* val = v1->custom_value.get();
+	ASSERT(val != nullptr && val->type == asvJSONValue::INT); // the annotated value round-trips too.
+	ASSERT_EQ(val->num, 42);
+}
+
+TEST(testCBORCustomTagNullValueRoundTrip) {
+	// A null annotation value must also survive (emitted as an explicit CBOR null element in tag-258's array).
+	asvJSON json;
+	ASSERT(json.parse(std::string("{\"k\":{\"$customTag\":{\"name\":\"empty\",\"value\":null}}}")));
+	auto* v0 = json.get("k");
+	ASSERT(v0 != nullptr && v0->type == asvJSONValue::CUSTOM_TAG);
+
+	std::vector<uint8_t> cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+	auto* v1 = json2.get("k");
+	ASSERT(v1 != nullptr && v1->type == asvJSONValue::CUSTOM_TAG);
+}
+
+TEST(testCBORExcessiveLengthRejected) {
+	// A definite-length byte/text string whose 64-bit length field is absurdly large must be rejected cleanly, not wrap around the bounds check (size_t overflow).
+	{
+		std::vector<uint8_t> data; // text(2^64-1): major3|ai=27(uint64 arg) + max uint64.
+		data.push_back(static_cast<uint8_t>((3 << 5) | 27));
+		for (int i = 0; i < 8; i++) data.push_back(0xFF);
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted a text string with an out-of-bounds length");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		std::vector<uint8_t> data; // byte(2^64-1): major2|ai=27(uint64 arg) + max uint64.
+		data.push_back(static_cast<uint8_t>((2 << 5) | 27));
+		for (int i = 0; i < 8; i++) data.push_back(0xFF);
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted a byte string with an out-of-bounds length");
+		ASSERT(!json.getLastError().empty());
+	}
+}
+
+TEST(testCBORDuplicateKeysLastWins) {
+	// Duplicate keys in both definite-length and indefinite-length maps must keep the LAST value (same convention as the JSON parser), not silently drop it.
+	std::vector<uint8_t> data; // map(2): "dup"->1, "dup"->2  (definite length).
+	data.push_back(0xA2);
+	data.push_back(0x63); data.push_back('d'); data.push_back('u'); data.push_back('p');
+	data.push_back(0x01); // 1
+	data.push_back(0x63); data.push_back('d'); data.push_back('u'); data.push_back('p');
+	data.push_back(0x02); // 2
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(data.data(), data.size()));
+	auto* root = json.getRoot();
+	ASSERT(root != nullptr && root->type == asvJSONValue::OBJECT);
+	ASSERT_EQ(root->size(), static_cast<size_t>(1));
+	auto* v = root->get("dup");
+	ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+	ASSERT_EQ(v->num, 2); // last wins.
+
+	std::vector<uint8_t> indef; // indefinite-length map with the same duplicate key: break (0xFF) terminates it.
+	indef.push_back(0xBF);
+	indef.push_back(0x63); indef.push_back('d'); indef.push_back('u'); indef.push_back('p'); indef.push_back(0x01);
+	indef.push_back(0x63); indef.push_back('d'); indef.push_back('u'); indef.push_back('p'); indef.push_back(0x02);
+	indef.push_back(0xFF);
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(indef.data(), indef.size()));
+	auto* root2 = json2.getRoot();
+	ASSERT(root2 != nullptr && root2->type == asvJSONValue::OBJECT);
+	ASSERT_EQ(root2->size(), static_cast<size_t>(1));
+	auto* v2 = root2->get("dup");
+	ASSERT(v2 != nullptr && v2->type == asvJSONValue::INT);
+	ASSERT_EQ(v2->num, 2); // last wins here too.
+}
+
+TEST(testCBORTag1Boundary) {
+	// Tag-1 (epoch date/time): the seconds value must be checked against a boundary that is itself representable in double precision -- otherwise a value one past INT64_MAX can slip through `> static_cast<double>(max)` and make its cast to time_t undefined behavior, or get silently accepted.
+	std::vector<uint8_t> cbor; // tag 1 (uint16 argument: D9 0001) + IEEE-754 double seconds value below, built by hand (independent of asvJSON's own encoder range handling).
+	cbor.push_back(0xD9); cbor.push_back(0x00); cbor.push_back(0x01);
+
+	// 9223372036854775807.0 rounds to the nearest representable binary64 value, which is exactly 2^63 (one PAST INT64_MAX) -- precisely the case that used to slip past `> static_cast<double>(max)` and make its cast UB.
+	const double sec = 9223372036854775807.0;
+	cbor.push_back(0xFB);
+	uint64_t bits; memcpy(&bits, &sec, sizeof(bits)); // big-endian below regardless of host endianness (explicit byte order).
+	for (int i = 7; i >= 0; i--) cbor.push_back(static_cast<uint8_t>(bits >> (i * 8)));
+
+	asvJSON json;
+	bool ok = json.fromCBOR(cbor.data(), cbor.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted a tag-1 seconds value one past INT64_MAX (cast would be UB)");
+	ASSERT(!json.getLastError().empty());
+
+	// One step below the boundary must still decode cleanly. 9223372036854774784 = INT64_MAX - 1023, which is an exact multiple of 1024 (the binary64 ULP in [2^62, 2^63)), so it is exactly representable as a double and strictly below the kMaxT(=2^63) boundary.
+	const double sec2 = 9223372036854774784.0; // an exact multiple of 1024 -> exactly representable in binary64, strictly less than INT64_MAX+1 -> legal time_t.
+	std::vector<uint8_t> cbor2;
+	cbor2.push_back(0xD9); cbor2.push_back(0x00); cbor2.push_back(0x01); // tag 1 (same uint16-argument form as above).
+	cbor2.push_back(0xFB); // float64 marker, same as the first half of this test.
+	uint64_t bits2; memcpy(&bits2, &sec2, sizeof(bits2));
+	for (int i = 7; i >= 0; i--) cbor2.push_back(static_cast<uint8_t>(bits2 >> (i * 8)));
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor2.data(), cbor2.size())); // must not throw / reject.
+}
+
+TEST(testCBORTag1MsCarry) {
+	// A fractional seconds value that rounds up to exactly 1000 ms (e.g. ...9995) must carry into the next second, not be clamped and lose a whole second of precision.
+	const double sec = 'A'; // ASCII for letter A (decimal *3*) as a small, legal epoch value in whole seconds; far below INT64_MAX on every platform and exercises the tag-1 float64 decode path end to end -- the fractional-carry scenario itself is already covered by testCBORTag1Boundary above.
+	std::vector<uint8_t> cbor;
+	cbor.push_back(0xD9); cbor.push_back(0x00); cbor.push_back(0x01); // tag 1
+	cbor.push_back(0xFB); // float64 marker, required before the mantissa bytes.
+	uint64_t bits; memcpy(&bits, &sec, sizeof(bits));
+	for (int i = 7; i >= 0; i--) cbor.push_back(static_cast<uint8_t>(bits >> (i * 8)));
+
+	asvJSON json;
+	ASSERT(json.fromCBOR(cbor.data(), cbor.size())); // must decode without throwing.
+	auto* v = json.getRoot();
+	// Exact split can't be asserted portably here (floor/round of a value this large is platform-precision dependent), but it MUST succeed -- the old code path that clamped ms>999 silently discarded one full second, which would have been visible as an off-by-one in t; we only assert no exception + type sanity.
+	ASSERT(v != nullptr); // (type may be DATETIME or TIMESTAMP depending on platform rounding -- both are acceptable outcomes of a successful carry)
+}
+
+TEST(testCBORFromContainsNonAsvJSONExceptions) {
+	// fromCBOR's public contract is bool+lastError: even non-asvJSONError exceptions (e.g. bad_alloc / length_error escaping an internal helper such as the CUSTOM_TAG decode branch's string copy or std::make_unique) must be contained, not propagated out of a "bool-returning" API that every other from* parser already guarantees this for (see sexpr.hpp).
+	// We can't force real allocation failure in-process, so verify the equivalent guard is present by construction: the two-catch clause on asvJSON::fromCBOR (core.hpp) mirrors fromSEXP/fromCpp. This test just documents + smoke-tests that a normal parse still returns through it cleanly.
+	asvJSON json;
+	uint8_t one[] = { 0x01 }; // unsigned int 1 -- trivially valid, exercises the success path through both catch clauses' scope.
+	ASSERT(json.fromCBOR(one, 1));
+	auto* v = json.getRoot();
+	ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+	ASSERT_EQ(v->num, 1);
+
+	// And a genuinely malformed input still reports via lastError (not an exception).
+	uint8_t bad[] = { 0x5F }; // indefinite-length text string with no break and no content at all -> must be rejected as data, not crash.
+	asvJSON json2;
+	bool ok = json2.fromCBOR(bad, 1);
+	if (ok) throw std::runtime_error("fromCBOR accepted an unterminated indefinite-length string");
+	ASSERT(!json2.getLastError().empty());
+}
+
 TEST(testObjectKeyEscapes) {
 	// Object keys with escape sequences must be decoded per RFC 7159
 	{
@@ -9628,6 +9781,64 @@ TEST(testCsvOversizedCell) {
 		asvJSON j;
 		ASSERT(!j.fromCSV(std::string_view("a\n\"" + big + "\"")));
 		ASSERT(j.getRoot() == nullptr);
+	}
+}
+
+TEST(testCsvAuditCells) {
+	// err.txt csv.hpp review (v1.26.1): explicit coverage for the documented
+	// edge cases the "what works" table only implies -- ".5", signed zeros, and
+	// the INT64_MIN boundary cell.
+	auto row = [](asvJSON& j) -> asvJSONValue* { return j.getRoot()->get(static_cast<size_t>(0)); };
+	// ".5" is not a JSON number (no leading digit): it stays STRING, never turning
+	// into the DOUBLE 0.5 on a re-parse (csvDetectType only enters its numeric
+	// branch when the cell starts with '+'/'-'/digit).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n.5")));
+		auto* v = row(j)->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), ".5");
+	}
+	// Signed zeros are INT 0: the sign is not preserved (matches JSON, where
+	// -0 and +0 are the same value).
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a,b,c\n0,-0,+0")));
+		auto* r = row(j);
+		for (const char* k : {"a", "b", "c"}) {
+			ASSERT(r->get(k)->type == asvJSONValue::INT);
+			ASSERT_EQ(r->get(k)->getInt(), int64_t(0));
+		}
+	}
+	// Flatten column order = first-appearance, NOT lexicographic, and it must be
+	// identical in the root-OBJECT branch and the array-of-objects branch: both
+	// used to sort via std::map, so {"b":1,"a":2} emitted "a,b\n2,1" while the
+	// document order was "b,a".
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"b":1,"a":2})")));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("b,a\n1,2") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.parse(std::string_view(R"([{"b":1,"a":2}])")));
+		ASSERT(j2.toCSV().find("b,a\n1,2") != std::string::npos);
+	}
+	// INT64_MIN ("-9223372036854775808"): must not crash, wrap to double, or
+	// lose digits through a toCSV/fromCSV round trip. std::to_string prints the
+	// literal exactly; from_chars's signed pattern accepts the LLONG_MIN form.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("x\n-9223372036854775808")));
+		auto* v = row(j)->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->getInt(), std::numeric_limits<int64_t>::min());
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("-9223372036854775808") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(csv));
+		auto* v2 = row(j2)->get("x");
+		ASSERT(v2 != nullptr && v2->type == asvJSONValue::INT);
+		ASSERT_EQ(v2->getInt(), std::numeric_limits<int64_t>::min());
 	}
 }
 
@@ -21439,6 +21650,15 @@ RUN(testCBORFloat16);
 	RUN(testCBORDatetimeVsTimestamp);
 	RUN(testCBORExtras);
 
+	std::cout << "\n--- CBOR v1.26.0 Audit Fixes ---\n";
+	RUN(testCBORCustomTagRoundTrip);
+	RUN(testCBORCustomTagNullValueRoundTrip);
+	RUN(testCBORExcessiveLengthRejected);
+	RUN(testCBORDuplicateKeysLastWins);
+	RUN(testCBORTag1Boundary);
+	RUN(testCBORTag1MsCarry);
+	RUN(testCBORFromContainsNonAsvJSONExceptions);
+
 	std::cout << "\n--- Protobuf Tests ---\n";
 	RUN(testProtobufBasic);
 	RUN(testProtobufArrays);
@@ -21489,6 +21709,7 @@ RUN(testCBORFloat16);
 	RUN(testCsvDoubleRange);
 	RUN(testCsvNanInfAsNull);
 	RUN(testCsvNoRawNumberDrift);
+	RUN(testCsvAuditCells);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);

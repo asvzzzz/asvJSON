@@ -99,6 +99,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
         cborWriteUint(out, 2, bin_data.size());
         out.insert(out.end(), bin_data.begin(), bin_data.end());
       } else {
+        // Null fallback -- in practice only reachable if an OBJECTID node somehow carries a non-12-byte payload. makeObjectId() enforces exactly 12 bytes and no other code path assigns type=OBJECTID, so this is defensive against externally-corrupted nodes rather than normal input; emitting null (rather than throwing from a pure serializer) matches how the other special types degrade here.
         out.push_back(0xF6); // null fallback
       }
       break;
@@ -120,7 +121,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       break;
     }
     case T::DATETIME: {
-      // CBOR tag 1 (epoch-based date/time) + float64 (seconds.ms)
+      // CBOR tag 1 (epoch-based date/time) + float64 (seconds.ms). Note: tz_offset_min is intentionally NOT encoded -- tag 1 represents an absolute UTC instant, so the original local-timezone offset cannot be recovered on a round-trip and will come back as the default. This matches how every other epoch-seconds based format here behaves; it's expected data loss, not a bug.
       out.push_back(0xC1); // tag 1
       double totalSec = static_cast<double>(timestamp) + static_cast<double>(datetime_ms) / 1000.0;
       out.push_back(0xFB);
@@ -153,6 +154,15 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       out.push_back(0xD8); out.push_back(0x23); // tag 35
       cborWriteUint(out, 3, str_data.size());
       out.insert(out.end(), str_data.begin(), str_data.end());
+      break;
+    }
+    case T::CUSTOM_TAG: {
+      // CBOR tag 258 + array [name(string), value] -- mirrors EXTENSION's tag-257 layout, so the annotation survives round-trips instead of falling through to undefined (0xF7 -> null) as before. The name is always present; a JSON-null custom_value emits an explicit null element.
+      out.push_back(0xD9); out.push_back(0x01); out.push_back(0x02); // tag 258 (uint16 argument)
+      out.push_back(0x82); // array of 2 items
+      cborWriteUint(out, 3, str_data.size());
+      out.insert(out.end(), str_data.begin(), str_data.end());
+      if (custom_value) custom_value->toCBOR(out); else out.push_back(0xF6); // null value -> explicit CBOR null
       break;
     }
     default:
@@ -227,7 +237,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (!k || k->type != asvJSONValue::STRING) throw asvJSONError("CBOR non-string map key");
         auto v = parseCBOR(data, pos, dataLen, depth + 1);
         if (!v) throw asvJSONError("CBOR map value failed");
-        obj->obj->emplace(k->str_data, std::move(v));
+        obj->obj->insert_or_assign(k->str_data, std::move(v)); // last wins (duplicate keys), same convention as the JSON parser.
         count++;
       }
       if (!terminated) throw asvJSONError("CBOR indefinite map missing terminator");
@@ -286,7 +296,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 2: { // Byte string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
-      if (len64 > SIZE_MAX || pos + static_cast<size_t>(len64) > dataLen) throw asvJSONError("CBOR binary overflow");
+      if (len64 > dataLen - pos) throw asvJSONError("CBOR binary overflow");
       auto v = asvJSONValue::makeBinary(data + pos, static_cast<size_t>(len64));
       pos += static_cast<size_t>(len64);
       if (!v) throw asvJSONError("CBOR binary alloc failed");
@@ -294,7 +304,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 3: { // Text string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
-      if (len64 > SIZE_MAX || pos + static_cast<size_t>(len64) > dataLen) throw asvJSONError("CBOR string overflow");
+      if (len64 > dataLen - pos) throw asvJSONError("CBOR string overflow");
       auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(len64));
       pos += static_cast<size_t>(len64);
       if (!v) throw asvJSONError("CBOR string alloc failed");
@@ -302,7 +312,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 4: { // Array
       uint64_t n64 = cborReadArg(data, pos, dataLen, info);
-      if (n64 > 1000000) throw asvJSONError("CBOR array too large");
+      if (n64 > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
       auto arr = asvJSONValue::makeArray();
       if (!arr) throw asvJSONError("CBOR array alloc failed");
       size_t n = static_cast<size_t>(n64);
@@ -312,7 +322,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 5: { // Map
       uint64_t n64 = cborReadArg(data, pos, dataLen, info);
-      if (n64 > 1000000) throw asvJSONError("CBOR map too large");
+      if (n64 > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("CBOR map too large");
       auto obj = asvJSONValue::makeObject();
       if (!obj) throw asvJSONError("CBOR map alloc failed");
       size_t n = static_cast<size_t>(n64);
@@ -321,7 +331,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (!k || k->type != asvJSONValue::STRING) throw asvJSONError("CBOR non-string map key");
         auto v = parseCBOR(data, pos, dataLen, depth + 1);
         if (!v) throw asvJSONError("CBOR map value failed");
-        obj->obj->emplace(k->str_data, std::move(v));
+        obj->obj->insert_or_assign(k->str_data, std::move(v)); // last wins (duplicate keys), same convention as the JSON parser.
       }
       return obj;
     }
@@ -339,14 +349,22 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
           // casting to time_t (which is UB on MSVC and yielded null).
           if (!std::isfinite(sec)) throw asvJSONError("CBOR tag 1: NaN/Infinity is not a valid date");
           double fl = std::floor(sec);
-          // Casting an out-of-range double to time_t is UB on some platforms.
-          if (fl < static_cast<double>(std::numeric_limits<time_t>::min()) ||
-              fl > static_cast<double>(std::numeric_limits<time_t>::max())) {
+          // Casting an out-of-range double to time_t is UB on some platforms. The upper
+          // bound must be a representable value strictly greater than any legal time_t:
+          // static_cast<double>(INT64_MAX) rounds up to 2^63 (one past INT64_MAX), so use
+          // that exact boundary and reject fl >= it -- otherwise the cast below is UB.
+          const double kMaxT = static_cast<double>(static_cast<uint64_t>(std::numeric_limits<time_t>::max()) + 1);
+          if (fl < static_cast<double>(std::numeric_limits<time_t>::min()) || fl >= kMaxT) {
             throw asvJSONError("CBOR tag 1: seconds out of time_t range");
           }
           time_t t = static_cast<time_t>(fl);
           int ms = static_cast<int>(std::floor((sec - fl) * 1000.0 + 0.5));
-          if (ms > 999) ms = 999;
+          // Rounding the fraction up to exactly 1000 must carry into the seconds
+          // rather than being silently clamped (e.g. ...9999 -> 1000 ms would otherwise lose a second). Check before adding: t is already at max => overflow, not detectable after.
+          if (ms >= 1000) {
+            if (t > std::numeric_limits<time_t>::max() - 1) throw asvJSONError("CBOR tag 1: seconds out of time_t range");
+            t += 1; ms = 0;
+          }
           if (ms < 0) ms = 0;
           return asvJSONValue::makeDateTime(t, ms);
         }
@@ -392,6 +410,23 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         }
         return val;
       }
+      if (tag == 258) {
+        // asvJSON Custom Tag type: array [name(string), value] -- the name is a
+        // required string, the value may be null. Mirrors EXTENSION's tag-257 layout so custom-tag annotations survive CBOR round-trips instead of being dropped to undefined/null (matching JSON/YAML/sexpr $customTag handling).
+        if (val->type == asvJSONValue::ARRAY && val->arr && val->arr->size() == 2) {
+          auto& nameVal = (*val->arr)[0];
+          // Validate first, so a malformed payload falls through to the untouched array below instead of being partially consumed.
+          if (nameVal && nameVal->type == asvJSONValue::STRING) {
+            auto custom = std::make_unique<asvJSONValue>(); // may throw bad_alloc; contained by fromCBOR's catch(std::exception).
+            custom->type = asvJSONValue::CUSTOM_TAG;
+            try { custom->str_data.assign(nameVal->str_data); } catch (...) { return val; }
+            auto dataVal = std::move((*val->arr)[1]); // may be a null value; moved unconditionally, same convention as the $customTag parser path in core.hpp.
+            if (dataVal) custom->custom_value = std::move(dataVal);
+            return custom;
+          }
+        }
+        return val;
+      }
       return val; // unknown tags pass through
     }
     case 7: { // Simple values and floats
@@ -424,7 +459,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         } else if (exp == 31) {
           d = mant ? NAN : INFINITY;
         } else {
-          d = (1.0 + mant / 1024.0) * pow(2.0, static_cast<int>(exp) - 15);
+          d = (1.0 + mant / 1024.0) * std::pow(2.0, static_cast<int>(exp) - 15);
         }
         if (sign) d = -d;
         auto v = asvJSONValue::makeDouble(d);
@@ -449,8 +484,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         double d; memcpy(&d, &dval, sizeof(d));
         return asvJSONValue::makeDouble(d);
       }
-      if (info >= 28 && info <= 30) throw asvJSONError("CBOR: reserved simple value");
-      throw asvJSONError("CBOR: unknown simple value");
+      if (info >= 28 && info <= 31) throw asvJSONError("CBOR: reserved encoding (additional information 28-31 are reserved by RFC 8949 s3.2)");
     }
     default:
       throw asvJSONError("CBOR: unknown major type");
