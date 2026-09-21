@@ -109,13 +109,16 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
 }
 
 // Escape a flat (key = value side) key: '.' must be escaped so a re-parse does
-// not split it into a nested path. Backslashes are left untouched (they are
-// not unescaped on the raw key path).
+// not split it into a nested path, and a backslash is doubled so it survives
+// the symmetric unescape in iniSplitDottedPath.
 inline std::string iniEscapeFlatKey(std::string_view s) {
+  if (s.empty())
+    throw asvJSONError("cannot represent empty key in INI"); // {"": ...} has no INI spelling
   std::string out;
   out.reserve(s.size());
   for (auto c : s) {
-    if (c == '.') out += "\\.";
+    if (c == '\\') out += "\\\\";
+    else if (c == '.') out += "\\.";
     else out += c;
   }
   return out;
@@ -189,10 +192,14 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
         // A bare text that would decode as a different type (bool/int/double/null)
         // must be quoted so the round-trip preserves the STRING type. raw_number
         // literals (e.g. overflowed integers) stay bare so they re-decode via the
-        // overflow path.
+        // overflow path. An empty string is quoted as "" (never a bare empty
+        // fragment followed by a dangling space on the line).
         if (!needsQuotes && !v->raw_number) {
-          auto bare = iniParseVal(std::string(sv), false);
-          if (bare && bare->type != T::STRING) needsQuotes = true;
+          if (sv.empty()) needsQuotes = true;
+          else {
+            auto bare = iniParseVal(std::string(sv), false);
+            if (bare && bare->type != T::STRING) needsQuotes = true;
+          }
         }
         if (needsQuotes) {
           out += '"';
@@ -208,6 +215,8 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
       break;
     case T::DOUBLE:
       {
+        if (std::isnan(v->dbl)) { out += "nan"; break; }
+        if (std::isinf(v->dbl)) { out += (v->dbl < 0 ? "-inf" : "inf"); break; }
         // A double with an integral value must round-trip as a float
         // (otherwise "100000" would re-decode as an INT on compilers whose
         // fmtDoubleVal falls back to %g; to_chars already emits "1e+05" there).
@@ -464,10 +473,50 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
       if (isArray) {
         // "[[a.b]]" -> array key "b" under path "a"; element index increments
         // per repeated header.
+        //
+        // The collector must mirror the decoder's descent (see the array branch
+        // of iniParseDocImpl, which calls descendArrays() after navigating into
+        // each enclosing segment): when an enclosing path node is itself a
+        // tracked array, a "[[a.b]]" header binds INSIDE that array's CURRENT
+        // (last) element. E.g. after `[[items]]`, a following `[[items.sub]]`
+        // belongs at items[0].sub[0] -- physical path "items\x1F[0]\x1Fsub\x1F[0]",
+        // NOT the flat "items\x1Fsub\x1F[0]` the old code produced (which made
+        // the collector's paths diverge from the decoder's tree). We therefore
+        // build the physical base by walking the enclosing segments, appending a
+        // "[<last element index>]" marker after every enclosing level that is
+        // itself a tracked array.
+        //
+        // arrayCounts is keyed by the PHYSICAL path (markers included). Repeated
+        // headers then correctly restart the element counter per enclosing
+        // element: after `[[items]]` re-opens items as items[1], a fresh
+        // "items\x1F[1]\x1Fsub" counter is created, matching the decoder's
+        // fresh b array. With no enclosing array the markers never appear, so
+        // this is byte-identical to the prior flat behavior.
         std::string arrKey = newPath.back();
         newPath.pop_back();
-        std::string arrPath = joinSegs(newPath);
-        std::string arrP = join(arrPath, arrKey);
+        std::vector<std::string> prefixSegs;
+        std::string physBase;   // physical base built so far (with [N] markers)
+        for (const auto& seg : newPath) {
+          prefixSegs.push_back(seg);
+          std::string dottedPrefix = joinSegs(prefixSegs);
+          std::string segPath = physBase.empty() ? seg : physBase + "\x1F" + seg;
+          // Is this enclosing level a tracked array? Then descend into its
+          // current (last) element, mirroring the decoder's descendArrays().
+          bool isArray = false;
+          for (const auto& ac : arrayCounts) {
+            if (ac.first == segPath) { isArray = true; break; }
+          }
+          if (isArray) {
+            size_t lastIdx = 0;
+            for (auto& ac : arrayCounts) {
+              if (ac.first == segPath) { lastIdx = ac.second > 0 ? ac.second - 1 : 0; break; }
+            }
+            physBase = segPath + "\x1F[" + std::to_string(lastIdx) + "]";
+          } else {
+            physBase = segPath;
+          }
+        }
+        std::string arrP = physBase.empty() ? arrKey : physBase + "\x1F" + arrKey;
         size_t idx = 0;
         bool found = false;
         for (auto& ac : arrayCounts) {
@@ -610,10 +659,18 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
   out += " = ";
   iniFormatVal(v, out);
   if (v->comments && !v->comments->trailing.empty()) {
-    auto it = v->comments->trailing.rbegin();
-    if (!it->block && it->text.find('\n') == std::string::npos) {
-      out += " ;";
-      out += it->text;
+    // Emit EVERY trailing comment, not just the last one: multiple single-line
+    // trailing comments each get an inline " ;" suffix, and any block/multiline
+    // trailing comment opens a comment-block that carries the whole list (so
+    // nothing is silently dropped).
+    bool allSingle = true;
+    for (const auto& c : v->comments->trailing)
+      if (c.block || c.text.find('\n') != std::string::npos) { allSingle = false; break; }
+    if (allSingle) {
+      for (const auto& c : v->comments->trailing) {
+        out += " ;";
+        out += c.text;
+      }
       out += '\n';
     } else {
       out += '\n';
@@ -637,7 +694,22 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
     }
   }
 
-  if (emitHeader && hasDirectKeys && !prefix.empty()) {
+  // Whether a `[prefix]` section header is emitted for THIS level. When it is,
+  // the bare keys below it must be emitted FLAT (the header already pins the
+  // dotted path), never as their own dotted prefix -- otherwise a compact
+  // encode of {"a":{"b":{"c":1}}} produced `[a.b]` followed by `a.b.c = 1`,
+  // which re-parses into a nested {"a":{"b":{"a":{"b":{"c":1}}}}} (the dotted
+  // key re-applies the whole section path). See "compact dotted 2+" in the
+  // module audit.
+  // Compact mode never emits section headers -- only dotted flat keys (and
+  // [[...]] table headers for object-arrays, produced by the toINI caller, not
+  // here). Without the `pretty` guard, the Pass-2 recursion below would pass
+  // `subHasDirect` as emitHeader=true and a depth>=2 compact encode of
+  // {"a":{"b":{"c":42}}} would emit `[a.b]` + flat `c = 42` instead of the
+  // required dotted `a.b.c = 42` (the "compact dotted 2+" audit case).
+  bool headerEmitted = pretty && emitHeader && hasDirectKeys && !prefix.empty();
+
+  if (headerEmitted) {
     if (!out.empty() && out.back() != '\n') out += '\n';
     if (obj->comments) iniWriteCommentLines(out, obj->comments->leading);
     out += '[' + prefix + "]\n";
@@ -653,21 +725,21 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
       throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
-        iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
+        iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
-        iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
+        iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
       } else if (iniIsBareChild(val.get())) {
         if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& elem : *val->arr) {
-          out += (pretty ? flatKey : dottedKey) + " = ";
+          out += (headerEmitted ? flatKey : dottedKey) + " = ";
           iniFormatVal(elem.get(), out);
           out += '\n';
         }
       }
     } else {
-      iniWriteKeyValue(out, (pretty ? flatKey : dottedKey), val.get());
+      iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
     }
   }
 
@@ -1178,7 +1250,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
             iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted));
           }
         } else {
-          iniSetValue(target, key, iniParseVal(valueStr, quoted));
+          iniSetValue(target, iniUnescapeSectionKey(key), iniParseVal(valueStr, quoted));
         }
       }
     }

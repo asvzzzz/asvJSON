@@ -1,5 +1,36 @@
 #pragma once
 // YAML serialization/parsing for asvJSON++
+//
+// Known limitations
+// -----------------
+// * DATETIME / TIMESTAMP round-trip through YAML relies on the core JSON
+//   string auto-detection, not on YAML tagging. The encoder emits DATETIME as
+//   a bare ISO-8601 scalar and TIMESTAMP as a bare integer (`dt: 2024-01-15T10:30:00.123Z`,
+//   `ts: 1700000000`) with no explicit tag; the YAML scalar decoder maps such
+//   scalars to a JSON string (DATETIME) or a JSON number (TIMESTAMP) without
+//   deep date detection. The DATETIME value is only reconstructed afterwards,
+//   when the intermediate JSON string passes through the JSON-layer ISO auto-
+//   detect (which likewise handles `!!timestamp`/`!!datetime` only as the raw
+//   string until that string reaches the JSON layer). A TIMESTAMP whose bare
+//   value is a plain integer therefore loses its TIMESTAMP type through a
+//   YAML round-trip unless an explicit `!!timestamp ...` tag is present that
+//   the JSON-layer detection can resolve. Round-trip fidelity is guaranteed for
+//   STRING / INT / DOUBLE / BOOL / NULL / ARRAY / OBJECT / BINARY / OBJECTID /
+//   REGEX and for DATETIME values whose ISO text matches the JSON-layer
+//   auto-detect pattern.
+// * A root-level flow-collection document followed by a deeper plain line
+//   (`{a: 1}\nb: 2`) has its trailing line parsed as a separate implicit
+//   document; re-serialization concatenates the documents into a JSON array
+//   only for `---`-delimited streams, so the plain line may be dropped if it
+//   does not form a document boundary. Use `---` separators for multi-node
+//   streams.
+// * A mapping value followed by a sibling key at the parent indentation is
+//   handled correctly (see the round-trip tests below), but a sequence or
+//   mapping whose items resume at the same indent as an enclosing mapping that
+//   has already closed requires the parser's frame-closing logic (closeFrames)
+//   to run; the nested-mapping-same-indent case is covered by the round-trip
+//   tests in test.cpp (testYaml...NestedIndent*).
+// * See also the "YAML Format Notes" section in AGENTS.md.
 
 #include "../core.hpp"
 
