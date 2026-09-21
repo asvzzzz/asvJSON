@@ -4,6 +4,52 @@
 //   - Attributes become "@prefix:name" keys (e.g. "@xml:lang")
 //   - Element names preserve the prefix (e.g. "ns:element")
 //   - xmlns declarations become "@xmlns" and "@xmlns:prefix" attributes
+//
+// Semantics notes:
+//   - <x/> and <x></x> parse identically; a lone type="..." attribute on an
+//     empty element pins the empty typed value (string/binary/array/object/
+//     extension), so both forms round-trip.
+//   - Mixed content is pinned with an asv:xc="1" marker on output so #content
+//     arrays re-parse exactly (leading-text mixtures included). External XML
+//     is routed to #content only when any text follows an element: leading
+//     text before elements comes back as {"#text", children} (asymmetric by
+//     design, see the interleaving analysis in xmlParseElement).
+//   - Arrays of objects serialize as <name><item>...</item></name> (single
+//     repeated child name), which the collapse rule reverses on a re-parse.
+//     A SINGLE-element array carries an explicit asv:arr="1" marker (the
+//     collapse rule needs count >= 2, so an unmarked <name><item>...</item></name>
+//     re-parses as a plain {item: value} object).
+//   - Adjacent STRING items in a #content array have no XML text boundary and
+//     would merge into one text run; the encoder separates consecutive
+//     strings with an internal empty marker element (<asv:s/>) that the
+//     parser drops on a re-parse.
+//   - RESERVED internal keys (in mixed #content only): asv:s (separator
+//     marker), asv:xc ("1" = rich/mixed-content pin), asv:arr ("1" =
+//     single-element array pin). A user key equal to one of these is only
+//     affected inside a mixed #content (asv:xc/) array; elsewhere on the
+//     document the literal text round-trips as data.
+//   - KNOWN LIMITATION (pre-existing, not a regression): a LEADING empty
+//     string in a #content array (["", "foo"]) has no XML text to serialize
+//     and no preceding adjacent-string boundary, so it is not round-tripped
+//     (same behavior as before the marker work; emitting <asv:s/> there
+//     would resurrect exactly the asv:s key collision documented above).
+//   - RESERVED KEYS: inside a #content array the keys/attributes asv:s, asv:xc
+//     and asv:arr are reserved as internal round-trip markers. A user object
+//     that itself contains {asv:s: ...} / {asv:xc: ...} / {asv:arr: ...} as a
+//     DIRECT child is unpinned and its contents round-trip (use that form to
+//     keep a literal key); put them inside a normal (non-array-of-strings)
+//     object instead of at mixed-content top level, or quote the key so it is
+//     not confused with a marker on re-parse.
+//   - A stray '<' not starting a valid tag in skipped xsi:nil content scans
+//     as ordinary characters (malformed input is tolerated, never hangs).
+//   - xmlns declarations are element-scoped: a prefix bound inside one element
+//     never leaks to earlier or later siblings.
+//   - Multiple root elements (invalid XML, tolerated as an extension) merge
+//     last-wins into one object.
+//   - CDATA sections are always character data: their text is never
+//     re-interpreted as a number/bool/null.
+//   - A NaN/Infinity attribute value throws (it has no XML attribute text
+//     form); NaN/Infinity doubles in element content serialize as xsi:nil.
 
 #include "../core.hpp"
 
@@ -24,28 +70,33 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 			else if (ent == "quot") out += '"';
 			else if (ent == "apos") out += '\'';
 			else if (!ent.empty() && ent[0] == '#') {
-				if (ent.size() > 1 && ent[1] == 'x') {
-					const char* first = ent.data() + 2;
-					const char* last = ent.data() + ent.size();
-					unsigned long cp = 0;
-					auto [ptr, ec] = std::from_chars(first, last, cp, 16);
-					if (ec == std::errc() && ptr > first && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+				int base = (ent.size() > 2 && ent[1] == 'x') ? 16 : 10;
+				const char* first = ent.data() + (base == 16 ? 2 : 1);
+				const char* last = ent.data() + ent.size();
+				if (first >= last) {
+					// Nothing after "&#"/"&#x": impossible to parse; keep the
+					// raw text instead of running from_chars over an inverted
+					// range (undefined behavior).
+					out += '&'; out.append(ent.data(), ent.size()); out += ';';
+					i = end;
+					continue;
+				}
+				unsigned long cp = 0;
+				auto [ptr, ec] = std::from_chars(first, last, cp, base);
+				if (ec == std::errc() && ptr > first) {
+					if (cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
 						if (cp <= 0x7F) out += static_cast<char>(cp);
 						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 						else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 					}
+					// else: valid number, illegal XML codepoint (surrogate/
+					// above U+10FFFF) -- silently dropped (legacy behavior).
 				} else {
-					const char* first = ent.data() + 1;
-					const char* last = ent.data() + ent.size();
-					unsigned long cp = 0;
-					auto [ptr, ec] = std::from_chars(first, last, cp, 10);
-					if (ec == std::errc() && ptr > first && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
-						if (cp <= 0x7F) out += static_cast<char>(cp);
-						else if (cp <= 0x7FF) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-						else if (cp <= 0xFFFF) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-						else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
-					}
+					// Malformed numeric reference (e.g. &#xG;): keep the raw
+					// text instead of losing the entity entirely -- same
+					// fallback as an unknown named reference.
+					out += '&'; out.append(ent.data(), ent.size()); out += ';';
 				}
 			} else {
 				out += '&'; out.append(ent.data(), ent.size()); out += ';';
@@ -91,11 +142,11 @@ inline void xmlAppendAttrValue(std::string& out, const asvJSONValue* v) {
 			break;
 		}
 		case T::DOUBLE: {
-			if (!std::isnan(v->dbl) && !std::isinf(v->dbl)) {
-				std::string t;
-				fmtDoubleVal(v->dbl, t);
-				out += t;
-			}
+			if (std::isnan(v->dbl) || std::isinf(v->dbl))
+				throw asvJSONError("XML: NaN/Infinity attribute value cannot be serialized");
+			std::string t;
+			fmtDoubleVal(v->dbl, t);
+			out += t;
 			break;
 		}
 		case T::BOOL_VAL: out += v->flag ? "true" : "false"; break;
@@ -175,15 +226,14 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			// Check for #content array (mixed content from fromXML)
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
-				// A pure-text #content array would re-parse as a typed scalar,
-				// so pin it with an asv:xc marker that the decoder turns back
-				// into the exact #content array (raw strings, no type detect).
-				bool pureText = true;
-				for (const auto& it2 : *(contentIt->second->arr)) {
-					if (it2->type != asvJSONValue::STRING) { pureText = false; break; }
-				}
-				out += pad + "<" + xmlSanitizeElementName(name);
-				if (pureText) out += " asv:xc=\"1\"";
+				// Pin #content with an asv:xc marker so a re-parse routes back
+				// into the #content branch (raw strings, no type detect) and
+				// the element lists restore as {name: val} wrappers. Without
+				// the marker a leading-text mixture ("foo<b>1</b>") would
+				// re-collapse into {"#text","b"} -- the asymmetric parser path
+				// -- and lose the array. Always emitted, pure-text included
+				// (a pure-text array would otherwise re-parse as a scalar).
+				out += pad + "<" + xmlSanitizeElementName(name) + " asv:xc=\"1\"";
 				for (const auto& [k, v] : *obj) {
 					if (k == "#content") continue;
 					if (!k.empty() && k[0] == '@') {
@@ -193,8 +243,15 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 					}
 				}
 				out += ">";
-				for (const auto& item : *(contentIt->second->arr)) {
+				for (size_t ti = 0; ti < contentIt->second->arr->size(); ti++) {
+					const auto& item = (*contentIt->second->arr)[ti];
 					if (item->type == asvJSONValue::STRING) {
+						// Adjacent text items have no XML boundary (they merge
+						// into one text run on a re-parse), so separate
+						// consecutive strings with an internal empty-marker
+						// element (<asv:s/>) the parser drops on a re-parse.
+						if (ti > 0 && (*contentIt->second->arr)[ti - 1]->type == asvJSONValue::STRING)
+							out += "<asv:s/>";
 						out += xmlEscapeContent(item->str_data);
 					} else if (item->type == asvJSONValue::OBJECT && item->obj && item->obj->size() == 1) {
 						const auto& [childName, childVal] = *item->obj->begin();
@@ -310,43 +367,43 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 		}
 		case T::ARRAY: {
 			if (!arr || arr->empty()) { out += pad + "<" + xmlSanitizeElementName(name) + " type=\"array\"></" + xmlSanitizeElementName(name) + ">\n"; break; }
-			bool allObjects = true;
+			// Every array -- objects included -- serializes as one <name>
+			// element with repeated <item> children. The parser's collapse
+			// rule (single repeated child name) reverses this exactly, so
+			// arrays of objects round-trip instead of degrading into multiple
+			// sibling <name> elements ({name:[{name:...}]} on a re-parse).
+			// A SINGLE-element array has no repeated name to collapse on and
+			// would re-parse as a plain {item: value} object, so it carries an
+			// explicit asv:arr marker that pins the array shape.
+			out += pad + "<" + xmlSanitizeElementName(name);
+			if (arr->size() == 1) out += " asv:arr=\"1\"";
+			out += ">\n";
 			for (const auto& item : *arr) {
-				if (item->type != asvJSONValue::OBJECT) { allObjects = false; break; }
-			}
-			if (allObjects) {
-				for (const auto& item : *arr) {
-					item->toXML(out, name, indent);
-				}
-			} else {
-				out += pad + "<" + xmlSanitizeElementName(name) + ">\n";
-				for (const auto& item : *arr) {
-					if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))
-						out += pad + "  <item type=\"string\">" + xmlEscapeContent(item->str_data) + "</item>\n";
-					else if (item->type == asvJSONValue::OBJECT || item->type == asvJSONValue::ARRAY) {
-						item->toXML(out, "item", indent + 1);
-					} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
-					           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
-					           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
-						item->toXML(out, "item", indent + 1);
+				if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))
+					out += pad + "  <item type=\"string\">" + xmlEscapeContent(item->str_data) + "</item>\n";
+				else if (item->type == asvJSONValue::OBJECT || item->type == asvJSONValue::ARRAY) {
+					item->toXML(out, "item", indent + 1);
+				} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
+				           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
+				           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
+					item->toXML(out, "item", indent + 1);
+				} else {
+					out += pad + "  <item";
+					if (item->type == asvJSONValue::NULL_VAL) {
+						out += " xsi:nil=\"true\"/>\n";
+					} else if (item->type == asvJSONValue::DOUBLE && (std::isnan(item->dbl) || std::isinf(item->dbl))) {
+						out += " xsi:nil=\"true\"/>\n";
 					} else {
-						out += pad + "  <item";
-						if (item->type == asvJSONValue::NULL_VAL) {
-							out += " xsi:nil=\"true\"/>\n";
-						} else if (item->type == asvJSONValue::DOUBLE && (std::isnan(item->dbl) || std::isinf(item->dbl))) {
-							out += " xsi:nil=\"true\"/>\n";
-						} else {
-							out += ">";
-							if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
-							else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
-							else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
-							else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
-							out += "</item>\n";
-						}
+						out += ">";
+						if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
+						else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
+						else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
+						else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
+						out += "</item>\n";
 					}
 				}
-				out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
 			}
+			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		}
 		default:
@@ -431,9 +488,86 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 
 // true when a STRING needs a type="string" annotation on output so that a
 // re-parse preserves STRING rather than re-detecting a number/bool/null.
+// Pure textual mirror of xmlDetectValue's type decision -- deliberately no
+// node allocation (this runs once per string element on output).
 inline bool xmlNeedsStringType(std::string_view s) {
-	auto detected = xmlDetectValue(s);
-	return detected && detected->type != asvJSONValue::STRING;
+	if (s.empty()) return true; // xmlDetectValue("") -> null
+	if (s == "true" || s == "TRUE" || s == "false" || s == "FALSE" || s == "null" || s == "NULL") return true;
+	if (!s.empty() && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
+		// JSON numbers never carry leading zeros -- those stay STRINGs.
+		bool leadZero = false;
+		if (s.size() > 1 && s[0] == '0' && s[1] >= '0' && s[1] <= '9') leadZero = true;
+		else if (s.size() > 2 && s[0] == '-' && s[1] == '0' && s[2] >= '0' && s[2] <= '9') leadZero = true;
+		if (!leadZero) {
+			long long v;
+			auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+			if (ec == std::errc() && ptr == s.data() + s.size()) return true; // INT
+			bool allDigits = (s.size() > 1);
+			const char* p0 = (s[0] == '-') ? s.data() + 1 : s.data();
+			for (const char* p = p0; p < s.data() + s.size(); ++p)
+				if (*p < '0' || *p > '9') { allDigits = false; break; }
+			if (allDigits) return false; // overflow literal -> STRING (raw_number)
+			double d;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
+			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return true; // DOUBLE
+#else
+			std::string tmp(s);
+			char* end; errno = 0;
+			d = std::strtod(tmp.c_str(), &end);
+			if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return true; // DOUBLE
+#endif
+		}
+	}
+	return false;
+}
+
+// Build the value for an element with empty content. <x/> and <x></x> are the
+// same XML construct, so both routes share this logic:
+//   - the asv:xc marker pins an empty #content array;
+//   - a lone type="..." attribute pins an empty typed value (string/binary/
+//     array/object/extension); any other attribute, or a type that cannot be
+//     represented empty (datetime/objectid/regex/timestamp), keeps the element
+//     an attribute-only object ({"@type":...} etc.);
+//   - otherwise an empty element is an empty STRING, and an attribute-only
+//     element is an object of @-prefixed keys.
+inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<std::string, std::string>& attrs, bool forceMixed) {
+	if (forceMixed) {
+		auto xobj = asvJSONValue::makeObject();
+		auto xarr = asvJSONValue::makeArray();
+		xobj->obj->emplace("#content", std::move(xarr));
+		for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+		return xobj;
+	}
+	auto tit = attrs.find("type");
+	if (tit != attrs.end()) {
+		const std::string& t = tit->second;
+		// Only the type attribute (plus optional exttype for extensions) is
+		// consumed as a typed empty value. Any other attribute means the
+		// element is an attribute-only object, which is preserved.
+		bool onlyTyped = true;
+		for (const auto& [k, v] : attrs)
+			if (k != "type" && !(t == "extension" && k == "exttype")) { onlyTyped = false; break; }
+		if (onlyTyped) {
+			if (t == "string") return asvJSONValue::makeString("", 0);
+			if (t == "binary") return asvJSONValue::makeBinary(nullptr, 0);
+			if (t == "array") return asvJSONValue::makeArray();
+			if (t == "object") return asvJSONValue::makeObject();
+			if (t == "extension") {
+				int8_t et = 0;
+				auto eit = attrs.find("exttype");
+				if (eit != attrs.end()) {
+					long ev = std::strtol(eit->second.c_str(), nullptr, 10);
+					if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
+				}
+				return asvJSONValue::makeExtension(et, nullptr, 0);
+			}
+		}
+	}
+	if (attrs.empty()) return asvJSONValue::makeString("", 0);
+	auto obj = asvJSONValue::makeObject();
+	for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+	return obj;
 }
 
 // Remove XML whitespace (space, tab, CR, LF) from base64 text so PEM-style
@@ -446,12 +580,77 @@ inline std::string xmlStripWs(std::string_view s) {
 	return out;
 }
 
+inline bool xmlNameChar(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+	       c == ':' || c == '-' || c == '_' || c == '.';
+}
+
+// Advance pos past an xsi:nil element's body to the matching closing tag.
+// A naive "</name" substring search can stop at a nested same-name closing
+// tag inside the content, so nesting is counted: every nested <name> opening
+// that delimits real content increments depth, and only the depth-0 close is
+// consumed. Comments/CDATA/PIs are skipped so their '<' never counts.
+// On failure pos is left unchanged and the caller's closing-tag/error path
+// diagnoses the unterminated element.
+inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& elemName) {
+	int depth = 0;
+	size_t p = pos;
+	while (p < s.size()) {
+		if (s[p] == '<') {
+			if (p + 1 < s.size() && s[p + 1] == '/') {
+				size_t q = p + 2, e = q;
+				while (e < s.size() && xmlNameChar(s[e])) e++;
+				if (std::string_view(s.data() + q, e - q) == elemName) {
+					if (depth == 0) {
+						size_t a = e;
+						while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
+						if (a < s.size() && s[a] == '>') pos = a + 1;
+						return;
+					}
+					depth--;
+				}
+				p = e;
+				continue;
+			}
+			if (p + 3 < s.size() && s[p + 1] == '!' && s[p + 2] == '-' && s[p + 3] == '-') {
+				size_t e = s.find("-->", p + 4);
+				p = (e == std::string_view::npos) ? s.size() : e + 3;
+				continue;
+			}
+			if (p + 8 < s.size() && s[p + 1] == '!' && s.substr(p + 2, 7) == "[CDATA[") {
+				size_t e = s.find("]]>", p + 9);
+				p = (e == std::string_view::npos) ? s.size() : e + 3;
+				continue;
+			}
+			if (p + 2 < s.size() && s[p + 1] == '?') {
+				size_t e = s.find("?>", p + 2);
+				p = (e == std::string_view::npos) ? s.size() : e + 2;
+				continue;
+			}
+			size_t q = p + 1, e = q;
+			while (e < s.size() && xmlNameChar(s[e])) e++;
+			// A '<' with no name chars following (< junk, malformed input) has
+			// an empty name that never matches elemName, so p advances past the
+			// '<' by exactly one and the remainder scans as ordinary content
+			// until the next '<'. Never stalls; worst case is a linear per-
+			// stray-'<' re-scan (O(n^2) on pathological input, no crash).
+			if (std::string_view(s.data() + q, e - q) == elemName &&
+			    (e >= s.size() || s[e] == ' ' || s[e] == '\t' || s[e] == '\n' || s[e] == '\r' || s[e] == '/' || s[e] == '>'))
+				depth++; // nested same-name element: its own </name> must balance
+			p = e;
+			continue;
+		}
+		p++;
+	}
+}
+
 // Forward declaration
 inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap);
 
 // Segment for interleaved mixed content tracking
 struct XmlSegment {
 	bool isElement;
+	bool isCdata;  // text came from a CDATA section: always character data
 	std::string text;      // for text segments
 	std::string childName; // for element segments
 	std::unique_ptr<asvJSONValue> childVal;
@@ -476,7 +675,9 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 					if (end == std::string_view::npos) throw asvJSONError("XML: unterminated CDATA section");
 					std::string cdata = std::string(s.substr(pos + 9, end - pos - 9));
 					if (!cdata.empty()) {
-						segments.push_back({false, std::move(cdata), "", nullptr});
+						// CDATA is character data per the spec -- flagged so the
+						// text is never re-interpreted as a number/bool/null.
+						segments.push_back({false, true, std::move(cdata), "", nullptr});
 					}
 					pos = end + 3; continue;
 				}
@@ -501,7 +702,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 			}
 			std::string childName;
 			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap);
-			if (childVal) segments.push_back({true, "", std::move(childName), std::move(childVal)});
+			if (childVal) segments.push_back({true, false, "", std::move(childName), std::move(childVal)});
 		} else {
 			size_t start = pos;
 			while (pos < s.size() && s[pos] != '<') pos++;
@@ -510,7 +711,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 			for (auto c : text) {
 				if (c != ' ' && c != '\t' && c != '\n' && c != '\r') { onlySpace = false; break; }
 			}
-			if (!onlySpace) segments.push_back({false, std::move(text), "", nullptr});
+			if (!onlySpace) segments.push_back({false, false, std::move(text), "", nullptr});
 		}
 	}
 }
@@ -518,6 +719,11 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
 inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap) {
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("XML nesting too deep");
+	// Namespace declarations are element-scoped: copy the inherited bindings,
+	// accumulate this element's own xmlns declarations into the copy, and hand
+	// the copy to children. Deeper elements never leak a binding back out, so
+	// a prefix declared inside one sibling is invisible to the next.
+	std::unordered_map<std::string, std::string> scopedNs = nsMap;
 	if (pos >= s.size() || s[pos] != '<') throw asvJSONError("expected '<'");
 	pos++; // skip '<'
 
@@ -545,9 +751,11 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 	}
 
-	// Accumulate xmlns declarations from this element into the nsMap
+	// Accumulate any xmlns declarations made on THIS element into the scoped
+	// map (the copy is discarded when the element returns, so bindings stay
+	// within this element's subtree).
 	for (const auto& [k, v] : attrs) {
-		if (k.size() > 6 && k.substr(0, 6) == "xmlns:") nsMap[std::string(k.substr(6))] = v;
+		if (k.size() > 6 && k.substr(0, 6) == "xmlns:") scopedNs[std::string(k.substr(6))] = v;
 	}
 
 	// xsi:nil detection: check any prefix:*nil attribute whose prefix
@@ -560,24 +768,21 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (k.size() < 5 || k.substr(k.size() - 4) != ":nil") continue;
 			std::string prefix(k.data(), k.size() - 4);
 			// Accept if prefix maps to XSI URI, or if literal "xsi" without xmlns decl
-			auto it = nsMap.find(prefix);
-			bool match = (it != nsMap.end() && it->second == xsiUri);
-			if (!match && prefix == "xsi" && !nsMap.count("xsi")) match = true;
+			auto it = scopedNs.find(prefix);
+			bool match = (it != scopedNs.end() && it->second == xsiUri);
+			if (!match && prefix == "xsi" && !scopedNs.count("xsi")) match = true;
 			if (!match) continue;
 			if (v == "true" || v == "1") {
-				if (pos < s.size() && s[pos] == '/') { pos++; if (pos < s.size() && s[pos] == '>') pos++; }
-				else if (pos < s.size() && s[pos] == '>') {
+				if (pos < s.size() && s[pos] == '/') {
 					pos++;
-					// Skip to matching closing tag, tolerant of whitespace before >
-					std::string closeTag = "</" + elemName;
-					size_t closePos = s.find(closeTag, pos);
-					if (closePos != std::string_view::npos) {
-						size_t afterName = closePos + closeTag.size();
-						while (afterName < s.size() && (s[afterName] == ' ' || s[afterName] == '\t' || s[afterName] == '\n' || s[afterName] == '\r'))
-							afterName++;
-						if (afterName < s.size() && s[afterName] == '>')
-							pos = afterName + 1;
-					}
+					if (pos < s.size() && s[pos] == '>') pos++;
+					else throw asvJSONError("XML: malformed self-closing tag in <" + elemName + ">");
+				} else if (pos < s.size() && s[pos] == '>') {
+					pos++;
+					// Skip the (usually empty) body to the matching closing
+					// tag -- depth-aware so nested same-name content is skipped
+					// wholesale rather than stopping at its </name>.
+					xmlSkipNilBody(s, pos, elemName);
 				}
 				return asvJSONValue::makeNull();
 			}
@@ -587,11 +792,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Self-closing tag
 	if (pos < s.size() && s[pos] == '/') {
 		pos++;
-		if (pos < s.size() && s[pos] == '>') { pos++; }
-		if (attrs.empty()) return asvJSONValue::makeString("", 0);
-		auto obj = asvJSONValue::makeObject();
-		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
-		return obj;
+		if (pos < s.size() && s[pos] == '>') pos++;
+		else throw asvJSONError("XML: malformed self-closing tag in <" + elemName + ">");
+		bool forceMixed = false;
+		auto xcIt = attrs.find("asv:xc");
+		if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
+		return xmlEmptyElement(attrs, forceMixed);
 	}
 
 	// Opening tag
@@ -600,7 +806,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
-	xmlParseChildrenSegments(s, pos, segments, depth + 1, nsMap);
+	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs);
 
 	// asv:xc marker (from toXML) pins an object as a #content array so pure
 	// text round-trips back to {"#content":[raw strings]} instead of being
@@ -608,6 +814,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	bool forceMixed = false;
 	auto xcIt = attrs.find("asv:xc");
 	if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
+
+	// asv:arr marker (from toXML) pins a SINGLE-element array so it re-parses
+	// as an array rather than a plain {item: value} object. Consumed here;
+	// never becomes a @attr.
+	bool forceArray = false;
+	auto arrIt = attrs.find("asv:arr");
+	if (arrIt != attrs.end()) { attrs.erase(arrIt); forceArray = true; }
 
 	// Closing tag
 	xmlSkipSpaces(s, pos);
@@ -619,11 +832,14 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		if (pos < s.size() && s[pos] == '>') pos++;
 	} else if (pos >= s.size()) {
 		throw asvJSONError("unterminated element: <" + elemName + "> (expected </" + elemName + ">)");
+	} else {
+		throw asvJSONError("XML: expected closing tag for <" + elemName + ">");
 	}
 
 	// Analyze segments: count text vs element segments
 	size_t textCount = 0, elemCount = 0;
 	std::string combinedText;
+	bool hasCdata = false;
 	bool hasInterleaving = false;
 	for (size_t i = 0; i < segments.size(); i++) {
 		if (segments[i].isElement) {
@@ -631,11 +847,15 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		} else {
 			textCount++;
 			combinedText += segments[i].text;
-			// Check if elements appear both before and after this text
+			if (segments[i].isCdata) hasCdata = true;
 		}
 	}
-	// Interleaving = text appears both before and after child elements
-	// Simple case: text-before-elements then elements is NOT interleaved
+	// Interleaving = at least one text segment after any child element. The
+	// decoder is deliberately asymmetric about leading text: "foo<b/>" routes
+	// to the object path below ({#text, children}) rather than #content; only
+	// text that follows an element -- or an explicit asv:xc marker -- produces
+	// a #content array. The encoder compensates: it emits asv:xc anytime the
+	// value has #content, so round-tripped XML always takes the #content side.
 	bool seenElem = false, textAfterElem = false;
 	for (size_t i = 0; i < segments.size(); i++) {
 		if (segments[i].isElement) {
@@ -649,48 +869,24 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// Build result
 	if (segments.empty()) {
-		// Empty element content. <x/> and <x></x> mean the same thing: an
-		// empty value. A lone type="..." attribute pins the parsed type so
-		// empty typed values (STRING, BINARY, EXTENSION) round-trip instead of
-		// collapsing into an attribute-only object.
-		if (forceMixed && segments.empty()) {
-			// <x asv:xc="1"></x>: marker with no content -- empty #content array
-			auto xobj = asvJSONValue::makeObject();
-			auto xarr = asvJSONValue::makeArray();
-			xobj->obj->emplace("#content", std::move(xarr));
-			for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
-			return xobj;
-		}
-		auto tit = attrs.find("type");
-		if (tit != attrs.end()) {
-			const std::string& t = tit->second;
-			// Only the type attribute (plus optional exttype for extensions)
-			// is consumed as a typed empty value. Any other attribute means
-			// the element is an attribute-only object, which is preserved.
-			bool onlyTyped = true;
-			for (const auto& [k, v] : attrs)
-				if (k != "type" && !(t == "extension" && k == "exttype")) { onlyTyped = false; break; }
-			if (onlyTyped) {
-				if (t == "string") return asvJSONValue::makeString("", 0);
-				if (t == "binary") return asvJSONValue::makeBinary(nullptr, 0);
-				if (t == "array") return asvJSONValue::makeArray();
-				if (t == "object") return asvJSONValue::makeObject();
-				if (t == "extension") {
-					int8_t et = 0;
-					auto eit = attrs.find("exttype");
-					if (eit != attrs.end()) {
-						long ev = std::strtol(eit->second.c_str(), nullptr, 10);
-						if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
-					}
-					return asvJSONValue::makeExtension(et, nullptr, 0);
-				}
-			}
-		}
-		if (attrs.empty()) return asvJSONValue::makeString("", 0);
-		auto obj = asvJSONValue::makeObject();
-		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
-		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
-		return obj;
+		// Empty element content. <x/> and <x></x> mean the same thing, so both
+		// routes share xmlEmptyElement: an asv:xc marker restores an empty
+		// #content array, a lone type="..." attribute pins an empty typed value
+		// (STRING/BINARY/ARRAY/OBJECT/EXTENSION), and an attribute-only element
+		// stays an @-prefixed object. (An asv:arr-marked empty is still an
+		// empty array -- the marker is only emitted for non-empty arrays.)
+		if (forceArray) return asvJSONValue::makeArray();
+		return xmlEmptyElement(attrs, forceMixed);
+	}
+
+	// asv:arr marker (single-element array from toXML): the child elements are
+	// the array items, so collect them regardless of the count-based collapse
+	// rule. Whitespace-only text segments (encoder indentation) carry no items.
+	if (forceArray) {
+		auto arr = asvJSONValue::makeArray();
+		for (auto& seg : segments)
+			if (seg.isElement) arr->arr->push_back(std::move(seg.childVal));
+		return arr;
 	}
 
 	// No elements, only text - simple case
@@ -707,7 +903,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
 			return xobj;
 		}
-		if (attrs.empty()) return xmlDetectValue(combinedText);
+		if (attrs.empty()) {
+			// CDATA is character data by definition: its text (possibly mixed
+			// with ordinary text) must never be re-detected as a number/bool/
+			// null, so any CDATA presence forces a plain STRING.
+			if (hasCdata) return asvJSONValue::makeString(combinedText.data(), combinedText.size());
+			return xmlDetectValue(combinedText);
+		}
 		// Check for special type attribute (from toXML)
 		auto tit = attrs.find("type");
 		if (tit != attrs.end()) {
@@ -797,13 +999,22 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		auto arr = asvJSONValue::makeArray();
 		for (auto& seg : segments) {
 			if (seg.isElement) {
+				// Internal empty-marker element (<asv:s/>) between adjacent
+				// #content strings: dropped so the original string split is
+				// restored on a re-parse. Only honored for marker-pinned
+				// content; a real <asv:s/> in external XML stays data.
+				if (forceMixed && seg.childName == "asv:s" &&
+				    seg.childVal && seg.childVal->type == asvJSONValue::STRING &&
+				    seg.childVal->str_data.empty())
+					continue;
 				auto wrapper = asvJSONValue::makeObject();
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
 				arr->arr->push_back(std::move(wrapper));
 			} else {
 				// Marker-pinned content keeps raw strings (no type detection),
-				// so {"#content":["123"]} round-trips instead of becoming [123].
-				if (forceMixed) {
+				// so {"#content":["123"]} round-trips instead of becoming [123];
+				// CDATA is likewise always character data.
+				if (forceMixed || seg.isCdata) {
 					arr->arr->push_back(asvJSONValue::makeString(seg.text.data(), seg.text.size()));
 				} else {
 					arr->arr->push_back(xmlDetectValue(seg.text));
@@ -813,8 +1024,11 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		obj->obj->emplace("#content", std::move(arr));
 	} else {
 		// Non-interleaved: all text first (if any), then all elements
-		// Add text content as #text
-		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
+		// Add text content as #text (CDATA content stays raw STRING)
+		if (!combinedText.empty()) {
+			if (hasCdata) obj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
+			else obj->obj->emplace("#text", xmlDetectValue(combinedText));
+		}
 
 		// Count occurrences of each child name (global, not just consecutive)
 		std::unordered_map<std::string, size_t> nameCounts;
@@ -910,7 +1124,9 @@ inline bool asvJSON::fromXML(std::string_view input) {
 
 		if (!skipProlog()) throw asvJSONError("expected '<'");
 
-		// Parse all top-level elements, combining into one object
+		// Parse all top-level elements, combining into one object. XML allows a
+		// single root only; repeated roots (tolerated as an extension) merge
+		// last-wins so the final element for a name is the surviving value.
 		auto obj = asvJSONValue::makeObject();
 		std::unordered_map<std::string, std::string> nsMap;
 		int count = 0;
@@ -919,7 +1135,7 @@ inline bool asvJSON::fromXML(std::string_view input) {
 			std::string name;
 			auto val = xmlParseElement(input, pos, name, 0, nsMap);
 			if (!val) break;
-			obj->obj->emplace(std::move(name), std::move(val));
+			obj->obj->insert_or_assign(std::move(name), std::move(val));
 			count++;
 		}
 		if (count == 0) throw asvJSONError("failed to parse root element");

@@ -4362,7 +4362,11 @@ TEST(testXMLElementNameSanitization) {
 		ASSERT(xml.find("<a\\b>") == std::string::npos);
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
-		ASSERT(json2.getRoot()->get("a_b")->getInt() == 1);
+		// $, !, ~ all sanitize to the same name "a_b": repeated roots now merge
+		// last-wins (fromXML no longer swallows duplicates via emplace), so the
+		// surviving value is 3, the final element.
+		ASSERT(json2.getRoot()->get("a_b")->getInt() == 3);
+		ASSERT(json2.getRoot()->get("a_")->getInt() == 4);
 		ASSERT(json2.getRoot()->get("x_y_z_k_")->getInt() == 5);
 	}
 	// Attribute names (@-keys) get the same treatment. (A bare attribute is
@@ -4694,6 +4698,269 @@ TEST(testXMLAuditFixes) {
 		ASSERT(v2 != nullptr && v2->type == asvJSONValue::BINARY);
 		std::string dec2(reinterpret_cast<const char*>(v2->bin_data.data()), v2->bin_data.size());
 		ASSERT_EQ(dec2, "abcdef");
+	}
+}
+
+TEST(testXMLAuditFixes2) {
+	// AUDIT 1/15: <x type="..."/> and <x type="..."></x> are the same XML
+	// construct -- a lone type attribute pins an EMPTY typed value in both
+	// spellings (self-closing used to degrade into {"@type":...}).
+	{
+		struct { const char* sv; const char* ev; asvJSONValue::Type t; } cases[] = {
+			{"<x type=\"string\"/>",     "<x type=\"string\"></x>",     asvJSONValue::STRING},
+			{"<x type=\"binary\"/>",     "<x type=\"binary\"></x>",     asvJSONValue::BINARY},
+			{"<x type=\"array\"/>",      "<x type=\"array\"></x>",      asvJSONValue::ARRAY},
+			{"<x type=\"object\"/>",     "<x type=\"object\"></x>",     asvJSONValue::OBJECT},
+			{"<x type=\"extension\"/>",  "<x type=\"extension\"></x>",  asvJSONValue::EXTENSION},
+			{"<x type=\"extension\" exttype=\"7\"/>", "<x type=\"extension\" exttype=\"7\"></x>", asvJSONValue::EXTENSION},
+		};
+		for (const auto& c : cases) {
+			asvJSON a, b;
+			ASSERT(a.fromXML(std::string_view(c.sv)));
+			ASSERT(b.fromXML(std::string_view(c.ev)));
+			ASSERT(a.getRoot()->get("x")->type == c.t);
+			ASSERT(b.getRoot()->get("x")->type == c.t);
+		}
+		// extension round-trips exttype through both spellings
+		asvJSON e;
+		ASSERT(e.fromXML("<x type=\"extension\" exttype=\"7\"/>"));
+		ASSERT(e.getRoot()->get("x")->ext_type == 7);
+		// any ADDITIONAL attribute (either spelling) keeps the attribute-only object
+		asvJSON o1, o2;
+		ASSERT(o1.fromXML("<x other=\"1\" type=\"string\"/>"));
+		ASSERT(o2.fromXML("<x other=\"1\" type=\"string\"></x>"));
+		ASSERT(o1.getRoot()->get("x")->type == asvJSONValue::OBJECT);
+		ASSERT(o2.getRoot()->get("x")->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(o1.getRoot()->get("x")->get("@type")->getString()), "string");
+	}
+	// AUDIT 2: #content with leading text must round-trip via asv:xc. The
+	// leading "foo" used to re-collapse into {"#text","b"} and lose #content.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{}")));
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeString("foo", 3));
+		auto inner = asvJSONValue::makeObject();
+		inner->obj->emplace("b", asvJSONValue::makeInt(1));
+		arr->arr->push_back(std::move(inner));
+		auto r = asvJSONValue::makeObject();
+		r->obj->emplace("#content", std::move(arr));
+		j.getRoot()->obj->emplace("x", std::move(r));
+		std::string xml = j.toXML();
+		ASSERT(xml.find("asv:xc=\"1\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromXML(xml));
+		auto* c = j2.getRoot()->get("x")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(c->arr->size(), size_t(2));
+		ASSERT_EQ(std::string((*c->arr)[0]->getString()), "foo");
+		auto* w = (*c->arr)[1]->get("b");
+		ASSERT(w != nullptr && w->type == asvJSONValue::INT);
+		ASSERT(w->getInt() == 1);
+	}
+	// AUDIT 5: arrays of objects serialize as <name><item>...</item></name>
+	// and round-trip as one array (previously they became sibling <name>
+	// elements that re-parsed as {"name":[{...}]} wrapped objects).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{}")));
+		auto items = asvJSONValue::makeArray();
+		auto a1 = asvJSONValue::makeObject();
+		a1->obj->emplace("a", asvJSONValue::makeInt(1));
+		auto a2 = asvJSONValue::makeObject();
+		a2->obj->emplace("b", asvJSONValue::makeInt(2));
+		items->arr->push_back(std::move(a1));
+		items->arr->push_back(std::move(a2));
+		j.getRoot()->obj->emplace("items", std::move(items));
+		std::string xml = j.toXML();
+		// no sibling <items> repeats; all items inside one wrapper
+		auto cnt = [](const std::string& hay, const char* needle) {
+			size_t n = 0, p = 0;
+			while ((p = hay.find(needle, p)) != std::string::npos) { n++; p += std::strlen(needle); }
+			return n;
+		};
+		ASSERT_EQ(cnt(xml, "<items>"), size_t(1));
+		ASSERT_EQ(cnt(xml, "<item>"), size_t(2));
+		asvJSON j2;
+		ASSERT(j2.fromXML(xml));
+		auto* items2 = j2.getRoot()->get("items");
+		ASSERT(items2 != nullptr && items2->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(items2->arr->size(), size_t(2));
+		ASSERT((*items2->arr)[0]->get("a")->getInt() == 1);
+		ASSERT((*items2->arr)[1]->get("b")->getInt() == 2);
+	}
+	// AUDIT 6/10/12: malformed closing tags and <x/y> throw instead of being
+	// silently tolerated; xsi:nil bodies skip nested SAME-NAME content.
+	{
+		asvJSON a;
+		ASSERT(!a.fromXML(std::string_view("<root><x>1</root")));
+		asvJSON b;
+		ASSERT(!b.fromXML(std::string_view("<x/y>")));
+		asvJSON c;
+		ASSERT(c.fromXML("<x xsi:nil=\"true\"><x>xsi.z</x><x>xsi.z2</x></x>"));
+		ASSERT(c.getRoot()->get("x")->type == asvJSONValue::NULL_VAL);
+		// a nil element's body must not swallow a following sibling
+		asvJSON d;
+		ASSERT(d.fromXML("<root><a xsi:nil=\"true\"><a>junk</a></a><b>2</b></root>"));
+		ASSERT(d.getRoot()->get("root")->get("a")->type == asvJSONValue::NULL_VAL);
+		ASSERT(d.getRoot()->get("root")->get("b")->getInt() == 2);
+	}
+	// AUDIT 7: a NaN/Infinity attribute value throws instead of silently
+	// emitting an empty attribute.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{}")));
+		auto inner = asvJSONValue::makeObject();
+		inner->obj->emplace("@bad", asvJSONValue::makeDouble(std::nan("")));
+		auto wrap = asvJSONValue::makeObject();
+		wrap->obj->emplace("k", asvJSONValue::makeInt(1));
+		inner->obj->emplace("k", std::move(wrap));
+		j.getRoot()->obj->emplace("r", std::move(inner));
+		bool threw = false;
+		try { j.toXML(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// AUDIT 8: duplicate roots merge last-wins (emplace used to swallow them).
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<r>1</r><r>2</r>"));
+		ASSERT(j.getRoot()->get("r")->getInt() == 2);
+	}
+	// AUDIT 9: CDATA is always character data, never re-detected as a
+	// number/bool/null -- even when element children are present.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x><![CDATA[123]]></x>"));
+		auto* v = j.getRoot()->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "123");
+		asvJSON j2;
+		ASSERT(j2.fromXML("<x><![CDATA[123]]><b>1</b></x>"));
+		auto* t = j2.getRoot()->get("x")->get("#text");
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(t->getString()), "123");
+	}
+	// AUDIT 11: malformed numeric entities keep their raw text instead of
+	// being silently dropped.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x>&#xG;</x>"));
+		auto* v = j.getRoot()->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "&#xG;");
+	}
+	// AUDIT 13: xmlns declarations are element-scoped -- a prefix declared
+	// inside one sibling must not leak into the next.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<root><a xmlns:x=\"http://www.w3.org/2001/XMLSchema-instance\" x:nil=\"true\"/><b x:nil=\"true\"/></root>"));
+		ASSERT(j.getRoot()->get("root")->get("a")->type == asvJSONValue::NULL_VAL);
+		auto* b = j.getRoot()->get("root")->get("b");
+		// x is not in scope for b: the bare x:nil never resolves, so b stays
+		// an attribute-only object instead of collapsing to null
+		ASSERT(b != nullptr && b->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(b->get("@x:nil")->getString()), "true");
+	}
+	// AUDIT 14: leading-zero and overflow literals stay STRINGs without a
+	// type annotation (and a numeric-looking STRING round-trips with one).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string(R"({"a":"0123","b":"99999999999999999999999","c":"42"})")));
+		std::string xml = j.toXML();
+		// "0123"/overflow need no annotation: they re-detected as STRING anyway
+		ASSERT(xml.find("<a type=\"string\">") == std::string::npos);
+		ASSERT(xml.find("<b type=\"string\">") == std::string::npos);
+		// "42" WOULD re-detect as INT, so it carries the annotation
+		ASSERT(xml.find("<c type=\"string\">42</c>") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromXML(xml));
+		ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::STRING);
+		ASSERT(j2.getRoot()->get("b")->type == asvJSONValue::STRING);
+		ASSERT(j2.getRoot()->get("c")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->get("c")->getString()), "42");
+	}
+	// AUDIT REGRESSION A: a SINGLE-element array [1] must round-trip through
+	// toXML -> fromXML without degrading into a plain {item: 1} object. The
+	// encoder pins it with an explicit asv:arr="1" marker that the decoder
+	// turns back into an array.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"items":[1]})")));
+		std::string xml = json.toXML();
+		ASSERT(xml.find(" asv:arr=\"1\"") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* items = json2.getRoot()->get("items");
+		ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1);
+		if (items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1)
+			ASSERT((*items->arr)[0]->getInt() == 1);
+	}
+	// AUDIT REGRESSION A2: a single-element ARRAY of OBJECTS [{a:1}] must not
+	// degrade into a plain {"a":1} wrapper when the array is size 1.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"items":[{"a":1}]})")));
+		std::string xml = json.toXML();
+		ASSERT(xml.find(" asv:arr=\"1\"") != std::string::npos);
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* items = json2.getRoot()->get("items");
+		ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1);
+		if (items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1) {
+			auto& inner = (*items->arr)[0];
+			ASSERT(inner->get("a")->getInt() == 1);
+		}
+	}
+	// AUDIT REGRESSION A3: nested single-element arrays [[1]] round-trip; the
+	// asv:arr marker must survive at both nesting levels.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"items":[[1]]})")));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* items = json2.getRoot()->get("items");
+		ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1);
+		if (items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 1) {
+			auto& inner = (*items->arr)[0];
+			ASSERT(inner != nullptr && inner->type == asvJSONValue::ARRAY && inner->arr->size() == 1);
+			if (inner != nullptr && inner->type == asvJSONValue::ARRAY && inner->arr->size() == 1)
+				ASSERT((*inner->arr)[0]->getInt() == 1);
+		}
+	}
+	// AUDIT REGRESSION B: adjacent STRINGs in #content ["foo","bar"] must not
+	// merge into a single "foobar" string across the XML round-trip. The
+	// encoder emits an internal empty-marker element between them; the
+	// decoder drops it, restoring two elements.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"x":{"#content":["foo","bar"]}})")));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* c = json2.getRoot()->get("x")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY && c->arr->size() == 2);
+		if (c != nullptr && c->type == asvJSONValue::ARRAY && c->arr->size() == 2) {
+			ASSERT(std::string((*c->arr)[0]->getString()) == "foo");
+			ASSERT(std::string((*c->arr)[1]->getString()) == "bar");
+		}
+	}
+	// AUDIT REGRESSION B2: adjacent STRINGs interleaved with an element
+	// ["foo",{"b":1},"bar"] preserve order and type across the round-trip.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"x":{"#content":["foo",{"b":1},"bar"]}})")));
+		std::string xml = json.toXML();
+		asvJSON json2;
+		ASSERT(json2.fromXML(xml));
+		auto* c = json2.getRoot()->get("x")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY && c->arr->size() == 3);
+		if (c != nullptr && c->type == asvJSONValue::ARRAY && c->arr->size() == 3) {
+			ASSERT(std::string((*c->arr)[0]->getString()) == "foo");
+			ASSERT((*c->arr)[1]->type == asvJSONValue::OBJECT);
+			ASSERT((*c->arr)[1]->get("b")->getInt() == 1);
+			ASSERT(std::string((*c->arr)[2]->getString()) == "bar");
+		}
 	}
 }
 
@@ -22481,6 +22748,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLMixedContentTypedScalars);
 	RUN(testXMLArrayTypedItems);
 	RUN(testXMLAuditFixes);
+	RUN(testXMLAuditFixes2);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
