@@ -404,9 +404,34 @@ inline std::string json5ToJson(std::string_view input) {
         if (c == '-') out += '-';
         out += "Infinity"; i = j + 7; continue;
       }
-      if (c == '+') continue;
+      // A sign here may only start a new value (prefix position: previous
+      // non-ws token is '{' '[' ',' ':' or start of document). An infix
+      // '+'/'-' (e.g. `a: 1 + 2`) must not be silently swallowed so the
+      // number becomes `12`; reject instead.
+      bool prefix = (i == 0);
+      for (size_t q = i; q-- > 0;) {
+        char pc = input[q];
+        if (pc == ' ' || pc == '\t' || pc == '\n' || pc == '\r' || pc == '\v' || pc == '\f') continue;
+        auto u = static_cast<unsigned char>(pc);
+        if (u == 0xC2 && q > 0 && static_cast<unsigned char>(input[q - 1]) == 0xA0) { continue; }
+        if (u == 0xE2 && q > 1 && static_cast<unsigned char>(input[q - 1]) == 0x80 &&
+            (static_cast<unsigned char>(input[q - 2]) == 0xA8 || static_cast<unsigned char>(input[q - 2]) == 0xA9)) { continue; }
+        if (u == 0xE2 && q > 1 && static_cast<unsigned char>(input[q - 1]) == 0x80 &&
+            static_cast<unsigned char>(input[q - 2]) >= 0x80 && static_cast<unsigned char>(input[q - 2]) <= 0x8A) { continue; }
+        if (u == 0xE2 && q > 1 && static_cast<unsigned char>(input[q - 1]) == 0x81 &&
+            static_cast<unsigned char>(input[q - 2]) == 0x9F) { continue; }
+        if (u == 0xE3 && q > 1 && static_cast<unsigned char>(input[q - 1]) == 0x80 &&
+            static_cast<unsigned char>(input[q - 2]) == 0x80) { continue; }
+        if (u == 0xEF && q > 1 && static_cast<unsigned char>(input[q - 1]) == 0xBB &&
+            static_cast<unsigned char>(input[q - 2]) == 0xBF) { continue; }
+        prefix = (pc == '{' || pc == '[' || pc == ',' || pc == ':');
+        break;
+      }
+      if (c == '+' || c == '-') {
+        if (!prefix) throw asvJSONError("stray '+'/'-' sign in JSON5 number");
+        if (c == '+') continuesuppress;
+      }
       if (isNum && j > i + 1) { out += '-'; i = j - 1; continue; }
-    }
 
     // Trailing decimal: 5. -> 5.0, 5.e10 -> 5.0e10
     if (c == '.' && i > 0 && std::isdigit(static_cast<unsigned char>(input[i - 1])) &&
@@ -645,6 +670,10 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       size_t j = i + 1;
       while (j < n) {
         if (input[j] == '\\' && j + 1 < n) { j += 2; continue; }
+        // JSON5 strings must not contain unescaped CR/LF: the only legal way
+        // to break a line inside a string is the backslash line continuation.
+        if (input[j] == '\n' || input[j] == '\r')
+          throw asvJSONError("unescaped newline in JSON5 string");
         if (input[j] == q) break;
         j++;
       }
@@ -838,6 +867,7 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       break;
     }
     case asvJSONValue::STRING: {
+      if (v->raw_number) { out.append(v->str_data.data(), v->str_data.size()); break; }
       out += '"';
       appendJsonEscaped(out, v->str_data);
       out += '"';
@@ -881,6 +911,8 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
           if (c.block) { out += "/*"; out += c.text; out += "*/"; }
           else { out += "//"; out += c.text; }
           if (pretty) out += '\n';
+          else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
+          else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing '}'
         }
       }
       if (pretty && v->obj && !v->obj->empty()) {
@@ -915,13 +947,15 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       }
       if (v->comments && !v->comments->closing.empty()) {
         if (pretty) out += '\n';
-        for (const auto& c : v->comments->closing) {
-          if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-          else out += ", ";
-          if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-          else { out += "//"; out += c.text; }
-          if (pretty) out += '\n';
-        }
+          for (const auto& c : v->comments->closing) {
+            if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+            else out += ", ";
+            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+            else { out += "//"; out += c.text; }
+            if (pretty) out += '\n';
+            else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
+            else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing '}'
+          }
       }
       if (pretty && v->arr && !v->arr->empty()) {
         if (out.back() != '\n') out += '\n';
@@ -989,6 +1023,7 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
         if (ec == std::errc()) out.append(buf, ptr - buf);
       }
       out += "}}";
+      if (pretty) out += '\n';
       break;
     }
     case asvJSONValue::EXTENSION: {
