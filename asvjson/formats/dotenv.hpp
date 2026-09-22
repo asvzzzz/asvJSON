@@ -11,12 +11,18 @@
 //
 // Bare values are type-inferred (null/bool/int/double/datetime/string) exactly
 // like INI; single-quoted values are always literal strings; double-quoted
-// values process C-style escapes and may span multiple lines. Inline comments
-// (` # ...`) are stripped from bare values. Duplicate keys follow last-wins.
+// values process C-style escapes and may span multiple lines. Unknown escape
+// sequences (e.g. \q) are preserved verbatim rather than decoded. Inline
+// comments (` # ...`) are stripped from bare values. Duplicate keys follow
+// last-wins. Comment text is stored without the leading '#' but with its
+// following space, so `# hello` parses to " hello" and re-emits as "# hello"
+// (the writer is symmetric -- no progressive space drift on round-trip).
 //
 // Nested objects and arrays have no dotenv syntax: toDotenv() writes their
 // compact JSON text as a quoted string (a documented lossy round-trip -- the
-// text survives but decodes back as a string).
+// text survives but decodes back as a string). The same applies to DATETIME,
+// BINARY and EXTENSION, which serialize as quoted ISO/base64 text and decode
+// back as STRING.
 
 #include "../core.hpp"
 
@@ -132,7 +138,7 @@ inline void dotenvWriteCommentLines(std::string& out, const std::vector<Comment>
     for (;;) {
       size_t nl = text.find('\n', start);
       std::string_view seg = text.substr(start, nl == std::string_view::npos ? text.size() - start : nl - start);
-      out += "# ";
+      out += "#";
       out += seg;
       out += '\n';
       if (nl == std::string_view::npos) break;
@@ -198,7 +204,11 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
       // Objects, arrays and other special types have no dotenv syntax: emit
       // their compact JSON text as a quoted string.
       std::string s;
-      v->serialize(s, false);
+      try {
+        v->serialize(s, false);
+      } catch (const std::exception& e) {
+        throw asvJSONError(std::string("dotenv: cannot serialize value: ") + e.what());
+      }
       out += '"';
       out += dotenvEscape(s);
       out += '"';

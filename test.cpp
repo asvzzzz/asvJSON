@@ -15386,6 +15386,10 @@ TEST(testDotenvComments) {
     ASSERT_EQ(w->comments->leading.size(), size_t(1));
     ASSERT_EQ(w->comments->trailing.size(), size_t(1));
     ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
+    // No comment drift: text survives exactly (writer is symmetric with parser).
+    ASSERT_EQ(w->comments->leading[0].text, std::string(" leading"));
+    ASSERT_EQ(w->comments->trailing[0].text, std::string(" trailing"));
+    ASSERT_EQ(j2.getRoot()->comments->footing[0].text, std::string(" footing"));
   }
 }
 
