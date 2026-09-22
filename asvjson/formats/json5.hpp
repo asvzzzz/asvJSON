@@ -432,6 +432,7 @@ inline std::string json5ToJson(std::string_view input) {
         if (c == '+') continue;
       }
       if (isNum && j > i + 1) { out += '-'; i = j - 1; continue; }
+    }
 
     // Trailing decimal: 5. -> 5.0, 5.e10 -> 5.0e10
     if (c == '.' && i > 0 && std::isdigit(static_cast<unsigned char>(input[i - 1])) &&
@@ -669,11 +670,11 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       char q = c;
       size_t j = i + 1;
       while (j < n) {
-        if (input[j] == '\\' && j + 1 < n) { j += 2; continue; }
-        // JSON5 strings must not contain unescaped CR/LF: the only legal way
-        // to break a line inside a string is the backslash line continuation.
-        if (input[j] == '\n' || input[j] == '\r')
-          throw asvJSONError("unescaped newline in JSON5 string");
+        if (input[j] == '\\' && j + 1 < n) {
+            if (input[j + 1] == '\r' && j + 2 < n && input[j + 2] == '\n') j += 3;
+            else j += 2;
+            continue;
+        }
         if (input[j] == q) break;
         j++;
       }
