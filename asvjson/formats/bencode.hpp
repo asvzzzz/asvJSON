@@ -170,9 +170,13 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
       break;
     }
     case T::DATETIME:
-    case T::TIMESTAMP:
       out += 'i';
       out += std::to_string(v->timestamp);
+      out += 'e';
+      break;
+    case T::TIMESTAMP:
+      out += 'i';
+      out += std::to_string(v->num);
       out += 'e';
       break;
     case T::OBJECTID:

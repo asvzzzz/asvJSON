@@ -393,9 +393,16 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
         if (c == '\\' && q + 1 < line.size()) {
           const char* segStart = line.data() + q;
           size_t segLen = 0;
-          while (q < line.size() && line[q] == '\\' && q + 1 < line.size()) {
-            segLen += 2;
-            q += 2;
+          while (q < line.size()) {
+            if (line[q] != '\\') break;
+            if (q + 1 >= line.size()) break;
+            if (line[q + 1] == 'u' && q + 5 < line.size()) {
+              segLen += 6;
+              q += 6;
+            } else {
+              segLen += 2;
+              q += 2;
+            }
           }
           key += javapropUnescape(std::string_view(segStart, segLen));
           continue;

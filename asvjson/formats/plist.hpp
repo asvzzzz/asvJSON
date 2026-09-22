@@ -136,11 +136,13 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
     }
     case T::BINARY:
     case T::EXTENSION:
-    case T::OBJECTID:
       out += pad + "<data>" + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "</data>\n";
       break;
+    case T::OBJECTID:
+      out += pad + "<data>" + encodeBase64(reinterpret_cast<const uint8_t*>(v->str_data.data()), v->str_data.size()) + "</data>\n";
+      break;
     case T::TIMESTAMP:
-      out += pad + "<integer>" + std::to_string(v->timestamp) + "</integer>\n";
+      out += pad + "<integer>" + std::to_string(v->num) + "</integer>\n";
       break;
     case T::REGEX: {
       std::string_view pat(v->str_data);
