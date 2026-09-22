@@ -146,6 +146,8 @@ struct FormatFrame {
 	int align = 0;
 	bool first = true;
 	bool isRoot = false;
+	size_t declLen = 0;   // declared length for TOON list-form arrays (0 = not a list frame)
+	size_t itemCount = 0; // items emitted so far into this array frame
 	std::string prefix;
 	int childIndent = -1; // indentation of the first entry; -1 = unset
 };

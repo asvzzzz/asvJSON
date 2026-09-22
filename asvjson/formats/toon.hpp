@@ -7,7 +7,9 @@
 //   key:                  -- nested object / array (children indented)
 //   key[N]: v1,v2         -- inline primitive array with length header (Sec. 9.1)
 //   key[N]: / - items     -- list-form array with length header (Sec. 9.4)
-//   key[N]{"f1","f2"}:    -- tabular array; subsequent indented lines are rows
+//   key[N]{"f1","f2"}:    -- tabular array; subsequent indented lines are rows (DECODE-ONLY:
+//                           the encoder never emits this shape; uniform-object arrays render as
+//                           list-form instead, so tabular is a one-way parse path)
 // Strings are quoted only when required; full round-trip via toTOON()/fromTOON().
 
 #include "../core.hpp"
@@ -75,9 +77,19 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
       if (std::isnan(d) || std::isinf(d)) return "null";
-      std::string r; fmtDoubleVal(d, r); return r;
+      std::string r; fmtDoubleVal(d, r);
+      // A DOUBLE must round-trip as a float literal even when its value is
+      // integral (fmtDoubleVal can emit "100" for 100.0); without this the JSON
+      // parser would re-read it as INT and lose the type.
+      if (r.find('.') == std::string::npos && r.find('e') == std::string::npos && r.find('E') == std::string::npos)
+        r += ".0";
+      return r;
     }
     case asvJSONValue::OBJECT: {
+      // NOTE: dead code in practice -- every caller routes OBJECT/ARRAY through the
+      // length-bearing / list-form branches and excludes them from allPrim, so this
+      // switch is never reached for these types. Left here only for completeness; do
+      // not rely on its output (it would emit unquoted keys, which is invalid TOON).
       std::string r = "{";
       bool first = true;
       for (const auto& [k, child] : *(v->obj)) {
@@ -171,9 +183,9 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
   for (size_t i = 0; i < v->size(); i++) {
     auto* e = v->get(i);
     if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
-              e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
-              e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
-              e->type == asvJSONValue::TIMESTAMP)) { allPrim = false; break; }
+               e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
+               e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
+               e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME)) { allPrim = false; break; }
   }
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   std::string head = pad + "- [" + std::to_string(v->size()) + "]:";
@@ -236,7 +248,7 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
                 e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
                 e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
-                e->type == asvJSONValue::TIMESTAMP)) { allPrim = false; break; }
+                e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME)) { allPrim = false; break; }
     }
     std::string head = pad + (isRoot ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
     if (allPrim) {
@@ -319,6 +331,10 @@ inline bool toonParseListArrayHeader(std::string_view val, size_t& len) {
   }
   if (i >= val.size() || val[i] != ']') return false;
   i++;
+  // A trailing ':' is optional here: when the ']' is the final character, i ==
+  // val.size() and the guard below is skipped, so "- [3]" (no colon) still parses.
+  // The list-item branch guards on content[1] == ' ', so a bare "- [3]" never
+  // reaches this path as a list item; callers that do rely on it treat it inline.
   if (i < val.size() && val[i] != ':') return false;
   len = n;
   return true;
@@ -337,6 +353,9 @@ inline size_t toonFindFirstUnquoted(std::string_view s, char target) {
   }
   return std::string_view::npos;
 }
+// Note: this scans only quotes, not brackets -- a ':' inside an unquoted {a: 1}
+// value would be seen as unquoted. That is acceptable because such a token starts
+// with '{', which the caller routes through the JSON branch before any colon check.
 
 // Decodes a TOON key token (optionally double-quoted) into the JSON-escaped
 // text BETWEEN quotes. A quoted token's inner text is already JSON-escaped
@@ -387,10 +406,21 @@ inline std::string toonToJson(std::string_view input) {
     if (line.empty()) continue;
     int indent = countIndent(line);
     std::string_view content = stripIndent(line);
+    if (content.empty()) continue;   // whitespace-only line: nothing to process
+
+    // Validate any open list-form array frame that this line's lower indent will
+    // close, mirroring closeFrames' pop condition exactly. Declared length is only
+    // ever set on TOON list-form frames (declLen > 0), so ordinary arrays are skipped.
+    for (size_t i = stack.size(); i-- > 0; ) {
+      if (stack[i].isRoot) break;
+      if (indent > stack[i].align) break;   // this frame stays open -- stop here
+      if (stack[i].type == 'A' && stack[i].declLen > 0 && stack[i].itemCount != stack[i].declLen)
+        throw asvJSONError("TOON: array length mismatch at line " + std::to_string(li + 1));
+    }
 
     closeFrames(stack, out, indent);
     if (stack.empty()) break;
-    auto& curFrame = stack.back();
+    auto& curFrame = stack.back();   // captured before any push_back below; a later push may reallocate the vector and invalidate this reference.
 
     // array header: [optional key][N][{fields}]:  (spec Sec. 9.1-Sec. 9.4, Sec. 10)
     // The header's first unquoted ':' must occur after the [N]{fields} segment,
@@ -504,7 +534,9 @@ inline std::string toonToJson(std::string_view input) {
               // root: its '[' is closed by the EOF pass
               continue;
             } else {
-              // list form: frame left open; deeper "- value" items fill it.
+              // list form: frame left open; deeper "- value" items fill it. Record the
+              // declared length so the item count can be validated when this frame closes.
+              if (!stack.empty()) stack.back().declLen = arrLen;
               continue;
             }
           }
@@ -516,6 +548,7 @@ inline std::string toonToJson(std::string_view input) {
     if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
       addComma(stack, out);
       curFrame.first = false;
+      if (curFrame.type == 'A') curFrame.itemCount++;   // one element of the enclosing array (scalar or nested)
       std::string_view val = content.substr(2);
       // nested array header form "- [M]: ..." / "- [M]" (spec Sec. 9.2/Sec. 9.4)
       size_t arrLen = 0;
@@ -548,8 +581,10 @@ inline std::string toonToJson(std::string_view input) {
           // empty inner array "- [0]:" -> []
           out += ']';
         } else {
-          // non-primitive list-form opener: leave frame open
+          // non-primitive list-form opener: leave frame open. Its deeper "- value"
+          // items are validated against this declared length when the frame closes.
           stack.push_back({'A', true, indent, true, false});
+          if (!stack.empty()) stack.back().declLen = arrLen;
         }
         continue;
       }
@@ -560,6 +595,7 @@ inline std::string toonToJson(std::string_view input) {
     if (content == "-") {
       addComma(stack, out);
       curFrame.first = false;
+      if (curFrame.type == 'A') curFrame.itemCount++;   // one object element of the enclosing array
       out += '{';
       stack.push_back({'O', true, indent, true, false});
       continue;
@@ -591,11 +627,17 @@ inline std::string toonToJson(std::string_view input) {
       } else {
         out += '"' + keyStr + "\":" + toonJsonQuoteBare(valPart);
       }
+      continue;   // handled as a member -- skip the unrecognized-line guard below
     }
+
+    throw asvJSONError("TOON: unrecognized line " + std::to_string(li + 1));
   }
 
-  // Close all remaining frames (EOF)
+  // Close all remaining frames (EOF). Any still-open list-form array must have met
+  // its declared length by now.
   while (!stack.empty()) {
+    if (stack.back().type == 'A' && stack.back().declLen > 0 && stack.back().itemCount != stack.back().declLen)
+      throw asvJSONError("TOON: array length mismatch (declared " + std::to_string(stack.back().declLen) + ", got " + std::to_string(stack.back().itemCount) + ")");
     out += (stack.back().type == 'O') ? '}' : ']';
     stack.pop_back();
   }
