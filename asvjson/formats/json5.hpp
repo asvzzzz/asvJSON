@@ -429,7 +429,7 @@ inline std::string json5ToJson(std::string_view input) {
       }
       if (c == '+' || c == '-') {
         if (!prefix) throw asvJSONError("stray '+'/'-' sign in JSON5 number");
-        if (c == '+') continuesuppress;
+        if (c == '+') continue;
       }
       if (isNum && j > i + 1) { out += '-'; i = j - 1; continue; }
 
