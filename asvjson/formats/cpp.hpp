@@ -348,8 +348,25 @@ inline std::string CppGenerator::registerStruct(const asvJSONValue* v,
                                                 const std::string& path,
                                                 const std::string& hint,
                                                 const asvJSONValue* commentSrc) {
+  // Fast-path: if this value was already registered (e.g. via a prior inferType
+  // call that populated objTypeCache_), reuse the same name rather than deriving
+  // a second uniqueName() and creating a dangling reference.
+  auto cac = objTypeCache_.find(v);
+  if (cac != objTypeCache_.end()) return cac->second.structName;
+
   std::string base = hint.empty() ? opts_.rootName : hint;
   std::string name = uniqueName(cppPascal(base, opts_.rootName.c_str()));
+
+  // Register in cache BEFORE processing children so that any recursive
+  // inferType() call on this same object (via busyObjects_ hit) resolves to the
+  // exact same name. Without this, a cycle like root -> child -> root would
+  // emit std::unique_ptr<Root2> while the struct is actually named Root.
+  CppType cached;
+  cached.kind = CppType::Struct;
+  cached.structName = name;
+  cached.type = name;
+  objTypeCache_.emplace(v, cached);
+
   StructDef def;
   def.name = name;
   def.src = v;
@@ -549,6 +566,9 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
       const void* key = static_cast<const void*>(v);
       if (busyObjects_.count(key)) {
         // Recursive reference: break the cycle with a pointer.
+        // objTypeCache_ was populated by registerStruct before child processing,
+        // so cac (checked above) already covers this case — we only reach here
+        // if the cache hit failed for some reason; fall back to deriving a name.
         usedUniquePtr_ = true;
         t.kind = CppType::Struct;
         t.structName = cppPascal(hint.empty() ? opts_.rootName : hint, "Node");
@@ -937,6 +957,9 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       // Preprocessor directive: consume the logical line (honoring `\`
       // continuations), track conditional-compilation state, and capture
       // object-like `#define NAME repl` macros only in active branches.
+      // Function-like macros (`#define F(x) ...`) are intentionally not captured —
+      // expanding them would require argument substitution, which is out of scope
+      // for this pragmatic reader. They appear as bare identifiers in the token stream.
       size_t j = i;
       std::string logical;
       while (j < n) {
@@ -1325,8 +1348,12 @@ inline TypeRef::ScalarKind cppRdClassify(const std::string& n) {
 
 // Classify a whole type region by the identifiers it contains, so multi-word
 // types classify correctly (`signed char` -> int, `unsigned long long` -> int).
+// Note: `unsigned char` and `signed char` both set anyInt=true (via "unsigned"
+// / "signed") and fall through to SInt. This matches the numeric range of
+// those types but means a hand-written `unsigned char flags;` round-trips as
+// INT rather than STRING/BINARY — toCpp() never emits those raw types anyway.
 inline TypeRef::ScalarKind cppRdClassifyRegion(const std::vector<const Tok*>& v,
-                                               size_t b, size_t e) {
+                                                size_t b, size_t e) {
   bool anyInt = false, anyFloat = false, anyChar = false, anyBool = false;
   bool anyStr = false, anyVoid = false;
   for (size_t k = b; k < e; k++) {
@@ -1640,9 +1667,25 @@ struct Reader {
 
   // Returns the "extra declarators" declared after the closing brace
   // (e.g. `struct Foo { ... } a, b;` -> fields a and b).
+  // Skip C++20-style bracket attributes ([...] or [[...]]) that may appear
+  // between 'struct'/'class' and the identifier (e.g. `struct [[nodiscard]] Foo`).
+  void skipBracketAttr() {
+    if (!isP("[")) return;
+    adv(); // '['
+    int d = 1;
+    while (!eof() && d > 0) {
+      if (isP("[")) d++;
+      else if (isP("]")) d--;
+      adv();
+    }
+  }
+
   std::vector<FieldDef> parseStructDecl() {
     std::vector<Comment> lead = takePending();
     adv(); // struct / class
+    skipTrivia();
+    // Skip any bracket attributes: [[nodiscard]], __attribute__((...)), etc.
+    while (isP("[")) skipBracketAttr();
     skipTrivia();
     std::string name;
     if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
@@ -1727,9 +1770,13 @@ struct Reader {
       if (isP(";")) { adv(); continue; }
       if (cur().kind == Tok::Ident) {
         const std::string s = cur().text;
+        // Treat `public`/`private`/`protected` as access-specifiers only when
+        // followed by `:` — otherwise they could be a field name in a
+        // declaration like `int public;` (invalid C++, but we should not mis-parse).
         if (s == "public" || s == "private" || s == "protected") {
           adv(); skipTrivia();
           if (isP(":")) adv();
+          else p--; // not a specifier: rewind so parseMember sees the ident
           continue;
         }
         if (s == "template") { skipTemplateParams(); continue; }
@@ -1773,7 +1820,11 @@ struct Reader {
         else if (s == "]") { if (brk > 0) brk--; }
         else if (s == "{") {
           if (paren == 0 && ang == 0 && brk == 0) {
-            if (sawEq) brace++;
+            // A bare `{` without a preceding `=` or `(` is brace-init (e.g.
+            // `Foo bar{5};`, `int arr[3]{1,2,3};`), not a method body.  Only
+            // treat it as a method body when `(` was seen earlier (`sawParen`).
+            if (!sawParen && !sawEq) brace++;
+            else if (sawEq) brace++;
             else {
               int d = 1; i++;
               while (i < t.size() && d > 0) {
@@ -1883,7 +1934,10 @@ struct Reader {
     // Done outside the segment loop so a trailing empty/no-identifier segment
     // (`int a, ;`) can never leave p stuck and loop forever.
     if (end != npos) {
-      if (parsedAny) {
+      // parsedAny is set after def.fields.push_back(...) in the loop above, so
+      // a non-empty fields vector is the expected invariant — but check explicitly
+      // to avoid UB on a future refactoring that could decouple the two.
+      if (parsedAny && !def.fields.empty()) {
         FieldDef& lastField = def.fields.back();
         int semiLine = t[end].line;
         size_t k = end + 1;
