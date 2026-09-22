@@ -68,6 +68,35 @@ MIT license - see the `LICENSE` file for details.
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
 - C++ codegen - `toCpp()` / `fromCpp()` - generate C++17 `struct`/`enum` declarations from a parsed value tree, and parse C++ declarations back into a value tree: nested structs per object, `std::array<T,N>` (or `std::vector<T>`) for homogeneous arrays, `std::vector<std::variant<...>>` for mixed arrays, and enums inferred from identifier-string arrays (object-map enums via `enumPaths`/`enumNames`); a C-style output mode emits `typedef struct` / C arrays / `enum`; comments carry over as `//` / `/* */`
 
+#### Format Specifications
+
+| Category | Format | Specification |
+| --- | --- | --- |
+| Industrial standards | JSON | [json.org](https://www.json.org/), [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259) |
+| Industrial standards | BSON | [bsonspec.org](https://bsonspec.org/) |
+| Industrial standards | MessagePack | [msgpack.org](https://msgpack.org/) |
+| Industrial standards | CBOR | [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949) |
+| Industrial standards | XML | [W3C XML](https://www.w3.org/TR/xml/) |
+| Industrial standards | YAML | [YAML 1.2 spec](https://yaml.org/spec/1.2.2/) |
+| Industrial standards | CSV | [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180) |
+| Industrial standards | TOML | [toml.io](https://toml.io/en/) |
+| Industrial standards | Protobuf | [protobuf.dev](https://protobuf.dev/) |
+| Binary formats | UBJSON | [ubjson.org](https://ubjson.org/) |
+| Binary formats | Bencode | [Wikipedia: Bencode](https://en.wikipedia.org/wiki/Bencode) |
+| Binary formats | Plist | [Apple NSKeyedArchiver / .plist](https://developer.apple.com/documentation/foundation/nskeyedarchiver) |
+| Human-readable / LLM-friendly | JSON5 | [spec.json5.org](https://spec.json5.org/) |
+| Human-readable / LLM-friendly | INI | [Wikipedia: Configuration file](https://en.wikipedia.org/wiki/Configuration_file) |
+| Human-readable / LLM-friendly | Dotenv | [dotenvx.com](https://dotenvx.com/) |
+| Human-readable / LLM-friendly | JavaProp | [Java Properties](https://docs.oracle.com/javase/8/docs/api/java/util/Properties.html) |
+| Human-readable / LLM-friendly | RON | [ron-rs/ron](https://github.com/ron-rs/ron) |
+| Human-readable / LLM-friendly | S-Expression | [Wikipedia: S-expression](https://en.wikipedia.org/wiki/S-expression) |
+| Human-readable / LLM-friendly | JSON Lines (NDJSON) | [ndjson.org](https://ndjson.org/) |
+| Human-readable / LLM-friendly | UDE | [github.com/asvzzz/UDE](https://github.com/asvzzz/UDE) |
+| Config / env formats | TOON | [github.com/toon-format/spec](https://github.com/toon-format/spec) |
+| Config / env formats | TRON | [tron-format.github.io](https://tron-format.github.io/) |
+| Config / env formats | GOON | [GOON-format/SPEC.md](https://github.com/GOON-format/goon/blob/main/SPEC.md) |
+| Platform / copyright formats | C++ codegen | Internal (asvJSON++) |
+
 ### Standards
 - JSON Pointer (RFC 6901)
 - JSON Merge Patch (RFC 7396)
