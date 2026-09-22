@@ -17329,13 +17329,14 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "hello\n");
   }
-  // A string ending in multiple newlines cannot round-trip as a block scalar,
-  // so it is quoted instead
+  // A string ending in multiple newlines round-trips as a '|+' block scalar,
+  // which keeps every trailing newline; the serializer no longer falls back to
+  // a quoted string for this case.
   {
     asvJSON j;
     j.putString("msg", "hello\n\n");
     std::string ude = j.toUDE();
-    ASSERT(ude.find("msg: \"") != std::string::npos);
+    ASSERT(ude.find("msg: |+") != std::string::npos);
     asvJSON j2;
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "hello\n\n");
@@ -17368,13 +17369,14 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "a\nb\n");
   }
-  // Internal blank lines cannot round-trip as a block scalar (Appendix A), so
-  // the serializer falls back to a quoted string
+  // Internal blank lines round-trip as a '|' block scalar: each blank line
+  // becomes a paragraph break, so the serializer no longer falls back to a
+  // quoted string for this case.
   {
     asvJSON j;
     j.putString("msg", "a\n\nb");
     std::string ude = j.toUDE();
-    ASSERT(ude.find("msg: \"") != std::string::npos);
+    ASSERT(ude.find("msg: |") != std::string::npos);
     asvJSON j2;
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "a\n\nb");

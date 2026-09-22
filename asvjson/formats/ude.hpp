@@ -58,7 +58,7 @@ inline bool udeIsTagChar(char c) {
   return udeIsIdentCont(c) || c == ':' || c == '.';
 }
 
-// ====================== Encoding / BOM (Section 9) ======================
+// ====================== Encoding / BOM ======================
 
 inline void udeAppendUtf8(std::string& out, uint32_t cp) {
   if (cp <= 0x7F) out.push_back(static_cast<char>(cp));
@@ -390,7 +390,7 @@ public:
   }
 
 private:
-  // Documented resource limits (Section 10 of the UDE spec): the maximum
+  // Documented resource limits (Section 12 of the UDE spec): the maximum
   // alias resolution depth (100, matching the spec) and the maximum number of
   // anchors that may be registered while parsing a document.
   static constexpr int kMaxAliasDepth = 100;
@@ -613,7 +613,7 @@ private:
           case '\\': out.push_back('\\'); break;
           case '"': out.push_back('"'); break;
           case 'x': {
-            // Byte escape \xHH -- exactly two hex digits (Section 6).
+            // Byte escape \xHH -- exactly two hex digits (Section 3.1).
             if (i + 2 >= raw.size()) throw asvJSONError("UDE: invalid \\x escape in string");
             int hi = udeHexDigit(raw[i + 1]);
             int lo = udeHexDigit(raw[i + 2]);
@@ -827,7 +827,7 @@ private:
       size_t indent = 0;
       while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t')) indent++;
       bool blank = (indent == line.size());
-      // YAML rule (Section 10): tabs may not be used for indentation. The
+      // YAML rule (Section 6): tabs may not be used for indentation. The
       // indentation margin of a block scalar must consist of spaces only;
       // tabs after the margin are part of the content.
       if (!blank) {
@@ -859,9 +859,10 @@ private:
       lineNum_++;
     }
 
-    // Join content lines (each element separated by a single newline). The
-    // terminating empty line is not content, but the break that follows the
-    // last content line is: append it when the scalar was cut short by one.
+    // Join content lines with single newlines, then apply chomping below. A
+    // blank line in the source becomes an empty element (a paragraph break),
+    // and a trailing blank line leaves a phantom empty element recording how
+    // many trailing newlines the source carried; '-' keeps none, clip one, '+' all.
     std::string out;
     for (size_t i = 0; i < content.size(); i++) {
       if (i > 0) out += '\n';
@@ -877,8 +878,11 @@ private:
       out = udeFoldScalar(out);
     }
 
-    // Apply chomping: '-' strips all trailing newlines, '+' keeps all, and
-    // the default (clip) keeps a single trailing newline (Section 6).
+    // Apply chomping ('-' = none, clip = one, '+' = all) per Section 6. The
+    // count of trailing newlines comes from phantom blank lines in the source;
+    // note that document splitting normalises a lone trailing newline, so a
+    // hand-written YAML block with exactly one trailing \n yields the value
+    // without it -- round-trips stay exact because the encoder emits matching blanks.
     if (chomp == '-') {
       while (!out.empty() && out.back() == '\n') out.pop_back();
     } else if (chomp != '+') {
@@ -1538,15 +1542,19 @@ inline void udeWriteIndent(std::ostream& os, int indent) {
 // line is absorbed into the base indent (or rejected outright for tabs), so
 // the encoder keeps a conservative subset here: at least one content line,
 // every line is either truly empty or begins with a non-whitespace character,
-// and at most one trailing blank line. Other strings (whose value cannot be
-// preserved exactly) are written as quoted strings by the caller instead.
+// and any number of trailing blank lines (kept exactly by a '|+' header, with
+// blanks becoming paragraph breaks). A '\r' anywhere -- whether a CRLF line
+// ending or an embedded carriage return -- cannot round-trip here, because the
+// decoder strips a line-ending '\r' when reading content, so such strings are
+// rejected outright and written as quoted strings instead, where '\r' is
+// escaped as \\r and preserved exactly. Other strings (whose value cannot be
+// preserved exactly) are likewise written as quoted strings by the caller.
 inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
-  size_t trailing = 0;
-  while (trailing < s.size() && s[s.size() - 1 - trailing] == '\n') trailing++;
-  if (trailing >= 2) return false; // only a single trailing blank line survives
+  if (s.find('\r') != std::string_view::npos) return false;
+  // Any number of trailing newlines round-trips via a '|+' header that keeps
+  // all of them, and blank lines (including repeats) become paragraph breaks.
   bool seenContent = false;
-  bool trailingBlank = false;
   size_t i = 0;
   while (i < s.size()) {
     size_t nl = s.find('\n', i);
@@ -1559,15 +1567,7 @@ inline bool udeCanBlockEncode(std::string_view s) {
     // decoder folds into a blank line, so it cannot round-trip here. Only a
     // truly empty line can represent a blank line.
     if (allWhite && !emptyLine) return false;
-    if (emptyLine) {
-      // Blank line. A trailing blank line is allowed once (it supplies the
-      // line break that clip chomping keeps); anything else is unsafe.
-      if (seenContent) {
-        if (trailingBlank) return false;
-        trailingBlank = true;
-      }
-    } else {
-      if (trailingBlank) return false; // blank line followed by more content
+    if (!emptyLine) {
       // Leading whitespace on a content line is unsafe: it is absorbed into
       // the base indent (a leading space) or rejected by the parser (a tab in
       // the indentation margin). Fall back to a quoted string.
@@ -1596,10 +1596,10 @@ inline bool udeCanFoldEncode(std::string_view s) {
   return true;
 }
 
-// Write a string as a block scalar. A single trailing newline is preserved by
-// emitting a '|+' header plus one trailing blank line so that the value
-// round-trips exactly. Strings that cannot round-trip as a block scalar are
-// written as quoted strings by the caller instead.
+// Write a string as a block scalar. '|' keeps no trailing newline; '|+' keeps
+// every one, so any number of trailing newlines round-trips exactly. Strings
+// that cannot round-trip as a block scalar are written as quoted strings by
+// the caller instead.
 inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
   size_t k = 0;
   while (k < s.size() && s[s.size() - 1 - k] == '\n') k++;
@@ -1608,8 +1608,13 @@ inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
   size_t i = 0;
   while (i < body.size()) {
     size_t eol = body.find('\n', i);
-    if (eol == std::string_view::npos) eol = body.size();
-    os << "  " << body.substr(i, eol - i) << '\n';
+    bool lastLine = (eol == std::string_view::npos);
+    if (lastLine) eol = body.size();
+    os << "  " << body.substr(i, eol - i);
+    // Only emit a newline after the final content line when chomping is
+    // requested (k > 0): without it the decoded value would gain a trailing
+    // newline that the source string did not have.
+    if (!lastLine || k > 0) os << '\n';
     i = eol + 1;
   }
   for (size_t j = 0; j < k; j++) os << '\n';
@@ -1878,7 +1883,7 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
           if (!udeIsTagChar(ch)) { verbatim = true; break; }
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
-      if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent, true, strict);
+      if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
       else os << "null";
       break;
     }

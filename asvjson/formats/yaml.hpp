@@ -2249,7 +2249,7 @@ inline std::string yamlGatherYamlEmbed(const std::string& tail,
 	return yamlProcessYamlEmbed(std::move(buf));
 }
 
-// YAML forbids using tabs for indentation (Section 10). A tab appearing in the
+// YAML forbids using tabs for indentation (Section 6). A tab appearing in the
 // leading whitespace of a line is a structural error; throw to match UDE behavior.
 inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 	for (char c : line) {
