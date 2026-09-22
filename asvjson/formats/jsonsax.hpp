@@ -439,11 +439,15 @@ public:
     }
 
     // Incremental structural UTF-8 validation over the newly appended region.
+    // Catches truncated sequences and invalid lead bytes immediately; full
+    // sequence semantics (overlong, surrogates, >U+10FFFF) are validated via
+    // isValidUTF8 on complete strings in processString where all bytes are present.
     if (validateUTF8) {
       for (size_t i = utf8ScanPos_; i < buffer_.size(); i++) {
         uint8_t b = static_cast<uint8_t>(buffer_[i]);
         if (utf8Need_ == 0) {
           if (b < 0x80) continue;
+          if (b <= 0xC1 || b >= 0xF5) { setError("Invalid UTF-8 in input"); return false; }
           if ((b & 0xE0) == 0xC0) utf8Need_ = 1;
           else if ((b & 0xF0) == 0xE0) utf8Need_ = 2;
           else if ((b & 0xF8) == 0xF0) utf8Need_ = 3;
@@ -598,7 +602,11 @@ private:
   State commentRetState_ = State::TOP;
 
   void setError(const std::string& msg) {
-    lastError_ = msg; error_ = true; handler_.onError(lastError_);
+    lastError_ = msg; error_ = true;
+    // Contract says onError MUST NOT throw, but wrap defensively: if a user-
+    // supplied handler does throw, catch and swallow so feed()/finish() don't
+    // propagate an exception through the error path.
+    try { handler_.onError(lastError_); } catch (...) {}
   }
 
   // True when the next unconsumed char is a '/' sitting at the very end of the
@@ -649,6 +657,7 @@ private:
       size_t consumed = pos_;
       buffer_.erase(0, consumed);
       pos_ = 0;
+      tokenStart_ = 0; // keep in sync — future states relying on it need a clean slate
       // Bytes [0, consumed) were already UTF-8 validated and are now gone; keep
       // the scan pointer aligned with the remaining (already validated) region.
       utf8ScanPos_ = (utf8ScanPos_ >= consumed) ? utf8ScanPos_ - consumed : 0;
@@ -936,6 +945,10 @@ private:
         raw.append(buffer_, tokenStart_, pos_ - tokenStart_);
         advance(); // past closing quote
 
+        if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(raw.data()), raw.size())) {
+          setError("Invalid UTF-8 in input");
+          return false;
+        }
         if (state_ == State::STR_KEY) {
           if (raw.size() > asvJSONValue::MAX_STRING_LEN) {
             setError("String too long");
@@ -1097,7 +1110,17 @@ private:
         // the DOM parser keeps the literal as a raw_number string, SAX emits it
         // as a double (a JSON number either way, with type conversion).
         tokenBuffer_.clear();
-        double d = std::strtod(numStr.c_str(), nullptr);
+        errno = 0;
+        char* end = nullptr;
+        double d = std::strtod(numStr.c_str(), &end);
+        if (errno == ERANGE || end != numStr.c_str() + numStr.size()) {
+          setError("Invalid number: out of range");
+          return false;
+        }
+        if (!allowNaNInfinity && (std::isnan(d) || std::isinf(d))) {
+          setError("NaN or Infinity not allowed");
+          return false;
+        }
         handler_.onDoubleValue(d);
       } else {
         tokenBuffer_.clear();
@@ -1291,6 +1314,12 @@ private:
       (*parent->obj)[currentKey_] = std::move(val);
     } else if (parent->type == asvJSONValue::ARRAY && parent->arr) {
       parent->arr->push_back(std::move(val));
+    } else {
+      // Mismatched container: SAX emitted a value where neither an object nor
+      // array is open. For a trusted SAX emitter this should never happen; log
+      // via the handler so it is visible rather than silently dropped.
+      lastError_ = "SAX value emitted outside object/array context";
+      try { handler_.onError(lastError_); } catch (...) {}
     }
   }
 };
