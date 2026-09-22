@@ -11,6 +11,9 @@
 //   - Leading decimal: .5
 //   - Plus sign: +42
 //   - Comments // /* */ # (already handled by JSON parser)
+// NOTE: unescaped U+000A/U+000D inside strings is accepted (lenient, per json5ToJson)
+// and escaped to \n / \r via escapeControl; spec §5.2 forbids them — use line-continuation
+// with backslash for actual multi-line strings.
 
 #include "../core.hpp"
 
@@ -913,7 +916,6 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
           else { out += "//"; out += c.text; }
           if (pretty) out += '\n';
           else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
-          else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing '}'
         }
       }
       if (pretty && v->obj && !v->obj->empty()) {
@@ -955,7 +957,6 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
             else { out += "//"; out += c.text; }
             if (pretty) out += '\n';
             else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
-            else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing '}'
           }
       }
       if (pretty && v->arr && !v->arr->empty()) {
@@ -1024,7 +1025,6 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
         if (ec == std::errc()) out.append(buf, ptr - buf);
       }
       out += "}}";
-      if (pretty) out += '\n';
       break;
     }
     case asvJSONValue::EXTENSION: {
