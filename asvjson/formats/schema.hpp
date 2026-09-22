@@ -100,6 +100,16 @@ private:
   };
   using RefCache = std::unordered_map<std::string, RefCacheEntry>;
   std::shared_ptr<RefCache> refCache_;
+  // Reusable buffer for propertyNames validation: validateNode may push its
+  // address into refStack_ when a $ref is encountered. Keeping this on the
+  // validator's lifetime (rather than as a stack-local in the loop) avoids a
+  // dangling pointer if an early-return or refactor ever changes erase timing.
+  asvJSONValue propertyNameVal_;
+
+  // A schema value is either a boolean (true/false schema) or an object.
+  static bool isSchema(const asvJSONValue* v) {
+    return v && (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::BOOL_VAL);
+  }
 
   void setError(const std::string& msg) {
     if (!error_.empty()) return;
@@ -107,16 +117,19 @@ private:
   }
 
   void pushPath(const std::string& seg) {
-    if (seg.find('\"') != std::string::npos || seg.find('\\') != std::string::npos || seg.find('/') != std::string::npos) {
+    // RFC 6901 JSON Pointer: ~ -> ~0, / -> ~1. Unquoted ref tokens are the
+    // standard form; quoting is only used as a legacy fallback for segments
+    // containing characters that would otherwise be ambiguous (quote itself).
+    bool needsQuote = seg.find('\"') != std::string::npos;
+    if (needsQuote || seg.find('/') != std::string::npos) {
       std::string escaped;
       escaped.reserve(seg.size() + 2);
-      escaped += '\"';
       for (char c : seg) {
-        if (c == '\"') escaped += "\\\"";
-        else if (c == '\\') escaped += "\\\\";
+        if (c == '~') escaped += "~0";
+        else if (c == '/') escaped += "~1";
+        else if (c == '\"') escaped += "\\\"";
         else escaped += c;
       }
-      escaped += '\"';
       path_ += "/" + escaped;
     } else {
       path_ += "/" + seg;
@@ -377,6 +390,9 @@ private:
   }
 
   static bool checkSingleType(const asvJSONValue* v, std::string_view t) {
+    // Custom types map to their closest JSON Schema analogue per the asvJSON++
+    // convention (see core.hpp type documentation). This keeps schema validation
+    // usable without requiring a dedicated "binary"/"datetime" keyword.
     switch (v->type) {
       case asvJSONValue::NULL_VAL: return t == "null";
       case asvJSONValue::BOOL_VAL: return t == "boolean";
@@ -388,6 +404,18 @@ private:
       case asvJSONValue::STRING: return t == "string";
       case asvJSONValue::ARRAY: return t == "array";
       case asvJSONValue::OBJECT: return t == "object";
+      // Custom types that serialize to strings.
+      case asvJSONValue::DATETIME:
+      case asvJSONValue::OBJECTID:
+      case asvJSONValue::REGEX:
+      case asvJSONValue::CUSTOM_TAG: return t == "string";
+      // Timestamp stores epoch seconds as int64 — maps to integer.
+      case asvJSONValue::TIMESTAMP: return t == "integer" || t == "number";
+      // Binary data can appear as a base64 string or (when decoded) an object;
+      // accept both for schema compatibility.
+      case asvJSONValue::BINARY: return t == "string" || t == "object";
+      // Extension payload has no single canonical JSON Schema type.
+      case asvJSONValue::EXTENSION: return false;
       default: return false;
     }
   }
@@ -504,10 +532,7 @@ private:
         return false;
       }
     }
-    // A schema value is either a boolean (true/false schema) or an object.
-    auto isSchema = [](const asvJSONValue* v) {
-      return v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::BOOL_VAL;
-    };
+
     // allOf / anyOf / oneOf -- non-empty arrays of schemas.
     static const char* const ofArrays[] = {"allOf", "anyOf", "oneOf"};
     for (const char* k : ofArrays) {
@@ -563,9 +588,15 @@ private:
     static const char* const schemaMaps[] = {"properties", "patternProperties", "definitions", "$defs"};
     for (const char* k : schemaMaps) {
       if (auto n = schemaGet(schema, k)) {
-        if (n->type != asvJSONValue::OBJECT) {
+        if (n->type != asvJSONValue::OBJECT || !n->obj) {
           setError(std::string("Invalid schema: '") + k + "' must be an object");
           return false;
+        }
+        for (const auto& [key, val] : *n->obj) {
+          if (!isSchema(val.get())) {
+            setError(std::string("Invalid schema: '") + k + "' values must be schemas");
+            return false;
+          }
         }
       }
     }
@@ -1027,19 +1058,21 @@ private:
     const asvJSONValue* itemsSchema = schemaGet(schema, "items");
     if (items && itemsSchema) {
       if (itemsSchema->type == asvJSONValue::ARRAY && itemsSchema->arr) {
+        // Hoisted out of the loop: schemaHas/schemaGet are O(log n) map lookups.
+        const asvJSONValue* additionalItemsSchema = schemaGet(schema, "additionalItems");
         for (size_t i = 0; i < count; i++) {
           const asvJSONValue* itemSchema = nullptr;
           if (i < itemsSchema->arr->size()) {
             itemSchema = (*itemsSchema->arr)[i].get();
-          } else if (schemaHas(schema, "additionalItems")) {
-            itemSchema = schemaGet(schema, "additionalItems");
-            if (isBoolFalse(itemSchema)) {
+          } else if (additionalItemsSchema) {
+            if (isBoolFalse(additionalItemsSchema)) {
               std::string savedPath = path_;
               pushIndexPath(i);
               setError("Additional items not allowed at index " + std::to_string(i));
               path_ = savedPath;
               return false;
             }
+            itemSchema = additionalItemsSchema;
           }
           if (itemSchema && !isBoolTrue(itemSchema)) {
             std::string oldPath = path_;
@@ -1176,10 +1209,9 @@ private:
         auto node = schemaGet(schema, "propertyNames");
         if (node && obj) {
           for (auto& kv : *obj) {
-            asvJSONValue nameVal;
-            nameVal.type = asvJSONValue::STRING;
-            nameVal.str_data = kv.first;
-            if (!validateNode(&nameVal, node)) {
+            propertyNameVal_.type = asvJSONValue::STRING;
+            propertyNameVal_.str_data = kv.first;
+            if (!validateNode(&propertyNameVal_, node)) {
               setError("Property name '" + kv.first + "' is invalid");
               return false;
             }
@@ -1215,7 +1247,10 @@ private:
                     return false;
                   }
                 }
-              } else if (depKV.second->type == asvJSONValue::OBJECT) {
+              } else if (isSchema(depKV.second.get())) {
+                // isSchema covers both OBJECT schemas and boolean schemas
+                // (true = always-valid, false = reject any value that has this key).
+                // validateNode already dispatches bool schemas at its top.
                 if (!validateNode(value, depKV.second.get())) return false;
               }
             }
