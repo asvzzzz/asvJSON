@@ -22,6 +22,9 @@
 //               range round-trips as {"$range":{"start":...,"end":...,"inclusive":...}})
 //   Comments:   // line, nested /* block */, #![enable(...)] headers
 //   Trailing commas: allowed in all containers
+//   Limitations: br'c' raw byte chars are not supported (only b'c'); r#foo
+//   raw identifiers decode to their bare ident text and re-encode as quoted
+//   strings, so round-trip text differs though the value is preserved.
 //
 // JSON mapping:
 //   () empty tuple -> {} empty object; None -> null; Some(x) -> x; bare idents
@@ -233,6 +236,19 @@ struct RonParser {
     e.path = std::move(path);
     e.trailing.swap(pendTrail);
     comments.push_back(std::move(e));
+  }
+
+  // Redirect a same-line comment collected right after ':' to leading of `path`
+  // (it introduces the value, not trailing it), then any own-line lead. Used for
+  // struct fields and map keys where a comment sits between ':' and its value.
+  void commitValueLead(const std::string& path) {
+    if (!pendTrail.empty()) {
+      RonCommentEntry e;
+      e.path = path;
+      e.leading.swap(pendTrail);
+      comments.push_back(std::move(e));
+    }
+    commitLead(path);
   }
 
   // Commit comments collected just before a container closer: they stay inside
@@ -723,12 +739,12 @@ struct RonParser {
         std::string key = readIdent();
         if (key.empty()) throw asvJSONError("RON: expected field name in struct");
         childPath = ronJoinPath(path, key);
-        skipWs();
-        if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after field name");
-        ++i;
-        skipWs();
-        commitLead(childPath);
-        std::string val = parseValue(depth + 1, childPath, commit);
+         skipWs();
+         if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after field name");
+         ++i;
+         skipWs();
+         commitValueLead(childPath);
+         std::string val = parseValue(depth + 1, childPath, commit);
         if (!first) out += ',';
         first = false;
         out += ronJsonStr(key);
@@ -813,11 +829,18 @@ struct RonParser {
       }
       std::string childPath;
       if (keyText.size() >= 2 && keyText[0] == '"') {
-        size_t q = 1;
         std::string rawKey;
-        while (q + 1 < keyText.size()) {
-          if (keyText[q] == '\\' && q + 1 < keyText.size()) { rawKey += keyText[q + 1]; q += 2; }
-          else { rawKey += keyText[q]; ++q; }
+        try {
+          // Full JSON unescape so `\uXXXX` control-char keys round-trip into the
+          // comment path too (the naive single-char pass above only handled one
+          // escape byte). allowNull=true keeps NUL bytes for exact matching.
+          rawKey = unescapeJsonString(keyText.substr(1, keyText.size() - 2), true);
+        } catch (...) {
+          size_t q = 1;
+          while (q + 1 < keyText.size()) {
+            if (keyText[q] == '\\' && q + 1 < keyText.size()) { rawKey += keyText[q + 1]; q += 2; }
+            else { rawKey += keyText[q]; ++q; }
+          }
         }
         childPath = ronJoinPath(path, rawKey);
       } else {
@@ -827,7 +850,7 @@ struct RonParser {
       if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after map key");
       ++i;
       skipWs();
-      commitLead(childPath);
+      commitValueLead(childPath);
       std::string val = parseValue(depth + 1, childPath, commit);
       if (!first) out += ',';
       first = false;
@@ -886,25 +909,30 @@ inline bool ronIsValidFieldKey(const std::string& k) {
   return true;
 }
 
-// A RON type name used as a struct/tuple/enum-variant qualifier: a single
-// identifier or a `A::B::C` path. Rejects RON literals that would be misread
-// as the leading name by the decoder (true/false/None/Some/inf/NaN).
+// A RON type name used as a struct/tuple/enum-variant qualifier. Only a single
+// identifier or an `A::B` path (max two segments) is accepted; longer paths are
+// rejected so the decoder's segment scanner cannot misread them. The first
+// segment must be a bare identifier that is not a RON literal, otherwise the
+// decoder would treat it as data rather than a name (true/false/None/Some/inf/NaN).
 inline bool ronIsValidTypeName(const std::string& k) {
   if (k.empty()) return false;
   size_t p = 0;
-  bool first = true;
-  while (p < k.size()) {
-    if (!first) {
-      if (k.compare(p, 2, "::") != 0) return false;
-      p += 2;
-    }
-    first = false;
-    if (p >= k.size() || !ronIsIdentStart(k[p])) return false;
-    ++p;
+  // First segment: a bare identifier that is not a RON literal.
+  if (!ronIsIdentStart(k[p])) return false;
+  ++p;
+  while (p < k.size() && ronIsIdentCont(k[p])) ++p;
+  std::string first(k.data(), p);
+  if (first == "true" || first == "false" || first == "None" ||
+      first == "Some" || first == "inf" || first == "NaN") return false;
+  // Optional single `::B` second segment, then end of input.
+  if (p < k.size()) {
+    if (k.compare(p, 2, "::") != 0) return false;
+    p += 2;
+    size_t start = p;
     while (p < k.size() && ronIsIdentCont(k[p])) ++p;
+    if (p == start || p != k.size()) return false; // missing or extra segments
   }
-  return k != "true" && k != "false" && k != "None" && k != "Some" &&
-         k != "inf" && k != "NaN";
+  return true;
 }
 
 inline void ronIndent(std::string& out, int depth) {
@@ -1007,7 +1035,7 @@ inline void ronSerializeObjFields(const asvJSONValue* v, std::string& out, int d
     prevNl = false;
     if (child->comments) {
       for (const auto& c : child->comments->leading) {
-        ronIndent(out, depth + 1);
+        if (pretty) ronIndent(out, depth + 1);
         if (c.block) { out += "/*"; out += c.text; out += "*/"; }
         else { out += "//"; out += c.text; }
         out += '\n';
@@ -1098,6 +1126,16 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           out += nit->first;
           out += '(';
           if (pretty && !childEmpty) out += '\n';
+          // Emit the group's own leading comments before its fields/elements.
+          if (child->comments && !child->comments->leading.empty()) {
+            for (const auto& c : child->comments->leading) {
+              if (pretty) ronIndent(out, depth + 1);
+              out += ' ';
+              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+              else { out += "//"; out += c.text; }
+              if (!c.block && commentNeedsEol(c)) out += '\n';
+            }
+          }
           if (child->type == asvJSONValue::OBJECT) {
             ronSerializeObjFields(child, out, depth, pretty);
           } else {
@@ -1177,7 +1215,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           prevNl = false;
           if (el->comments) {
             for (const auto& c : el->comments->leading) {
-              ronIndent(out, depth + 1);
+              if (pretty) ronIndent(out, depth + 1);
               if (c.block) { out += "/*"; out += c.text; out += "*/"; }
               else { out += "//"; out += c.text; }
               out += '\n';
@@ -1265,7 +1303,7 @@ inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, b
   if (pretty) out += '\n';
   for (const auto& c : v->comments->closing) {
     if (pretty) ronIndent(out, depth + 1);
-    else out += ", ";
+    else if (!out.empty() && out.back() != '\n') out += ", ";
     if (c.block) { out += "/*"; out += c.text; out += "*/"; }
     else { out += "//"; out += c.text; }
     if (pretty) out += '\n';
