@@ -16252,6 +16252,61 @@ TEST(testUBJSONRoundTrip) {
   }
 }
 
+TEST(testUBJSONSpecialTypes) {
+  // OBJECTID and EXTENSION encode as binary blobs (type-loss per spec);
+  // BINARY round-trips byte-for-byte.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"oid\":{\"$oid\":\"0102030405060708090a0b0c\"},\"ext\":{\"$binary\":{\"base64\":\"AQID\",\"subType\":\"2a\"}},\"bin\":{\"$binary\":{\"base64\":\"BQYH\",\"subType\":\"00\"}}}")));
+    auto bytes = j.toUBJSON();
+    asvJSON j2;
+    ASSERT(j2.fromUBJSON(bytes.data(), bytes.size()));
+    // OBJECTID and EXTENSION lose their special type through UBJSON (encoded as
+    // raw uint8 typed arrays), but the payload bytes survive.
+    auto* oid = j2.getRoot()->get("oid");
+    auto* ext = j2.getRoot()->get("ext");
+    auto* bin = j2.getRoot()->get("bin");
+    ASSERT(oid != nullptr && oid->type == asvJSONValue::BINARY);
+    ASSERT(ext != nullptr && ext->type == asvJSONValue::BINARY);
+    ASSERT(bin != nullptr && bin->type == asvJSONValue::BINARY);
+    // OBJECTID payload: 12 bytes (0x01..0x0c) stored in str_data.
+    ASSERT_EQ(oid->bin_data.size(), size_t(12));
+    for (size_t i = 0; i < 12; i++) ASSERT_EQ(oid->bin_data[i], uint8_t(i + 1));
+    // EXTENSION payload: 3 bytes (0x01,0x02,0x03), subtype lost.
+    ASSERT_EQ(ext->bin_data.size(), size_t(3));
+    ASSERT_EQ(ext->bin_data[0], uint8_t(1));
+    ASSERT_EQ(ext->bin_data[2], uint8_t(3));
+    // Plain BINARY round-trips intact.
+    ASSERT_EQ(bin->bin_data.size(), size_t(3));
+    ASSERT_EQ(bin->bin_data[0], uint8_t(5));
+    ASSERT_EQ(bin->bin_data[1], uint8_t(6));
+    ASSERT_EQ(bin->bin_data[2], uint8_t(7));
+  }
+}
+
+TEST(testUBJSONNTypedContainer) {
+  // N noops are skipped inside typed containers without consuming count slots.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$i#i\x03", 6) + std::string("\x01", 1) + "N" + std::string("\x02", 1) + std::string("\x03", 1)));
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(3));
+    ASSERT_EQ(j.getRoot()->arr->at(0)->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->arr->at(1)->getInt(), int64_t(2));
+    ASSERT_EQ(j.getRoot()->arr->at(2)->getInt(), int64_t(3));
+  }
+}
+
+TEST(testUBJSONRejectDollarBrackets) {
+  // $[ and ${ without a # count are rejected (typed container requires #n).
+  {
+    asvJSON j;
+    ASSERT(!j.fromUBJSON(std::string("[$i", 4)));
+    ASSERT(!j.fromUBJSON(std::string("{$i", 4)));
+    ASSERT(!j.fromUBJSON(std::string("[$U\x01\x02", 5)));
+    ASSERT(!j.fromUBJSON(std::string("{$S\x01a", 5)));
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -22883,6 +22938,9 @@ RUN(testCBORFloat16);
 	RUN(testFromUBJSON);
 	RUN(testToUBJSON);
 	RUN(testUBJSONRoundTrip);
+	RUN(testUBJSONSpecialTypes);
+	RUN(testUBJSONNTypedContainer);
+	RUN(testUBJSONRejectDollarBrackets);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);

@@ -9,12 +9,18 @@
 //
 // Encoding maps asvJSON types onto the JSON-compatible subset:
 //   BOOL    -> T/F           NULL -> Z
-//   INT     -> smallest int8/uint8/int16/int32/int64 type that fits
+//   INT     -> smallest integer type (signed or unsigned) that fits
 //   DOUBLE  -> D (double64), or d (float32) when is_float32 is set
 //   STRING  -> S
-//   BINARY (and OBJECTID/EXTENSION payloads) -> typed uint8 array `[$U#<n>...`
+//   BINARY payload -> typed uint8 array `[$U#<n>...`
+//   OBJECTID payload (stored in str_data per BSON/XML/TRON) -> typed uint8
+//     array `[$U#12...`; decodes to BINARY, type identity is lost on round-trip
+//   EXTENSION payload + ext_type -> typed uint8 array `[$U#<n>...`; ext_type
+//     is lost on round-trip, value decodes back to plain BINARY
 //   ARRAY   -> '[' items ']'      OBJECT -> '{' key/value pairs '}'
-//   DATETIME-> double seconds, TIMESTAMP -> int64 seconds, REGEX -> S
+//   DATETIME-> double seconds (decodes to DOUBLE, type identity is lost)
+//   TIMESTAMP -> int64 seconds (decodes to INT, type identity is lost)
+//   REGEX   -> S
 // Decoding reverses the mapping; H stays a STRING (exact text, no precision
 // loss), C becomes a 1-char STRING, and a typed uint8 array decodes to BINARY
 // (the spec's binary-data convention, matching py-ubjson and the reference
@@ -92,10 +98,29 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
       ubjWriteLen(static_cast<int64_t>(v->str_data.size()), out);
       out.insert(out.end(), v->str_data.begin(), v->str_data.end());
       break;
-    case T::BINARY:
-    case T::OBJECTID:
-    case T::EXTENSION: {
+    case T::BINARY: {
       // Spec binary-data convention: a strongly typed array of uint8.
+      out.push_back('[');
+      out.push_back('$');
+      out.push_back('U');
+      out.push_back('#');
+      ubjWriteLen(static_cast<int64_t>(v->bin_data.size()), out);
+      out.insert(out.end(), v->bin_data.begin(), v->bin_data.end());
+      break;
+    }
+    case T::OBJECTID: {
+      // OBJECTID stores its 12 bytes in str_data (see makeObjectId / BSON/XML/TRON).
+      // Emit as a typed uint8 array so the payload survives round-trip; decodes to BINARY.
+      out.push_back('[');
+      out.push_back('$');
+      out.push_back('U');
+      out.push_back('#');
+      ubjWriteLen(static_cast<int64_t>(v->str_data.size()), out);
+      out.insert(out.end(), v->str_data.begin(), v->str_data.end());
+      break;
+    }
+    case T::EXTENSION: {
+      // EXTENSION payload (bin_data) is emitted as a typed uint8 array; ext_type is lost.
       out.push_back('[');
       out.push_back('$');
       out.push_back('U');
@@ -115,6 +140,7 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
     case T::TIMESTAMP: {
       int64_t n = v->num;
       if (n >= -128 && n <= 127) { out.push_back('i'); out.push_back(static_cast<uint8_t>(static_cast<int8_t>(n))); }
+      else if (n >= 0 && n <= 255) { out.push_back('U'); out.push_back(static_cast<uint8_t>(n)); }
       else if (n >= -32768 && n <= 32767) { out.push_back('I'); ubjWriteBE(out, static_cast<uint64_t>(static_cast<int16_t>(n)), 2); }
       else if (n >= -2147483648LL && n <= 2147483647LL) { out.push_back('l'); ubjWriteBE(out, static_cast<uint64_t>(static_cast<int32_t>(n)), 4); }
       else { out.push_back('L'); ubjWriteBE(out, static_cast<uint64_t>(n), 8); }
@@ -283,10 +309,10 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       pos++;
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end ($)");
       char t = static_cast<char>(data[pos++]);
-      if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
-      pos++;
-      uint64_t count = ubjReadLen(data, pos, dataLen);
-      if (count > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("UBJSON: array too large");
+        if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
+        pos++;
+        uint64_t count = ubjReadLen(data, pos, dataLen);
+        if (count > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("UBJSON: array too large");
       // The spec's binary-data convention: a typed uint8 array is raw bytes.
       if (t == 'U') {
         if (count > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("UBJSON: binary too large");
@@ -299,8 +325,13 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       // $Z/$N/$T/$F have no payload; each element's value is implicit.
       if (t == 'Z' || t == 'N') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeNull()); }
       else if (t == 'T' || t == 'F') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeBool(t == 'T')); }
-      else {
-        for (uint64_t i = 0; i < count; i++) arr->arr->push_back(ubjParseTyped(data, pos, dataLen, depth + 1, t));
+        else {
+        for (uint64_t i = 0; i < count; ) {
+          if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed array");
+          if (data[pos] == 'N') { pos++; continue; }
+          arr->arr->push_back(ubjParseTyped(data, pos, dataLen, depth + 1, t));
+          i++;
+        }
       }
       return arr;
     }
@@ -337,21 +368,24 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       pos++;
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end ($)");
       char t = static_cast<char>(data[pos++]);
-      if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
-      pos++;
-      uint64_t count = ubjReadLen(data, pos, dataLen);
-      if (count > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("UBJSON: object too large");
-      for (uint64_t i = 0; i < count; i++) {
-        std::string key = ubjReadRawString(data, pos, dataLen);
-        std::unique_ptr<asvJSONValue> val;
-        if (t == 'Z' || t == 'N') val = asvJSONValue::makeNull();
-        else if (t == 'T') val = asvJSONValue::makeBool(true);
-        else if (t == 'F') val = asvJSONValue::makeBool(false);
-        else val = ubjParseTyped(data, pos, dataLen, depth + 1, t);
-        if (!val) throw asvJSONError("UBJSON: object value alloc failed");
-        obj->obj->insert_or_assign(key, std::move(val));
-      }
-      return obj;
+        if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
+        pos++;
+        uint64_t count = ubjReadLen(data, pos, dataLen);
+        if (count > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("UBJSON: object too large");
+        for (uint64_t i = 0; i < count; ) {
+          if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed object");
+          if (data[pos] == 'N') { pos++; continue; }
+          std::string key = ubjReadRawString(data, pos, dataLen);
+          std::unique_ptr<asvJSONValue> val;
+          if (t == 'Z' || t == 'N') val = asvJSONValue::makeNull();
+          else if (t == 'T') val = asvJSONValue::makeBool(true);
+          else if (t == 'F') val = asvJSONValue::makeBool(false);
+          else val = ubjParseTyped(data, pos, dataLen, depth + 1, t);
+          if (!val) throw asvJSONError("UBJSON: object value alloc failed");
+          obj->obj->insert_or_assign(key, std::move(val));
+          i++;
+        }
+        return obj;
     }
     if (pos < dataLen && data[pos] == '#') {
       pos++;
