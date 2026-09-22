@@ -117,23 +117,17 @@ private:
   }
 
   void pushPath(const std::string& seg) {
-    // RFC 6901 JSON Pointer: ~ -> ~0, / -> ~1. Unquoted ref tokens are the
-    // standard form; quoting is only used as a legacy fallback for segments
-    // containing characters that would otherwise be ambiguous (quote itself).
-    bool needsQuote = seg.find('\"') != std::string::npos;
-    if (needsQuote || seg.find('/') != std::string::npos) {
-      std::string escaped;
-      escaped.reserve(seg.size() + 2);
-      for (char c : seg) {
-        if (c == '~') escaped += "~0";
-        else if (c == '/') escaped += "~1";
-        else if (c == '\"') escaped += "\\\"";
-        else escaped += c;
-      }
-      path_ += "/" + escaped;
-    } else {
-      path_ += "/" + seg;
+    // RFC 6901 JSON Pointer: ~ -> ~0, / -> ~1. Both must always be escaped
+    // regardless of other characters present; `"` has no special meaning in
+    // JSON Pointer tokens so it is emitted as-is.
+    std::string escaped;
+    escaped.reserve(seg.size() + 2);
+    for (char c : seg) {
+      if (c == '~') escaped += "~0";
+      else if (c == '/') escaped += "~1";
+      else escaped += c;
     }
+    path_ += "/" + escaped;
   }
 
   void pushIndexPath(size_t idx) {
