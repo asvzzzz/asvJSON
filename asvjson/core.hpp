@@ -386,6 +386,9 @@ private:
 	void eraseAt(std::size_t pos) {
 		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
 		if (!slots_.empty()) rebuildIndex();
+		// NOTE: rebuildIndex() is O(n), so erasing N keys one by one is O(N²).
+		// This is an intentional trade-off for the small-object path; bulk
+		// erase should be done via a dedicated method if performance matters.
 	}
 };
 
@@ -576,6 +579,7 @@ struct asvJSONValue {
 
 	[[nodiscard]] static std::unique_ptr<asvJSONValue> makeString(const char* s, size_t len) {
 		if (!asvJSONValue::checkStringLen(len)) return nullptr;
+		if (len > 0 && !s) return nullptr; // guard against null pointer dereference
 		auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
 		if (!v) return nullptr;
 		v->type = STRING;

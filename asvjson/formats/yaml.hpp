@@ -1298,7 +1298,7 @@ inline bool yamlIsAnchorChar(char c) {
 	       (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
 }
 
-// Pre-compute quote and flow-bracket state for a line — single O(n) pass.
+// Pre-compute quote and flow-bracket state for a line - single O(n) pass.
 struct YamlPrecomp {
 	std::vector<bool> inQuote;  // true at position if inside '...' or "..."
 	std::vector<bool> inFlow;   // true at position if inside {...} or [...]

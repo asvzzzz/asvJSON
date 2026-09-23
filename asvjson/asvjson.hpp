@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // asvJSON++ v1.26.7 - Main entry point
 // Includes core + all formats by default.
 // Define ASVJSON_DISABLE_MSG_PACK, ASVJSON_DISABLE_CBOR, ASVJSON_DISABLE_BSON,

@@ -1,4 +1,4 @@
-﻿#include "../asvjson/asvjson.hpp"
+#include "../asvjson/asvjson.hpp"
 #include <iostream>
 #include <string>
 #include <vector>

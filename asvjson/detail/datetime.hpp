@@ -50,7 +50,8 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int*
 
 	size_t pos = 16;
 
-	// Seconds are optional (some implementations omit them)
+	// Seconds required: strings shorter than 20 characters ("YYYY-MM-DDTHH:MM:SS")
+	// are rejected above, so this branch is effectively mandatory.
 	if (pos < sv.size() && sv[pos] == ':') {
 		pos++;
 		if (pos + 1 < sv.size() && sv[pos] >= '0' && sv[pos] <= '9' && sv[pos + 1] >= '0' && sv[pos + 1] <= '9') {
