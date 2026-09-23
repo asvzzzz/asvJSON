@@ -476,8 +476,9 @@ public:
       case State::STR_KEY:
         lastError_ = "Unterminated string"; error_ = true; handler_.onError(lastError_); return false;
       case State::NUM:
+        // emitPendingNumber already calls afterValue() internally on success,
+        // so a second call here would double-advance the container counter.
         if (!emitPendingNumber()) return false;
-        if (!afterValue()) return false;
         break;
       case State::LIT_TRUE:
       case State::LIT_FALSE:
@@ -616,7 +617,7 @@ private:
   }
 
   static bool isIdentChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
   }
 
   bool isValueStart(char c) {
@@ -1147,6 +1148,11 @@ private:
     if (state_ == State::LIT_TRUE) handler_.onBoolValue(true);
     else if (state_ == State::LIT_FALSE) handler_.onBoolValue(false);
     else handler_.onNullValue();
+    // Consistent with JsonSaxParser: reject a literal followed by an ident
+    // char (e.g. "truey" must error, not silently parse as "true").
+    if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) {
+      setError("Invalid literal"); return false;
+    }
     return afterValue();
   }
 
@@ -1222,59 +1228,81 @@ private:
 
 class JsonSaxToDom : public JsonSaxHandler {
 public:
-  std::unique_ptr<asvJSONValue> getResult() { return std::move(root_); }
+  std::unique_ptr<asvJSONValue> getResult() {
+    if (fatal_) return nullptr;
+    return std::move(root_);
+  }
 
   void onStartObject() override {
+    if (fatal_) return;
     auto obj = asvJSONValue::makeObject();
+    if (!obj) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
     pushContainer(std::move(obj));
   }
 
   void onEndObject() override {
+    if (fatal_) return;
     popContainer();
   }
 
   void onStartArray() override {
+    if (fatal_) return;
     auto arr = asvJSONValue::makeArray();
-    arr->arr->reserve(16);
+    if (!arr) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (arr->arr) arr->arr->reserve(16);
     pushContainer(std::move(arr));
   }
 
   void onEndArray() override {
+    if (fatal_) return;
     popContainer();
   }
 
   void onKey(std::string_view key) override {
+    if (fatal_) return;
     currentKey_ = std::string(key);
   }
 
   void onStringValue(std::string_view value) override {
+    if (fatal_) return;
     // An empty string_view may carry data() == nullptr; makeString requires a
     // valid pointer even for a zero-length value.
     auto v = asvJSONValue::makeString(value.empty() ? "" : value.data(), value.size());
-    addValue(std::move(v));
+    if (!v) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (!addValue(std::move(v))) return;
   }
 
   void onIntegerValue(int64_t value) override {
+    if (fatal_) return;
     auto v = asvJSONValue::makeInt(value);
-    addValue(std::move(v));
+    if (!v) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (!addValue(std::move(v))) return;
   }
 
   void onDoubleValue(double value) override {
+    if (fatal_) return;
     auto v = asvJSONValue::makeDouble(value);
-    addValue(std::move(v));
+    if (!v) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (!addValue(std::move(v))) return;
   }
 
   void onBoolValue(bool value) override {
+    if (fatal_) return;
     auto v = asvJSONValue::makeBool(value);
-    addValue(std::move(v));
+    if (!v) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (!addValue(std::move(v))) return;
   }
 
   void onNullValue() override {
+    if (fatal_) return;
     auto v = asvJSONValue::makeNull();
-    addValue(std::move(v));
+    if (!v) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return; }
+    if (!addValue(std::move(v))) return;
   }
 
   void onError(std::string_view message) override {
+    if (fatal_) return;
+    fatal_ = true;
     errorMsg_ = std::string(message);
   }
 
@@ -1285,13 +1313,15 @@ private:
   std::vector<asvJSONValue*> stack_; // raw pointers (root_ owns)
   std::string currentKey_;
   std::string errorMsg_;
+  bool fatal_ = false;
 
   void pushContainer(std::unique_ptr<asvJSONValue> node) {
+    if (!node) return;
     asvJSONValue* raw = node.get();
     if (stack_.empty()) {
       root_ = std::move(node);
-    } else {
-      addToCurrent(std::move(node));
+    } else if (!addToCurrent(std::move(node))) {
+      return; // node destroyed in mismatch, raw would be dangling
     }
     stack_.push_back(raw);
   }
@@ -1300,27 +1330,27 @@ private:
     if (!stack_.empty()) stack_.pop_back();
   }
 
-  void addValue(std::unique_ptr<asvJSONValue> val) {
+  bool addValue(std::unique_ptr<asvJSONValue> val) {
     if (stack_.empty()) {
       root_ = std::move(val);
-      return;
+      return true;
     }
-    addToCurrent(std::move(val));
+    return addToCurrent(std::move(val));
   }
 
-  void addToCurrent(std::unique_ptr<asvJSONValue> val) {
+  bool addToCurrent(std::unique_ptr<asvJSONValue> val) {
     asvJSONValue* parent = stack_.back();
     if (parent->type == asvJSONValue::OBJECT && parent->obj) {
       (*parent->obj)[currentKey_] = std::move(val);
-    } else if (parent->type == asvJSONValue::ARRAY && parent->arr) {
-      parent->arr->push_back(std::move(val));
-    } else {
-      // Mismatched container: SAX emitted a value where neither an object nor
-      // array is open. For a trusted SAX emitter this should never happen; log
-      // via the handler so it is visible rather than silently dropped.
-      lastError_ = "SAX value emitted outside object/array context";
-      try { handler_.onError(lastError_); } catch (...) {}
+      return true;
     }
+    if (parent->type == asvJSONValue::ARRAY && parent->arr) {
+      parent->arr->push_back(std::move(val));
+      return true;
+    }
+    errorMsg_ = "SAX value emitted outside object/array context";
+    fatal_ = true;
+    return false;
   }
 };
 
