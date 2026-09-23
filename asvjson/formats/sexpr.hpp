@@ -3,7 +3,7 @@
 //
 // S-Expression format:
 //   (key "value" (nested 1 2 3))
-//   Objects: alternating key-value pairs in a list (heuristic: even length, keys are strings/symbols)
+//   Objects: alternating key-value pairs in a list (heuristic: even length, keys are any scalar token - string/symbol/number/bool/nil)
 //   Arrays: plain list of values
 //   Strings: "quoted" with standard C escapes
 //   Numbers: as-is (must be valid JSON-like numbers)
@@ -42,8 +42,8 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
   size_t i = 0;
   while (i < input.size()) {
     char c = input[i];
-    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
-    if (c == ';') { while (i < input.size() && input[i] != '\n') i++; continue; }
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
+    if (c == ';') { while (i < input.size() && input[i] != '\n' && input[i] != '\r') i++; continue; }
     if (c == '(') { tokens.push_back({SEXPR_LPAREN, ""}); i++; continue; }
     if (c == ')') { tokens.push_back({SEXPR_RPAREN, ""}); i++; continue; }
 
@@ -151,7 +151,7 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
     }
 
     std::string val;
-    while (i < input.size() && input[i] != ' ' && input[i] != '\t' && input[i] != '\n' && input[i] != '\r' && input[i] != '(' && input[i] != ')' && input[i] != '"' && input[i] != ';') {
+    while (i < input.size() && input[i] != ' ' && input[i] != '\t' && input[i] != '\n' && input[i] != '\r' && input[i] != '\f' && input[i] != '\v' && input[i] != '(' && input[i] != ')' && input[i] != '"' && input[i] != ';') {
       val += input[i]; i++;
     }
 
@@ -348,14 +348,12 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // JSON text for item i used as a VALUE: a marker-prefixed item used as data
   // must keep the marker byte (it was data, not a key).
   //
-  // KNOWN QUIRK (issue #4): for hand-written input the marker is only "stuck"
-  // to the item when it was the LAST position holding a marker-prefixed string
-  // PLUS at least one more item follows at an even index. If a striped marker
-  // string is instead used as a VALUE (e.g. ("a" "\x01abc" 1 2) parses the
-  // group as a 4-item object and "\x01abc" lands in a value slot), the decoded
-  // value retains the literal \x01 byte. This only affects hand-written
-  // (non-encoder) input: the encoder always emits marked strings exclusively in
-  // key positions, so encoded data round-trips without the stray byte.
+  // KNOWN QUIRK (issue #4): for hand-written input, any marker-prefixed string
+  // that lands in a value position will have its \x01 marker byte preserved in
+  // the decoded value. The encoder always emits marked strings exclusively in
+  // key positions, so encoded data round-trips without the stray byte; this
+  // only affects hand-written (non-encoder) input where a marked string is
+  // used as a value rather than a key.
   auto valueJson = [&](size_t i) -> std::string {
     if (marked[i]) {
       std::string r;
