@@ -10323,6 +10323,29 @@ TEST(testCsvEmptyObjects) {
 		ASSERT(v != nullptr);
 		ASSERT_EQ(std::string(v->getString()), "{}");
 	}
+	// A single empty-string key must round-trip: the header cell is force-quoted
+	// so the line-splitter in fromCSV does not drop it as an empty line.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"":1})"));
+		std::string csv = j.toCSV();
+		ASSERT(csv == "\"\"\n1\n");
+		ASSERT(j2.fromCSV(csv));
+		auto* v = row(j2)->get("");
+		ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+		ASSERT_EQ(v->getInt(), int64_t(1));
+	}
+	// Array-of-objects with a single empty-string key also round-trips.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([{"":1},{"":2}])"));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("\"\"") != std::string::npos);
+		ASSERT(j2.fromCSV(csv));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 2U);
+		ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->get("")->getInt(), int64_t(1));
+		ASSERT_EQ(j2.getRoot()->get(static_cast(size_t)(1))->get("")->getInt(), int64_t(2));
+	}
 	// An empty object nested inside an array-of-objects member keeps its column.
 	{
 		asvJSON j, j2;

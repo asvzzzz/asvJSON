@@ -411,7 +411,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			}
 		};
 		for (const auto& item : items) collect(collect, item.get(), "", visited);
-		for (size_t i = 0; i < keys.size(); i++) { if (i > 0) out += ','; out += csvEscape(keys[i]); }
+		for (size_t i = 0; i < keys.size(); i++) { if (i > 0) out += ','; out += csvEscape(keys[i], keys[i].empty()); }
 		out += '\n';
 		for (const auto& item : items) {
 			std::map<std::string, std::string> flat;
@@ -471,7 +471,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			flatten(flatten, this, "", flattenVisited);
 			for (size_t i = 0; i < flat.size(); i++) {
 				if (i > 0) out += ',';
-				out += csvEscape(flat[i].first);
+				out += csvEscape(flat[i].first, flat[i].first.empty());
 			}
 			out += '\n';
 			for (size_t i = 0; i < flat.size(); i++) {
