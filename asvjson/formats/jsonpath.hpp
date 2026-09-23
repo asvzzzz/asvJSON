@@ -22,7 +22,7 @@
 //     fragment inside a filter resolves to at most one node, so count(x) means
 //     "x selected something" (1/0), not "number of nodes in x's result set";
 //     likewise `@.a[*] == 5` tests membership loosely rather than comparing the
-//     full nodelist per RFC §2.3.5.2.2. This is a deliberate design choice to
+//     full nodelist per RFC 2.3.5.2.2. This is a deliberate design choice to
 //     keep the filter evaluator simple and allocation-light, not an oversight;
 //     paths that genuinely need multi-node comparison should be split into
 //     separate query() calls combined by caller code.
@@ -30,12 +30,12 @@
 //     RFC 9485 I-Regexp subset; patterns relying on lookahead/lookbehind or
 //     backreferences will compile here even though they are not valid I-Regexps.
 //     Untrusted, hand-crafted patterns carry ReDoS risk since std::regex has no
-//     timeout — validate/reject suspiciously nested quantifiers at your boundary
+//     timeout - validate/reject suspiciously nested quantifiers at your boundary
 //     before passing them in when the pattern source is untrusted. Invalid or
 //     otherwise rejected patterns simply yield false (no exception escapes).
 //   - query()/queryFirst() are lenient: malformed, unterminated, or otherwise
 //     invalid path segments select nothing rather than throwing; however they do
-//     not guard against out-of-memory conditions — std::bad_alloc (or similar)
+//     not guard against out-of-memory conditions - std::bad_alloc (or similar)
 //     from internal allocations while evaluating deep/wide filters on very large
 //     trees can still propagate to the caller. Catch at your call site if that is
 //     a concern for untrusted inputs.
@@ -97,7 +97,7 @@ inline bool jpParseIntStrict(const std::string& s, int64_t& out) {
     if (s.size() == 1) return false;
     i = 1;
   }
-  if (s[i] == '0') {
+  if (i == 0 && s[i] == '0') {
     if (i + 1 != s.size()) return false;
     out = 0;
     return true;
@@ -125,7 +125,7 @@ inline bool jpParseInt64(const std::string& s, int64_t& out) {
     if (s.size() == 1) return false;
     i = 1;
   }
-  if (s[i] == '0') {
+  if (i == 0 && s[i] == '0') {
     if (i + 1 != s.size()) return false;
     out = 0;
     return true;
@@ -142,8 +142,8 @@ inline bool jpParseInt64(const std::string& s, int64_t& out) {
   return true;
 }
 
-// Lenient decimal literal parse for filter operands: optional '-', digits, at
-// most one '.'. Never throws.
+// Lenient decimal literal parse for filter operands: RFC number grammar with
+// exponent support. Never throws.
 inline bool jpParseNumber(const std::string& s, double& out) {
   if (s.empty()) return false;
   size_t i = 0;
@@ -151,18 +151,29 @@ inline bool jpParseNumber(const std::string& s, double& out) {
     if (s.size() == 1) return false;
     i = 1;
   }
-  bool digit = false, dot = false;
-  for (; i < s.size(); ++i) {
-    char c = s[i];
-    if (c >= '0' && c <= '9') { digit = true; continue; }
-    if (c == '.') {
-      if (dot) return false;
-      dot = true;
-      continue;
-    }
-    return false;
+  // int part ("0" / DIGIT1 *DIGIT)
+  if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+  if (s[i] == '0') {
+    if (i > 0) return false;
+    i++;
+    if (i < s.size() && s[i] >= '0' && s[i] <= '9') return false;
+  } else {
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
   }
-  if (!digit) return false;
+  // frac
+  if (i < s.size() && s[i] == '.') {
+    i++;
+    if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+  }
+  // exp
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    i++;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+    if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+  }
+  if (i != s.size()) return false;
   errno = 0;
   char* endp = nullptr;
   double v = std::strtod(s.c_str(), &endp);
@@ -260,6 +271,8 @@ public:
                   uint32_t lo = 0;
                   if (!hex4(lo) || lo < 0xDC00 || lo > 0xDFFF) { ok = false; break; }
                   cp = 0x10000 + static_cast<uint32_t>((cp - 0xD800) << 10) + (lo - 0xDC00);
+                } else {
+                  ok = false; break;
                 }
               } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
                 ok = false;
@@ -285,6 +298,18 @@ public:
       num += c; pos_++;
       while (pos_ < src.size() && ((src[pos_] >= '0' && src[pos_] <= '9') || src[pos_] == '.')) {
         num += src[pos_]; pos_++;
+      }
+      if (pos_ < src.size() && (src[pos_] == 'e' || src[pos_] == 'E')) {
+        size_t save = pos_;
+        size_t k = pos_ + 1;
+        if (k < src.size() && (src[k] == '+' || src[k] == '-')) k++;
+        if (k < src.size() && src[k] >= '0' && src[k] <= '9') {
+          num += src[pos_++];
+          if (pos_ < src.size() && (src[pos_] == '+' || src[pos_] == '-')) num += src[pos_++];
+          while (pos_ < src.size() && src[pos_] >= '0' && src[pos_] <= '9') num += src[pos_++];
+        } else {
+          pos_ = save;
+        }
       }
       return {TokType::NUMBER, num};
     }
@@ -335,39 +360,6 @@ public:
       if (c == '[') { depth++; pos_++; continue; }
       if (c == ']') {
         if (depth == 0) { pos_++; return true; }
-        depth--; pos_++; continue;
-      }
-      pos_++;
-    }
-    return false;
-  }
-
-  // Like skipToEndBracket but additionally enforces balanced parentheses in
-  // the skipped region (used by the strict path validator for filter
-  // selectors).
-  bool skipBracketBalanced() {
-    int depth = 0, paren = 0;
-    char q = 0;
-    while (pos_ < src.size()) {
-      char c = src[pos_];
-      if (q) {
-        if (c == '\\') { pos_ += 2; continue; }
-        if (c == q) q = 0;
-        pos_++; continue;
-      }
-      if (c == '\'' || c == '"') { q = c; pos_++; continue; }
-      if (c == '[') { depth++; pos_++; continue; }
-      if (c == '(') { paren++; pos_++; continue; }
-      if (c == ')') {
-        if (paren == 0) return false;
-        paren--; pos_++; continue;
-      }
-      if (c == ']') {
-        if (depth == 0) {
-          if (paren != 0) return false;
-          pos_++;
-          return true;
-        }
         depth--; pos_++; continue;
       }
       pos_++;
@@ -705,7 +697,7 @@ class JPFilterEval {
             // wildcard: the node is selected iff it has at least one child
             if (jpAllChildren(node).empty()) node = nullptr;
           } else {
-            break;
+            node = nullptr; break;
           }
         } else if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
           lex_.next();
@@ -1351,7 +1343,11 @@ inline bool jpValidateOperand(PathLexer& lex) {
 
 inline bool jpValidateNotExpr(PathLexer& lex) {
   // Consume a run of NOT prefixes iteratively so `!!!!...` cannot overflow the stack.
-  while (lex.peek().type == TokType::NOT) lex.next();
+  // Per RFC 9535, logical-not-op is only valid before '(' (paren-expr); it is not
+  // allowed before a bare comparison like `!@.a == 5`.
+  bool hasNot = false;
+  while (lex.peek().type == TokType::NOT) { lex.next(); hasNot = true; }
+  if (hasNot && lex.peek().type != TokType::LPAREN) return false;
   if (lex.peek().type == TokType::LPAREN) {
     lex.next();
     if (!jpValidateExpr(lex)) return false;
