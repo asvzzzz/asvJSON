@@ -1298,48 +1298,38 @@ inline bool yamlIsAnchorChar(char c) {
 	       (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
 }
 
-// Check if position p is inside flow brackets ({...} or [...]) in string s
-inline bool yamlInFlowBrackets(std::string_view s, size_t p) {
-	int depth = 0;
-	bool inSQuote = false, inDQuote = false;
-	for (size_t i = 0; i < p && i < s.size(); i++) {
-		if (inSQuote) {
-			if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') i++;
-			else if (s[i] == '\'') inSQuote = false;
-		} else if (inDQuote) {
-			if (s[i] == '\\') i++;
-			else if (s[i] == '"') inDQuote = false;
-		} else {
-			if (s[i] == '{' || s[i] == '[') depth++;
-			else if (s[i] == '}' || s[i] == ']') depth--;
-			else if (s[i] == '\'') inSQuote = true;
-			else if (s[i] == '"') inDQuote = true;
-		}
-	}
-	return depth > 0;
-}
+// Pre-compute quote and flow-bracket state for a line — single O(n) pass.
+struct YamlPrecomp {
+	std::vector<bool> inQuote;  // true at position if inside '...' or "..."
+	std::vector<bool> inFlow;   // true at position if inside {...} or [...]
+};
 
-// Check if & is inside quotes at the given position in s
-// Handles escaped quotes: \" inside "", '' inside ''
-inline bool yamlAmpInQuote(std::string_view s, size_t ampPos) {
+inline YamlPrecomp yamlPrecomputeQuotes(std::string_view s) {
+	YamlPrecomp r{std::vector<bool>(s.size(), false), std::vector<bool>(s.size(), false)};
 	bool inSQuote = false, inDQuote = false;
-	for (size_t i = 0; i < ampPos && i < s.size(); i++) {
+	int depth = 0;
+	for (size_t i = 0; i < s.size(); i++) {
 		if (inSQuote) {
 			if (s[i] == '\'') {
-				if (i + 1 < s.size() && s[i + 1] == '\'') i++;
+				if (i + 1 < s.size() && s[i + 1] == '\'') { i++; r.inQuote[i] = true; }
 				else inSQuote = false;
 			}
+			r.inQuote[i] = true;
 		} else if (inDQuote) {
-			if (s[i] == '\\') i++;
+			if (s[i] == '\\') { i++; r.inQuote[i] = true; }
 			else if (s[i] == '"') inDQuote = false;
+			r.inQuote[i] = true;
 		} else {
 			if (s[i] == '\'') inSQuote = true;
 			else if (s[i] == '"') inDQuote = true;
+			else if (s[i] == '{' || s[i] == '[') depth++;
+			else if (s[i] == '}' || s[i] == ']') { if (depth > 0) depth--; }
+			r.inQuote[i] = false;
 		}
+		r.inFlow[i] = (depth > 0);
 	}
-	return inSQuote || inDQuote;
+	return r;
 }
-
 // Resolve *alias with cycle detection
 inline std::string yamlResolveAlias(std::string_view aliasName,
                                     std::unordered_map<std::string, std::string>& anchors,
@@ -1947,121 +1937,99 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 		std::string_view content = stripIndent(lines[li]);
 		if (content.empty() || content[0] == '#') continue;
 
-		size_t amp = content.find('&');
-		if (amp == std::string_view::npos) continue;
-		if (yamlAmpInQuote(content, amp)) continue;
-		if (yamlInFlowBrackets(content, amp)) continue; // flow anchors handled during parse
+		auto pc = yamlPrecomputeQuotes(content);
+		size_t amp = 0;
+		while ((amp = content.find('&', amp)) != std::string_view::npos) {
+			if (pc.inQuote[amp] || pc.inFlow[amp]) {
+				amp++;
+				continue;
+			}
+			size_t ns = amp + 1;
+			if (ns >= content.size() || !yamlIsAnchorChar(content[ns])) { amp++; continue; }
+			size_t ne = ns;
+			while (ne < content.size() && yamlIsAnchorChar(content[ne])) ne++;
+			std::string name(content.substr(ns, ne - ns));
+			if (anchors.count(name)) { amp = ne; continue; }
+			if (anchors.size() >= MAX_YAML_ANCHORS) throw asvJSONError("YAML: too many anchors");
 
-		size_t ns = amp + 1;
-		if (ns >= content.size() || !yamlIsAnchorChar(content[ns])) continue;
-		size_t ne = ns;
-		while (ne < content.size() && yamlIsAnchorChar(content[ne])) ne++;
-		std::string name(content.substr(ns, ne - ns));
-		if (anchors.count(name)) continue;
+			found = true;
+			std::string_view rest = content.substr(ne);
+			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
 
-		if (anchors.size() >= MAX_YAML_ANCHORS) throw asvJSONError("YAML: too many anchors");
-
-		found = true;
-		std::string_view rest = content.substr(ne);
-		while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
-
-		if (!rest.empty() && rest[0] != '#') {
-			if (yamlIsSoloTag(rest)) {
-				// Anchor on a solo-tag line: the anchored value is the block
-				// node on the following (deeper) lines, annotated by the tag.
-				// Capture it exactly like the main pass so aliases resolve to
-				// the tagged block value, not to an empty scalar.
-				std::string tRest(rest);
-				std::string ytail;
-				size_t aLi = li;
-				if (yamlYamlTagNeedsGather(tRest, ytail))
-					anchors[name] = yamlGatherYamlEmbed(ytail, lines, aLi, indent);
-				else
-					anchors[name] = yamlTaggedBlockValue(tRest, lines, aLi, indent, depth + 1);
-			} else {
-				// Scalar anchor -- value follows on same line. Strip a trailing
-				// comment exactly like the main pass does, so aliases agree with
-				// the anchored line's own value.
-				std::string_view rv = yamlStripComment(rest);
-				while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
-				if (!rv.empty() && (rv[0] == '|' || rv[0] == '>')) {
-					// Anchor on a block-scalar header ("&x |"): the anchored
-					// value is the block scalar built from the following deep
-					// lines, JSON-quoted exactly like the main pass emits it.
+			if (!rest.empty() && rest[0] != '#') {
+				if (yamlIsSoloTag(rest)) {
+					// Anchor on a solo-tag line: the anchored value is the block
+					// node on the following (deeper) lines, annotated by the tag.
+					std::string tRest(rest);
+					std::string ytail;
 					size_t aLi = li;
-					bool aFolded = (rv[0] == '>');
-					std::string atext = yamlParseBlockScalar(std::string(rv), lines, aLi, aFolded, indent);
-					std::string aesc;
-					for (auto c : atext) {
-						switch (c) {
-							case '"': aesc += "\\\""; break;
-							case '\\': aesc += "\\\\"; break;
-							case '\n': aesc += "\\n"; break;
-							case '\t': aesc += "\\t"; break;
-							default: aesc += c;
+					if (yamlYamlTagNeedsGather(tRest, ytail))
+						anchors[name] = yamlGatherYamlEmbed(ytail, lines, aLi, indent);
+					else
+						anchors[name] = yamlTaggedBlockValue(tRest, lines, aLi, indent, depth + 1);
+				} else {
+					// Scalar anchor -- value follows on same line. Strip a trailing
+					// comment exactly like the main pass does, so aliases agree with
+					// the anchored line's own value.
+					std::string_view rv = yamlStripComment(rest);
+					while (!rv.empty() && (rv.back() == ' ' || rv.back() == '\t')) rv.remove_suffix(1);
+					if (!rv.empty() && (rv[0] == '|' || rv[0] == '>')) {
+						// Anchor on a block-scalar header ("&x |"): the anchored
+						// value is the block scalar built from the following deep
+						// lines, JSON-quoted exactly like the main pass emits it.
+						size_t aLi = li;
+						bool aFolded = (rv[0] == '>');
+						std::string atext = yamlParseBlockScalar(std::string(rv), lines, aLi, aFolded, indent);
+						std::string aesc;
+						for (auto c : atext) {
+							switch (c) {
+								case '"': aesc += "\\\""; break;
+								case '\\': aesc += "\\\\"; break;
+								case '\n': aesc += "\\n"; break;
+								case '\t': aesc += "\\t"; break;
+								default: aesc += c;
+							}
+						}
+						anchors[name] = "\"" + aesc + "\"";
+					} else {
+						anchors[name] = yamlParseInlineValue(rv);
+					}
+				}
+			} else {
+				// Block anchor -- collect child lines (content only, like before)
+				std::vector<std::string> childLines;
+				size_t ci = li + 1;
+				size_t minIndent = SIZE_MAX;
+				while (ci < lines.size()) {
+					int si = countIndent(lines[ci]);
+					std::string_view sc = stripIndent(lines[ci]);
+					if (sc.empty() || sc[0] == '#') { ci++; continue; }
+					if (si > indent) {
+						if (static_cast<size_t>(si) < minIndent) minIndent = static_cast<size_t>(si);
+						childLines.push_back(lines[ci]);
+						ci++;
+					} else {
+						break;
+					}
+				}
+				if (!childLines.empty()) {
+					// Normalize indentation: strip the minimum indent in place
+					if (minIndent != SIZE_MAX && minIndent > 0) {
+						for (auto& cl : childLines) {
+							std::string_view cs = stripIndent(cl);
+							if (cs.empty() || cs[0] == '#') continue;
+							if (static_cast<size_t>(countIndent(cl)) >= minIndent) cl.erase(0, minIndent);
 						}
 					}
-					anchors[name] = "\"" + aesc + "\"";
+					anchors[name] = yamlParseDocImpl(childLines, depth + 1);
 				} else {
-					anchors[name] = yamlParseInlineValue(rv);
+					anchors[name] = "null";
 				}
 			}
-		} else {
-			// Block anchor -- collect child lines (content only, like before)
-			std::vector<std::string> childLines;
-			size_t ci = li + 1;
-			size_t minIndent = SIZE_MAX;
-			while (ci < lines.size()) {
-				int si = countIndent(lines[ci]);
-				std::string_view sc = stripIndent(lines[ci]);
-				if (sc.empty() || sc[0] == '#') { ci++; continue; }
-				if (si > indent) {
-					if (static_cast<size_t>(si) < minIndent) minIndent = static_cast<size_t>(si);
-					childLines.push_back(lines[ci]);
-					ci++;
-				} else {
-					break;
-				}
-			}
-			if (!childLines.empty()) {
-				// Normalize indentation: strip the minimum indent in place
-				if (minIndent != SIZE_MAX && minIndent > 0) {
-					for (auto& cl : childLines) {
-						std::string_view cs = stripIndent(cl);
-						if (cs.empty() || cs[0] == '#') continue;
-						if (static_cast<size_t>(countIndent(cl)) >= minIndent) cl.erase(0, minIndent);
-					}
-				}
-				anchors[name] = yamlParseDocImpl(childLines, depth + 1);
-			} else {
-				anchors[name] = "null";
-			}
+			amp = ne; // advance past this anchor before searching for the next
 		}
 	}
 	return found;
-}
-
-// Strip &anchor tags from a content string, returning cleaned version
-inline std::string yamlStripAnchors(std::string_view s, std::string* outAnchor) {
-	std::string result;
-	result.reserve(s.size());
-	size_t i = 0;
-	while (i < s.size()) {
-		if (s[i] == '&') {
-			if (i + 1 < s.size() && yamlIsAnchorChar(s[i + 1])) {
-				size_t start = i + 1;
-				size_t end = start;
-				while (end < s.size() && yamlIsAnchorChar(s[end])) end++;
-				if (outAnchor) *outAnchor = std::string(s.substr(start, end - start));
-				i = end;
-				while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) i++;
-				continue;
-			}
-		}
-		result += s[i++];
-	}
-	while (!result.empty() && (result.back() == ' ' || result.back() == '\t')) result.pop_back();
-	return result;
 }
 
 inline void yamlRejectTabIndent(const std::string& line, int lineNum);
@@ -2825,17 +2793,22 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		while (!content.empty() && (content.back() == ' ' || content.back() == '\t')) content.pop_back();
 		if (content.empty()) continue;
 
-		// Strip &anchor tags (they were already captured by pre-scan)
-		// Must check yamlAmpInQuote to avoid removing & inside quoted strings
-		{
+		if (hasAmp && content.find('&') != std::string_view::npos) {
+			// Strip &anchor tags that were registered by the pre-scan.
+			// Only strip anchors present in the map to keep the pre-scan and
+			// main pass in sync — unregistered &name text is left as-is so
+			// downstream parsing sees it rather than silently dropping it.
+			auto pc = yamlPrecomputeQuotes(content);
 			std::string cleaned;
+			cleaned.reserve(content.size());
 			size_t i = 0;
 			while (i < content.size()) {
-				if (content[i] == '&' && i + 1 < content.size() && yamlIsAnchorChar(content[i + 1]) && !yamlAmpInQuote(content, i)) {
-					if (!yamlInFlowBrackets(content, i)) {
-						size_t ns = i + 1;
-						size_t ne = ns;
-						while (ne < content.size() && yamlIsAnchorChar(content[ne])) ne++;
+				if (content[i] == '&' && i + 1 < content.size() && yamlIsAnchorChar(content[i + 1]) && !pc.inQuote[i] && !pc.inFlow[i]) {
+					size_t ns = i + 1;
+					size_t ne = ns;
+					while (ne < content.size() && yamlIsAnchorChar(content[ne])) ne++;
+					std::string_view aname(content.data() + ns, ne - ns);
+					if (anchors.find(std::string(aname)) != anchors.end()) {
 						i = ne;
 						while (i < content.size() && (content[i] == ' ' || content[i] == '\t')) i++;
 						continue;
@@ -2849,7 +2822,10 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		if (content.empty()) continue;
 
 		// A pending explicit key ("? key") must be satisfied by a ": value" line.
-		if (!pendingKey.empty() && yamlFindKeyColon(content) != 0) {
+		// Use yamlFindKeyColonSep: if the line does not start with ': ' (or ':'
+		// at EOL), it is either a multi-line key continuation (deeper indent)
+		// or an error — never silently treated as a new sibling entry.
+		if (!pendingKey.empty() && yamlFindKeyColonSep(content) != 0) {
 			// A deeper-indented line folds into a multi-line explicit key
 			// (YAML plain-scalar continuation). Any other non-": value" content
 			// is an error.
@@ -3698,11 +3674,9 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 			inDoc = true;
 			isExplicit = true;
 			hasContent = false;
-			docStart = i + 1;
-			if (pendingDirStart != SIZE_MAX) { // include directives before ---
-				docStart = pendingDirStart;
-				pendingDirStart = SIZE_MAX;
-			}
+			// Include any pending directives in the explicit document's range.
+			docStart = (pendingDirStart == SIZE_MAX) ? i + 1 : pendingDirStart;
+			pendingDirStart = SIZE_MAX;
 			continue;
 		}
 		if (atIndent0 && yamlIsBoundaryMarker(stripped, false)) { // "..."
@@ -3723,6 +3697,7 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 			isExplicit = false;
 			hasContent = false;
 			docStart = (pendingDirStart == SIZE_MAX) ? i : pendingDirStart;
+			pendingDirStart = SIZE_MAX;
 		}
 		hasContent = true;
 	}
