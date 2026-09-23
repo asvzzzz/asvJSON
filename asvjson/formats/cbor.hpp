@@ -249,6 +249,8 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       bool terminated = false;
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; terminated = true; break; }
+        // RFC 8949 §3.2.2: chunks of an indefinite-length string must be definite-length.
+        if ((data[pos] & 0x1F) == 31) throw asvJSONError("CBOR indefinite string with indefinite chunk");
         auto chunk = parseCBOR(data, pos, dataLen, depth + 1);
         if (!chunk) throw asvJSONError("CBOR indefinite string chunk");
         // RFC 8949 s3.2.2: an indefinite-length byte string (major 2) is made
@@ -305,6 +307,8 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     case 3: { // Text string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
       if (len64 > dataLen - pos) throw asvJSONError("CBOR string overflow");
+      // RFC 8949 §3.1: text strings MUST be valid UTF-8; reject invalid sequences outright.
+       if (!isValidUTF8(data + pos, static_cast<size_t>(len64))) throw asvJSONError("CBOR invalid UTF-8 in text string");
       auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(len64));
       pos += static_cast<size_t>(len64);
       if (!v) throw asvJSONError("CBOR string alloc failed");
@@ -403,7 +407,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (val->type == asvJSONValue::ARRAY && val->arr && val->arr->size() == 2) {
           auto& extTypeVal = (*val->arr)[0];
           auto& dataVal = (*val->arr)[1];
-          if (extTypeVal && dataVal && extTypeVal->type == asvJSONValue::INT && dataVal->type == asvJSONValue::BINARY) {
+          if (extTypeVal && dataVal && extTypeVal->type == asvJSONValue::INT && dataVal->type == asvJSONValue::BINARY && extTypeVal->num >= -128 && extTypeVal->num <= 127) {
             auto ext = asvJSONValue::makeExtension(static_cast<int8_t>(extTypeVal->num), dataVal->bin_data.data(), dataVal->bin_data.size());
             if (ext) return ext;
           }
@@ -454,17 +458,17 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         uint16_t exp = (half >> 10) & 0x1F;
         uint16_t mant = half & 0x3FF;
         double d;
+        // Note: half-precision is decoded to DOUBLE (asvJSONValue has no float16 type),
+        // so round-trip through CBOR will emit a float64 instead of the original float16.
         if (exp == 0) {
           d = (mant / 1024.0) * (1.0 / 16384.0);
         } else if (exp == 31) {
           d = mant ? NAN : INFINITY;
         } else {
-          d = (1.0 + mant / 1024.0) * std::pow(2.0, static_cast<int>(exp) - 15);
+          d = (1.0 + mant / 1024.0) * std::ldexp(1.0, static_cast<int>(exp) - 15);
         }
         if (sign) d = -d;
-        auto v = asvJSONValue::makeDouble(d);
-        if (v) v->is_float32 = false;
-        return v;
+        return asvJSONValue::makeDouble(d); // makeDouble defaults is_float32=false
       }
       if (info == 26) {
         if (pos + 4 > dataLen) throw asvJSONError("CBOR: unexpected end (float32)");

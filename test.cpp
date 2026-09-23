@@ -3188,6 +3188,102 @@ TEST(testCBORIndefiniteStringTruncated) {
 	ASSERT(!json.getLastError().empty());
 }
 
+TEST(testCBORIndefiniteStringWithIndefiniteChunk) {
+	// RFC 8949 §3.2.2: chunks of an indefinite-length string must be definite-length.
+	// Outer indefinite text string (0x7F), first chunk is itself indefinite (0x7F).
+	std::vector<uint8_t> data = { 0x7F, 0x7F, 0x61, 0xFF, 0xFF };
+	asvJSON json;
+	bool ok = json.fromCBOR(data.data(), data.size());
+	if (ok) throw std::runtime_error("fromCBOR accepted indefinite string with indefinite chunk");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testCBORInvalidUTF8TextString) {
+	// RFC 8949 §3.1: text strings MUST be valid UTF-8. Reject invalid sequences.
+	{
+		// Overlong 2-byte sequence: C0 80 (encodes U+0000, should be just 0x00)
+		std::vector<uint8_t> data = { 0x63, 0xC0, 0x80, 0x61 }; // "??a" — invalid UTF-8
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted overlong UTF-8");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		// Lone continuation byte at end: 62 80 ("a" + stray continuation)
+		std::vector<uint8_t> data = { 0x62, 0x61, 0x80 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted lone continuation byte");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		// 0xED + A0..FF → surrogate range, invalid in UTF-8
+		std::vector<uint8_t> data = { 0x63, 0xED, 0xA0, 0x80 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted surrogate UTF-8");
+		ASSERT(!json.getLastError().empty());
+	}
+	{
+		// Valid 4-byte sequence: U+10FFFF = F4 8F BF BF
+		std::vector<uint8_t> data = { 0x64, 0xF4, 0x8F, 0xBF, 0xBF };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid 4-byte UTF-8");
+	}
+	{
+		// Valid ASCII: "abc"
+		std::vector<uint8_t> data = { 0x63, 0x61, 0x62, 0x63 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid ASCII");
+	}
+	{
+		// Valid 4-byte sequence U+10400 = F0 90 84 80 (third byte is 0x90, fourth < 0xA0)
+		std::vector<uint8_t> data = { 0x66, 0xF0, 0x90, 0x84, 0x80 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+10400 (F0 90 84 80)");
+	}
+	{
+		// Valid 3-byte sequence U+FFC0 = EF BF C0 (second byte is 0xBF, > 0xBE)
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xC0 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFC0 (EF BF C0)");
+	}
+	{
+		// Valid 3-byte sequence U+FFFF = EF BF FF (second byte is 0xBF, > 0xBE)
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xFF };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFFF (EF BF FF)");
+	}
+	{
+		// Valid 4-byte sequence U+1D400 = F0 9D 90 80 (fourth byte >= 0xA0, old code path still works)
+		std::vector<uint8_t> data = { 0x66, 0xF0, 0x9D, 0x90, 0x80 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+1D400 (F0 9D 90 80)");
+	}
+	{
+		// Valid 3-byte sequence in Private Use Area: U+E000 = EF B0 80 (range 0xE1..0xEC, old bug path)
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xB0, 0x80 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+E000 PUA (EF B0 80)");
+	}
+	{
+		// Valid boundary: U+FFFF = EF BF FF and U+E000 = EF B0 80 — both must succeed
+		std::vector<uint8_t> data1 = { 0x63, 0xEF, 0xBF, 0xFF };
+		std::vector<uint8_t> data2 = { 0x63, 0xEF, 0xB0, 0x80 };
+		asvJSON json;
+		if (!json.fromCBOR(data1.data(), data1.size())) throw std::runtime_error("fromCBOR rejected U+FFFF");
+		json.clear();
+		if (!json.fromCBOR(data2.data(), data2.size())) throw std::runtime_error("fromCBOR rejected U+E000");
+	}
+	{
+		// Invalid: 0xEE (U+E000..U+EFFF) must be rejected — this was the old bug path falling through to false-positive
+		std::vector<uint8_t> data = { 0x63, 0xEE, 0xA0, 0x80 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted invalid U+E000 range (0xEE)");
+	}
+}
+
 TEST(testCBORExtras) {
 	// 1. JSON null must encode as CBOR null (0xF6), NOT undefined (0xF7).
 	{
