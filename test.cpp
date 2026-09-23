@@ -6282,7 +6282,7 @@ TEST(testFromYAML) {
 		asvJSON json;
 		ASSERT(json.fromYAML("---\n%TAG !x! tag:example.com,2000:app/\nx: !x!foo hello"));
 		auto* x = json.getRoot()->get("x");
-	 ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
+		 ASSERT(x != nullptr && x->type == asvJSONValue::CUSTOM_TAG);
 		ASSERT_EQ(std::string(x->str_data), "tag:example.com,2000:app/foo");
 		if (x->custom_value) {
 			ASSERT(x->custom_value->type == asvJSONValue::STRING);
@@ -19693,8 +19693,8 @@ TEST(testJsonStream) {
 		ASSERT(sp.finish());
 		ASSERT_EQ(events.size(), size_t(2));
 		ASSERT_EQ(events[0], "int:1");
-	 ASSERT_EQ(events[1], "int:2");
-	}
+		 ASSERT_EQ(events[1], "int:2");
+		}
 
 	// -- regression: backslash escape split across a chunk boundary --
 	// The `\"` must be treated as an escaped quote even when the backslash is the
@@ -19729,8 +19729,8 @@ TEST(testJsonStream) {
 		ASSERT(sp.feed("tr"));
 		ASSERT(sp.feed("ue"));
 		ASSERT(sp.finish());
-	 ASSERT(val);
-	}
+		 ASSERT(val);
+		}
 	{
 		bool val = false;
 		struct : JsonSaxHandler {
@@ -19744,8 +19744,8 @@ TEST(testJsonStream) {
 			ASSERT(sp.feed(std::string_view(input.data() + i, std::min<size_t>(2, input.size() - i))));
 		}
 		ASSERT(sp.finish());
-	 ASSERT(!val);
-	}
+		 ASSERT(!val);
+		}
 	{
 		bool emitted = false;
 		struct : JsonSaxHandler {
@@ -19759,8 +19759,8 @@ TEST(testJsonStream) {
 			ASSERT(sp.feed(std::string_view(&c, 1)));
 		}
 		ASSERT(sp.finish());
-	 ASSERT(emitted);
-	}
+		 ASSERT(emitted);
+		}
 
 	// -- regression: `//` comment whose first slash lands at a chunk boundary --
 	// A dangling `/` at the end of a chunk must not spin forever or error; it
@@ -19777,11 +19777,11 @@ TEST(testJsonStream) {
 		ASSERT(sp.feed("{/"));
 		ASSERT(sp.feed("/ c\n\"a\":1}"));
 		ASSERT(sp.finish());
-	 ASSERT_EQ(events.size(), size_t(2));
-	 ASSERT_EQ(events[0], "key:a");
-	 ASSERT_EQ(events[1], "int:1");
-	}
-	// -- regression: block comment `/*` split at the first slash boundary --
+		 ASSERT_EQ(events.size(), size_t(2));
+		 ASSERT_EQ(events[0], "key:a");
+		 ASSERT_EQ(events[1], "int:1");
+		}
+		// -- regression: block comment `/*` split at the first slash boundary --
 	{
 		bool got = false;
 		int64_t val = 0;
@@ -19793,10 +19793,10 @@ TEST(testJsonStream) {
 		JsonStreamParser sp(h);
 		ASSERT(sp.feed("[1, /"));
 		ASSERT(sp.feed("* b\n*/2]"));
-	 ASSERT(sp.finish());
-	 ASSERT(got);
-	 ASSERT_EQ(val, 2);
-	}
+		 ASSERT(sp.finish());
+		 ASSERT(got);
+		 ASSERT_EQ(val, 2);
+		}
 
 	// -- regression: dangling '/' at EOF rejected (DOM/SAX parity) --
 	// feed("123 /") leaves a '/' awaiting a second comment character; at EOF it
@@ -19844,9 +19844,9 @@ TEST(testJsonStream) {
 		sp.allowComments = true;
 		ASSERT(sp.feed("123 /"));
 		ASSERT(sp.feed("/ trailing"));
-	 ASSERT(sp.finish());
-	 ASSERT(ok);
-	}
+		 ASSERT(sp.finish());
+		 ASSERT(ok);
+		}
 }
 
 TEST(testJsonSaxStrict) {
