@@ -122,6 +122,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 		}
 		case T::DATETIME: {
 			uint32_t ns = static_cast<uint32_t>(datetime_ms) * 1000000;
+			// Defensive clamp; unreachable when datetime_ms is in its documented [0, 999] range.
 			if (ns > 999999999) ns = 999999999;
 			if (timestamp >= 0 && timestamp < 0x100000000LL && ns == 0) {
 				// fixext4: seconds precision
@@ -165,7 +166,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 		case T::TIMESTAMP: {
 			// Store as fixext8 (0xD7) with type 3 for roundtrip preservation
 			out.push_back(0xD7);
-			out.push_back(3); // extType=3 for Timestamp
+			out.push_back(static_cast<uint8_t>(3)); // extType=3 for Timestamp
 			uint64_t n = static_cast<uint64_t>(num);
 			for (int i = 7; i >= 0; i--) out.push_back(static_cast<uint8_t>((n >> (i * 8)) & 0xFF));
 			break;
@@ -223,6 +224,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 	if (tag >= 0xA0 && tag <= 0xBF) {
 		uint32_t len = tag & 0x1F;
 		if (len > dataLen - pos) throw asvJSONError("MsgPack string too long");
+		if (!isValidUTF8(data + pos, static_cast<size_t>(len))) throw asvJSONError("MsgPack invalid UTF-8 in string");
 		auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), len);
 		pos += len;
 		if (!val) throw asvJSONError("MsgPack string alloc failed");
@@ -426,6 +428,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				// Timestamp 32
 				uint32_t t = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 				pos += 4;
+				if (static_cast<int64_t>(t) > static_cast<int64_t>(std::numeric_limits<time_t>::max())) throw asvJSONError("MsgPack fixext4 datetime seconds out of time_t range");
 				auto d = asvJSONValue::makeDateTime(static_cast<time_t>(t), 0);
 				if (!d) throw asvJSONError("MsgPack datetime alloc failed");
 				return d;
@@ -437,10 +440,10 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (!v) throw asvJSONError("MsgPack extension alloc failed");
 			return v;
 		}
-		case 0xD7: { 
-			if (pos >= dataLen) throw asvJSONError("MsgPack fixext8"); 
-			int8_t et = static_cast<int8_t>(data[pos++]); 
-			if (pos + 8 > dataLen) throw asvJSONError("MsgPack fixext8 overflow"); 
+		case 0xD7: {
+			if (pos >= dataLen) throw asvJSONError("MsgPack fixext8");
+			int8_t et = static_cast<int8_t>(data[pos++]);
+			if (pos + 8 > dataLen) throw asvJSONError("MsgPack fixext8 overflow");
 			if (et == 3) { 
 				uint64_t ts = 0; 
 				for (int i = 7; i >= 0; i--) ts = (ts << 8) | data[pos++]; 
@@ -454,8 +457,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				pos += 8; 
 				uint64_t sec = data64 & 0x3FFFFFFFFLL; 
 				auto ns = static_cast<uint32_t>((data64 >> 34) & 0x3FFFFFFF); 
-				if (ns >= 1000000000) throw asvJSONError("MsgPack fixext8 datetime ns overflow"); 
-				auto d = asvJSONValue::makeDateTime(static_cast<time_t>(sec), ns / 1000000); 
+				if (ns >= 1000000000) throw asvJSONError("MsgPack fixext8 datetime ns overflow");
+				if (static_cast<int64_t>(sec) > static_cast<int64_t>(std::numeric_limits<time_t>::max())) throw asvJSONError("MsgPack fixext8 datetime seconds out of time_t range");
+				auto d = asvJSONValue::makeDateTime(static_cast<time_t>(sec), ns / 1000000);
 				if (!d) throw asvJSONError("MsgPack datetime alloc failed"); 
 				return d; 
 			} 
@@ -471,6 +475,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos >= dataLen) throw asvJSONError("MsgPack str8");
 			uint8_t slen = data[pos++];
 			if (slen > dataLen - pos) throw asvJSONError("MsgPack str8 overflow");
+			if (!isValidUTF8(data + pos, static_cast<size_t>(slen))) throw asvJSONError("MsgPack invalid UTF-8 in string");
 			auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen);
 			pos += slen;
 			if (!val) throw asvJSONError("MsgPack string too long");
@@ -481,6 +486,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			uint16_t slen = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
 			if (slen > dataLen - pos) throw asvJSONError("MsgPack str16 overflow");
+			if (!isValidUTF8(data + pos, static_cast<size_t>(slen))) throw asvJSONError("MsgPack invalid UTF-8 in string");
 			auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen);
 			pos += slen;
 			if (!val) throw asvJSONError("MsgPack string too long");
@@ -491,6 +497,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			uint32_t slen = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
 			if (slen > dataLen - pos) throw asvJSONError("MsgPack str32 overflow");
+			if (!isValidUTF8(data + pos, static_cast<size_t>(slen))) throw asvJSONError("MsgPack invalid UTF-8 in string");
 			auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen);
 			pos += slen;
 			if (!val) throw asvJSONError("MsgPack string too long");
@@ -567,7 +574,7 @@ inline std::unique_ptr<asvJSONValue> msgpackDecodeCustomTag(const uint8_t* data,
 			if (val && pos == subEnd) {
 				auto custom = std::make_unique<asvJSONValue>();
 				custom->type = asvJSONValue::CUSTOM_TAG;
-				custom->str_data = name->str_data;
+				custom->str_data = std::move(name->str_data);
 				custom->custom_value = std::move(val);
 				return custom;
 			}

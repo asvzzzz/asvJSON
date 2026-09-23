@@ -1149,6 +1149,48 @@ TEST(testMessagePackCorruptedData) {
 	}
 }
 
+TEST(testMessagePackInvalidUTF8) {
+	// fixstr (0xA5) with invalid UTF-8 continuation byte 0x80.
+	{
+		uint8_t data[] = {0xa3, 0xC0, 0x80, 'X'}; // str3 but first byte is overlong
+		asvJSON json2;
+		bool ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("invalid UTF-8 fixstr should fail");
+	}
+	// str8 with invalid standalone 0xFE.
+	{
+		uint8_t data[] = {0xd9, 0x02, 0xFE, 0xFF};
+		asvJSON json2;
+		bool ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("invalid UTF-8 str8 should fail");
+	}
+	// str16 with invalid continuation.
+	{
+		uint8_t data[] = {0xda, 0x00, 0x03, 'A', 0x80, 'B'};
+		asvJSON json2;
+		bool ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("invalid UTF-8 str16 should fail");
+	}
+	// str32 with invalid standalone 0xF0.
+	{
+		uint8_t data[] = {0xdb, 0x00, 0x00, 0x00, 0x02, 0xF0, 'X'};
+		asvJSON json2;
+		bool ok = json2.fromMessagePack(data, sizeof(data));
+		if (ok) throw std::runtime_error("invalid UTF-8 str32 should fail");
+	}
+	// Valid multi-byte UTF-8 must still parse fine.
+	{
+		const char* utf8 = "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"; // "привет"
+		std::vector<uint8_t> data = {0xa8};
+		data.insert(data.end(), (uint8_t*)utf8, (uint8_t*)utf8 + 8);
+		asvJSON json2;
+		bool ok = json2.fromMessagePack(data.data(), data.size());
+		if (!ok) throw std::runtime_error("valid UTF-8 fixstr should succeed");
+		std::string_view sv = json2.getRoot()->getString();
+		if (sv != "привет") throw std::runtime_error("UTF-8 value mismatch");
+	}
+}
+
 TEST(testMsgPackUInt64Overflow) {
 	// uint64 (0xCF) value above int64 max (0xFFFFFFFFFFFFFFFF)
 	// must be rejected before makeInt() (which performs no range check).
@@ -10344,7 +10386,7 @@ TEST(testCsvEmptyObjects) {
 		ASSERT(j2.fromCSV(csv));
 		ASSERT_EQ(j2.getRoot()->arr->size(), 2U);
 		ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(0))->get("")->getInt(), int64_t(1));
-		ASSERT_EQ(j2.getRoot()->get(static_cast(size_t)(1))->get("")->getInt(), int64_t(2));
+		ASSERT_EQ(j2.getRoot()->get(static_cast<size_t>(1))->get("")->getInt(), int64_t(2));
 	}
 	// An empty object nested inside an array-of-objects member keeps its column.
 	{
@@ -22791,7 +22833,7 @@ int main() {
 	RUN(testJSONPatchTestIntDouble);
 	
 	std::cout << "\n--- Corrupted Data Tests ---\n";
-	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);	RUN(testMsgPackUInt64Overflow);
+	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);	RUN(testMessagePackInvalidUTF8);	RUN(testMsgPackUInt64Overflow);
 	
 	std::cout << "\n--- Duplicate Key Tests ---\n";
 	RUN(testDuplicateKeyNoLeak);
