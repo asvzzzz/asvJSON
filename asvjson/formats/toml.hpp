@@ -325,7 +325,6 @@ static inline size_t tomlSkipString(std::string_view s, size_t i) {
     if (escaped) { escaped = false; i++; continue; }
     if (q == '"' && d == '\\') { escaped = true; i++; continue; }
     if (d == q) {
-      if (escaped) { escaped = false; i++; continue; }
       if (ml) {
         size_t run = 0;
         while (i + run < s.size() && s[i + run] == q) run++;
@@ -646,7 +645,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
     int bracketDepth = 0;
     std::string cur;
     bool inBasic = false, inLiteral = false, escape = false;
-    bool multi = s.find('\n') != std::string_view::npos || s.find('\r') != std::string_view::npos;
+    bool inMultiBasic = false, inMultiLiteral = false;
     bool closed = false;
     auto flushVal = [&]() {
       std::string trimmed = std::string(trimSV(std::string_view(cur)));
@@ -666,10 +665,28 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
     while (!s.empty()) {
       char c = s[0]; s.remove_prefix(1);
       if (escape) { escape = false; cur += c; continue; }
-      if (c == '\\' && inBasic) { escape = true; cur += c; continue; }
-      if (c == '"' && !inLiteral) { inBasic = !inBasic; cur += c; continue; }
-      if (c == '\'' && !inBasic) { inLiteral = !inLiteral; cur += c; continue; }
-      if (!inBasic && !inLiteral) {
+      if (c == '\\' && (inBasic || inMultiBasic)) { escape = true; cur += c; continue; }
+      // Triple-quote detection for multiline strings
+      if (!inMultiBasic && !inMultiLiteral && c == '"' && !inLiteral) {
+        if (s.size() >= 2 && s[0] == '"' && s[1] == '"') {
+          inMultiBasic = true; cur += "\"\"\""; s.remove_prefix(2); continue;
+        }
+        inBasic = !inBasic; cur += c; continue;
+      }
+      if (!inMultiBasic && !inMultiLiteral && c == '\'' && !inBasic) {
+        if (s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
+          inMultiLiteral = true; cur += "'''"; s.remove_prefix(2); continue;
+        }
+        inLiteral = !inLiteral; cur += c; continue;
+      }
+      // Close multiline string delimiters
+      if (inMultiBasic && c == '"' && s.size() >= 2 && s[0] == '"' && s[1] == '"') {
+        inMultiBasic = false; cur += "\"\"\""; s.remove_prefix(2); continue;
+      }
+      if (inMultiLiteral && c == '\'' && s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
+        inMultiLiteral = false; cur += "'''"; s.remove_prefix(2); continue;
+      }
+      if (!inBasic && !inLiteral && !inMultiBasic && !inMultiLiteral) {
         if (c == '#') { skipToEol(); continue; }
         // Newlines separate elements in a multiline array (comma optional)
         if (c == '\n' || c == '\r') { flushVal(); continue; }

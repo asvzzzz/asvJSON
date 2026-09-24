@@ -11446,6 +11446,24 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("a = [1,\n2,\n]")));
     ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
   }
+  // Multiline basic string inside inline array
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [\"\"\"foo\nbar\"\"\"]")));
+    ASSERT_EQ(std::string(j.getString("a[0]")), "foo\nbar");
+  }
+  // Escaped triple-quote inside multiline basic string in inline array
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [\"\"\"foo\\\"\"\"bar\"\"\"]")));
+    ASSERT_EQ(std::string(j.getString("a[0]")), "foo\\\"\"\"bar");
+  }
+  // Multiline literal string inside inline array
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = ['''foo\nbar'''")));
+    ASSERT_EQ(std::string(j.getString("a[0]")), "foo\nbar");
+  }
   // JSON-invalid `[1 2]` inside an inline array is a parse error (the second
   // element must not be silently dropped; matches the inline-table path)
   {
@@ -11503,6 +11521,12 @@ key = "value" # inline comment)")));
     asvJSON j;
     ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"foo\\\"\"\"bar\"\"\"}")));
     ASSERT_EQ(std::string(j.getString("a.b")), "foo\\\"\"\"bar");
+  }
+  // Multiline basic string inside inline table (re-affirm after array fix)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = [\"\"\"x\ny\"\"\"]}")));
+    ASSERT_EQ(std::string(j.getString("a.b[0]")), "x\ny");
   }
   // Missing comma between inline-table pairs is an error
   {
