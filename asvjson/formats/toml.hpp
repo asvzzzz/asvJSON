@@ -325,6 +325,7 @@ static inline size_t tomlSkipString(std::string_view s, size_t i) {
     if (escaped) { escaped = false; i++; continue; }
     if (q == '"' && d == '\\') { escaped = true; i++; continue; }
     if (d == q) {
+      if (escaped) { escaped = false; i++; continue; }
       if (ml) {
         size_t run = 0;
         while (i + run < s.size() && s[i + run] == q) run++;
@@ -339,10 +340,11 @@ static inline size_t tomlSkipString(std::string_view s, size_t i) {
   return i;
 }
 
-// Quote-aware scan that reports whether the array opened by the first '['
-// is already balanced on this string. Used to gather multiline array value
-// lines (`arr = [\n1,\n2]`) until the brackets close.
-inline bool tomlArrayBalanced(std::string_view s) {
+// Quote-aware scan that reports whether a container opened by `open` is
+// already balanced on this string. Used to gather multiline array/table value
+// lines until the delimiters close.
+template<char OPEN, char CLOSE>
+inline bool tomlBalanced(std::string_view s) {
   int depth = 0;
   size_t i = 0;
   while (i < s.size()) {
@@ -355,8 +357,8 @@ inline bool tomlArrayBalanced(std::string_view s) {
       while (i < s.size() && s[i] != '\n' && s[i] != '\r') i++;
       continue;
     }
-    if (c == '[') depth++;
-    else if (c == ']') {
+    if (c == OPEN) depth++;
+    else if (c == CLOSE) {
       depth--;
       if (depth <= 0) return true;
     }
@@ -365,31 +367,15 @@ inline bool tomlArrayBalanced(std::string_view s) {
   return false;
 }
 
+// Quote-aware scan that reports whether the array opened by the first '['
+// is already balanced on this string. Used to gather multiline array value
+// lines (`arr = [\n1,\n2]`) until the brackets close.
+inline bool tomlArrayBalanced(std::string_view s) { return tomlBalanced<'[', ']'>(s); }
+
 // Quote-aware scan that reports whether the inline table opened by the first '{'
 // is already balanced on this string. Used to gather multiline inline table
 // value lines (`a = {\n  b = 1,\n}`) until the braces close.
-inline bool tomlTableBalanced(std::string_view s) {
-  int depth = 0;
-  size_t i = 0;
-  while (i < s.size()) {
-    char c = s[i];
-    if (c == '"' || c == '\'') {
-      i = tomlSkipString(s, i);
-      continue;
-    }
-    if (c == '#') {
-      while (i < s.size() && s[i] != '\n' && s[i] != '\r') i++;
-      continue;
-    }
-    if (c == '{') depth++;
-    else if (c == '}') {
-      depth--;
-      if (depth <= 0) return true;
-    }
-    i++;
-  }
-  return false;
-}
+inline bool tomlTableBalanced(std::string_view s) { return tomlBalanced<'{', '}'>(s); }
 
 // Parse a complete TOML value into JSON string
 constexpr int MAX_TOML_DEPTH = 64;
@@ -461,7 +447,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
           break;
         char c = s[0]; s.remove_prefix(1);
         if (escape) { escape = false; valStr += c; continue; }
-        if (c == '\\' && inBasic) { escape = true; valStr += c; continue; }
+        if (c == '\\' && (inBasic || inMultiBasic)) { escape = true; valStr += c; continue; }
         // Triple-quote detection for multiline strings
         if (!inMultiBasic && !inMultiLiteral && c == '"' && !inLiteral) {
           if (s.size() >= 2 && s[0] == '"' && s[1] == '"') {
@@ -543,7 +529,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
     }
     if (!closed) throw asvJSONError("unterminated inline table");
     rejectTrailing();
-    // Mark all paths created by this inline table as closed (immutable)
+    // Mark all paths created by this inline table as immutable (closed for extension)
     if (inlineTablePaths) {
       std::function<void(const asvJSONValue*, const std::string&)> markPaths;
       markPaths = [&](const asvJSONValue* objVal, const std::string& p) {
@@ -1196,7 +1182,8 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     // two different parents with the same leaf name (`[[a.x]]`, `[[b.x]]`)
     // cannot collide and silently defeat the static-array guard below.
     std::unordered_set<std::string> arrayTablePaths;
-    // Paths created by inline tables are immutable per TOML spec
+    // Paths created by inline tables are immutable — headers and key=value
+    // that would extend them are rejected at parse time.
     std::unordered_set<std::string> inlineTablePaths;
     for (size_t lineNum = 0; lineNum < lines.size(); lineNum++) {
       std::string_view line = trimSV(lines[lineNum]);
@@ -1249,7 +1236,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             throw asvJSONError("cannot extend inline table '" + fullPath + "'");
           // Check prefix matches: [x.b] must be rejected if x.a is an inline table
           for (size_t i = 1; i < tablePath.size(); i++) {
-            std::string prefix;
+        std::string prefix;
             for (size_t j = 0; j < i; j++) {
               if (j > 0) prefix += '.';
               prefix += tablePath[j];

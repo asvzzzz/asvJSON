@@ -11498,6 +11498,12 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("a = {b = '''it's'''}}}")));
     ASSERT_EQ(std::string(j.getString("a.b")), "it's");
   }
+  // Escaped triple-quote inside multiline basic string (TOML 1.0)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"foo\\\"\"\"bar\"\"\"}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "foo\\\"\"\"bar");
+  }
   // Missing comma between inline-table pairs is an error
   {
     asvJSON j;
