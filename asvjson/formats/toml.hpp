@@ -1199,7 +1199,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     // two different parents with the same leaf name (`[[a.x]]`, `[[b.x]]`)
     // cannot collide and silently defeat the static-array guard below.
     std::unordered_set<std::string> arrayTablePaths;
-    // Paths created by inline tables are immutable — headers and key=value
+    // Paths created by inline tables are immutable -- headers and key=value
     // that would extend them are rejected at parse time.
     std::unordered_set<std::string> inlineTablePaths;
     for (size_t lineNum = 0; lineNum < lines.size(); lineNum++) {
@@ -1253,7 +1253,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             throw asvJSONError("cannot extend inline table '" + fullPath + "'");
           // Check prefix matches: [x.b] must be rejected if x.a is an inline table
           for (size_t i = 1; i < tablePath.size(); i++) {
-        std::string prefix;
+            std::string prefix;
             for (size_t j = 0; j < i; j++) {
               if (j > 0) prefix += '.';
               prefix += tablePath[j];
@@ -1448,16 +1448,16 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       if (trimSV(std::string_view(valueStr)).empty())
         throw asvJSONError("missing value for key");
 
-       std::string prefix;
-       for (size_t pi = 0; pi < tablePath.size(); pi++) {
-         if (pi > 0) prefix += '.';
-         prefix += tablePath[pi];
-       }
-       for (size_t ki = 0; ki < keys.size(); ki++) {
-         if (!prefix.empty()) prefix += '.';
-         prefix += keys[ki];
-       }
-       std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true, &inlineTablePaths, prefix);
+      std::string prefix;
+      for (size_t pi = 0; pi < tablePath.size(); pi++) {
+        if (pi > 0) prefix += '.';
+        prefix += tablePath[pi];
+      }
+      for (size_t ki = 0; ki < keys.size(); ki++) {
+        if (!prefix.empty()) prefix += '.';
+        prefix += keys[ki];
+      }
+      std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true, &inlineTablePaths, prefix);
 
       if (isArrayTable) {
         // Inside [[array]]: set on current (last) array element
