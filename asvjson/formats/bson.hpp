@@ -106,7 +106,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 					if (elem.size() > elemStart) {
 						char idx[32];
 						auto [ptr, ec] = std::to_chars(idx, idx + sizeof(idx), i);
-						if (ec) throw asvJSONError("BSON array index too large");
+						if (ec != std::errc()) throw asvJSONError("BSON array index too large");
 						size_t n = static_cast<size_t>(ptr - idx);
 						elem.insert(elem.begin() + elemStart + 1, idx, idx + n);
 						elem.insert(elem.begin() + elemStart + 1 + n, 0);

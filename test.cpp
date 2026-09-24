@@ -11287,13 +11287,19 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("d = 1979-05-27T07:32:00Z")));
     ASSERT_EQ(std::string(j.getString("d")), "1979-05-27T07:32:00Z");
   }
-  // Trailing comma in inline arrays is a parse error (per TOML spec)
+  // Trailing comma in inline arrays is allowed (per TOML spec)
   {
     asvJSON j;
-    ASSERT(!j.fromTOML(std::string_view("a = [1, 2,]")));
-    ASSERT(!j.fromTOML(std::string_view("a = [1,]")));
-    ASSERT(!j.fromTOML(std::string_view("a = [1, ]")));
-    ASSERT(!j.fromTOML(std::string_view("a = [[1,2],]")));
+    ASSERT(j.fromTOML(std::string_view("a = [1, 2,]")));
+    ASSERT_EQ(j.getRoot()->getConst("a")->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->getConst("a")->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->getConst("a")->get(static_cast<size_t>(1))->getInt(), int64_t(2));
+    ASSERT(j.fromTOML(std::string_view("a = [1,]")));
+    ASSERT_EQ(j.getRoot()->getConst("a")->size(), size_t(1));
+    ASSERT(j.fromTOML(std::string_view("a = [1, ]")));
+    ASSERT_EQ(j.getRoot()->getConst("a")->size(), size_t(1));
+    ASSERT(j.fromTOML(std::string_view("a = [[1,2],]")));
+    ASSERT_EQ(j.getRoot()->getConst("a")->size(), size_t(1));
   }
   // Missing array element between commas is a parse error
   {
@@ -11559,6 +11565,78 @@ key = "value" # inline comment)")));
   {
     asvJSON j;
     ASSERT(!j.fromTOML(std::string_view("x =")));
+  }
+  // Fix 1: Missing value in inline table should throw
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("{a = , b = 2}")));
+    ASSERT(!j.fromTOML(std::string_view("{a =, b = 2}")));
+  }
+  // Fix 3: Empty table headers should throw
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("[]")));
+    ASSERT(!j.fromTOML(std::string_view("[[]]")));
+    ASSERT(!j.fromTOML(std::string_view("[ ]")));
+  }
+  // Fix 4: Inline tables should be immutable (cannot add keys after)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = 1}")));
+    ASSERT_EQ(j.getInt("a.b"), int64_t(1));
+    // Cannot add new keys to an inline table after it's closed
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1}\n[a.c]\nx = 2")));
+    // Cannot reopen an inline table with a header
+    ASSERT(!j.fromTOML(std::string_view("a = {}\n[a.b]\nx = 1")));
+  }
+  // Fix 5: Multi-line strings/arrays inside inline tables should work
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(a = { s = """long
+text""" })")));
+    ASSERT_EQ(std::string(j.getString("a.s")), "long\ntext");
+    // Multi-line array inside inline table
+    ASSERT(j.fromTOML(std::string_view(R"(a = { arr = [1,
+2,
+3] })")));
+    ASSERT_EQ(j.getRoot()->get("a")->get("arr")->size(), size_t(3));
+  }
+  // Fix 6: Date validation - invalid month/day should not be accepted as date
+  {
+    asvJSON j;
+    // Invalid month (13) should not be accepted as a date string
+    ASSERT(!j.fromTOML(std::string_view("d = 2024-13-01")));
+    // Invalid day (32) should not be accepted as a date string
+    ASSERT(!j.fromTOML(std::string_view("d = 2024-01-32")));
+    // Valid date should still work
+    ASSERT(j.fromTOML(std::string_view("d = 2024-01-15")));
+  }
+  // Fix 7: Trailing content after multiline string should be error, not consume next lines
+  {
+    asvJSON j;
+    // Trailing content after closing delimiter should be an error
+    ASSERT(!j.fromTOML(std::string_view("a = \"\"\"x\"\"\" y")));
+    ASSERT(!j.fromTOML(std::string_view("a = '''x''' y")));
+  }
+  // Fix 8: stripComment state should not leak between lines
+  {
+    asvJSON j;
+    // A multiline string followed by a comment should work correctly
+    ASSERT(j.fromTOML(std::string_view(R"(a = """
+x
+"""
+# comment
+b = 1)")));
+    ASSERT_EQ(std::string(j.getString("a")), "x\n");
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+    // Comment inside a multiline string should be preserved
+    ASSERT(j.fromTOML(std::string_view(R"(a = """
+x # not a comment
+y
+"""
+b = 2)")));
+    ASSERT_EQ(std::string(j.getString("a")), "x # not a comment\ny\n");
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
   }
 }
 
