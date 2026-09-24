@@ -11427,6 +11427,19 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("a = [1,\n2,\n]")));
     ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
   }
+  // Trailing comma is legal in a single-line array (TOML 1.0)
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [1, 2,]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->get("a")->get(static_cast<size_t>(0))->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->get("a")->get(static_cast<size_t>(1))->getInt(), int64_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [1,]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(1));
+  }
   // Unclosed multiline array is an error
 {
     asvJSON j;
@@ -11456,6 +11469,23 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("a = {b = \"x}y\", c = 1}")));
     ASSERT_EQ(std::string(j.getString("a.b")), "x}y");
     ASSERT_EQ(j.getInt("a.c"), int64_t(1));
+  }
+  // Multiline basic string inside inline table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"\nhello\nworld\n\"\"\"}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "hello\nworld\n");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"hello\"\"\"}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "hello");
+  }
+  // Multiline literal string inside inline table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = '''\nhello\nworld\n'''}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "hello\nworld\n");
   }
   // Missing comma between inline-table pairs is an error
   {

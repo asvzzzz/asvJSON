@@ -312,6 +312,33 @@ inline std::unique_ptr<asvJSONValue> tomlParseJsonValue(const std::string& jsonV
   return cloneValue(tmp.getRoot()->get("_"));
 }
 
+// Quote-aware scanner: skip a string literal (single or triple-quoted)
+// starting at position `i`. Returns the position after the closing delimiter.
+static inline size_t tomlSkipString(std::string_view s, size_t i) {
+  if (i >= s.size()) return i;
+  char q = s[i];
+  bool ml = (i + 2 < s.size() && s[i + 1] == q && s[i + 2] == q);
+  i += ml ? 3 : 1;
+  bool escaped = false;
+  while (i < s.size()) {
+    char d = s[i];
+    if (escaped) { escaped = false; i++; continue; }
+    if (q == '"' && d == '\\') { escaped = true; i++; continue; }
+    if (d == q) {
+      if (ml) {
+        size_t run = 0;
+        while (i + run < s.size() && s[i + run] == q) run++;
+        if (run >= 3) return i + run;
+        i++;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return i;
+}
+
 // Quote-aware scan that reports whether the array opened by the first '['
 // is already balanced on this string. Used to gather multiline array value
 // lines (`arr = [\n1,\n2]`) until the brackets close.
@@ -321,27 +348,7 @@ inline bool tomlArrayBalanced(std::string_view s) {
   while (i < s.size()) {
     char c = s[i];
     if (c == '"' || c == '\'') {
-      char q = c;
-      bool ml = (i + 2 < s.size() && s[i + 1] == q && s[i + 2] == q);
-      i += ml ? 3 : 1;
-      bool escaped = false;
-      while (i < s.size()) {
-        char d = s[i];
-        if (escaped) { escaped = false; i++; continue; }
-        if (q == '"' && d == '\\') { escaped = true; i++; continue; }
-        if (d == q) {
-          if (ml) {
-            size_t run = 0;
-            while (i + run < s.size() && s[i + run] == q) run++;
-            if (run >= 3) { i += run; break; }
-            i++;
-            continue;
-          }
-          i++;
-          break;
-        }
-        i++;
-      }
+      i = tomlSkipString(s, i);
       continue;
     }
     if (c == '#') {
@@ -367,27 +374,7 @@ inline bool tomlTableBalanced(std::string_view s) {
   while (i < s.size()) {
     char c = s[i];
     if (c == '"' || c == '\'') {
-      char q = c;
-      bool ml = (i + 2 < s.size() && s[i + 1] == q && s[i + 2] == q);
-      i += ml ? 3 : 1;
-      bool escaped = false;
-      while (i < s.size()) {
-        char d = s[i];
-        if (escaped) { escaped = false; i++; continue; }
-        if (q == '"' && d == '\\') { escaped = true; i++; continue; }
-        if (d == q) {
-          if (ml) {
-            size_t run = 0;
-            while (i + run < s.size() && s[i + run] == q) run++;
-            if (run >= 3) { i += run; break; }
-            i++;
-            continue;
-          }
-          i++;
-          break;
-        }
-        i++;
-      }
+      i = tomlSkipString(s, i);
       continue;
     }
     if (c == '#') {
@@ -407,7 +394,7 @@ inline bool tomlTableBalanced(std::string_view s) {
 // Parse a complete TOML value into JSON string
 constexpr int MAX_TOML_DEPTH = 64;
 
-inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strictTail = false, std::unordered_set<std::string>* inlineTablePaths = nullptr) {
+inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strictTail = false, std::unordered_set<std::string>* inlineTablePaths = nullptr, const std::string& prefix = "") {
   s = trimSV(s);
   if (depth > MAX_TOML_DEPTH) throw asvJSONError("TOML value nesting too deep");
   if (s.empty()) return "null";
@@ -464,21 +451,43 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       std::string valStr;
       bool commaBreak = false;
       bool inBasic = false, inLiteral = false, escape = false;
+      bool inMultiBasic = false, inMultiLiteral = false;
       while (!s.empty()) {
         // A depth-0 '}' right at the current position (also immediately after
         // a closing quote -- the quote toggles below continue past it) is the
         // table closer: leave it for the outer loop, never swallow it into
         // the raw value text that parseTomlValue() will re-parse.
-        if (!inBasic && !inLiteral && !escape && !valStr.empty() && s[0] == '}' && bracketDepth == 0)
+        if (!inBasic && !inLiteral && !escape && !inMultiBasic && !inMultiLiteral && !valStr.empty() && s[0] == '}' && bracketDepth == 0)
           break;
         char c = s[0]; s.remove_prefix(1);
         if (escape) { escape = false; valStr += c; continue; }
         if (c == '\\' && inBasic) { escape = true; valStr += c; continue; }
-        if (c == '"' && !inLiteral) { inBasic = !inBasic; valStr += c; continue; }
-        if (c == '\'' && !inBasic) { inLiteral = !inLiteral; valStr += c; continue; }
-        if (c == '\n' || c == '\r')
+        // Triple-quote detection for multiline strings
+        if (!inMultiBasic && !inMultiLiteral && c == '"' && !inLiteral) {
+          if (s.size() >= 2 && s[0] == '"' && s[1] == '"') {
+            inMultiBasic = true; valStr += c; s.remove_prefix(2); continue;
+          }
+          inBasic = !inBasic; valStr += c; continue;
+        }
+        if (!inMultiBasic && !inMultiLiteral && c == '\'' && !inBasic) {
+          if (s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
+            inMultiLiteral = true; valStr += c; s.remove_prefix(2); continue;
+          }
+          inLiteral = !inLiteral; valStr += c; continue;
+        }
+        // Close multiline string delimiters
+        if (inMultiBasic && c == '"' && s.size() >= 2 && s[0] == '"' && s[1] == '"') {
+          inMultiBasic = false; valStr += c; s.remove_prefix(2); continue;
+        }
+        if (inMultiLiteral && c == '\'' && s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
+          inMultiLiteral = false; valStr += c; s.remove_prefix(2); continue;
+        }
+        // Newlines are allowed inside multiline strings
+        if (c == '\n' || c == '\r') {
+          if (inMultiBasic || inMultiLiteral) { valStr += c; continue; }
           throw asvJSONError("newline not allowed in inline table");
-        if (!inBasic && !inLiteral) {
+        }
+        if (!inBasic && !inLiteral && !inMultiBasic && !inMultiLiteral) {
           if (c == '{' || c == '[') bracketDepth++;
           if (c == '}' || c == ']') bracketDepth--;
           if (c == ',' && bracketDepth == 0) { commaBreak = true; break; }
@@ -487,7 +496,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       }
       if (trimSV(std::string_view(valStr)).empty())
         throw asvJSONError("missing value for key in inline table");
-      std::string valJson = parseTomlValue(trimSV(std::string_view(valStr)), depth + 1, true, inlineTablePaths);
+      std::string valJson = parseTomlValue(trimSV(std::string_view(valStr)), depth + 1, true, inlineTablePaths, prefix);
       if (!keys.empty()) {
         std::string fullKey;
         for (size_t ki = 0; ki < keys.size(); ki++) {
@@ -540,10 +549,10 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
           markPaths(kv.second.get(), fullPath);
         }
       };
-      markPaths(obj.get(), "");
+      markPaths(obj.get(), prefix);
     }
     std::string json;
-    obj->serialize(json, true);
+    obj->serialize(json, false);
     return json;
   }
 
@@ -652,7 +661,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       if (!trimmed.empty()) {
         if (!first) json += ',';
         first = false;
-        json += parseTomlValue(std::string_view(trimmed), depth + 1, true, inlineTablePaths);
+        json += parseTomlValue(std::string_view(trimmed), depth + 1, true, inlineTablePaths, prefix);
       }
       cur.clear();
     };
@@ -675,9 +684,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         if (c == '[') { bracketDepth++; cur += c; continue; }
         if (c == ']') {
           if (bracketDepth == 0) {
-            // A trailing comma is legal in both single-line and multiline arrays
-            if (trimSV(std::string_view(cur)).empty() && !first)
-              throw asvJSONError("trailing comma in inline array");
+            // A trailing comma is legal in both single-line and multiline arrays (TOML 1.0)
             flushVal();
             closed = true;
             break;
@@ -1328,20 +1335,28 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         // A `"""` exactly at position 3 usually closes an empty string
         // (`""""""`); it is a continuation only when escaped as `\"""`.
         if (closePos == 3 && vtmp.size() > 2 && vtmp[2] == '\\') closePos = vtmp.find("\\" + delim, 3);
+        bool hasTrailingContent = false;
         if (closePos != std::string_view::npos && closePos > 2) {
           // Check that everything after the closing delimiter is whitespace/comment
           std::string_view after = vtmp.substr(closePos + 3);
           after = trimSV(after);
           if (!after.empty() && after[0] != '#')
-            closePos = std::string_view::npos;
+            hasTrailingContent = true;
         }
-        if (closePos != std::string_view::npos && closePos > 2) {
+        if (closePos != std::string_view::npos && closePos > 2 && !hasTrailingContent) {
           // The string closes on this line: hand the whole value to
           // parseTomlValue, which enforces the closing delimiter and any
           // trailing content (previously trailing text was silently dropped).
           valueStr = vtmp;
           // Reset persistent stripComment state -- the multiline string
           // was fully consumed on this line.
+          stripInBasic = false;
+          stripInLiteral = false;
+        } else if (hasTrailingContent) {
+          // Appears closed but has trailing content: pass to parseTomlValue
+          // which will reject it with a proper error instead of gathering
+          // continuation lines and eventually throwing "unclosed multi-line string".
+          valueStr = vtmp;
           stripInBasic = false;
           stripInLiteral = false;
         } else {
@@ -1413,7 +1428,16 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       if (trimSV(std::string_view(valueStr)).empty())
         throw asvJSONError("missing value for key");
 
-      std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true, &inlineTablePaths);
+       std::string prefix;
+       for (size_t pi = 0; pi < tablePath.size(); pi++) {
+         if (pi > 0) prefix += '.';
+         prefix += tablePath[pi];
+       }
+       for (size_t ki = 0; ki < keys.size(); ki++) {
+         if (!prefix.empty()) prefix += '.';
+         prefix += keys[ki];
+       }
+       std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true, &inlineTablePaths, prefix);
 
       if (isArrayTable) {
         // Inside [[array]]: set on current (last) array element
