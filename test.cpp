@@ -11487,6 +11487,17 @@ key = "value" # inline comment)")));
     ASSERT(j.fromTOML(std::string_view("a = {b = '''\nhello\nworld\n'''}")));
     ASSERT_EQ(std::string(j.getString("a.b")), "hello\nworld\n");
   }
+  // Multiline string with embedded quotes inside inline table
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"he\"llo\"\"\"}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "he\"llo");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = {b = '''it's'''}}}")));
+    ASSERT_EQ(std::string(j.getString("a.b")), "it's");
+  }
   // Missing comma between inline-table pairs is an error
   {
     asvJSON j;
@@ -11618,6 +11629,14 @@ key = "value" # inline comment)")));
     ASSERT(!j.fromTOML(std::string_view("a = {b = 1}\n[a.c]\nx = 2")));
     // Cannot reopen an inline table with a header
     ASSERT(!j.fromTOML(std::string_view("a = {}\n[a.b]\nx = 1")));
+    // Cannot extend via key=value
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1}\na.c = 2")));
+    // Cannot extend nested inline table via header
+    ASSERT(!j.fromTOML(std::string_view("a = {b = {c = 1}}\n[a.b.d]\nx = 2")));
+    // Cannot extend nested inline table via key=value
+    ASSERT(!j.fromTOML(std::string_view("a = {b = {c = 1}}\na.b.d = 2")));
+    // Inline table path itself is marked (not just descendants)
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1}\n[a]\nx = 2")));
   }
   // Fix 5: Multi-line strings/arrays inside inline tables should work
   {

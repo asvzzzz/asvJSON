@@ -465,22 +465,22 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         // Triple-quote detection for multiline strings
         if (!inMultiBasic && !inMultiLiteral && c == '"' && !inLiteral) {
           if (s.size() >= 2 && s[0] == '"' && s[1] == '"') {
-            inMultiBasic = true; valStr += c; s.remove_prefix(2); continue;
+            inMultiBasic = true; valStr += "\"\"\""; s.remove_prefix(2); continue;
           }
           inBasic = !inBasic; valStr += c; continue;
         }
         if (!inMultiBasic && !inMultiLiteral && c == '\'' && !inBasic) {
           if (s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
-            inMultiLiteral = true; valStr += c; s.remove_prefix(2); continue;
+            inMultiLiteral = true; valStr += "'''"; s.remove_prefix(2); continue;
           }
           inLiteral = !inLiteral; valStr += c; continue;
         }
         // Close multiline string delimiters
         if (inMultiBasic && c == '"' && s.size() >= 2 && s[0] == '"' && s[1] == '"') {
-          inMultiBasic = false; valStr += c; s.remove_prefix(2); continue;
+          inMultiBasic = false; valStr += "\"\"\""; s.remove_prefix(2); continue;
         }
         if (inMultiLiteral && c == '\'' && s.size() >= 2 && s[0] == '\'' && s[1] == '\'') {
-          inMultiLiteral = false; valStr += c; s.remove_prefix(2); continue;
+          inMultiLiteral = false; valStr += "'''"; s.remove_prefix(2); continue;
         }
         // Newlines are allowed inside multiline strings
         if (c == '\n' || c == '\r') {
@@ -496,7 +496,12 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
       }
       if (trimSV(std::string_view(valStr)).empty())
         throw asvJSONError("missing value for key in inline table");
-      std::string valJson = parseTomlValue(trimSV(std::string_view(valStr)), depth + 1, true, inlineTablePaths, prefix);
+      std::string childPrefix = prefix;
+      for (size_t ki = 0; ki < keys.size(); ki++) {
+        if (!childPrefix.empty()) childPrefix += '.';
+        childPrefix += keys[ki];
+      }
+      std::string valJson = parseTomlValue(trimSV(std::string_view(valStr)), depth + 1, true, inlineTablePaths, childPrefix);
       if (!keys.empty()) {
         std::string fullKey;
         for (size_t ki = 0; ki < keys.size(); ki++) {
@@ -541,14 +546,15 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
     // Mark all paths created by this inline table as closed (immutable)
     if (inlineTablePaths) {
       std::function<void(const asvJSONValue*, const std::string&)> markPaths;
-      markPaths = [&](const asvJSONValue* objVal, const std::string& prefix) {
+      markPaths = [&](const asvJSONValue* objVal, const std::string& p) {
         if (!objVal || objVal->type != asvJSONValue::OBJECT || !objVal->obj) return;
         for (auto& kv : *objVal->obj) {
-          std::string fullPath = prefix.empty() ? kv.first : prefix + "." + kv.first;
+          std::string fullPath = p.empty() ? kv.first : p + "." + kv.first;
           inlineTablePaths->insert(fullPath);
           markPaths(kv.second.get(), fullPath);
         }
       };
+      if (!prefix.empty()) inlineTablePaths->insert(prefix);
       markPaths(obj.get(), prefix);
     }
     std::string json;
@@ -1241,6 +1247,16 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           }
           if (inlineTablePaths.count(fullPath))
             throw asvJSONError("cannot extend inline table '" + fullPath + "'");
+          // Check prefix matches: [x.b] must be rejected if x.a is an inline table
+          for (size_t i = 1; i < tablePath.size(); i++) {
+            std::string prefix;
+            for (size_t j = 0; j < i; j++) {
+              if (j > 0) prefix += '.';
+              prefix += tablePath[j];
+            }
+            if (inlineTablePaths.count(prefix))
+              throw asvJSONError("cannot extend inline table '" + prefix + "'");
+          }
         }
 
         // Nothing but whitespace may follow the closing bracket(s)
@@ -1467,12 +1483,22 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             }
           }
         }
-      } else {
+       } else {
         // Regular: full path = table path + key path
         std::vector<std::string> fullPath = tablePath;
         fullPath.insert(fullPath.end(), keys.begin(), keys.end());
 
         if (fullPath.empty()) continue;
+        // Reject key=value that extends an inline-table path
+        for (size_t i = 0; i < fullPath.size(); i++) {
+          std::string p;
+          for (size_t j = 0; j <= i; j++) {
+            if (j > 0) p += '.';
+            p += fullPath[j];
+          }
+          if (inlineTablePaths.count(p))
+            throw asvJSONError("cannot extend inline table '" + p + "'");
+        }
         std::string lastKey = fullPath.back();
         fullPath.pop_back();
         asvJSONValue* parent = tomlNavigate(root.get(), fullPath, true);
