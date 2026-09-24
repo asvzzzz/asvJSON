@@ -157,7 +157,14 @@ inline ProtoField protoParseOneField(const asvJSONValue* val) {
   ProtoField f;
   if (!val || val->type != asvJSONValue::OBJECT) return f;
   auto* n = val->get("id");
-  if (n && n->type == asvJSONValue::INT) f.number = static_cast<int>(n->num);
+  if (n) {
+    if (n->type != asvJSONValue::INT)
+      throw asvJSONError("Protobuf: field id must be an integer");
+    int64_t id = n->num;
+    if (id < 1 || id > static_cast<int64_t>(protoMaxFieldNum))
+      throw asvJSONError("Protobuf: field id out of range [1, " + std::to_string(protoMaxFieldNum) + "]");
+    f.number = static_cast<int>(id);
+  }
   auto* t = val->get("type");
   if (t && t->type == asvJSONValue::STRING) f.type.assign(t->str_data.data(), t->str_data.size());
   auto* r = val->get("repeated");
@@ -869,22 +876,25 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
         case 'v': r += '\v'; break; case '\\': r += '\\'; break;
         case '\'': r += '\''; break; case '"': r += '"'; break;
         case 'x': {
-          int v = 0;
+          int v = 0; bool ok = false;
           if (pos < text.size()) { char h = text[pos];
             if (('0'<=h&&h<='9')||('a'<=h&&h<='f')||('A'<=h&&h<='F')) { pos++;
-              v = (h<='9')?(h-'0'):(h<='F'?(h-'A'+10):(h-'a'+10));
+              v = (h<='9')?(h-'0'):(h<='F'?(h-'A'+10):(h-'a'+10)); ok = true;
               if (pos < text.size()) { h = text[pos];
                 if (('0'<=h&&h<='9')||('a'<=h&&h<='f')||('A'<=h&&h<='F'))
-                  { pos++; v = (v<<4)|((h<='9')?(h-'0'):(h<='F'?(h-'A'+10):(h-'a'+10))); }}}
+                  { pos++; v = (v<<4)|((h<='9')?(h-'0'):(h<='F'?(h-'A'+10):(h-'a'+10))); ok = true; } } }
           }
-          r += static_cast<char>(v); break;
+          if (ok) r += static_cast<char>(v); else { r += '\\'; r += 'x'; } break;
         }
         case 'u': {
-          uint32_t cp = 0;
+          uint32_t cp = 0; int hexCount = 0;
+          size_t uStart = pos;
           for (int i = 0; i < 4 && pos < text.size(); i++) { char h = text[pos++];
-            if (h>='0'&&h<='9') cp=(cp<<4)|(h-'0');
-            else if (h>='a'&&h<='f') cp=(cp<<4)|(h-'a'+10);
-            else if (h>='A'&&h<='F') cp=(cp<<4)|(h-'A'+10); }
+            if (h>='0'&&h<='9') { cp=(cp<<4)|(h-'0'); hexCount++; }
+            else if (h>='a'&&h<='f') { cp=(cp<<4)|(h-'a'+10); hexCount++; }
+            else if (h>='A'&&h<='F') { cp=(cp<<4)|(h-'A'+10); hexCount++; }
+            else break; }
+          if (hexCount < 4) { pos = uStart; appendUtf8Codepoint(r, 0xFFFD); break; }
           if (cp >= 0xD800 && cp <= 0xDBFF) {
             if (pos + 1 < text.size() && text[pos] == '\\' && text[pos + 1] == 'u') {
               size_t loStart = pos;
@@ -892,7 +902,8 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
               for (int i = 0; i < 4 && pos < text.size(); i++) { char h = text[pos++];
                 if (h>='0'&&h<='9') lo=(lo<<4)|(h-'0');
                 else if (h>='a'&&h<='f') lo=(lo<<4)|(h-'a'+10);
-                else if (h>='A'&&h<='F') lo=(lo<<4)|(h-'A'+10); }
+                else if (h>='A'&&h<='F') lo=(lo<<4)|(h-'A'+10);
+                else { pos = loStart; break; } }
               if (lo >= 0xDC00 && lo <= 0xDFFF) {
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
               } else {
@@ -1109,7 +1120,7 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
       pos++;
       auto elem = asvJSONValue::makeObject();
       if (elem) { protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
-      else { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } }
+      else { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } if (pos < text.size()) pos++; }
     } else if (text[pos] == '[') {
       pos++;
       auto elem = asvJSONValue::makeArray();
@@ -1217,11 +1228,19 @@ inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
 
 inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) { out += "{}"; return; }
+  auto isValidProtoIdent = [](const std::string& k) -> bool {
+    if (k.empty()) return false;
+    if (!(std::isalpha(static_cast<unsigned char>(k[0])) || k[0] == '_')) return false;
+    for (size_t i = 1; i < k.size(); i++)
+      if (!std::isalnum(static_cast<unsigned char>(k[i])) && k[i] != '_') return false;
+    return true;
+  };
   out += "{\n";
   for (const auto& [k, fv] : *val->obj) {
     if (!fv || fv->type == asvJSONValue::NULL_VAL) continue;
     for (int i = 0; i < indent + 1; i++) out += "  ";
-    out += k;
+    if (isValidProtoIdent(k)) out += k;
+    else { out += '['; out += k; out += ']'; }
     if (fv->type == asvJSONValue::OBJECT) {
       out += ' '; protoTextSerializeVal(fv.get(), out, indent + 1);
     } else {
@@ -1241,7 +1260,7 @@ inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
     case asvJSONValue::DOUBLE: {
       if (std::isnan(val->dbl)) { out += "nan"; break; }
       if (std::isinf(val->dbl)) { out += (val->dbl > 0) ? "inf" : "-inf"; break; }
-      char buf[64]; snprintf(buf, sizeof(buf), "%.16g", val->dbl); out += buf; break;
+      fmtDoubleVal(val->dbl, out); break;
     }
     case asvJSONValue::STRING: protoTextQuote(val->str_data, out); break;
     case asvJSONValue::BINARY:
@@ -1271,10 +1290,12 @@ inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
         out += ']';
       } else {
         out += '[';
+        bool firstWritten = false;
         for (size_t i = 0; i < val->arr->size(); i++) {
           if ((*val->arr)[i]) {
-            if (i > 0) out += ", ";
+            if (firstWritten) out += ", ";
             protoTextSerializeVal((*val->arr)[i].get(), out, indent);
+            firstWritten = true;
           }
         }
         out += ']';
