@@ -406,7 +406,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				for (const auto& [k, val] : *v->obj)
 					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
 			} else {
-				std::string key = prefix.empty() ? "value" : prefix;
+				std::string key = prefix;
 				if (keySeen.insert(key).second) keys.push_back(std::move(key));
 			}
 		};
@@ -425,7 +425,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
 				} else {
-					std::string key = prefix.empty() ? "value" : prefix;
+					std::string key = prefix;
 					// Two different paths flattening onto one column would
 					// silently drop one value; reject instead of losing data.
 					if (!flat.emplace(key, csvCell(v)).second)
@@ -460,7 +460,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					for (const auto& [k, val] : *v->obj)
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
 				} else {
-					std::string key = prefix.empty() ? "value" : prefix;
+					std::string key = prefix;
 					// Two different paths flattening onto one column would
 					// silently drop one value; reject instead of losing data.
 					if (!flatSeen.insert(key).second)

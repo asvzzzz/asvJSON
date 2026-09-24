@@ -964,13 +964,15 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 	// Guard the tag-chain cycle (yamlParseTaggedValue <-> yamlParseInlineValue):
 	// "!!int !!int ... 5" chains must not overflow the stack.
 	static thread_local int yamlTagNestDepth = 0;
-	if (yamlTagNestDepth >= static_cast<int>(MAX_YAML_DEPTH))
-		throw asvJSONError("YAML: maximum tag nesting depth exceeded");
 	struct YamlTagDepthGuard {
 		int& d;
 		explicit YamlTagDepthGuard(int& depth) : d(depth) { ++d; }
 		~YamlTagDepthGuard() { --d; }
 	} yamlTagDepthGuard(yamlTagNestDepth);
+	if (yamlTagNestDepth >= static_cast<int>(MAX_YAML_DEPTH)) {
+		yamlTagNestDepth = 0;
+		throw asvJSONError("YAML: maximum tag nesting depth exceeded");
+	}
 
 	// Extract tag name
 	size_t tagEnd = 0;

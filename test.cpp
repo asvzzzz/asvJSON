@@ -1181,8 +1181,8 @@ TEST(testMessagePackInvalidUTF8) {
 	// Valid multi-byte UTF-8 must still parse fine.
 	{
 		const char* utf8 = "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"; // "привет"
-		std::vector<uint8_t> data = {0xa8};
-		data.insert(data.end(), (uint8_t*)utf8, (uint8_t*)utf8 + 8);
+		std::vector<uint8_t> data = {0xac};
+		data.insert(data.end(), (uint8_t*)utf8, (uint8_t*)utf8 + 12);
 		asvJSON json2;
 		bool ok = json2.fromMessagePack(data.data(), data.size());
 		if (!ok) throw std::runtime_error("valid UTF-8 fixstr should succeed");
@@ -21978,13 +21978,17 @@ TEST(testReauditRegression) {
 	// YAML: quoted !!binary / !objectid values parse.
 	{
 		asvJSON j;
-		ASSERT(j.fromYAML("x: !!binary \"aGVsbG8=\"\n"));
+		bool r = j.fromYAML("x: !!binary \"aGVsbG8=\"\n");
+		if (!r) std::cerr << "YAML binary error: " << j.getLastError() << "\n";
+		ASSERT(r);
 		ASSERT_EQ(j.getRoot()->get("x")->type, asvJSONValue::BINARY);
 		auto b = j.getBinary("x");
 		ASSERT_EQ(b.size(), size_t(5)); // "hello"
 		ASSERT_EQ(b[0], uint8_t('h'));
 		asvJSON j2;
-		ASSERT(j2.fromYAML("id: !objectid \"507f1f77bcf86cd799439011\"\n"));
+		bool r2 = j2.fromYAML("id: !objectid \"507f1f77bcf86cd799439011\"\n");
+		if (!r2) std::cerr << "YAML objectid error: " << j2.getLastError() << "\n";
+		ASSERT(r2);
 		ASSERT_EQ(j2.getRoot()->get("id")->type, asvJSONValue::OBJECTID);
 		ASSERT_EQ(j2.getObjectId("id").size(), size_t(12));
 	}
