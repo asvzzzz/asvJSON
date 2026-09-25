@@ -1677,7 +1677,7 @@ public:
 		if (!root) return 0;
 		std::string out;
 		out.reserve(512);
-		root->serialize(out);
+		root->serialize(out, allowNaNInfinity);
 		return out.size();
 	}
 
@@ -2114,8 +2114,42 @@ public:
 				seg = path.substr(start, end - start);
 			}
 			auto it = mapFind(*cur->obj, seg);
-			if (it == cur->obj->end()) return nullptr;
-			cur = it->second.get();
+			if (it != cur->obj->end()) {
+				cur = it->second.get();
+			} else if (seg.find('[') != std::string_view::npos) {
+				size_t brk = 0;
+				while (brk < seg.size() && seg[brk] != '[') brk++;
+				const asvJSONValue* node = cur;
+				if (brk > 0) {
+					auto bit = mapFind(*cur->obj, seg.substr(0, brk));
+					if (bit == cur->obj->end()) return nullptr;
+					node = bit->second.get();
+				}
+				size_t k = brk;
+				bool ok = true;
+				while (node && k < seg.size()) {
+					if (seg[k] != '[') { ok = false; break; }
+					size_t close = k + 1;
+					while (close < seg.size() && seg[close] != ']') close++;
+					if (close >= seg.size()) { ok = false; break; }
+					std::string_view digits = seg.substr(k + 1, close - k - 1);
+					if (digits.empty()) { ok = false; break; }
+					size_t idx = 0;
+					for (char c : digits) {
+						if (c < '0' || c > '9') { ok = false; break; }
+						if (idx > (std::numeric_limits<size_t>::max() - static_cast<size_t>(c - '0')) / 10) { ok = false; break; }
+						idx = idx * 10 + static_cast<size_t>(c - '0');
+					}
+					if (!ok) break;
+					if (node->type != asvJSONValue::ARRAY || !node->arr || idx >= node->arr->size()) { ok = false; break; }
+					node = (*node->arr)[idx].get();
+					k = close + 1;
+				}
+				if (!ok || !node) return nullptr;
+				cur = node;
+			} else {
+				return nullptr;
+			}
 			start = end;
 			if (start < path.size() && path[start] == '.') start++;
 		}
@@ -3422,6 +3456,10 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 		lastError = e.what();
 		root = nullptr;
 		return false;
+	} catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers.
+		lastError = e.what();
+		root = nullptr;
+		return false;
 	}
 }
 
@@ -3440,6 +3478,9 @@ inline bool asvJSON::fromBSON(const void* data, size_t size) {
 		formatType = FormatType::BSON;
 		return true;
 	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers.
+	    lastError = e.what(); root = nullptr; return false;
+	}
 }
 
 // Static conversion helpers

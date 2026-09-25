@@ -469,7 +469,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         }
         // Newlines are allowed inside multiline strings
         if (c == '\n' || c == '\r') {
-          if (inMultiBasic || inMultiLiteral) { valStr += c; continue; }
+          if (inMultiBasic || inMultiLiteral || bracketDepth > 0) { valStr += c; continue; }
           throw asvJSONError("newline not allowed in inline table");
         }
         if (!inBasic && !inLiteral && !inMultiBasic && !inMultiLiteral) {
@@ -570,6 +570,11 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         continue;
       }
       if (c == '\\') {
+        if (s.size() >= 3 && s[0] == '"' && s[1] == '"' && s[2] == '"') {
+          val += "\\\"\"\"";
+          s.remove_prefix(3);
+          continue;
+        }
         // Check for line continuation (backslash at end of line)
         size_t skip = 0;
         while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t')) skip++;
@@ -1457,6 +1462,15 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         if (!prefix.empty()) prefix += '.';
         prefix += keys[ki];
       }
+      // Snapshot the set of inline-table paths that exist *before* this line's
+      // value is parsed. parseTomlValue() registers every inline table it
+      // builds (including the current key via `prefix`), so the regular
+      // key=value branch below must only reject extensions of inline tables
+      // that already existed -- never the very line that just defined one
+      // (otherwise `point = {x = 1, y = 2}` self-rejects with
+      // "cannot extend inline table 'point'").
+      std::unordered_set<std::string> preInlinePaths = inlineTablePaths;
+
       std::string jsonVal = parseTomlValue(std::string_view(valueStr), 0, true, &inlineTablePaths, prefix);
 
       if (isArrayTable) {
@@ -1493,14 +1507,19 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         fullPath.insert(fullPath.end(), keys.begin(), keys.end());
 
         if (fullPath.empty()) continue;
-        // Reject key=value that extends an inline-table path
+        // Reject key=value that extends an inline-table path. Only paths that
+        // already existed *before this line* count: parseTomlValue() registers
+        // the current key itself (via `prefix`) when it builds an inline table,
+        // so checking the live set here would self-reject the very line that
+        // defines the inline table (`point = {x = 1, y = 2}` would fail with
+        // "cannot extend inline table 'point'").
         for (size_t i = 0; i < fullPath.size(); i++) {
           std::string p;
           for (size_t j = 0; j <= i; j++) {
             if (j > 0) p += '.';
             p += fullPath[j];
           }
-          if (inlineTablePaths.count(p))
+          if (preInlinePaths.count(p))
             throw asvJSONError("cannot extend inline table '" + p + "'");
         }
         std::string lastKey = fullPath.back();

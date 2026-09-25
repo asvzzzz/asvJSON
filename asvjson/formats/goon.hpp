@@ -15,7 +15,11 @@
 // serializes as an empty string (goonJsonText) and therefore decodes as a
 // STRING, not a BINARY/EXTENSION (the __BASE64__ path only applies to
 // unquoted/cell values); `+Infinity` / `+NaN` in manual input are plain
-// strings, not numbers.
+// strings, not numbers.  Tabular column names are NOT unescaped on read
+// (except when explicitly quoted) - the encoder never emits escaped bare
+// identifiers so this is a robustness-only gap for external input.  Column
+// sorting (`autoSort`) runs unconditionally in Compact mode; Balanced/LLM
+// preserve insertion order (already lost by unordered_map).
 
 #include "../core.hpp"
 
@@ -315,7 +319,10 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   }
   if (tabular && arr->get(0) && arr->get(0)->type == asvJSONValue::OBJECT && arr->get(0)->obj) {
     for (const auto& [k, _] : *(arr->get(0)->obj)) cols.push_back(k);
-    std::sort(cols.begin(), cols.end());
+    // Spec: sort columns alphabetically in Compact mode only; Balanced/LLM keep
+    // the (unordered_map) iteration order.  Since ObjectMapT is insertion-ordered
+    // by default this is a formal deviation from round-trip fidelity, not a practical bug.
+    if (opts.mode == GoonWriteOptions::Mode::Compact) std::sort(cols.begin(), cols.end());
 
     for (size_t i = 1; i < arr->size(); i++) {
       auto* obj = arr->get(i);
@@ -323,7 +330,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       std::vector<std::string> rowKeys;
       rowKeys.reserve(obj->obj->size());
       for (const auto& [k, _] : *(obj->obj)) rowKeys.push_back(k);
-      std::sort(rowKeys.begin(), rowKeys.end());
+      if (opts.mode == GoonWriteOptions::Mode::Compact) std::sort(rowKeys.begin(), rowKeys.end());
       if (rowKeys != cols) { tabular = false; break; }
     }
   }
@@ -549,7 +556,7 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
         goonWriteKey(key, out, opts);
         out += ": " + dv + "\n";
       } else {
-        out += dv + '\n';
+        out += pad + dv + '\n';
       }
       break;
     }
@@ -822,7 +829,6 @@ inline std::string goonToJson(std::string_view input) {
      firstContent[1] == '.' || firstContent[1] == 'i' || firstContent[1] == 'I' ||
      firstContent[1] == 'n' || firstContent[1] == 'N');
   bool rootIsArr = (firstContent.size() >= 2 && firstContent[0] == '[') ||
-    (firstContent.size() >= 2 && firstContent.compare(0, 2, "[]") == 0) ||
     (firstContent.size() >= 1 && firstContent[0] == '-' && !minusScalar);
 
   std::string out;
@@ -1029,7 +1035,20 @@ inline std::string goonToJson(std::string_view input) {
                   while (fs < f.size() && f[fs] == ' ') fs++;
                   size_t fe = f.size();
                   while (fe > fs && f[fe - 1] == ' ') fe--;
-                  fields.push_back(f.substr(fs, fe - fs));
+                  std::string raw = f.substr(fs, fe - fs);
+                  // Quoted field names are JSON-escaped by the encoder; unescape them
+                  // here so the key round-trips correctly.  The GOON grammar says bare
+                  // tabular column names must not contain quotes/commas/spaces, so only
+                  // explicitly quoted names need unescaping (robustness for external input).
+                  if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
+                    try {
+                      fields.push_back(unescapeJsonString(std::string_view(raw.data() + 1, raw.size() - 2), false));
+                    } catch (const std::runtime_error&) {
+                      fields.push_back(raw);  // keep raw on decode error
+                    }
+                  } else {
+                    fields.push_back(raw);
+                  }
                 }
                 afterB = closeBr + 1;
               }
@@ -1066,6 +1085,7 @@ inline std::string goonToJson(std::string_view input) {
             // ROW's cell values so a `^` reference resolves across rows (the
             // encoder emits `^` between consecutive rows, not within one).
             std::vector<std::string> prevValues(fields.size(), "");
+            std::vector<bool> hasPrev(fields.size(), false);  // tracks whether column has had any prior row
             size_t lastRl = li;
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
               auto& rline = lines[rl];
@@ -1176,13 +1196,16 @@ inline std::string goonToJson(std::string_view input) {
                       // Spec: '^' references the previous row's value; a quoted
                       // "^" is an ordinary literal string. Using '^' with no
                       // prior value (first row / first appearance of a column)
-                      // is a decode error.
-                      if (prevValues[fi].empty())
+                      // is a decode error.  Must check hasPrev, not prevValues.empty(),
+                      // because an empty-cell reference in row N should resolve to the
+                      // previous non-empty value for that column (or error if none).
+                      if (!hasPrev[fi])
                         throw GoonDecodeError("GOON: column reference '^' with no previous value at line " + std::to_string(li + 1));
                       cell = prevValues[fi];
                     } else {
                       prevValues[fi] = cell;
                     }
+                    hasPrev[fi] = true;
                     out += expandCell(cell);
                   } else {
                     out += "null";
@@ -1452,6 +1475,9 @@ inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
 inline bool asvJSON::fromGOON(std::string_view input) {
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
+  // Security: reject inputs larger than 10 MB to prevent memory exhaustion.
+  constexpr size_t MAX_GOON_INPUT = 10u * 1024u * 1024u;
+  if (input.size() > MAX_GOON_INPUT) { lastError = "GOON input exceeds 10 MB limit"; return false; }
   bool prevNaN = allowNaNInfinity;
   allowNaNInfinity = true;
   try {

@@ -19,6 +19,10 @@
 // - String values (0x02) are length-prefixed, so an embedded NUL is technically
 //   invalid BSON; makeString strings are rejected by toBSON() rather than
 //   emitted, mirroring the key check.
+// - Timestamp (0x11) follows the spec: a uint64 with the increment in the low
+//   32 bits (stored first) and the seconds in the high 32 bits.  asvJSONValue
+//   stores only the seconds, so the increment is always encoded as 0 and a
+//   non-zero increment from an external document is discarded on decode.
 
 #include <charconv>
 #include "../core.hpp"
@@ -198,13 +202,14 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::TIMESTAMP: {
-			// BSON 0x11 seconds field is uint32; values outside [0, 2^32-1]
-			// would silently wrap via the cast, so reject them instead.
+			// BSON 0x11 is a uint64 whose low 32 bits are the increment and whose
+			// high 32 bits are the seconds, so the increment is stored first.
+			// The seconds field is uint32; values outside [0, 2^32-1] would
+			// silently wrap via the cast, so reject them instead.
 			if (num < 0 || num > static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
 				throw asvJSONError("BSON timestamp out of uint32 seconds range");
 			out.push_back(0x11);
 			uint32_t t = static_cast<uint32_t>(num);
-			// BSON 0x11 layout is {i: uint32, t: uint32}; increment first, then seconds.
 			writeLE32(out, 0);
 			writeLE32(out, t);
 			break;
@@ -421,14 +426,14 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 			case 0x11: {
 				if (pos + 8 > docEnd) throw asvJSONError("BSON timestamp");
 				uint32_t inc; readLE32(data, pos, inc);
-				uint32_t ts; readLE32(data, pos, ts);
-				// BSON timestamp = {i: uint32 increment, t: uint32 seconds}.
-				// Increment is discarded: asvJSONValue::TIMESTAMP stores only
-				// the seconds field.  toBSON writes i=0.  This is a known,
-				// documented loss -- the BSON timestamp type is primarily used
-				// internally by MongoDB and rarely round-trips through JSON.
+				uint32_t sec; readLE32(data, pos, sec);
+				// BSON 0x11 is a uint64 stored as {increment, seconds}: the low
+				// 32 bits carry the increment, the high 32 bits the seconds.
+				// asvJSONValue::TIMESTAMP holds only the seconds value, so the
+				// increment is discarded -- toBSON() always writes 0, and a
+				// non-zero increment read from an external document is dropped.
 				(void)inc;
-				auto v11 = asvJSONValue::makeTimestamp(static_cast<int64_t>(ts));
+				auto v11 = asvJSONValue::makeTimestamp(static_cast<int64_t>(sec));
 				if (!v11) throw asvJSONError("BSON timestamp alloc failed");
 				obj->obj->insert_or_assign(key, std::move(v11));
 				break;

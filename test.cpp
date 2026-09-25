@@ -1075,6 +1075,54 @@ TEST(testBSONCorruptedData) {
 	if (ok) throw std::runtime_error("null data should fail");
 }
 
+TEST(testBSONDecodeNeverThrows) {
+	// The public contract is bool + lastError, so no exception may escape
+	// fromBSON() -- not asvJSONError and not std::bad_alloc/std::length_error
+	// raised by an oversized length prefix.
+	asvJSON json;
+	// Oversized string length prefix (0x7FFFFFFF) with a truncated payload.
+	{
+		uint8_t data[] = {
+			0x0F, 0x00, 0x00, 0x00, // document length = 15
+			0x02, 's', 0x00,        // element type 0x02 (string), key "s"
+			0xFF, 0xFF, 0xFF, 0x7F, // string length = 0x7FFFFFFF
+			0x00, 0x00, 0x00,       // truncated payload
+			0x00                    // document terminator
+		};
+		bool threw = false;
+		try { json.fromBSON(data, sizeof(data)); } catch (...) { threw = true; }
+		ASSERT(!threw);
+		ASSERT(!json.getLastError().empty());
+		ASSERT(json.getRoot() == nullptr);
+	}
+	// Oversized binary length prefix.
+	{
+		uint8_t data[] = {
+			0x0F, 0x00, 0x00, 0x00,
+			0x05, 'b', 0x00,        // element type 0x05 (binary), key "b"
+			0xFF, 0xFF, 0xFF, 0x7F, // binary length = 0x7FFFFFFF
+			0x00, 0x00, 0x00,
+			0x00
+		};
+		bool threw = false;
+		try { json.fromBSON(data, sizeof(data)); } catch (...) { threw = true; }
+		ASSERT(!threw);
+	}
+	// Unknown element type and a bogus document length.
+	{
+		uint8_t d1[] = {0x08, 0x00, 0x00, 0x00, 0x08, 'a', 0x00, 0x00};
+		bool threw = false;
+		try { json.fromBSON(d1, sizeof(d1)); } catch (...) { threw = true; }
+		ASSERT(!threw);
+	}
+	{
+		uint8_t d2[] = {0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+		bool threw = false;
+		try { json.fromBSON(d2, sizeof(d2)); } catch (...) { threw = true; }
+		ASSERT(!threw);
+	}
+}
+
 TEST(testBSONDecimal128) {
 	// BSON decimal128 (element type 0x13) is rejected rather than silently
 	// replaced with null, which would lose data.
@@ -1791,6 +1839,24 @@ TEST(testBSONTimestampRoundtrip) {
 	auto bson = json.toBSON();
 	ASSERT(bson.size() > 0);
 
+	// Spec byte layout: 0x11 is a uint64 with the increment in the low 32 bits
+	// (stored first) and the seconds in the high 32 bits.  A round-trip cannot
+	// detect a swapped field order, so pin the encoded bytes down explicitly.
+	ASSERT_EQ(bson.size(), size_t(17));
+	ASSERT_EQ(bson[4], uint8_t(0x11));   // element type: timestamp
+	ASSERT_EQ(bson[5], uint8_t('t'));
+	ASSERT_EQ(bson[6], uint8_t('s'));
+	ASSERT_EQ(bson[7], uint8_t(0x00));   // cstring key terminator
+	ASSERT_EQ(bson[8], uint8_t(0x00));   // increment, low  LE32
+	ASSERT_EQ(bson[9], uint8_t(0x00));
+	ASSERT_EQ(bson[10], uint8_t(0x00));
+	ASSERT_EQ(bson[11], uint8_t(0x00));
+	ASSERT_EQ(bson[12], uint8_t(0xD2));  // seconds,     high LE32 (1234567890)
+	ASSERT_EQ(bson[13], uint8_t(0x02));
+	ASSERT_EQ(bson[14], uint8_t(0x96));
+	ASSERT_EQ(bson[15], uint8_t(0x49));
+	ASSERT_EQ(bson[16], uint8_t(0x00));  // document terminator
+
 	asvJSON json2;
 	bool ok = json2.fromBSON(bson.data(), bson.size());
 	ASSERT(ok);
@@ -1801,13 +1867,15 @@ TEST(testBSONTimestampRoundtrip) {
 }
 
 TEST(testBSONTimestampDecode) {
-	// Hand-crafted BSON: {t: TIMESTAMP{t=1234, i=5678}}; increment must be ignored
+	// Hand-crafted spec-compliant BSON: {t: TIMESTAMP{t=1234, i=5678}}.
+	// BSON 0x11 is a uint64 whose low 32 bits are the increment and whose high
+	// 32 bits are the seconds, so the increment is stored first and ignored.
 	std::vector<uint8_t> bson = {
 		0x10, 0x00, 0x00, 0x00, // total document size = 16
 		0x11,                   // BSON type: timestamp
 		't', 0x00,              // key "t"
-		0xD2, 0x04, 0x00, 0x00, // t = 1234 (LE32)
-		0x32, 0x16, 0x00, 0x00, // i = 5678 (LE32, must be ignored)
+		0xD2, 0x04, 0x00, 0x00, // increment = 1234 (LE32, must be ignored)
+		0x2E, 0x16, 0x00, 0x00, // seconds = 5678 (LE32)
 		0x00                    // terminator
 	};
 	asvJSON json;
@@ -1816,7 +1884,7 @@ TEST(testBSONTimestampDecode) {
 	auto* v = json.getRoot()->get("t");
 	ASSERT(v != nullptr);
 	ASSERT_EQ(v->type, asvJSONValue::TIMESTAMP);
-	ASSERT_EQ(v->num, 1234LL);
+	ASSERT_EQ(v->num, 5678LL);
 }
 
 TEST(testBSONDateTimeRoundtrip) {
@@ -11461,7 +11529,7 @@ key = "value" # inline comment)")));
   // Multiline literal string inside inline array
   {
     asvJSON j;
-    ASSERT(j.fromTOML(std::string_view("a = ['''foo\nbar'''")));
+    ASSERT(j.fromTOML(std::string_view("a = ['''foo\nbar''']")));
     ASSERT_EQ(std::string(j.getString("a[0]")), "foo\nbar");
   }
   // JSON-invalid `[1 2]` inside an inline array is a parse error (the second
@@ -11472,6 +11540,24 @@ key = "value" # inline comment)")));
     ASSERT(!j.fromTOML(std::string_view("a = [1 2, 3]")));
     ASSERT(!j.fromTOML(std::string_view("a = [true false]")));
     ASSERT(j.fromTOML(std::string_view("a = [1, 2]")));
+  }
+  // An unclosed inline array/table must be rejected at EOF rather than
+  // silently completed. Strictness must not depend on whether the pending
+  // value happens to contain strings, and arrays must be exactly as strict
+  // as inline tables.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = [1")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1, 2")));
+    ASSERT(!j.fromTOML(std::string_view("a = [1,\n2")));
+    ASSERT(!j.fromTOML(std::string_view("a = ['''foo\nbar'''")));
+    ASSERT(!j.fromTOML(std::string_view("a = [\"\"\"foo")));
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1")));
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1,")));
+    // The closed equivalents are still accepted.
+    ASSERT(j.fromTOML(std::string_view("a = [1, 2]")));
+    ASSERT(j.fromTOML(std::string_view("a = ['''foo\nbar''']")));
+    ASSERT(j.fromTOML(std::string_view("a = {b = 1}")));
   }
   // Separator comma between inline-table entries (was mis-rejected as
   // 'invalid key: unexpected character')
@@ -11513,7 +11599,7 @@ key = "value" # inline comment)")));
   }
   {
     asvJSON j;
-    ASSERT(j.fromTOML(std::string_view("a = {b = '''it's'''}}}")));
+    ASSERT(j.fromTOML(std::string_view("a = {b = '''it's'''}")));
     ASSERT_EQ(std::string(j.getString("a.b")), "it's");
   }
   // Escaped triple-quote inside multiline basic string (TOML 1.0)
@@ -18210,6 +18296,29 @@ TEST(testByteSizeWithCountAndName) {
 	ASSERT_EQ(j.byteSize(), j.serialize().size());
 }
 
+TEST(testByteSizeHonorsAllowNaNInfinity) {
+	// byteSize() must measure the very output serialize() produces. With
+	// allowNaNInfinity set, non-finite values serialize as NaN/Infinity
+	// rather than collapsing to null, so byteSize() has to honor the flag too.
+	asvJSON j;
+	j.allowNaNInfinity = true;
+	ASSERT(j.parse(std::string_view("{\"a\":NaN,\"b\":Infinity,\"c\":-Infinity}")));
+	std::string s = j.serialize();
+	ASSERT(s.find("NaN") != std::string::npos);
+	ASSERT(s.find("Infinity") != std::string::npos);
+	ASSERT_EQ(j.byteSize(), s.size());
+
+	// The flag is copied on assignment, so byteSize() follows the new owner.
+	asvJSON k;
+	k = j;
+	ASSERT_EQ(k.byteSize(), k.serialize().size());
+
+	// With the flag off these values are rejected at parse time.
+	asvJSON strict;
+	strict.allowNaNInfinity = false;
+	ASSERT(!strict.parse(std::string_view("{\"a\":NaN}")));
+}
+
 TEST(testFromAnyAndFormatType) {
 	{
 		asvJSON doc;
@@ -22994,7 +23103,7 @@ int main() {
 	RUN(testJSONPatchTestIntDouble);
 	
 	std::cout << "\n--- Corrupted Data Tests ---\n";
-	RUN(testBSONCorruptedData);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);	RUN(testMessagePackInvalidUTF8);	RUN(testMsgPackUInt64Overflow);
+	RUN(testBSONCorruptedData);	RUN(testBSONDecodeNeverThrows);	RUN(testBSONDecimal128);	RUN(testMessagePackCorruptedData);	RUN(testMessagePackInvalidUTF8);	RUN(testMsgPackUInt64Overflow);
 	
 	std::cout << "\n--- Duplicate Key Tests ---\n";
 	RUN(testDuplicateKeyNoLeak);
@@ -23192,6 +23301,7 @@ RUN(testCBORFloat16);
 	RUN(testByteSizeSimpleString);
 	RUN(testByteSizeNestedStructure);
 	RUN(testByteSizeWithCountAndName);
+	RUN(testByteSizeHonorsAllowNaNInfinity);
 
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
