@@ -1,6 +1,35 @@
 #pragma once
 // INI serialization/parsing for asvJSON++
 // Conforms to the standard INI format with dot-notation section nesting.
+//
+// Key escaping. Only [A-Za-z0-9_-] are emitted bare. '.' and '\' use a
+// backslash form; every other character (the '=' and ':' delimiters, ';', '#',
+// spaces, tabs, CR, LF and any other control byte) is emitted as a \xNN hex
+// escape. See iniEscapeKey for why a backslash is insufficient for those.
+// The decoder still accepts the historical unescaped and "\[" / "\]" forms,
+// so previously written documents keep parsing.
+//
+// KNOWN LIMITATIONS (inherent to the format, not encoder defects):
+//   - A non-OBJECT root cannot survive as a root, because fromINI always
+//     builds an object. A scalar root is wrapped under the key "value"; a
+//     non-empty array root is written as repeated "value = ..." lines
+//     (primitives) or [[value]] tables (objects), so no element is lost, but
+//     the document gains that one key on the way back in.
+//   - A comment whose text contains a newline is written as one ';'-prefixed
+//     line per text line, so it re-parses as several Comment objects rather
+//     than one. INI has no block comment and no way to mark the lines as one
+//     logical comment without inventing an escape that would collide with
+//     comment text legitimately containing a backslash.
+//   - Leading comments on the root object are written above the first key and
+//     re-parse as leading comments on THAT key. INI has no notion of a comment
+//     that precedes the document itself.
+//   - footing is only emitted for the root, matching the decoder: trailing
+//     comments at EOF are always attributed to the root, so a nested object's
+//     footing is an API-only state that does not survive a round trip.
+//   - A repeated key inside one section decodes to an array, so writing
+//     {k:1, k:2} and reading it back yields {k:[1,2]}. Comments collected for
+//     both occurrences then attach to that array node and are emitted above
+//     its first element.
 
 #include "../core.hpp"
 
@@ -77,28 +106,77 @@ inline std::string iniEscape(std::string_view s) {
   return out;
 }
 
-// Escape a key for use inside a section header [...] (brackets/backslash/dot)
-inline std::string iniEscapeSectionKey(std::string_view s) {
+// Escape one key for INI output. Only [A-Za-z0-9_-] pass through untouched.
+//
+// '.' and '\' keep a backslash form because iniSplitDottedPath uses a
+// backslash to suppress the dot split, and iniUnescapeSectionKey consumes a
+// backslash generically. Everything else is emitted as a \xNN hex escape,
+// because a backslash is NOT enough for those three separate reasons:
+//
+//   - '=' and ':' are located by the delimiter scan BEFORE any unescaping, so
+//     a leading '\' cannot hide them ("\= = 1" still splits at the '='). A
+//     hex escape is not '=' text, so the scan skips over it.
+//   - iniTrim runs BEFORE unescaping, so a trailing backslash-escaped space
+//     is still trimmed away ("a\ " -> "a\"). A hex escape ends in a hex digit,
+//     so trim cannot reach the encoded character.
+//   - iniUnescapeSectionKey maps '\' + ANY character to that character, so a
+//     backslash-escaped '\t' would decode to 't' and silently drop the tab.
+//
+// Hex-escaping ';' and '#' as well keeps one uniform rule; only a comment
+// whose marker is the FIRST character is recognized, so even the bare
+// backslash form would have worked, but uniformity avoids special cases.
+// Reading a hex escape takes precedence over the generic rule, so a key that
+// literally contains the text "\x41" stays distinguishable: its backslash is
+// doubled by the encoder and decodes to a single literal backslash.
+inline std::string iniEscapeKey(std::string_view s) {
+  static const char* kHex = "0123456789ABCDEF";
   std::string out;
   out.reserve(s.size());
-  for (auto c : s) {
-    switch (c) {
-      case '\\': out += "\\\\"; break;
-      case '[': out += "\\["; break;
-      case ']': out += "\\]"; break;
-      case '.': out += "\\."; break;
-      default: out += c;
+  for (unsigned char c : s) {
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '-') {
+      out += (char)c;
+    } else if (c == '.') {
+      out += "\\.";
+    } else if (c == '\\') {
+      out += "\\\\";
+    } else {
+      out += "\\x";
+      out += kHex[c >> 4];
+      out += kHex[c & 0x0F];
     }
   }
   return out;
 }
 
-// Unescape a section path segment read from a header
+// Escape a key for use inside a section header [...] or a dotted path
+inline std::string iniEscapeSectionKey(std::string_view s) {
+  return iniEscapeKey(s);
+}
+
+inline int iniHexVal(char c) noexcept {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Unescape a key path segment read from a header or a dotted key. Handles the
+// \xNN form emitted by iniEscapeKey plus the historical "a backslash escapes
+// the next character" rule for '.', '\', '[', ']' and anything else.
 inline std::string iniUnescapeSectionKey(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '\\' && i + 1 < s.size()) {
+      // \xNN must be tested first: the generic rule below would otherwise
+      // decode "\x41" to 'x' and leave "41" behind.
+      if (s[i + 1] == 'x' && i + 3 < s.size() &&
+          iniHexVal(s[i + 2]) >= 0 && iniHexVal(s[i + 3]) >= 0) {
+        out += (char)((iniHexVal(s[i + 2]) << 4) | iniHexVal(s[i + 3]));
+        i += 3;
+        continue;
+      }
       out += s[i + 1];
       i++;
     } else {
@@ -108,20 +186,13 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
   return out;
 }
 
-// Escape a flat (key = value side) key: '.' must be escaped so a re-parse does
-// not split it into a nested path, and a backslash is doubled so it survives
-// the symmetric unescape in iniSplitDottedPath.
+// Escape a flat (key = value side) key. An empty key has no INI spelling at
+// all: " = v" is skipped by the decoder and "[...]" would need a nameless
+// section, so reject it rather than silently dropping the whole branch.
 inline std::string iniEscapeFlatKey(std::string_view s) {
   if (s.empty())
     throw asvJSONError("cannot represent empty key in INI"); // {"": ...} has no INI spelling
-  std::string out;
-  out.reserve(s.size());
-  for (auto c : s) {
-    if (c == '\\') out += "\\\\";
-    else if (c == '.') out += "\\.";
-    else out += c;
-  }
-  return out;
+  return iniEscapeKey(s);
 }
 
 // Split a dotted path (section name or dotted key) on unescaped '.', trimming
@@ -592,7 +663,15 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
       e.trailing.swap(trailing);
       entries.push_back(std::move(e));
     }
-    inMlValue = false;
+    // NOTE: inMlValue is deliberately NOT cleared here. It was set above when
+    // this line opened a quoted value that has no closing quote yet, and the
+    // continuation branch at the top of the loop clears it on the line that
+    // carries the closing quote. Clearing it unconditionally at the end of
+    // this iteration cancelled the flag in the same breath it was raised, so
+    // the continuation branch was dead code and every line of a multi-line
+    // quoted value was classified as ordinary content -- a ';' or '#' line
+    // inside the value landed in `pending` and was then attached to the NEXT
+    // key as a leading comment, moving it out of the value it belonged to.
   }
 
   // Unconsumed comments at EOF become the root footing.
@@ -990,10 +1069,34 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
       if (comments) iniWriteCommentLines(out, comments->footing);
     }
   } else if (type == T::ARRAY && arr) {
-    out += "value = ";
-    iniFormatVal(this, out);
-    out += '\n';
+    // INI always decodes to an OBJECT root, so a bare array cannot survive as
+    // a root and has to be wrapped under a key. Emitting a single
+    // "value = " line lost every element (iniFormatVal renders ANY array as
+    // "[]", so [1,2,3] became "value = []" and re-parsed as {"value": []}).
+    // Reuse the shapes the decoder already understands for a named array:
+    // repeated keys build an array of primitives, [[...]] tables build an
+    // array of objects. Both preserve the elements. iniIsBareChild throws for
+    // nested and mixed arrays, which have no INI spelling at all.
+    if (arr->empty()) {
+      out += "value = []\n";
+    } else if (iniIsBareChild(this)) {
+      for (const auto& elem : *arr) {
+        out += "value = ";
+        iniFormatVal(elem.get(), out);
+        out += '\n';
+      }
+    } else {
+      for (const auto& elem : *arr) {
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
+        out += "[[value]]\n";
+        if (elem->type == T::OBJECT) iniEmitElement(elem.get(), out, "value");
+      }
+    }
   } else {
+    // A scalar root likewise cannot be represented (the decoder always builds
+    // an object), so it is wrapped under "value". The data is preserved; only
+    // the document shape changes, which is inherent to INI.
     out += "value = ";
     iniFormatVal(this, out);
     out += '\n';

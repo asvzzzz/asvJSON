@@ -15122,7 +15122,7 @@ TEST(testToINI) {
     asvJSON j;
     j.parse(std::string(R"({"a[b]":{"c[d]":"v"}})"));
     std::string ini = j.toINI();
-    ASSERT(ini.find("a\\[b\\]]") != std::string::npos);
+    ASSERT(ini.find("a\\x5Bb\\x5D") != std::string::npos);
     ASSERT(ini.find("[a[b]]") == std::string::npos);
     asvJSON j2;
     ASSERT(j2.fromINI(ini));
@@ -15442,7 +15442,7 @@ TEST(testIniExtras) {
     asvJSON j, j2;
     j.parse(std::string("{\"a[b]\":[{\"y\":[{\"z\":1},{\"z\":2}]}]}"));
     std::string ini = j.toINI();
-    ASSERT(ini.find("[[a\\[b\\]]]") != std::string::npos);
+    ASSERT(ini.find("[[a\\x5Bb\\x5D]]") != std::string::npos);
     ASSERT(ini.find("a[b].y]]") == std::string::npos);
     ASSERT(j2.fromINI(ini));
     auto* a = j2.getRoot()->get("a[b]");
@@ -15808,6 +15808,171 @@ TEST(testINIKeyLeadingBracket) {
     bool threw = false;
     try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
     ASSERT(threw);
+  }
+}
+
+TEST(testINIReviewFidelity) {
+  // 1. A ';'/'#' line INSIDE a multi-line quoted value must not be collected
+  //    as a comment. iniCollectComments raised inMlValue when a quoted value
+  //    had no closing quote, then cleared it unconditionally at the end of the
+  //    same iteration, so the continuation branch was dead code: the injected
+  //    line landed in `pending` and was attached to the NEXT key, moving the
+  //    comment out of the value it belonged to.
+  {
+    const char* src = "k = \"line1\n;injected\nline2\"\nj = 1\n";
+    asvJSON j;
+    ASSERT(j.fromINI(src));
+    // The value itself is decoded correctly.
+    ASSERT_EQ(std::string(j.getString("k")), std::string("line1\n;injected\nline2"));
+    // And the comment stayed inside the value instead of moving to j.
+    auto* k = j.getRoot()->get("k");
+    auto* jj = j.getRoot()->get("j");
+    ASSERT(k != nullptr && jj != nullptr);
+    ASSERT(!(jj->comments && !jj->comments->leading.empty()));
+    // Re-encoding is stable (a moved comment would change between rounds).
+    asvJSON j2;
+    ASSERT(j2.fromINI(j.toINI()));
+    ASSERT_EQ(j2.toINI(), j.toINI());
+  }
+  // A comment line above a multi-line value still attaches to that value's key.
+  {
+    const char* src = "; lead\nk = \"a\n;inside\nb\"\nj = 1\n";
+    asvJSON j;
+    ASSERT(j.fromINI(src));
+    auto* k = j.getRoot()->get("k");
+    auto* jj = j.getRoot()->get("j");
+    ASSERT(k != nullptr && jj != nullptr);
+    ASSERT(k->comments && k->comments->leading.size() == 1);
+    ASSERT_EQ(k->comments->leading[0].text, std::string("lead"));
+    ASSERT(!(jj->comments && !jj->comments->leading.empty()));
+  }
+  // 2/3. Keys must survive every character that used to break the wire format.
+  //    The delimiters '=' and ':' are located BEFORE unescaping and iniTrim
+  //    runs BEFORE unescaping, so a backslash escape could not hide either;
+  //    both now use a \xNN hex form.
+  {
+    const char* keys[] = {
+      "a=b", "a:b", ";x", "#x", "a\nb", "a\tb", "a\rb", "a b", " a", "a ", "  ",
+      "=", ":", ";", "#", "a\\=b", "a\\;b", "a.b", "a\\b", "a[b]c", "ok"};
+    for (auto k : keys) {
+      asvJSON j, back;
+      j.putInt(k, 1);
+      std::string ini = j.toINI();
+      ASSERT_MSG(back.fromINI(ini), k);
+      auto* v = back.getRoot()->get(k);
+      ASSERT_MSG(v != nullptr && v->type == asvJSONValue::INT, k);
+    }
+  }
+  // The same characters inside a section-header key. A newline used to break
+  // the header into two lines, so the whole document failed to parse.
+  {
+    const char* keys[] = {"a\nb", "a\tb", "a\rb", "a b", "a.b", "a[b]c", "a\\b", "ok"};
+    for (auto k : keys) {
+      asvJSON j;
+      j.parse(std::string_view("{}"));
+      auto sub = asvJSONValue::makeObject();
+      sub->obj->emplace(std::string("x"), asvJSONValue::makeInt(1));
+      j.getRoot()->obj->emplace(std::string(k), std::move(sub));
+      std::string ini = j.toINI();
+      asvJSON back;
+      ASSERT_MSG(back.fromINI(ini), k);
+      auto* sec = back.getRoot()->get(k);
+      ASSERT_MSG(sec != nullptr && sec->get("x") != nullptr, k);
+    }
+  }
+  // A key whose literal text looks like an escape must not be mis-decoded.
+  {
+    const char* keys[] = {"\\x41", "\\", "x", "\\x", "a\\x41b"};
+    for (auto k : keys) {
+      asvJSON j, back;
+      j.putInt(k, 7);
+      std::string ini = j.toINI();
+      ASSERT_MSG(back.fromINI(ini), k);
+      auto* v = back.getRoot()->get(k);
+      ASSERT_MSG(v != nullptr && v->type == asvJSONValue::INT, k);
+    }
+  }
+  // Legacy input keeps its historical escaping.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[a\\[b\\]]\nc[d] = v\n"));
+    ASSERT_EQ(std::string(j.getString("a[b].c[d]")), "v");
+  }
+  // 4. An empty key has no INI spelling and must be rejected, not dropped.
+  //    Pass 1 escapes EVERY key, so even a branch whose own keys are all
+  //    serializable is refused rather than silently losing the empty branch.
+  {
+    const char* srcs[] = {R"({"":{}})", R"({"":{"x":1}})", R"({"":{"n":{"x":1}}})"};
+    for (auto src : srcs) {
+      asvJSON j;
+      ASSERT(j.parse(std::string_view(src)));
+      bool threw = false;
+      try { (void)j.toINI(); } catch (const asvJSONError&) { threw = true; }
+      ASSERT_MSG(threw, src);
+    }
+  }
+  // 5. A non-empty array root must not collapse to "value = []". INI always
+  //    decodes to an object, so the array is wrapped under "value" using the
+  //    shapes the decoder already understands -- but no element is dropped.
+  {
+    asvJSON j, back;
+    j.parse(std::string_view("[1,2,3]"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("value = 1") != std::string::npos);
+    ASSERT(ini.find("value = 2") != std::string::npos);
+    ASSERT(ini.find("value = 3") != std::string::npos);
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 3);
+    if (v != nullptr && v->arr->size() == 3) {
+      ASSERT_EQ((*v->arr)[0]->getInt(), int64_t(1));
+      ASSERT_EQ((*v->arr)[1]->getInt(), int64_t(2));
+      ASSERT_EQ((*v->arr)[2]->getInt(), int64_t(3));
+    }
+  }
+  // An array of objects uses [[value]] tables and keeps every element.
+  {
+    asvJSON j, back;
+    j.parse(std::string_view(R"([{"a":1},{"a":2}])"));
+    std::string ini = j.toINI();
+    ASSERT(ini.find("[[value]]") != std::string::npos);
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 2);
+    if (v != nullptr && v->arr->size() == 2) {
+      ASSERT((*v->arr)[0]->get("a") != nullptr && (*v->arr)[0]->get("a")->getInt() == 1);
+      ASSERT((*v->arr)[1]->get("a") != nullptr && (*v->arr)[1]->get("a")->getInt() == 2);
+    }
+  }
+  // An empty array still uses the "[]" literal (repeated keys would build
+  // nothing and decode to a missing key instead of an empty array).
+  {
+    asvJSON j, back;
+    j.parse(std::string_view("[]"));
+    std::string ini = j.toINI();
+    ASSERT_EQ(ini, std::string("value = []\n"));
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->empty());
+  }
+  // A nested array root has no INI spelling and must throw, not lose data.
+  {
+    asvJSON j;
+    j.parse(std::string_view("[[1,2]]"));
+    bool threw = false;
+    try { (void)j.toINI(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  // A scalar root keeps its data under "value" (the shape change is inherent
+  // to INI, which has no scalar document form).
+  {
+    asvJSON j, back;
+    j.parse(std::string_view("42"));
+    std::string ini = j.toINI();
+    ASSERT_EQ(ini, std::string("value = 42\n"));
+    ASSERT(back.fromINI(ini));
+    ASSERT(back.getRoot()->get("value") != nullptr);
+    ASSERT_EQ(back.getRoot()->get("value")->getInt(), int64_t(42));
   }
 }
 
@@ -23581,6 +23746,7 @@ RUN(testCBORFloat16);
 	RUN(testINIMixedArray);
 	RUN(testINITableOrder);
 	RUN(testINIKeyLeadingBracket);
+	RUN(testINIReviewFidelity);
 	RUN(testINIDottedKeyRoundTrip);
 
 	std::cout << "\n--- Dotenv Serialization Tests ---\n";
