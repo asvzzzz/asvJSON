@@ -39,6 +39,10 @@ int failed = 0;
 	if ((a) != (b)) throw std::runtime_error("Assertion failed: " #a " == " #b); \
 } while(0)
 
+#define ASSERT_MSG(cond, msg) do { \
+	if (!(cond)) throw std::runtime_error(std::string("Assertion failed: " #cond " -- ") + (msg)); \
+} while(0)
+
 struct ValueGuard {
 	asvJSONValue* v;
 	explicit ValueGuard(asvJSONValue* val) : v(val) {}
@@ -4379,8 +4383,8 @@ TEST(testXmlExtras) {
 		json.putRegex("rx", "^test$", "gi");
 		json.putRegex("rx2", "plain", "");
 		std::string xml = json.toXML();
-		ASSERT(xml.find("type=\"regex\">^test$|gi<") != std::string::npos);
-		ASSERT(xml.find("type=\"regex\">plain<") != std::string::npos);
+		ASSERT(xml.find("type=\"regex\">^test$|gi|") != std::string::npos);
+		ASSERT(xml.find("type=\"regex\">plain||") != std::string::npos);
 		asvJSON json2;
 		ASSERT(json2.fromXML(xml));
 		auto* rx = json2.getRoot()->get("rx");
@@ -4771,7 +4775,7 @@ TEST(testXMLArrayTypedItems) {
 
 		std::string xml = json.toXML();
 		ASSERT(xml.find("<item type=\"binary\">AQID</item>") != std::string::npos);
-		ASSERT(xml.find("<item type=\"regex\">a.b|i</item>") != std::string::npos);
+		ASSERT(xml.find("<item type=\"regex\">a.b|i|</item>") != std::string::npos);
 		ASSERT(xml.find("<item type=\"datetime\">") != std::string::npos);
 		ASSERT(xml.find("<item type=\"objectid\">0102030405060708090a0b0c</item>") != std::string::npos);
 		ASSERT(xml.find("<item type=\"timestamp\">1234567890123</item>") != std::string::npos);
@@ -5167,6 +5171,145 @@ TEST(testXMLAuditFixes2) {
 			ASSERT((*c->arr)[1]->get("b")->getInt() == 1);
 			ASSERT(std::string((*c->arr)[2]->getString()) == "bar");
 		}
+	}
+}
+
+TEST(testXMLTextAndRegexFidelity) {
+	// 1. type="string" must be honored in the "has child elements" branch too.
+	//    The encoder adds the annotation for a #text that would re-detect as a
+	//    number, but the decoder only read it when there were NO children, so
+	//    the annotation reappeared as a phantom @type and the text was
+	//    re-detected: {#text:"123", child:1} -> {@type:"string", #text:123}.
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"w":{"#text":"123","child":1}})")));
+		std::string xml = j.toXML();
+		ASSERT(xml.find("type=\"string\"") != std::string::npos);
+		ASSERT(j2.fromXML(xml));
+		auto* w = j2.getRoot()->get("w");
+		ASSERT(w != nullptr);
+		// The consumed annotation must not survive as a phantom @type key.
+		ASSERT(w->get("@type") == nullptr);
+		auto* t = w->get("#text");
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+		ASSERT_EQ(t->str_data, std::string("123"));
+		ASSERT(w->get("child") != nullptr && w->get("child")->type == asvJSONValue::INT);
+	}
+	// External XML with the same shape parses identically.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<root type=\"string\">123<child>1</child></root>"));
+		auto* r = j.getRoot()->get("root");
+		ASSERT(r != nullptr && r->get("@type") == nullptr);
+		auto* t = r ? r->get("#text") : nullptr;
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+		ASSERT_EQ(t->str_data, std::string("123"));
+	}
+	// An empty #text with children: the annotation still denotes an empty STRING.
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"w":{"#text":"","child":1}})")));
+		ASSERT(j2.fromXML(j.toXML()));
+		auto* t = j2.getRoot()->get("w")->get("#text");
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING && t->str_data.empty());
+	}
+	// A non-STRING #text keeps its type (no annotation, no coercion).
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"w":{"#text":123,"child":1}})")));
+		std::string xml = j.toXML();
+		ASSERT(xml.find("type=\"string\"") == std::string::npos);
+		ASSERT(j2.fromXML(xml));
+		auto* t = j2.getRoot()->get("w")->get("#text");
+		ASSERT(t != nullptr && t->type == asvJSONValue::INT && t->num == 123);
+	}
+	// String literals that merely look numeric keep their type too.
+	{
+		const char* cases[][2] = {
+			{R"({"w":{"#text":"1.5","child":1}})", "1.5"},
+			{R"({"w":{"#text":"true","child":1}})", "true"},
+			{R"({"w":{"#text":"null","child":1}})", "null"}};
+		for (auto& c : cases) {
+			asvJSON j, j2;
+			ASSERT(j.parse(std::string_view(c[0])));
+			ASSERT(j2.fromXML(j.toXML()));
+			auto* t = j2.getRoot()->get("w")->get("#text");
+			ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+			ASSERT_MSG(t->str_data == std::string(c[1]), c[0]);
+		}
+	}
+	// 2. A self-closing same-name tag does not open a nested element, so
+	//    xmlSkipNilBody still finds the outer closing tag.
+	{
+		const char* srcs[] = {
+			"<x xsi:nil=\"true\"><x/></x>",
+			"<x xsi:nil=\"true\"><x /></x>",
+			"<x xsi:nil=\"true\"><x></x></x>",
+			"<x xsi:nil=\"true\"><x><y/></x></x>"};
+		for (auto src : srcs) {
+			asvJSON j;
+			ASSERT_MSG(j.fromXML(src), src);
+			auto* v = j.getRoot()->get("x");
+			ASSERT_MSG(v != nullptr && v->type == asvJSONValue::NULL_VAL, src);
+		}
+	}
+	// An xsi:nil body with no closing tag is an error, not a silent null.
+	{
+		asvJSON j;
+		ASSERT(!j.fromXML("<x xsi:nil=\"true\">garbage"));
+	}
+	// 3. A '|' in a REGEX pattern must survive: the encoder escapes it and
+	//    terminates the field, instead of the parser splitting at the last '|'.
+	{
+		struct { const char* pat; const char* opt; } cases[] = {
+			{"a|b", ""}, {"foo|", ""}, {"a|b|c", ""}, {"abc", ""}, {"a|b", "im"}, {"abc", "im"}};
+		for (auto& c : cases) {
+			asvJSON j, j2;
+			ASSERT(j.parse(std::string_view("{}")));
+			j.getRoot()->obj->emplace("re", asvJSONValue::makeRegex(c.pat, c.opt));
+			std::string xml = j.toXML();
+			ASSERT(j2.fromXML(xml));
+			auto* re = j2.getRoot()->get("re");
+			ASSERT_MSG(re != nullptr && re->type == asvJSONValue::REGEX, c.pat);
+			size_t z = re->str_data.find('\0');
+			ASSERT_MSG(re->str_data.substr(0, z) == std::string(c.pat), c.pat);
+			std::string got = (z == std::string::npos) ? std::string() : re->str_data.substr(z + 1);
+			ASSERT_MSG(got == std::string(c.opt), c.pat);
+		}
+	}
+	// Legacy unescaped XML keeps the historical rfind('|') split.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<root type=\"regex\">abc|im</root>"));
+		auto* re = j.getRoot()->get("root");
+		ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+		ASSERT_EQ(std::string(j.getRegexPattern("root")), std::string("abc"));
+		ASSERT_EQ(std::string(j.getRegexOptions("root")), std::string("im"));
+	}
+	// 4. CUSTOM_TAG has no XML text form and must be rejected everywhere, not
+	//    silently emitted as an empty element that re-parses as "".
+	{
+		const char* srcs[] = {
+			R"({"w":{"$customTag":{"name":"!x","value":1}}})",
+			R"({"w":[{"$customTag":{"name":"!x","value":1}}]})",
+			R"({"w":{"#content":[{"$customTag":{"name":"!x","value":1}}]}})"};
+		for (auto src : srcs) {
+			asvJSON j;
+			ASSERT(j.parse(std::string_view(src)));
+			bool threw = false;
+			try { (void)j.toXML(); } catch (const asvJSONError&) { threw = true; }
+			ASSERT_MSG(threw, src);
+		}
+	}
+	// 5. Non-empty adjacent #content strings still split on the asv:s marker.
+	{
+		asvJSON j, j2;
+		ASSERT(j.parse(std::string_view(R"({"w":{"#content":["foo","bar"]}})")));
+		ASSERT(j2.fromXML(j.toXML()));
+		auto* c = j2.getRoot()->get("w")->get("#content");
+		ASSERT(c != nullptr && c->arr->size() == 2);
+		ASSERT_EQ((*c->arr)[0]->str_data, std::string("foo"));
+		ASSERT_EQ((*c->arr)[1]->str_data, std::string("bar"));
 	}
 }
 
@@ -23335,6 +23478,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLArrayTypedItems);
 	RUN(testXMLAuditFixes);
 	RUN(testXMLAuditFixes2);
+	RUN(testXMLTextAndRegexFidelity);
 	
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);

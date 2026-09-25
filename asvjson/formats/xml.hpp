@@ -28,11 +28,15 @@
 //     single-element array pin). A user key equal to one of these is only
 //     affected inside a mixed #content (asv:xc/) array; elsewhere on the
 //     document the literal text round-trips as data.
-//   - KNOWN LIMITATION (pre-existing, not a regression): a LEADING empty
-//     string in a #content array (["", "foo"]) has no XML text to serialize
-//     and no preceding adjacent-string boundary, so it is not round-tripped
-//     (same behavior as before the marker work; emitting <asv:s/> there
-//     would resurrect exactly the asv:s key collision documented above).
+//   - KNOWN LIMITATION (pre-existing, not a regression): an empty string in a
+//     #content array is not round-tripped at either end. A LEADING one
+//     (["", "foo"]) has no XML text to serialize and no preceding adjacent-
+//     string boundary; a TRAILING one (["foo", ""]) does emit the <asv:s/>
+//     separator but is followed by no text, and the empty text run produces no
+//     segment on re-parse. Both collapse to the non-empty items. Emitting a
+//     marker for the leading case would resurrect exactly the asv:s key
+//     collision documented below, and no empty text node is representable in
+//     XML, so neither is fixable without changing the on-wire marker scheme.
 //   - RESERVED KEYS: inside a #content array the keys/attributes asv:s, asv:xc
 //     and asv:arr are reserved as internal round-trip markers. A user object
 //     that itself contains {asv:s: ...} / {asv:xc: ...} / {asv:arr: ...} as a
@@ -113,18 +117,48 @@ inline std::string xmlDecodeEntities(std::string_view s) {
 // Forward declaration (defined alongside the decoder below)
 inline bool xmlNeedsStringType(std::string_view s);
 
-// Serialize a REGEX value as raw "pattern|options" text (the same
-// convention "type=\"regex\"" tags use on parse: options follow the last
-// '|'). Never emit JSON-style quotes here -- the XML text body is raw
-// content, so fmtRegexVal()'s quote wrapping would corrupt the pattern on
-// a toXML -> fromXML round trip.
+// Serialize a REGEX value as raw "pattern|options|" text for type="regex".
+// Never emit JSON-style quotes here -- the XML text body is raw content, so
+// fmtRegexVal()'s quote wrapping would corrupt the pattern on a toXML ->
+// fromXML round trip.
+//
+// A '|' inside a pattern or an option string is escaped as \u007C and a
+// backslash as \\, so the ONLY literal '|' characters in our own output are
+// the separators, and a trailing '|' terminates the field unambiguously.
+// Without this the parser's rfind('|') split a no-options pattern like "a|b"
+// into pattern "a" + options "b" (silent corruption). Escaping the backslash
+// first keeps a pattern containing the literal text "\u007C" distinguishable
+// from an escaped pipe. Unescaped external XML stays inherently ambiguous.
+inline void xmlEscRegexText(std::string_view s, std::string& out) {
+	for (char c : s) {
+		if (c == '\\') out += "\\\\";
+		else if (c == '|') out += "\\u007C";
+		else out += c;
+	}
+}
+
+inline std::string xmlUnescRegexText(std::string_view s) {
+	std::string out;
+	out.reserve(s.size());
+	for (size_t i = 0; i < s.size(); i++) {
+		if (s[i] == '\\' && i + 1 < s.size()) {
+			if (s[i + 1] == '\\') { out += '\\'; i++; continue; }
+			if (i + 5 < s.size() && s.compare(i, 6, "\\u007C") == 0) { out += '|'; i += 5; continue; }
+		}
+		out += s[i];
+	}
+	return out;
+}
+
 inline void fmtRegexXml(std::string_view s, std::string& out) {
 	size_t sep = s.rfind('\0');
-	out.append(s.data(), (sep != std::string_view::npos) ? sep : s.size());
-	if (sep != std::string_view::npos && sep + 1 < s.size()) {
-		out += '|';
-		out.append(s.data() + sep + 1, s.size() - sep - 1);
-	}
+	std::string_view pat = (sep != std::string_view::npos) ? s.substr(0, sep) : s;
+	std::string_view opts = (sep != std::string_view::npos && sep + 1 < s.size())
+		? s.substr(sep + 1) : std::string_view();
+	xmlEscRegexText(pat, out);
+	out += '|';
+	if (!opts.empty()) xmlEscRegexText(opts, out);
+	out += '|';
 }
 
 // Stringify any scalar attribute value (parser attributes are always STRING,
@@ -388,6 +422,11 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
 					item->toXML(out, "item", indent + 1);
 				} else {
+					// CUSTOM_TAG (and any future unhandled type) has no element
+					// text form; "<item></item>" would re-parse as an empty STRING
+					// and lose the tag, so reject it as the mixed-content path does.
+					if (item->type == asvJSONValue::CUSTOM_TAG)
+						throw asvJSONError("XML: cannot serialize CUSTOM_TAG value");
 					out += pad + "  <item";
 					if (item->type == asvJSONValue::NULL_VAL) {
 						out += " xsi:nil=\"true\"/>\n";
@@ -407,8 +446,11 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			break;
 		}
 		default:
-			out += pad + "<" + xmlSanitizeElementName(name) + "/>\n";
-			break;
+			// Only CUSTOM_TAG (and any future unhandled type) reaches this
+			// default: it has no XML text form, and the old silent "<name/>"
+			// re-parsed as an empty STRING, quietly losing the tag. Reject it
+			// like the mixed-content path does instead of dropping the value.
+			throw asvJSONError("XML: cannot serialize CUSTOM_TAG value");
 	}
 }
 
@@ -634,9 +676,17 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 			// '<' by exactly one and the remainder scans as ordinary content
 			// until the next '<'. Never stalls; worst case is a linear per-
 			// stray-'<' re-scan (O(n^2) on pathological input, no crash).
-			if (std::string_view(s.data() + q, e - q) == elemName &&
-			    (e >= s.size() || s[e] == ' ' || s[e] == '\t' || s[e] == '\n' || s[e] == '\r' || s[e] == '/' || s[e] == '>'))
-				depth++; // nested same-name element: its own </name> must balance
+			if (std::string_view(s.data() + q, e - q) == elemName) {
+				// Only a genuinely OPENING tag balances against a later
+				// </name>. A self-closing tag -- "<x/>" or "<x />" -- completes its
+				// element instead of opening a nested one, so counting it left the
+				// outer </name> unbalanced: <x xsi:nil="true"><x/></x> never found
+				// its closing tag, pos did not advance, and the leftover </x> was
+				// later parsed as a new element ("empty element name").
+				size_t a = e;
+				while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
+				if (a >= s.size() || s[a] == '>') depth++;
+			}
 			p = e;
 			continue;
 		}
@@ -782,7 +832,14 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 					// Skip the (usually empty) body to the matching closing
 					// tag -- depth-aware so nested same-name content is skipped
 					// wholesale rather than stopping at its </name>.
+					// xmlSkipNilBody leaves pos untouched when no matching close
+					// exists, so an unterminated element is reported here instead
+					// of being silently accepted as null with the trailing
+					// content left for the caller to misparse.
+					size_t bodyStart = pos;
 					xmlSkipNilBody(s, pos, elemName);
+					if (pos == bodyStart)
+						throw asvJSONError("unterminated element: <" + elemName + "> (expected </" + elemName + ">)");
 				}
 				return asvJSONValue::makeNull();
 			}
@@ -948,16 +1005,20 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				}
 			}
 			if (t == "regex" && !combinedText.empty()) {
-				size_t sep = combinedText.rfind('|');
-				if (sep != std::string::npos) {
-					std::string pat = combinedText.substr(0, sep);
-					std::string opt = combinedText.substr(sep + 1);
-					if (!pat.empty()) {
-						auto rn = asvJSONValue::makeRegex(pat.c_str(), opt.c_str());
-						if (rn) return rn;
-					}
-				} else {
-					auto rn = asvJSONValue::makeRegex(combinedText.c_str(), "");
+				// The last '|' (when present) is the mandatory terminator
+				// emitted by fmtRegexXml; what remains splits into pattern and
+				// options at its own last '|'. A body without a terminator is
+				// legacy unescaped XML: the historical rfind('|') split is kept
+				// so previously written documents still decode as before.
+				std::string body = combinedText;
+				if (!body.empty() && body.back() == '|') body.pop_back();
+				size_t sep = body.rfind('|');
+				std::string pat = (sep == std::string::npos) ? body : body.substr(0, sep);
+				std::string opt = (sep == std::string::npos) ? std::string() : body.substr(sep + 1);
+				pat = xmlUnescRegexText(pat);
+				opt = xmlUnescRegexText(opt);
+				if (!pat.empty()) {
+					auto rn = asvJSONValue::makeRegex(pat.c_str(), opt.empty() ? nullptr : opt.c_str());
 					if (rn) return rn;
 				}
 			}
@@ -991,8 +1052,25 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Has child elements (possibly interleaved with text)
 	auto obj = asvJSONValue::makeObject();
 
+	// type="string" pins the element's own text as a STRING. The encoder emits
+	// it for a #text that would otherwise re-detect as a number/bool/null, and
+	// the child elements must not change that: without honoring it here the
+	// annotation re-appeared as a phantom @type and the text was re-detected
+	// ({"#text":"123", child:1} -> {@type:"string", #text:123, child:1}).
+	// Mirrors the type="string" handling of the text-only branch above. The
+	// annotation is consumed (never becomes an @-key) so it is not re-emitted
+	// on a second round trip.
+	bool pinTextString = false;
+	{
+		auto tit = attrs.find("type");
+		if (tit != attrs.end() && tit->second == "string") pinTextString = true;
+	}
+
 	// Add attributes
-	for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+	for (const auto& [k, v] : attrs) {
+		if (pinTextString && k == "type") continue;
+		obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+	}
 
 	if (hasInterleaving || forceMixed) {
 		// Mixed content: preserve interleaved order as #content array
@@ -1026,8 +1104,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		// Non-interleaved: all text first (if any), then all elements
 		// Add text content as #text (CDATA content stays raw STRING)
 		if (!combinedText.empty()) {
-			if (hasCdata) obj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
+			if (hasCdata || pinTextString) obj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
 			else obj->obj->emplace("#text", xmlDetectValue(combinedText));
+		} else if (pinTextString) {
+			// type="string" with no text run at all still denotes an empty
+			// STRING: this is what toXML emits for {#text:"", child:1}.
+			obj->obj->emplace("#text", asvJSONValue::makeString("", 0));
 		}
 
 		// Count occurrences of each child name (global, not just consecutive)
@@ -1088,7 +1170,7 @@ inline bool asvJSON::fromXML(std::string_view input) {
 
 		// Skip XML declaration <?xml ...?>
 		xmlSkipSpaces(input, pos);
-		if (pos + 5 < input.size() && input.substr(pos, 5) == "<?xml") {
+		if (pos + 5 <= input.size() && input.substr(pos, 5) == "<?xml") {
 			size_t end = input.find("?>", pos + 2);
 			if (end == std::string_view::npos) throw asvJSONError("unclosed XML declaration");
 			pos = end + 2;
