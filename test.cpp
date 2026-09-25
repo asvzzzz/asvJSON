@@ -12918,6 +12918,98 @@ TEST(testTRONAudit) {
   }
 }
 
+TEST(testTRONRoundTripFidelity) {
+  // 1. An integral DOUBLE must round-trip as a DOUBLE, not become an INT.
+  //    fmtDoubleVal emits "1" for 1.0 and "-0" for -0.0, and the decoder only
+  //    treats a token as DOUBLE when it contains '.', 'e' or 'E'.
+  {
+    asvJSON j, j2;
+    j.parse(std::string_view(R"({"a":1.0,"b":-0.0,"c":100.0,"d":2.5})"));
+    std::string s = j.toTRON();
+    ASSERT(s.find("1.0") != std::string::npos);
+    ASSERT(s.find("-0.0") != std::string::npos);
+    ASSERT(s.find("100.0") != std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.getDouble("a"), 1.0);
+    ASSERT(j2.getRoot()->get("b")->type == asvJSONValue::DOUBLE);
+    // The sign bit of -0.0 must survive: a bare "-0" would decode as INT 0.
+    ASSERT(std::signbit(j2.getDouble("b")));
+    ASSERT(j2.getRoot()->get("c")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.getDouble("c"), 100.0);
+    ASSERT(j2.getRoot()->get("d")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.getDouble("d"), 2.5);
+  }
+  // A genuine INT must stay an INT (the ".0" suffix must not leak the other way).
+  {
+    asvJSON j, j2;
+    j.putInt("n", 1);
+    std::string s = j.toTRON();
+    ASSERT(s.find("1.0") == std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("n")->type == asvJSONValue::INT);
+  }
+  // Exponent forms already carry 'e' and need no suffix.
+  {
+    asvJSON j, j2;
+    j.putDouble("d", 1e20);
+    std::string s = j.toTRON();
+    ASSERT(s.find('e') != std::string::npos || s.find('E') != std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("d")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.getDouble("d"), 1e20);
+  }
+  // 2. A YAML !!set must keep its flag through a TRON round-trip. It is emitted
+  //    as the {"$set":[...]} marker form and must never be hoisted into a class.
+  {
+    asvJSON y, j2;
+    ASSERT(y.fromYAML(std::string_view("a: !!set [x, y]\n")));
+    ASSERT(y.getRoot()->get("a")->yaml_set);
+    std::string s = y.toTRON();
+    ASSERT(s.find("\"$set\"") != std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* v = j2.getRoot()->get("a");
+    ASSERT(v != nullptr && v->yaml_set);
+    ASSERT(v->get("x") != nullptr && v->get("x")->type == asvJSONValue::NULL_VAL);
+    ASSERT(v->get("y") != nullptr);
+  }
+  // Repeated identical sets are still emitted as markers, not as a shared class.
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromYAML(std::string_view("a: !!set [p, q]\nb: !!set [p, q]\n")));
+    std::string s = j.toTRON();
+    ASSERT(s.find("class ") == std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("a")->yaml_set);
+    ASSERT(j2.getRoot()->get("b")->yaml_set);
+  }
+  // A plain object with a "$set" key holding non-strings is NOT a set marker
+  // (MongoDB's {"$set":[1,2]} update operator must survive as a plain object).
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view(R"({"$set":[1,2]})")));
+    std::string s = j.toTRON();
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(!j2.getRoot()->yaml_set);
+    ASSERT(j2.getRoot()->get("$set") != nullptr);
+  }
+  // 3. toTRON() on an empty document ends with a newline like every other path.
+  {
+    asvJSON j;
+    std::string s = j.toTRON();
+    ASSERT_EQ(s, std::string("null\n"));
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot() != nullptr && j2.getRoot()->type == asvJSONValue::NULL_VAL);
+  }
+  // 4. Class properties must be comma/newline separated; a bare space is not a
+  //    separator, so "class A: x y" is a syntax error rather than two props.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view("class A: x y\nA(1,2)\n")));
+  }
+}
+
 
 TEST(testToJSON5) {
   // Basic object round-trip
@@ -23283,6 +23375,7 @@ RUN(testCBORFloat16);
 	RUN(testTRONExtras);
 	RUN(testTRONSpecialTypes);
 	RUN(testTRONAudit);
+	RUN(testTRONRoundTripFidelity);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 	RUN(testToGOON);

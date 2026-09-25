@@ -12,6 +12,13 @@
 // The encoder emits FLAT class definitions: inheritance (`class B(A):`) is fully
 // supported by the decoder, but re-serialized as an equivalent flat class (the
 // inherited properties are merged into the emitted class's property list).
+//
+// Known limitation: toTRON() returns std::string with no error channel, so a tree
+// nested deeper than MAX_NESTING_DEPTH (reachable via setByPointer, which does not
+// enforce the limit) is emitted with "null" past that depth instead of reporting an
+// error. This matches the other recursive encoders (JSON5/RON/sexpr/GOON).
+// CUSTOM_TAG values are not preserved: they serialize as "null" (the encoder's
+// default case), as TRON has no marker form for them.
 
 #include "../core.hpp"
 
@@ -46,6 +53,10 @@ inline void tronDiscoverSchemas(const asvJSONValue* v,
   if (!v) return;
   if (!asvJSONValue::checkNestingDepth(depth)) return;
   if (v->type == asvJSONValue::OBJECT && !v->obj->empty()) {
+    // A yaml_set object is emitted as the {"$set":[...]} marker form, never as a
+    // class instance: hoisting it would render the members as a positional
+    // instance and drop the set flag.
+    if (v->yaml_set) return;
     if (visited.count(v)) return;
     visited.insert(v);
     auto sig = tronSchemaSignature(v);
@@ -183,10 +194,27 @@ inline void tronSerializeVal(const asvJSONValue* v,
   }
   // Standard JSON-serializable types
   switch (v->type) {
+    case asvJSONValue::DOUBLE: {
+      // fmtDoubleVal emits "1" for 1.0 and "-0" for -0.0, and the TRON decoder
+      // classifies a token as DOUBLE only when it contains '.', 'e' or 'E'.
+      // A bare "1" would therefore re-decode as INT, and "-0" as INT 0 (losing
+      // the sign), so append ".0" whenever the literal is a plain integer.
+      // This mirrors the CSV/TOON/UDE convention.
+      if (std::isnan(v->dbl) || std::isinf(v->dbl)) {
+        appendJsonToken(out, v, allowNaNInfinity);
+        break;
+      }
+      std::string s;
+      fmtDoubleVal(v->dbl, s);
+      if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+          s.find('E') == std::string::npos)
+        s += ".0";
+      out += s;
+      break;
+    }
     case asvJSONValue::NULL_VAL:
     case asvJSONValue::BOOL_VAL:
     case asvJSONValue::INT:
-    case asvJSONValue::DOUBLE:
       appendJsonToken(out, v, allowNaNInfinity);
       break;
     case asvJSONValue::STRING:
@@ -214,6 +242,22 @@ inline void tronSerializeVal(const asvJSONValue* v,
     }
     case asvJSONValue::OBJECT: {
       if (v->obj->empty()) { out += "{}"; break; }
+      if (v->yaml_set) {
+        // YAML !!set marker form: {"$set":["a","b"]}; the member keys become
+        // the array strings in insertion order. fromTRON() recognizes this
+        // shape and restores the yaml_set flag.
+        out += "{\"$set\":[";
+        bool sfirst = true;
+        for (const auto& [k, _] : *v->obj) {
+          if (!sfirst) out.push_back(',');
+          out.push_back('"');
+          appendJsonEscaped(out, k);
+          out.push_back('"');
+          sfirst = false;
+        }
+        out += "]}";
+        break;
+      }
       auto sig = tronSchemaSignature(v);
       auto it = sigToClass.find(sig);
       if (it != sigToClass.end()) {
@@ -248,7 +292,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
 }
 
 inline std::string asvJSON::toTRON() const {
-  if (!root) return "null";
+  if (!root) return "null\n";
   std::unordered_map<std::string, std::vector<std::string>> firstKeys;
   std::unordered_map<std::string, size_t> counts;
   std::unordered_set<const asvJSONValue*> visited;
@@ -459,6 +503,38 @@ struct TronParseState {
       skipNewlines();
     }
     if (!match(TronTokType::RBRACE)) throw asvJSONError("expected '}' or ',' in object");
+    // YAML set marker: {"$set":["a","b"]} -> object whose members are the array
+    // strings (each mapped to null), flagged yaml_set. Recognized only when the
+    // key is the sole member and every array element is a string, so a plain
+    // object with a "$set" key holding non-strings (e.g. MongoDB's update
+    // operator {"$set":[1,2]}) is left untouched. Mirrors the JSON parser.
+    if (obj->obj->size() == 1) {
+      auto stIt = obj->obj->find("$set");
+      if (stIt != obj->obj->end() && stIt->second && stIt->second->type == asvJSONValue::ARRAY &&
+          stIt->second->arr) {
+        bool allStrings = true;
+        for (const auto& m : *stIt->second->arr) {
+          if (!m || m->type != asvJSONValue::STRING) { allStrings = false; break; }
+        }
+        if (allStrings) {
+          // Reuse the parsed object in place: the sole "$set" member is an ARRAY
+          // that gets replaced by one null per array element, so the object needs
+          // no further allocation beyond the null values themselves.
+          auto setArr = std::move(stIt->second);
+          obj->obj->clear();
+          for (const auto& m : *setArr->arr) {
+            if (!m) continue;
+            if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+              throw asvJSONError("TRON set too large");
+            auto nullv = asvJSONValue::makeNull();
+            if (!nullv) throw asvJSONError("out of memory");
+            obj->obj->emplace(m->str_data, std::move(nullv));
+          }
+          obj->yaml_set = true;
+          return obj.release();
+        }
+      }
+    }
     return obj.release();
   }
 
