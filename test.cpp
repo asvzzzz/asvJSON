@@ -16507,6 +16507,128 @@ TEST(testDotenvComments) {
   }
 }
 
+TEST(testDotenvReviewFixes) {
+  // 1. DOUBLE inf/nan must not pick up the ".0" suffix. fmtDoubleVal yields
+  // "inf"/"-inf"/"nan"/"-nan(ind)", none of which contain '.', 'e' or 'E', so
+  // the integral-suffix rule used to emit "inf.0"/"nan.0" and the re-parse
+  // produced a STRING (strtoll stops at 'i', strtod stops at '.').
+  {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    struct Case { double v; bool neg; };
+    const Case cases[] = {{inf, false}, {-inf, true}, {nan, false}, {-nan, true}};
+    for (const Case& c : cases) {
+      asvJSON j;
+      ASSERT(j.parse(std::string("{\"V\":0}")));
+      auto* v = j.getRoot()->get("V");
+      v->type = asvJSONValue::DOUBLE;
+      v->dbl = c.v;
+      std::string env = j.toDotenv();
+      asvJSON j2;
+      ASSERT(j2.fromDotenv(env));
+      auto* w = j2.get("V");
+      ASSERT(w != nullptr && w->type == asvJSONValue::DOUBLE);
+      if (std::isnan(c.v)) {
+        ASSERT(std::isnan(w->dbl));
+        ASSERT_EQ(std::signbit(w->dbl), c.neg);
+      } else {
+        ASSERT_EQ(w->dbl, c.v);
+        ASSERT_EQ(std::signbit(w->dbl), c.neg);
+      }
+      // Idempotent: re-encoding the reparsed tree is byte-identical.
+      ASSERT_EQ(j2.toDotenv(), env);
+    }
+    // Integral doubles still get the suffix and still come back as DOUBLE.
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"A\":100.0,\"B\":1.0,\"C\":0.1}")));
+    std::string env = j.toDotenv();
+    ASSERT(env.find("A=100.0") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT(j2.get("A") != nullptr && j2.get("A")->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.get("A")->dbl, 100.0);
+    // A STRING that merely looks like a non-finite number stays a STRING.
+    for (const char* s : {"inf", "-inf", "nan", "inf.0", "nan.0"}) {
+      asvJSON t;
+      ASSERT(t.fromDotenv("S=\"" + std::string(s) + "\"\n"));
+      ASSERT(t.get("S") != nullptr && t.get("S")->type == asvJSONValue::STRING);
+      ASSERT_EQ(std::string(t.get("S")->getString()), std::string(s));
+    }
+  }
+  // 2. Every trailing comment is emitted, not just the last one. Only reachable
+  // from a programmatically built tree, since the parser records at most one.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"K\":1}")));
+    auto* v = j.getRoot()->get("K");
+    v->comments.reset(new asvJSONInternal::Comments());
+    v->comments->trailing.push_back(asvJSONInternal::Comment{" first", false});
+    v->comments->trailing.push_back(asvJSONInternal::Comment{" second", false});
+    v->comments->trailing.push_back(asvJSONInternal::Comment{" third", false});
+    std::string env = j.toDotenv();
+    ASSERT_EQ(env, std::string("K=1 # first # second # third\n"));
+    // The parser folds the whole tail into one comment; the text survives and
+    // re-emits verbatim.
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT(j2.get("K") != nullptr && j2.get("K")->comments);
+    ASSERT_EQ(j2.get("K")->comments->trailing.size(), size_t(1));
+    ASSERT_EQ(j2.get("K")->comments->trailing[0].text, std::string(" first # second # third"));
+    ASSERT_EQ(j2.toDotenv(), env);
+    // A block comment cannot share the value line, so all of them move to their
+    // own lines and none is lost.
+    asvJSON b;
+    ASSERT(b.parse(std::string("{\"K\":1}")));
+    auto* bv = b.getRoot()->get("K");
+    bv->comments.reset(new asvJSONInternal::Comments());
+    bv->comments->trailing.push_back(asvJSONInternal::Comment{" one", false});
+    bv->comments->trailing.push_back(asvJSONInternal::Comment{" two", true});
+    std::string benv = b.toDotenv();
+    ASSERT(benv.find("# one") != std::string::npos);
+    ASSERT(benv.find("# two") != std::string::npos);
+    ASSERT(benv.find("K=1\n") != std::string::npos);
+  }
+  // 3. CRLF input must not leak '\r' into a multi-line value. splitLines()
+  // already strips the CR of a CRLF pair before the multi-line loop appends the
+  // continuation, so the value holds a bare '\n'.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("M=\"line1\r\nline2\"\r\nK=v\r\n")));
+    std::string got = j.getString("M");
+    ASSERT(got.find('\r') == std::string::npos);
+    ASSERT_EQ(got, std::string("line1\nline2"));
+    // The re-encode escapes the value's newline as a literal backslash-n.
+    ASSERT_EQ(j.toDotenv(), std::string("M=\"line1\\nline2\"\nK=v\n"));
+  }
+  // 4. Root leading comments are emitted above the first key. fromDotenv never
+  // produces them, so this only matters for trees coming from another format.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"K\":1}")));
+    ASSERT(j.getRoot()->get("K") != nullptr);
+    j.getRoot()->comments.reset(new asvJSONInternal::Comments());
+    j.getRoot()->comments->leading.push_back(asvJSONInternal::Comment{" root comment", false});
+    j.getRoot()->comments->footing.push_back(asvJSONInternal::Comment{" footer", false});
+    ASSERT_EQ(j.toDotenv(), std::string("# root comment\nK=1\n# footer\n"));
+    // Root footing alone is unaffected, and a dotenv-native parse (which puts
+    // everything above the first key into that key's leading comments) still
+    // round-trips byte-identically.
+    asvJSON p;
+    ASSERT(p.fromDotenv("# lead\nK=1\n# foot\n"));
+    ASSERT_EQ(p.toDotenv(), std::string("# lead\nK=1\n# foot\n"));
+  }
+  // 5. Blank lines are not in the data model and are dropped by the parser, so
+  // they are not restored on encode (documented lossy case). Pin the behavior so
+  // a future change to preserve them is a deliberate one.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv("# c1\n\nKEY=val\n"));
+    ASSERT(j.get("KEY") != nullptr && j.get("KEY")->comments);
+    ASSERT_EQ(j.get("KEY")->comments->leading.size(), size_t(1));
+    ASSERT_EQ(j.toDotenv(), std::string("# c1\nKEY=val\n"));
+  }
+}
+
 TEST(testFromJavaProp) {
   // '=', ':' and whitespace separators, leading whitespace, type inference
   {
@@ -24816,6 +24938,7 @@ RUN(testRONReviewFixes);
 	RUN(testToDotenv);
 	RUN(testDotenvRoundTrip);
 	RUN(testDotenvComments);
+	RUN(testDotenvReviewFixes);
 
 	std::cout << "\n--- Java Properties Serialization Tests ---\n";
 	RUN(testFromJavaProp);

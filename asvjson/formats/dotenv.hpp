@@ -23,6 +23,15 @@
 // text survives but decodes back as a string). The same applies to DATETIME,
 // BINARY and EXTENSION, which serialize as quoted ISO/base64 text and decode
 // back as STRING.
+//
+// Known lossy cases, all cosmetic rather than data-affecting:
+// - Blank lines are not part of the data model, so a blank line between a leading
+//   comment and its key ("# c1\n\nKEY=v") is dropped on re-encode. The parser
+//   discards blank lines outright; representing them would need a sentinel that
+//   does not collide with a bare "#" comment (which parses to empty text) and a
+//   new flag on the shared Comment struct used by every format.
+// - Comments always precede the first key as whole lines, and only a value's own
+//   line can hold an inline comment, so comment placement is normalized.
 
 #include "../core.hpp"
 
@@ -175,6 +184,18 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
     }
     case T::INT: out += std::to_string(v->num); break;
     case T::DOUBLE: {
+      // inf/nan must be spelled out and never get the ".0" suffix: fmtDoubleVal
+      // returns "inf"/"-inf"/"nan" (MSVC spells a negative nan "-nan(ind)"), none
+      // of which contain '.', 'e' or 'E', so the suffix below would turn them into
+      // "inf.0"/"nan.0"/"-nan(ind).0" -- strtoll stops at 'i' and strtod stops at
+      // '.', so the re-parse yields a STRING and the round-trip loses the type.
+      // Bare "inf"/"nan" is safe in the other direction: dotenvParseVal's strtod
+      // maps it straight back to a DOUBLE, and that is also why a STRING "inf" is
+      // quoted by the STRING case above (its probe reports a non-STRING type).
+      if (std::isnan(v->dbl)) { out += std::signbit(v->dbl) ? "-nan" : "nan"; break; }
+      if (std::isinf(v->dbl)) { out += (v->dbl < 0 ? "-inf" : "inf"); break; }
+      // A double with an integral value must round-trip as a float (otherwise
+      // "100000" would re-decode as an INT). Same rule as INI/UDE.
       std::string tmp;
       fmtDoubleVal(v->dbl, tmp);
       if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
@@ -220,6 +241,12 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
 inline void asvJSONValue::toDotenv(std::string& out) const {
   if (type != OBJECT || !obj)
     throw asvJSONError("dotenv: root must be an object");
+  // Root leading comments go above the first key. fromDotenv never produces them
+  // (everything before the first key becomes the first key's leading comments),
+  // so dotenv-native round-trips are unaffected, but a tree carrying root leading
+  // comments from another format used to lose them. INI emits the same pair.
+  if (comments && !comments->leading.empty())
+    dotenvWriteCommentLines(out, comments->leading);
   for (const auto& [key, val] : *obj) {
     if (key.empty())
       throw asvJSONError("dotenv: empty key");
@@ -232,10 +259,23 @@ inline void asvJSONValue::toDotenv(std::string& out) const {
     out += '=';
     dotenvFormatVal(val.get(), out);
     if (val->comments && !val->comments->trailing.empty()) {
-      auto it = val->comments->trailing.rbegin();
-      if (!it->block && it->text.find('\n') == std::string::npos) {
-        out += " #";
-        out += it->text;
+      // Dotenv has exactly one inline comment slot per value (" # text"), so all
+      // trailing comments share the value's line. Emit every one of them joined by
+      // " # " instead of keeping only the last: the parser reads the whole
+      // remainder of the line as one comment, so nothing is lost and the text
+      // re-emits verbatim on the next pass. Dropping the earlier ones (the
+      // previous rbegin()-only behavior) silently lost data on trees built
+      // programmatically, where more than one trailing comment is possible.
+      // A block or multi-line comment cannot share a value line, so if any is
+      // present they all go on their own lines instead.
+      bool allInline = true;
+      for (const auto& c : val->comments->trailing)
+        if (c.block || c.text.find('\n') != std::string::npos) { allInline = false; break; }
+      if (allInline) {
+        for (const auto& c : val->comments->trailing) {
+          out += " #";
+          out += c.text;
+        }
         out += '\n';
       } else {
         out += '\n';
