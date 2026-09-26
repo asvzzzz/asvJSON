@@ -17369,9 +17369,11 @@ TEST(testFromUBJSON) {
     asvJSON j2;
     ASSERT(j2.fromUBJSON(std::string("[#i\x02", 4) + std::string("i\x01", 2) + "N" + std::string("i\x02", 2)));
     ASSERT_EQ(j2.getRoot()->arr->size(), size_t(2));
-    asvJSON j3; // top-level noop -> null
-    ASSERT(j3.fromUBJSON(std::string("N", 1)));
-    ASSERT_EQ(j3.getRoot()->type, asvJSONValue::NULL_VAL);
+    // 'N' is a no-op, not a null value: at top level it is skipped, so a lone noop
+    // carries no value at all.
+    asvJSON j3;
+    ASSERT(!j3.fromUBJSON(std::string("N", 1)));
+    ASSERT(j3.lastError.find("no value") != std::string::npos);
   }
   // Error cases all return false (never throw)
   {
@@ -17388,6 +17390,131 @@ TEST(testFromUBJSON) {
     ASSERT(!j.fromUBJSON(std::string("{", 1) + std::string("i\x01", 2) + "a" + std::string("i\x05", 2) + std::string("\x00", 1)));
     ASSERT(!j.fromUBJSON(std::string("Z", 1) + "\xFF"));
     ASSERT(!j.fromUBJSON(std::string("S", 1) + std::string("i\x05", 2) + "ab"));
+  }
+}
+
+TEST(testUBJSONReviewFixes) {
+  // 1. A negative signed length is malformed, not a huge unsigned one. Sign
+  // extension used to turn -1 into UINT64_MAX, which then tripped a downstream
+  // size guard and named the wrong cause ("string too long" for S i FF, "array
+  // too large" for [ # i FF).
+  {
+    struct Case { const char* doc; size_t n; };
+    const Case neg[] = {
+      {"Si\xFF", 3}, {"SI\xFF\xFF", 4}, {"Sl\xFF\xFF\xFF\xFF", 6},
+      {"SL\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 10},
+      {"[#i\xFF", 4}, {"{#i\xFF", 4}, {"[$U#i\xFF", 6}, {"Si\xFB", 3},
+    };
+    for (const Case& c : neg) {
+      asvJSON j;
+      ASSERT(!j.fromUBJSON(std::string(c.doc, c.n)));
+      ASSERT_EQ(j.lastError, std::string("UBJSON: negative length"));
+    }
+    // Non-negative lengths of every marker width still work.
+    struct Ok { const char* doc; size_t n; const char* val; };
+    const Ok good[] = {
+      {"Si\x03" "abc", 6, "\"abc\""}, {"Si\x00", 3, "\"\""}, {"SU\x00", 3, "\"\""},
+      {"SI\x00\x00", 4, "\"\""}, {"Sl\x00\x00\x00\x00", 6, "\"\""},
+      {"SL\x00\x00\x00\x00\x00\x00\x00\x00", 10, "\"\""},
+    };
+    for (const Ok& g : good) {
+      asvJSON j;
+      ASSERT(j.fromUBJSON(std::string(g.doc, g.n)));
+      ASSERT_EQ(j.serialize(), std::string(g.val));
+    }
+    // A length that is merely larger than the data is still reported as truncated.
+    asvJSON t;
+    ASSERT(!t.fromUBJSON(std::string("SU\xFF", 3) + "aaa"));
+    ASSERT(t.lastError.find("truncated") != std::string::npos);
+  }
+  // 2. Every binary decoder reports empty input instead of returning false with a
+  // stale (or empty) lastError, matching the text decoders.
+  {
+    asvJSON j;
+    j.parse("{\"stale\":1}");
+    ASSERT(!j.fromUBJSON(nullptr, 0));
+    ASSERT(!j.lastError.empty());
+    ASSERT(!j.fromMessagePack(nullptr, 0));
+    ASSERT(!j.lastError.empty());
+    ASSERT(!j.fromCBOR(nullptr, 0));
+    ASSERT(!j.lastError.empty());
+    ASSERT(!j.fromBSON(nullptr, 0));
+    ASSERT(!j.lastError.empty());
+    // A non-null but too-short BSON buffer is a distinct, clearer diagnostic.
+    const uint8_t two[2] = {1, 2};
+    ASSERT(!j.fromBSON(two, 2));
+    ASSERT(j.lastError.find("too small") != std::string::npos);
+  }
+  // 3. Value-level toUBJSON appends -- the shared binary-encoder convention. It
+  // must not clear a buffer the caller is filling incrementally.
+  {
+    asvJSON j;
+    j.parse("{\"a\":1}");
+    std::vector<uint8_t> pre{0xDE, 0xAD};
+    j.getRoot()->toUBJSON(pre);
+    ASSERT_EQ(pre.size(), size_t(9));
+    ASSERT_EQ(pre[0], uint8_t(0xDE));
+    ASSERT_EQ(pre[1], uint8_t(0xAD));
+    ASSERT_EQ(pre[2], uint8_t('{'));
+    // The no-argument overload starts from empty.
+    ASSERT_EQ(j.toUBJSON().size(), size_t(7));
+  }
+  // 4. In a typed container the $type marker describes the element payloads, so
+  // the elements are bare -- no per-element marker. Matches the spec and
+  // py-ubjson; per-element markers after the count are trailing content.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$i#i\x03", 6) + std::string("\x01", 1) + std::string("\x02", 1) +
+                        std::string("\x03", 1)));
+    ASSERT_EQ(j.serialize(), std::string("[1,2,3]"));
+    asvJSON k;
+    ASSERT(!k.fromUBJSON(std::string("[$i#i\x03", 6) + std::string("i\x01", 2) + std::string("i\x02", 2) +
+                         std::string("i\x03", 2)));
+    ASSERT(k.lastError.find("trailing") != std::string::npos);
+    // An untyped counted array still needs a marker per element.
+    asvJSON u;
+    ASSERT(!u.fromUBJSON(std::string("[#i\x02", 4) + std::string("\x01", 1) + std::string("\x02", 1)));
+  }
+  // 5. 'N' is a no-op and never yields a value, at top level as well as inside
+  // containers. Previously it was skipped in containers but returned null in
+  // value position, so [N] decoded to null while [i5][N] failed on trailing
+  // content.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("Ni\x05", 3)));
+    ASSERT_EQ(j.serialize(), std::string("5"));
+    ASSERT(j.fromUBJSON(std::string("i\x05N", 3)));
+    ASSERT_EQ(j.serialize(), std::string("5"));
+    ASSERT(j.fromUBJSON(std::string("NNi\x05NN", 6)));
+    ASSERT_EQ(j.serialize(), std::string("5"));
+    asvJSON n;
+    ASSERT(!n.fromUBJSON(std::string("NNN", 3)));
+    ASSERT(n.lastError.find("no value") != std::string::npos);
+    // A no-op where a value is required is an error, not a silent null.
+    asvJSON v;
+    ASSERT(!v.fromUBJSON(std::string("{#i\x01", 4) + std::string("U\x01", 2) + "K" + "N"));
+    ASSERT(v.lastError.find("no-op") != std::string::npos);
+    // 'Z' is the real null, and it still round-trips.
+    asvJSON z;
+    ASSERT(z.fromUBJSON(std::string("Z", 1)));
+    ASSERT_EQ(z.getRoot()->type, asvJSONValue::NULL_VAL);
+    // $N in a *type* position is unrelated: it fixes a typed object's values null.
+    asvJSON t;
+    ASSERT(t.fromUBJSON(std::string("{$N#i\x01", 6) + std::string("U\x01", 2) + "K"));
+    ASSERT_EQ(t.serialize(), std::string("{\"K\":null}"));
+    // No-ops inside containers are still skipped without consuming a slot.
+    asvJSON c;
+    ASSERT(c.fromUBJSON(std::string("[#i\x02", 4) + "NN" + std::string("i\x07", 2) + std::string("i\x08", 2)));
+    ASSERT_EQ(c.serialize(), std::string("[7,8]"));
+  }
+  // Round-trip is untouched by all of the above.
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"a\":[1,2,3],\"b\":{\"c\":true},\"d\":null,\"e\":\"str\",\"f\":1.5}"));
+    std::vector<uint8_t> buf = j.toUBJSON();
+    asvJSON k;
+    ASSERT(k.fromUBJSON(buf.data(), buf.size()));
+    ASSERT_EQ(k.serialize(), j.serialize());
   }
 }
 
@@ -24977,6 +25104,7 @@ RUN(testRONReviewFixes);
 
 	std::cout << "\n--- UBJSON Tests ---\n";
 	RUN(testFromUBJSON);
+	RUN(testUBJSONReviewFixes);
 	RUN(testToUBJSON);
 	RUN(testUBJSONRoundTrip);
 	RUN(testUBJSONSpecialTypes);

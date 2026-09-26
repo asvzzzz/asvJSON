@@ -25,8 +25,25 @@
 // loss), C becomes a 1-char STRING, and a typed uint8 array decodes to BINARY
 // (the spec's binary-data convention, matching py-ubjson and the reference
 // C library). Unoptimized containers may be counted (`[#<n>`, `{#<n>`) or
-// unbounded (closed by `]`/`}`); `$` requires a `#` count per spec. `N` noop
-// markers are skipped inside containers without consuming a count slot.
+// unbounded (closed by `]`/`}`); `$` requires a `#` count per spec.
+//
+// `N` is a no-op and never produces a value. Inside a container it is skipped
+// without consuming a count slot; at the top level any run of `N` before or after
+// the document's value is skipped, and a document consisting only of no-ops is
+// rejected ("no value"). `N` in a *type* position is a different thing -- `{$N#n`
+// legitimately fixes every value of a typed object to null.
+//
+// Typed containers: the `$<type>` marker describes the element payloads, so
+// `[$i#3` is followed by three BARE int8 bytes with no per-element `i` marker.
+// This matches the spec and py-ubjson; per-element markers after the count are
+// trailing content and are rejected. The encoder never emits typed containers
+// except for BINARY payloads -- it writes plain unbounded `['...']` / `{...}`.
+//
+// Encoding appends. asvJSONValue::toUBJSON(std::vector<uint8_t>&) pushes onto
+// whatever the buffer already holds; it does not clear it. That is the shared
+// convention for the binary encoders (toCBOR, toMessagePack and toBSON behave
+// identically) and it is what lets a caller build one buffer incrementally. Use
+// the no-argument asvJSON::toUBJSON() for a freshly allocated buffer.
 //
 // UBJSON has no magic leading bytes (it starts with the same '{'/'[' as JSON),
 // so fromAny() does not auto-detect it; use fromUBJSON() or the `.ubj`
@@ -187,27 +204,37 @@ inline uint64_t ubjReadLen(const uint8_t* data, size_t& pos, size_t dataLen) {
   if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (length)");
   char m = static_cast<char>(data[pos++]);
   uint64_t v = 0;
+  int64_t sv = 0;  // signed reading, so a negative length can be rejected
   if (m == 'i') {
     if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (int8)");
-    v = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(data[pos++])));
+    sv = static_cast<int8_t>(data[pos++]);
+    v = static_cast<uint64_t>(sv);
   } else if (m == 'U') {
     if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (uint8)");
     v = data[pos++];
   } else if (m == 'I') {
     if (pos + 2 > dataLen) throw asvJSONError("UBJSON: unexpected end (int16)");
-    v = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(ubjReadBE(data, pos, 2))));
+    sv = static_cast<int16_t>(ubjReadBE(data, pos, 2));
     pos += 2;
+    v = static_cast<uint64_t>(sv);
   } else if (m == 'l') {
     if (pos + 4 > dataLen) throw asvJSONError("UBJSON: unexpected end (int32)");
-    v = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(ubjReadBE(data, pos, 4))));
+    sv = static_cast<int32_t>(ubjReadBE(data, pos, 4));
     pos += 4;
+    v = static_cast<uint64_t>(sv);
   } else if (m == 'L') {
     if (pos + 8 > dataLen) throw asvJSONError("UBJSON: unexpected end (int64)");
-    v = ubjReadBE(data, pos, 8);
+    sv = static_cast<int64_t>(ubjReadBE(data, pos, 8));
     pos += 8;
+    v = static_cast<uint64_t>(sv);
   } else {
     throw asvJSONError("UBJSON: invalid length type marker");
   }
+  // A negative signed length is malformed, not a huge unsigned one. Without this
+  // the sign extension turned -1 into UINT64_MAX, which then tripped a downstream
+  // size guard and reported the wrong cause ("string too long" for S i FF, "array
+  // too large" for [ # i FF) instead of naming the actual defect.
+  if (sv < 0) throw asvJSONError("UBJSON: negative length");
   return v;
 }
 
@@ -228,7 +255,12 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
 inline std::unique_ptr<asvJSONValue> ubjParseTyped(const uint8_t* data, size_t& pos,
                                                    size_t dataLen, int depth, char m) {
   switch (m) {
-    case 'Z': case 'N': return asvJSONValue::makeNull();
+    // 'N' is a no-op and never yields a value: the container loops that reach here
+    // have already skipped it, so seeing one means a no-op sat where a value was
+    // required. The type position of a typed container is a different thing --
+    // {$N#..} legitimately fixes every value to null.
+    case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
+    case 'Z': return asvJSONValue::makeNull();
     case 'T': return asvJSONValue::makeBool(true);
     case 'F': return asvJSONValue::makeBool(false);
     case 'i': {
@@ -417,7 +449,9 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
   }
 
   switch (m) {
-    case 'Z': case 'N': return asvJSONValue::makeNull();
+    // See ubjParseTyped: 'N' is a no-op, not a null value.
+    case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
+    case 'Z': return asvJSONValue::makeNull();
     case 'T': return asvJSONValue::makeBool(true);
     case 'F': return asvJSONValue::makeBool(false);
     case 'i': {
@@ -494,11 +528,19 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
-  if (!data || size < 1) return false;
+  if (!data || size < 1) { lastError = "UBJSON: empty input"; return false; }
   const uint8_t* u = static_cast<const uint8_t*>(data);
   try {
     size_t p = 0;
+    // 'N' is a no-op, not a value. Skip any run of them before the document's
+    // single value and after it; a document made only of no-ops carries no value
+    // at all. Previously 'N' in value position returned null, while the very same
+    // byte inside a container was skipped -- so [N] decoded to null but [i5][N]
+    // failed with "trailing content".
+    while (p < size && u[p] == 'N') p++;
+    if (p >= size) throw asvJSONError("UBJSON: no value (only no-ops)");
     root = ubjParseValue(u, p, size, 0);
+    while (p < size && u[p] == 'N') p++;
     if (!root || p != size) {
       root = nullptr;
       throw asvJSONError(p != size ? "UBJSON: trailing content after value" : "UBJSON: parse failed");

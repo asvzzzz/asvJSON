@@ -3281,7 +3281,7 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
-	if (!data || size < 1) return false;
+	if (!data || size < 1) { lastError = "Empty input"; return false; }
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
 		size_t pos = 0;
@@ -3299,7 +3299,7 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
-	if (!data || size < 1) return false;
+	if (!data || size < 1) { lastError = "CBOR: empty input"; return false; }
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
 		size_t pos = 0;
@@ -3470,7 +3470,9 @@ inline bool asvJSON::fromBSON(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
-	if (!data || size < 5) return false;
+	if (!data || size < 1) { lastError = "Empty input"; return false; }
+	// A BSON document is at least 5 bytes (int32 length + terminator).
+	if (size < 5) { lastError = "BSON: document too small (need 5 bytes)"; return false; }
 	try {
 		size_t pos = 0;
 		root = parseBSON(static_cast<const uint8_t*>(data), pos, size, 0);
