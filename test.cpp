@@ -16843,6 +16843,87 @@ TEST(testJavaPropRoundTrip) {
     ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
     ASSERT_EQ(j2.toJavaProp(), once);
   }
+  // A literal space in final position is stripped by the loader (the JDK rule),
+  // so the encoder has to escape it -- otherwise "a " silently came back as "a".
+  // Only the last character needs escaping: the loader stops at the first
+  // escaped space, which protects the whole run behind it.
+  {
+    const char* cases[] = {"a ", "a  ", " a ", " ", "  ", "a", "a b", " a", "a \t",
+                           "\t a", "a= b", "# a", "a\t", "a\n", "a\f", "a\\", "a\\ "};
+    for (const char* c : cases) {
+      asvJSON j;
+      ASSERT(j.parse(std::string("{\"k\":\"\"}")));
+      std::string want(c);
+      j.getRoot()->obj->insert_or_assign(std::string("k"), asvJSONValue::makeStringView(want));
+      std::string enc = j.toJavaProp();
+      asvJSON j2;
+      ASSERT(j2.fromJavaProp(enc));
+      ASSERT_EQ(std::string(j2.getString("k")), want);
+    }
+    // Interior spaces stay literal, so ordinary output is unchanged; only a
+    // space in final position grows a backslash.
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"k\":\"\",\"m\":\"a b c\"}")));
+    j.getRoot()->obj->insert_or_assign(std::string("k"), asvJSONValue::makeStringView(std::string("a ")));
+    ASSERT_EQ(j.toJavaProp(), std::string("k=a\\ \nm=a b c\n"));
+  }
+  // Root-level leading comments (only reachable from another format, since our
+  // parser attaches a block before the first key to that key) are emitted, for
+  // parity with dotenv and INI which both write root leading and footing.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":1}")));
+    j.getRoot()->comments = std::make_unique<Comments>();
+    j.getRoot()->comments->leading.push_back(Comment{"root leading", false});
+    j.getRoot()->comments->footing.push_back(Comment{"root footing", false});
+    ASSERT_EQ(j.toJavaProp(), std::string("# root leading\na=1\n# root footing\n"));
+    // And the emitted text survives a re-parse.
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    auto* v = j2.get("a");
+    ASSERT(v != nullptr && v->comments);
+    ASSERT_EQ(v->comments->leading.size(), size_t(1));
+    ASSERT_EQ(v->comments->leading[0].text, std::string("root leading"));
+    ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
+  }
+  // BINARY / EXTENSION are written as base64 and come back as a plain STRING
+  // holding that base64: documented lossy (the header now says so).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"b\":\"x\",\"e\":\"x\"}")));
+    const uint8_t abc[] = {0x61, 0x62, 0x63};
+    j.getRoot()->obj->insert_or_assign(std::string("b"), asvJSONValue::makeBinary(abc, 3));
+    const uint8_t two[] = {0x01, 0x02};
+    j.getRoot()->obj->insert_or_assign(std::string("e"), asvJSONValue::makeExtension(3, two, 2));
+    ASSERT_EQ(j.toJavaProp(), std::string("b=YWJj\ne=AQI=\n"));
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    ASSERT_EQ(j2.get("b")->type, asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j2.getString("b")), std::string("YWJj"));
+    ASSERT_EQ(j2.get("e")->type, asvJSONValue::STRING);
+  }
+  // DATETIME is not lossy: ISO text on the way out, type back on the way in.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"d\":\"2024-01-15T10:30:00Z\"}")));
+    ASSERT(j.toJavaProp().find("2024-01-15T10:30:00Z") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    ASSERT_EQ(j2.get("d")->type, asvJSONValue::DATETIME);
+  }
+  // A malformed \u escape is kept literally instead of being rejected.
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("a=\\uZZZZ\nb=\\u00\nc=\\u")));
+    ASSERT_EQ(std::string(j.getString("a")), std::string("uZZZZ"));
+    ASSERT_EQ(std::string(j.getString("b")), std::string("u00"));
+    ASSERT_EQ(std::string(j.getString("c")), std::string("u"));
+    // A valid escape, and a surrogate pair, still decode properly.
+    asvJSON k;
+    ASSERT(k.fromJavaProp(std::string("a=\\u0041\nb=\\uD83D\\uDE00\n")));
+    ASSERT_EQ(std::string(k.getString("a")), std::string("A"));
+    ASSERT_EQ(std::string(k.getString("b")), std::string("\xF0\x9F\x98\x80"));
+  }
 }
 
 TEST(testJavaPropFromAny) {

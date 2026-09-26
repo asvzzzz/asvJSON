@@ -21,9 +21,24 @@
 // dotenv/INI. Duplicate keys follow last-wins. Comments are preserved via the
 // shared `Comments` metadata (leading/footing) and re-emitted by toJavaProp().
 //
-// Nested objects and arrays have no .properties syntax: toJavaProp() writes
-// their compact JSON text as an escaped bare value (a documented lossy
-// round-trip -- the text survives but decodes back as a string).
+// Lossy on encode, because .properties has no syntax for these:
+//   - nested objects and arrays are written as their compact JSON text, escaped
+//     as a bare value (the text survives, but decodes back as a STRING);
+//   - BINARY and EXTENSION are written as base64 of their bytes, which decodes
+//     back as a plain STRING holding that base64 -- both the type and the bytes
+//     are lost, since nothing tries to reverse the encoding on load.
+// DATETIME is not lossy: it is written in ISO form and tryParseDateTime() gives
+// the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types.
+//
+// A malformed \u escape is kept literally rather than rejected (the JDK throws
+// IllegalArgumentException): "\uZZZZ" loads as the text `uZZZZ`, and a truncated
+// escape such as "\u00" as `u00`.
+//
+// fromAny() detection is a heuristic, not a parser: it needs a line with an '='
+// separator, an unspaced ':' separator, an '!' comment or a \u escape. A
+// whitespace-only separator ("key value") or "key: value" is deliberately left
+// to the YAML/GOON/TOON cascade, since those are far more common. Call
+// fromJavaProp() directly for such files.
 
 #include "../core.hpp"
 
@@ -221,6 +236,14 @@ inline std::string javapropEscapeVal(std::string_view s) {
       case '\n': out += "\\n"; break;
       case '\r': out += "\\r"; break;
       case '\f': out += "\\f"; break;
+      // An unescaped trailing whitespace run is stripped on load, so a literal
+      // space in final position is data that has to be escaped -- otherwise
+      // "a " round-trips as "a". Only the last character needs it: the loader
+      // stops stripping at the first escaped space, which protects the whole
+      // run behind it ("a  " -> "a \ " -> "a  "). Interior spaces stay literal,
+      // matching what the JDK's own writer produces. The other whitespace
+      // characters need no special case because they are always escaped above.
+      case ' ':  out += (i + 1 == s.size()) ? "\\ " : " "; break;
       default:   out += c; break;
     }
   }
@@ -292,6 +315,13 @@ inline void javapropFormatVal(const asvJSONValue* v, std::string& out) {
 inline void asvJSONValue::toJavaProp(std::string& out) const {
   if (type != OBJECT || !obj)
     throw asvJSONError("javaprop: root must be an object");
+  // A document that reached us from another format can carry root-level leading
+  // comments (our own parser attaches a comment block before the first key to
+  // that key's `leading`, so this is a no-op for a parse -> emit cycle). Emitted
+  // for parity with dotenv and INI, which both write the root's leading and
+  // footing; only footing used to be written here, silently dropping them.
+  if (comments && !comments->leading.empty())
+    javapropWriteCommentLines(out, comments->leading);
   for (const auto& [key, val] : *obj) {
     if (key.empty())
       throw asvJSONError("javaprop: empty key");
