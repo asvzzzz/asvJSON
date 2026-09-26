@@ -31,6 +31,8 @@ does not create an empty first document.
 
 **Note:** Document separation is handled as a pre-parsing step. The EBNF grammar defined in Appendix A is applied to each document chunk individually after the file is split by this separator.
 
+Because a multi-document stream decodes to a single root array, re-encoding it writes that array as one document  -  the `---` separators are not recreated. The data round-trips unchanged (`stream -> array -> document` is stable), but the result is no longer a multi-document stream. Keep the original file if the separators themselves matter. Line numbers in errors are relative to the whole input, not to the individual document.
+
 ### 2.1 Header (Optional)
 The first non-empty line can be an optional header that identifies the format and may include flags:
 
@@ -95,6 +97,8 @@ Single-quoted strings (`SQ_STRING`) are fully literal: the only escape is `''`, 
 
 A code point above U+10FFFF, an invalid surrogate pair, or a malformed escape (e.g. `\x` without two hex digits, a truncated `\u`/`\U`, or an unknown escape letter) is a parse error reported with the line number, e.g. `UDE: invalid escape sequence in string at line N`.
 
+**Encoded documents** (Section 2) are decoded before parsing. If the byte content cannot represent a code point, the decoder substitutes U+FFFD REPLACEMENT CHARACTER rather than emitting an invalid UTF-8 sequence: an unpaired UTF-16 surrogate (a lone high or low surrogate) and a UTF-32 value above U+10FFFF all become U+FFFD. A surrogate *pair* still joins into the real character. This is the only lossy step in decoding, and it is deliberate  -  a lone surrogate has no UTF-8 encoding, so passing it through would produce bytes no consumer can read.
+
 ---
 
 
@@ -105,12 +109,17 @@ UDE supports the following scalar types:
 |------|----------------|---------|
 | **Null** | `null` | `key: null` |
 | **Boolean** | `true` / `false` | `enabled: true` |
-| **Integer** | Decimal, hex (`0xFF`), octal (`0o77`), binary (`0b1011`) | `count: 42`, `hex: 0x2A` |
-| **Float** | Standard decimal or scientific notation | `ratio: 3.14e-2` |
+| **Integer** | Decimal, hex (`0xFF`), octal (`0o77`), binary (`0b1011`); `_` may separate digits (`1_000`, `0xFF_FF`) | `count: 42`, `hex: 0x2A` |
+| **Float** | Standard decimal or scientific notation; `_` may separate digits; a leading digit before the decimal point is required, so `.5` is a string | `ratio: 3.14e-2` |
+| **Non-finite float** | `.nan`, `.inf`, `.infinity`, each optionally negated | `ratio: -.inf` |
 | **String** | Quoted or unquoted (if safe) | `name: "John Doe"` |
 | **Binary** | Tagged as `!base64 "..."` or `!bin 0xFFEE` | `payload: !base64 "SGVsbG8="` |
 | **Array** | `[elem1, elem2]` or multi-line block | `list: [1, 2, 3]` |
 | **Object** | `{key: value}` or explicit braces | `person: {name: Alice, age: 30}` |
+
+JSON has no literal for a non-finite value, so one projects to `null` in JSON output; the spellings above are the UDE way of keeping it. A UDE round-trip of `.inf` gives a `DOUBLE` holding infinity, not the integer or string it started as.
+
+A `_` digit separator is only legal *between* two digits, in all bases: `1_000` and `0b1010_1010` are numbers, `1_` and `_1` are plain strings. A number that overflows the destination type is not an error  -  it is kept as its original text in a STRING, so nothing is lost.
 
 ---
 
@@ -141,12 +150,15 @@ key: >-
   Folded text that will become a single line.
 ```
 Chomping indicators:
-* `+`  -  keep all trailing newlines.
+* `+`  -  keep all trailing newlines, including the line break that ends the last content line.
 * `-`  -  strip all trailing newlines.
-No indicator defaults to keeping one newline (YAML default).
+* none  -  clip: keep exactly one trailing newline, and exactly one only if the scalar is non-empty. A block scalar with no content at all (immediately followed by a less-indented or non-indented line) is the empty string, not `"\n"`.
 
-An optional explicit indentation indicator `|2`, `|0` (a digit right after the
-`|`/`>`) overrides the auto-detected base indentation.
+The encoder picks the indicator from the value it is writing: a value with no trailing newline becomes `|-`, a value with exactly one becomes `|` (the default), and a value with two or more becomes `|+`.
+
+An optional explicit indentation indicator (`|2`, `>-3`) overrides the auto-detected base indentation. The digit comes **before** the chomping indicator and is exactly one digit, so `|2-` is valid and `|+2` is not -  a reversed order is a header error, not a silently accepted spelling.
+
+`|` and `>` fold identically as far as chomping is concerned, so for the same body text they yield the same trailing breaks; they differ only in how the body's interior line breaks are treated (`>` turns a lone break between two non-empty lines into a space and keeps a run of k blank lines as k breaks).
 
 Block scalar termination: the base indentation is the number of leading spaces
 on the first non-empty line of the block. Every subsequent line must have at
@@ -191,11 +203,37 @@ Tags allow custom data types to be represented in a type-safe way:
 | `!base64` | `!base64 "<data>"` | Decoded binary data from base64 string. |
 | `!bin` | `!bin 0x<hex>` | Binary data represented as hex literal. |
 | `!datetime` | `!datetime "2026-07-30T14:45:00Z"` | ISO-8601 timestamp. |
-| `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two-token form like `!ext image/png "..."` would not parse. |
-| `!regex` | `!regex "<pattern>"` or `!regex "<pattern>\|<opts>"` | Regular expression with optional flags. |
+| `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two-token form like `!ext image/png "..."` would not parse. `<type>` is a signed byte and must be within `[-128, 127]`; anything else is rejected with `UDE: extension type out of range [-128, 127]`. |
+| `!regex` | `!regex "__REGEX__<pattern>\|<opts>\|"` | Regular expression with optional flags. The canonical body is described below; the historical `!regex "<pattern>\|<opts>"` form is still accepted. |
 | `!schema` | `!schema <string\|object>` | Schema reference or inline schema; stored as a custom tag with name `schema` (see 8.1). |
 
 These **explicit type-cast tags** (`!int`, `!float`, `!string`, `!bool`, `!null`) force a specific runtime type on the following value and validate it; a value of the wrong type is a parse error. They are the UDE equivalent of YAML's explicit type tags.
+
+**`!null` needs no value.** A tag's value may not live on a later line (`WS` is `[ \t]*` and does not include a line break), so `!null` is recognised before any whitespace/comment skipping that could cross the line end. A bare `!null` is valid at the end of a line, at the end of the input, and directly before a flow delimiter, which is what makes `[!null, 1]` and `{y: !null, z: 1}` work:
+
+```text
+a: !null          # end of line
+[!null, 1]        # before ','
+{y: !null}        # before '}'
+```
+
+Every other tag still requires a value; a bare `!int` is rejected with `UDE: !int requires a value`.
+
+#### `!regex` body forms
+
+The pattern/options separator has to be located in the **raw** token text, before escape processing, otherwise a `|` written as `\u007C` inside a pattern is indistinguishable from the separator. The canonical body therefore escapes every literal pipe as `\u007C` and ends with a mandatory terminator:
+
+```text
+!regex "__REGEX__^(a\u007Cb)$|i|"     # pattern ^(a|b)$, options i
+```
+
+The `__REGEX__` marker is what makes the canonical form unambiguous. A body **without** the marker is the historical form and keeps its old meaning  -  the decoded text split at the **last** `|`  -  so an existing `!regex "a|b|c"` still means pattern `a|b` with options `c` instead of being read as canonical and silently truncated. A pattern that needs a literal pipe is emitted as `\u007C`, so all of these round-trip exactly:
+
+| Pattern | Options | Emitted body |
+|---------|---------|--------------|
+| `^(a\|b)$` | (none) | `__REGEX__^(a\|b)$\|\|` |
+| `a\|` | (none) | `__REGEX__a\|\|\|` |
+| `a` | `i` | `__REGEX__a\|i\|` |
 
 > **Note on `!!value`:** UDE does **not** support the YAML `!!value` / `!!yaml` core-schema tags. UDE tags are always single-token `!name` forms or verbatim `!<uri>` forms (Section 8.1). The absence of `!!value` is intentional and is **not** a specification discrepancy.
 
@@ -208,7 +246,8 @@ An unknown tag stores its **name separately from its value**:
 !<name> <value>
 ```
 
-* The name is a plain identifier, an optional namespace form `!ns:tag`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
+* The name is a plain identifier, an optional namespace form `!ns:tag` / `!a.b`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
+* Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `UDE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name.
 * The value is any UDE value (string, number, object, array, ...), not flattened text  -  `!point {x: 1, y: 2}` keeps the object intact.
 * In JSON (Extended JSON convention) a custom tag is represented as:
 
@@ -273,7 +312,7 @@ The parser enforces documented resource limits:
 | Anchor resolution depth | 100 | Alias chains resolving through more than 100 levels are rejected (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
 | Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser. |
-| String length | 10 MiB | Shared core limit. |
+| String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. |
 | Object/array size | 1,000,000 entries | Shared core limit. |
 
 Tabs are **not** structural indentation anywhere in UDE (YAML rule). They are
@@ -291,12 +330,12 @@ The following conditions raise an error (non-exhaustive; messages are verbatim):
 
 * **Syntax / structure**  -  `UDE: expected ':' after key ...`, `UDE: expected key at line N`, `UDE: expected value at line N`, `UDE: unterminated object/array/string/single-quoted string/tag URI/block comment at line N`, `UDE: unexpected top-level collection at line N`, `UDE: trailing content after block scalar`, `UDE: trailing content after top-level collection`.
 * **Block scalar**  -  `UDE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
-* **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid escape sequence in string at line N`.
+* **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid \u{...} escape in string`, `UDE: invalid escape sequence in string at line N`. The first group is raised by the escape decoder itself and reaches the caller as a `std::runtime_error` that the parser converts to `asvJSONError`; the last message is the parser's own, raised when it rejects an escape whose text is not a valid sequence at all.
 * **Anchors / aliases**  -  `UDE: undefined alias *<name>`, `UDE: cyclic reference detected for alias *<name>`, `UDE: anchor resolution depth exceeded` (depth > 100), `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
 * **Duplicate keys**  -  `UDE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
 * **Strict mode**  -  `UDE: strict mode requires all keys to be quoted (key: ...)`, `UDE: strict mode requires quoting value: <tok>`, `UDE: missing value after ':' at line N`.
-* **Tags**  -  e.g. `UDE: !int requires an integral value`, `UDE: !base64 requires a string value`, `UDE: !datetime requires a string value`, `UDE: !ext requires "type:data"`, `UDE: invalid base64 data`, `UDE: invalid regex`, `UDE: empty tag URI at line N`.
-* **Resource limits**  -  `UDE: array too large`, `UDE: binary data too large`, `UDE: extension data too large`, `UDE: too many documents` (see Sec. 12).
+* **Tags**  -  e.g. `UDE: !int requires an integral value`, `UDE: !base64 requires a string value`, `UDE: !datetime requires a string value`, `UDE: !ext requires "type:data"`, `UDE: extension type out of range [-128, 127]`, `UDE: invalid base64 data`, `UDE: invalid regex`, `UDE: invalid tag name '!<name>' at line N`, `UDE: <tag> requires a value` (a tag written without a value other than `!null`), `UDE: unterminated tag URI at line N`.
+* **Resource limits**  -  `UDE: array too large`, `UDE: binary data too large`, `UDE: extension data too large`, `UDE: string too long`, `UDE: too many documents` (see Sec. 12).
 * **Header / version**  -  `UDE: malformed version header`, `UDE: unsupported UDE version vX.Y` (a major version other than `1` is rejected).
 
 There is no error-recovery mode: the first error aborts parsing. Callers that need partial results must catch the exception; the partially built DOM is not returned.
@@ -341,17 +380,26 @@ SQ_STRING         ::= "'" (SQ_ESC | ~['])* "'"
 SQ_ESC            ::= "''"
 ESC               ::= '\\' ["\\/bfnrt] | '\\x' HEXDIG HEXDIG | '\\u' HEXDIG{4} | '\\U' HEXDIG{8} | '\\u{' HEXDIG+ '}' | '\\' NEWLINE
 HEXDIG            ::= [0-9a-fA-F]
-NUMBER            ::= SIGNED_INT | SIGNED_FLOAT | HEX | OCTAL | BINARY
+NUMBER            ::= SIGNED_INT | SIGNED_FLOAT | HEX | OCTAL | BINARY | NON_FINITE
 SIGNED_INT        ::= '-'? INT
 SIGNED_FLOAT      ::= '-'? FLOAT
-INT               ::= '0' | [1-9][0-9]*
-FLOAT             ::= [0-9]+("." [0-9]*)? ([eE][+-]?[0-9]+)?
+INT               ::= DIGITS | DIGITS '_' DIGITS
+FLOAT             ::= DIGITS ("." [0-9]*)? ([eE][+-]?[0-9]+)?
+DIGITS            ::= '0' | [1-9][0-9]* ( '_' [0-9]+ )*
 # Note: A leading digit before the decimal point is required. Forms like '.5' or
 # '-.5' are not valid FLOAT literals; they are lexed as UNQUOTED_STRING instead.
 # This is a deliberate restriction to avoid ambiguity with dotted keys.
-HEX               ::= '-'? "0x" [0-9a-fA-F]+
-OCTAL             ::= '-'? "0o" [0-7]+
-BINARY            ::= '-'? "0b" [01]+
+# Digit separators: '_' is allowed between digits and is removed from the value,
+# so "1_000" is 1000. A '_' must sit between two digits; "1_" and "_1" are not
+# numbers. The same rule applies inside HEX, OCTAL and BINARY.
+NON_FINITE        ::= '-'? ( '.nan' | '.inf' | '.infinity' )
+# Note: JSON has no literal for these, so a DOUBLE holding a non-finite value
+# projects to null in JSON output. UDE therefore gives them a first-class
+# spelling, and a non-finite DOUBLE survives a UDE round-trip (its type is still
+# DOUBLE afterwards). ".nan" without the dot is an ordinary unquoted string.
+HEX               ::= '-'? "0x" DIGITS
+OCTAL             ::= '-'? "0o" DIGITS
+BINARY            ::= '-'? "0b" DIGITS
 # Note: The optional leading '-' is part of the HEX/OCTAL/BINARY token itself.
 # In a longest-match lexer, '-0xFF' is lexed as a single HEX token (length 5),
 # not as SIGNED_INT '-' followed by an invalid '0xFF'.
@@ -419,12 +467,18 @@ BLOCK_SCALAR     ::= SCALAR_INDICATOR INDENT_DIGIT? CHOMP_INDICATOR? WS? NEWLINE
 # digit in 0-9; multi-digit or signed values are NOT permitted.
 
 # Folded Scalar Semantics
-# Note: In a folded scalar, first the text is folded (NEWLINE  ->  space), then chomping indicators are applied. This mirrors YAML behaviour.
+# Note: In a folded scalar a line break is turned into a space only when exactly
+# one break separates two non-empty lines; chomping then applies to the folded
+# result. This mirrors YAML behaviour.
 # When the scalar indicator is '>' (folded), the following rules apply:
 # * A single NEWLINE between two non-empty lines is replaced by a space.
-# * Empty lines are part of the content: a run of one or more blank lines
-#   between non-empty lines is preserved as a single paragraph break
-#   (one NEWLINE), exactly as in YAML block folding.
+# * Empty lines are part of the content: a run of k blank lines between
+#   non-empty lines yields k NEWLINEs, exactly as in YAML block folding (so one
+#   blank line separates paragraphs and two keep a blank line between them).
+# * The last non-empty line's own terminating NEWLINE is part of the content,
+#   which is what lets '+' chomping preserve it and clip chomping keep exactly
+#   one. Collapsing a blank-line run, or dropping that final break, would make
+#   '>' disagree with '|' for the same text.
 # * The resulting string may be further processed by the tag handlers if present.
 # These semantics are identical to YAML's folded scalar rules and allow
 # multi-line values to be stored as a single logical line in UDE.

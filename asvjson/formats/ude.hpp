@@ -52,15 +52,47 @@ inline bool udeIsIdentCont(char c) {
   return udeIsIdentStart(c) || (c >= '0' && c <= '9') || c == '-';
 }
 
+// Marks the lossless !regex body form: "__REGEX__<pattern>|<opts>|". The
+// marker is what keeps the canonical encoding distinguishable from the
+// historical "decoded text, split at the last '|'" form that the decoder
+// still accepts, so an old `!regex "a|b|c"` is not read as canonical and
+// silently truncated. Declared before UDEParser and the encoder, which are
+// separate classes that both need it.
+constexpr std::string_view kUdeRegexMarker = "__REGEX__";
+
 // Tag names may include a namespace separator ':' (e.g. !ns:tag) or a dotted
 // prefix, so that registered tag namespaces are directly representable.
+// Appendix A: TAG ::= '!' ( IDENTIFIER (':' IDENTIFIER | '.' IDENTIFIER)* | ...)
+// so the FIRST character must be an identifier start; a digit or '-' may not
+// begin the name. Each '.'/':' separated component is checked separately so
+// that "!1a:b" is rejected too, not just "!1".
 inline bool udeIsTagChar(char c) {
   return udeIsIdentCont(c) || c == ':' || c == '.';
+}
+
+// True when `name` matches TAG's non-verbatim form: identifier components
+// joined by ':' or '.'. Used both to validate a parsed tag and to decide
+// whether the encoder may emit !name or must fall back to !<name>.
+inline bool udeIsSimpleTagName(std::string_view name) {
+  if (name.empty()) return false;
+  size_t i = 0;
+  while (true) {
+    if (i >= name.size() || !udeIsIdentStart(name[i])) return false;
+    i++;
+    while (i < name.size() && udeIsIdentCont(name[i])) i++;
+    if (i == name.size()) return true;
+    if (name[i] != ':' && name[i] != '.') return false;
+    i++;  // consume the separator; a component MUST follow it
+  }
 }
 
 // ====================== Encoding / BOM ======================
 
 inline void udeAppendUtf8(std::string& out, uint32_t cp) {
+  // A surrogate code point is never a valid Unicode scalar value, and encoding
+  // one directly would emit an ill-formed UTF-8 sequence (ED A0 80..ED BF BF
+  // for U+D800..U+DFFF). Substitute U+FFFD so the result is always well-formed.
+  if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
   if (cp <= 0x7F) out.push_back(static_cast<char>(cp));
   else if (cp <= 0x7FF) {
     out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
@@ -78,6 +110,10 @@ inline void udeAppendUtf8(std::string& out, uint32_t cp) {
 }
 
 // Decode UTF-16 (with BOM already stripped) to UTF-8, combining surrogate pairs.
+// An unpaired surrogate is not a valid Unicode scalar value; udeAppendUtf8
+// substitutes U+FFFD for it, so a malformed input still yields well-formed
+// UTF-8 (replacing the ill-formed ED A0 80..ED BF BF that a direct encoding
+// would produce).
 inline void udeDecodeUtf16(std::string& out, const uint8_t* p, size_t n, bool littleEndian) {
   size_t i = 0;
   while (i + 1 < n) {
@@ -105,6 +141,8 @@ inline void udeDecodeUtf32(std::string& out, const uint8_t* p, size_t n, bool li
                                : ((static_cast<uint32_t>(p[i]) << 24) | (static_cast<uint32_t>(p[i + 1]) << 16) |
                                   (static_cast<uint32_t>(p[i + 2]) << 8) | static_cast<uint32_t>(p[i + 3]));
     if (cp > 0x10FFFF) cp = 0xFFFD;
+    // U+D800..U+DFFF is inside the 0x10FFFF range but is still not a valid
+    // scalar value; udeAppendUtf8 maps it to U+FFFD.
     udeAppendUtf8(out, cp);
   }
 }
@@ -314,40 +352,6 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
   return asvJSONValue::makeInt(static_cast<int64_t>(ll));
 }
 
-// Fold a block scalar: a single newline between two non-empty lines becomes a
-// space; a run of one or more blank lines is preserved as a single paragraph
-// break. A trailing newline is left in place so that chomping can adjust it.
-inline std::string udeFoldScalar(std::string_view s) {
-  std::string res;
-  res.reserve(s.size());
-  size_t i = 0;
-  size_t n = s.size();
-  bool para = false; // last emitted character was a paragraph break '\n'
-  while (i < n) {
-    size_t eol = s.find('\n', i);
-    std::string_view seg = (eol == std::string_view::npos) ? s.substr(i) : s.substr(i, eol - i);
-    if (res.empty()) {
-      res.append(seg);
-      para = false;
-    } else if (seg.empty()) {
-      if (!para) { res += '\n'; para = true; }
-    } else {
-      if (para) {
-        res.append(seg);
-      } else {
-        res += ' ';
-        res.append(seg);
-      }
-      para = false;
-    }
-    if (eol == std::string_view::npos) break;
-    i = eol + 1;
-  }
-  if (!s.empty() && s.back() == '\n' && (res.empty() || res.back() != '\n'))
-    res += '\n';
-  return res;
-}
-
 // Parse a UDE datetime value. Accepts the full ISO-8601 form handled by
 // tryParseDateTime (with optional fractional seconds and timezone offset) as
 // well as date-only "YYYY-MM-DD" (midnight UTC).
@@ -416,6 +420,35 @@ private:
   // Anchor names currently being resolved (cycle detection).
   std::unordered_set<std::string> resolving_anchors_;
   int aliasDepth_ = 0;
+  // Raw (still-escaped) token body of the value of the !regex tag currently
+  // being parsed, so applyTag can split the pattern from the options before
+  // udeUnescape collapses an escaped pipe into a bare one. Empty for any other
+  // tag, which then falls back to splitting the decoded text.
+  std::string regexRaw_;
+
+  // "pat|opts|" -- the first raw '|' separates the fields and the last one is a
+  // mandatory terminator, so a field may itself end in a pipe and an empty
+  // options field stays distinguishable. Only raw text is inspected, so a
+  // "\u007C" inside a field is never read as a separator.
+  static void udeSplitCanonicalRegex(std::string_view raw, std::string& pattern, std::string& opts) {
+    size_t term = raw.rfind('|');
+    if (term == std::string_view::npos) { pattern = udeUnescape(raw); return; }
+    size_t sep = raw.find('|');
+    if (sep == std::string_view::npos || sep >= term) {
+      pattern = udeUnescape(raw.substr(0, term));
+    } else {
+      pattern = udeUnescape(raw.substr(0, sep));
+      opts = udeUnescape(raw.substr(sep + 1, term - sep - 1));
+    }
+  }
+
+  // Historical body form: the already-decoded text split at the LAST '|', so a
+  // pattern that itself contains a pipe keeps its old meaning.
+  static void udeSplitLegacyRegex(const std::string& s, std::string& pattern, std::string& opts) {
+    size_t sep = s.rfind('|');
+    pattern = (sep == std::string::npos) ? s : s.substr(0, sep);
+    opts = (sep == std::string::npos) ? std::string() : s.substr(sep + 1);
+  }
 
   bool eof() const { return pos_ >= text_.size(); }
   char peek() const { return eof() ? '\0' : text_[pos_]; }
@@ -488,6 +521,17 @@ private:
       }
       return false;
     }
+  }
+
+  // True when a tag is immediately followed by something that cannot start a
+  // value: the end of the line, the end of the input, or a flow delimiter.
+  // UDE has no block-sequence production (Appendix A: DOC_LINE is only
+  // WS? (LINE | BLOCK_COMMENT | COMMENT)), so a value-less tag is only legal
+  // at end of line or right before a ',' / '}' / ']' in a flow collection,
+  // which is what makes "[!null, 1]" and "{y: !null, z: 1}" work.
+  bool atTagValueEnd() {
+    if (atLineEndSkipping()) return true;
+    return !eof() && (peek() == ',' || peek() == '}' || peek() == ']');
   }
 
   void expect(char c, const char* what) {
@@ -702,6 +746,19 @@ private:
     return out;
   }
 
+  // Wrap an unescaped string in a STRING node, enforcing the core string-length
+  // limit (Section 12). The make*String factories return nullptr past
+  // MAX_STRING_LEN, and every caller here dereferences its result, so the check
+  // must be explicit: an over-long literal would otherwise be a null-pointer
+  // dereference rather than a parse error.
+  std::unique_ptr<asvJSONValue> makeUdeString(std::string&& s) {
+    if (!asvJSONValue::checkStringLen(s.size()))
+      throw asvJSONError("UDE: string too long");
+    auto v = asvJSONValue::makeStringView(std::move(s));
+    if (!v) throw asvJSONError("UDE: string too long");
+    return v;
+  }
+
   std::unique_ptr<asvJSONValue> parseQuotedString() {
     pos_++; // consume '"'
     size_t start = pos_;
@@ -717,11 +774,37 @@ private:
     if (eof()) throw asvJSONError("UDE: unterminated string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume '"'
+    std::string decoded;
     try {
-      return asvJSONValue::makeStringView(udeUnescape(raw));
+      decoded = udeUnescape(raw);
     } catch (const std::exception&) {
       throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
     }
+    // Outside the try: a length failure must not be reported as a bad escape.
+    return makeUdeString(std::move(decoded));
+  }
+
+  // Scan a double-quoted string WITHOUT decoding it, returning the raw token
+  // body (between the quotes, escapes intact) and leaving pos_ after the
+  // closing quote. Used by !regex, which must find the pattern/options
+  // separator before escape processing turns a \u007C inside the pattern into
+  // a raw '|' indistinguishable from the separator.
+  std::string_view scanRawQuotedString() {
+    pos_++; // consume '"'
+    size_t start = pos_;
+    bool escaped = false;
+    while (!eof()) {
+      char c = text_[pos_];
+      if (escaped) { escaped = false; pos_++; continue; }
+      if (c == '\\') { escaped = true; pos_++; continue; }
+      if (c == '"') break;
+      if (c == '\n') lineNum_++;
+      pos_++;
+    }
+    if (eof()) throw asvJSONError("UDE: unterminated string at line " + std::to_string(lineNum_));
+    std::string_view raw(text_.data() + start, pos_ - start);
+    pos_++; // consume '"'
+    return raw;
   }
 
   std::unique_ptr<asvJSONValue> parseSingleQuotedString() {
@@ -740,7 +823,7 @@ private:
     if (eof()) throw asvJSONError("UDE: unterminated single-quoted string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume '\''
-    return asvJSONValue::makeStringView(udeUnescapeSingle(raw));
+    return makeUdeString(udeUnescapeSingle(raw));
   }
 
   std::unique_ptr<asvJSONValue> parseArray(int depth) {
@@ -864,34 +947,54 @@ private:
     // and a trailing blank line leaves a phantom empty element recording how
     // many trailing newlines the source carried; '-' keeps none, clip one, '+' all.
     std::string out;
-    for (size_t i = 0; i < content.size(); i++) {
-      if (i > 0) out += '\n';
-      out += content[i];
-    }
-
-
     if (indicator == '>') {
-      // Folded scalar: first fold (NEWLINE -> space), then chomping is
-      // applied to the folded result. Empty lines are part of the content
-      // and become paragraph breaks (Section 6); they never terminate the
-      // scalar -- termination happens only on a dedent, in the loop above.
-      out = udeFoldScalar(out);
+      // Folded scalar (Section 6): a single line break between two content
+      // lines becomes a space, a run of blank lines becomes that many line
+      // breaks, and the last content line's own break is part of the content
+      // so that '+' chomping can preserve it. Working from `content` rather
+      // than from a pre-joined string is what keeps the break counts exact --
+      // joining first loses the final line's terminator, and collapsing a
+      // blank-line run to one break would lose the others. Empty lines are
+      // part of the content and never terminate the scalar; only a dedent in
+      // the loop above does that.
+      bool seen = false;
+      size_t brk = 0; // blank lines seen since the last content line
+      for (const std::string& e : content) {
+        if (e.empty()) { brk++; continue; }
+        if (!seen) out.append(brk, '\n'); // leading blanks are never folded away
+        else if (brk == 0) out += ' ';
+        else out.append(brk, '\n');
+        out += e;
+        brk = 0;
+        seen = true;
+      }
+      if (seen) out.append(brk + 1, '\n');
+    } else {
+      for (size_t i = 0; i < content.size(); i++) {
+        if (i > 0) out += '\n';
+        out += content[i];
+      }
+      // Every collected line was terminated by a line break in the source,
+      // including the last one; the join only produced n-1 of them.
+      if (!content.empty()) out += '\n';
     }
 
     // Apply chomping ('-' = none, clip = one, '+' = all) per Section 6. The
-    // count of trailing newlines comes from phantom blank lines in the source;
-    // note that document splitting normalises a lone trailing newline, so a
-    // hand-written YAML block with exactly one trailing \n yields the value
-    // without it -- round-trips stay exact because the encoder emits matching blanks.
+    // trailing blank lines of the source are already joined into `out`, and
+    // the last content line's own break is present too, so '+' needs no fixup.
     if (chomp == '-') {
       while (!out.empty() && out.back() == '\n') out.pop_back();
-    } else if (chomp != '+') {
-      size_t k = 0;
-      while (k < out.size() && out[out.size() - 1 - k] == '\n') k++;
-      if (k > 1) out.resize(out.size() - (k - 1));
+    } else if (chomp == '+') {
+      // keep as is
+    } else {
+      // Clip is a guarantee, not a maximum: trailing newlines are stripped and
+      // exactly one is put back, so "x\ny" gains the break and the same document
+      // means the same thing here and in a YAML parser.
+      while (!out.empty() && out.back() == '\n') out.pop_back();
+      if (!out.empty()) out += '\n';
     }
 
-    return asvJSONValue::makeStringView(out);
+    return makeUdeString(std::move(out));
   }
 
   std::unique_ptr<asvJSONValue> parseScalar() {
@@ -921,7 +1024,7 @@ private:
           throw asvJSONError("UDE: strict mode requires quoting value: " + tok);
       }
     }
-    return asvJSONValue::makeStringView(tok);
+    return makeUdeString(std::move(tok));
   }
 
   std::string parseAnchorName() {
@@ -1095,12 +1198,28 @@ private:
     }
     if (tag == "regex") {
       if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !regex requires a string value");
-      const std::string& s = val->str_data;
-      // Split on the LAST '|' so patterns containing '|' round-trip (matches
-      // the __REGEX__ convention used by TRON/GOON).
-      size_t sep = s.rfind('|');
-      std::string pattern = (sep == std::string::npos) ? s : s.substr(0, sep);
-      std::string opts = (sep == std::string::npos) ? std::string() : s.substr(sep + 1);
+      // Two wire forms are accepted.
+      //
+      // Canonical: !regex "__REGEX__<pattern>|<opts>|" (marker + trailing
+      // terminator, literal '|' inside a field written as \u007C). The split is
+      // done on the RAW token text, before unescaping, so an escaped pipe in the
+      // pattern is not mistaken for the separator. The marker is what makes it
+      // unambiguous: without it "a|b|c" is indistinguishable from a canonical
+      // body whose options are "b" and whose trailing "c" would be dropped.
+      //
+      // Legacy (no marker): the DECODED text split at the LAST '|', the
+      // historical behaviour. Old documents keep loading with the meaning they
+      // had, including a pattern that contains a pipe.
+      std::string pattern, opts;
+      if (regexRaw_.empty()) {
+        udeSplitLegacyRegex(val->str_data, pattern, opts);
+      } else {
+        std::string_view raw(regexRaw_);
+        if (raw.compare(0, kUdeRegexMarker.size(), kUdeRegexMarker) == 0)
+          udeSplitCanonicalRegex(raw.substr(kUdeRegexMarker.size()), pattern, opts);
+        else
+          udeSplitLegacyRegex(val->str_data, pattern, opts);
+      }
       auto r = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
       if (!r) throw asvJSONError("UDE: invalid regex");
       return r;
@@ -1148,6 +1267,11 @@ private:
       long type = std::strtol(s.c_str(), &end, 10);
       if (errno == ERANGE || !end || end != s.c_str() + static_cast<long>(colon))
         throw asvJSONError("UDE: invalid extension type");
+      // strtol reports only long-range overflow. The stored type is int8_t
+      // (Section 8), so a value outside [-128, 127] must be rejected here:
+      // static_cast<int8_t>(300) silently wrapped to 44.
+      if (type < -128 || type > 127)
+        throw asvJSONError("UDE: extension type out of range [-128, 127]");
       bool err = false;
       auto bytes = decodeBase64Fast(s.data() + colon + 1, s.size() - colon - 1, &err);
       if (err) throw asvJSONError("UDE: invalid base64 in !ext");
@@ -1174,29 +1298,76 @@ private:
       size_t start = pos_;
       while (!eof() && text_[pos_] != '>') pos_++;
       if (eof()) throw asvJSONError("UDE: unterminated tag URI at line " + std::to_string(lineNum_));
+      // An empty body is accepted on purpose: a CUSTOM_TAG may carry an empty
+      // name, and the encoder writes such a name as "!<>" so the round-trip
+      // stays total. "!<" is unambiguous -- the '<' cannot open a simple name.
       tag.assign(text_.substr(start, pos_ - start));
-      if (tag.empty()) throw asvJSONError("UDE: empty tag URI at line " + std::to_string(lineNum_));
       pos_++; // consume '>'
     } else {
       size_t start = pos_;
       while (!eof() && udeIsTagChar(text_[pos_])) pos_++;
       if (pos_ == start) throw asvJSONError("UDE: expected tag name at line " + std::to_string(lineNum_));
       tag = std::string(text_.substr(start, pos_ - start));
+      // udeIsTagChar is deliberately permissive about the FIRST character so
+      // the scan above can find where the name ends; validate the shape now.
+      // A name that is not identifier-like has no !name spelling and must be
+      // written as the verbatim !<name> form, so it is rejected here.
+      if (!udeIsSimpleTagName(tag))
+        throw asvJSONError("UDE: invalid tag name '!" + tag + "' at line " + std::to_string(lineNum_));
+    }
+    // A bare tag with no value. The end-of-line test MUST run before
+    // skipWsAndComments(), which also crosses line breaks: with it first, the
+    // check below could never see '\n' (skipWs had already eaten it) and the
+    // NEXT line's first token was consumed as the tag's value. "a: !null\nb: 1"
+    // parsed 'b' as the value of !null, then failed on the leftover ':' with
+    // "invalid key at line 2". Appendix A agrees: WS is [ \t]* and does not
+    // include a line break, so a tag's value may not live on a later line.
+    if (atTagValueEnd()) {
+      // Only !null is meaningful without a value.
+      if (tag == "null") return asvJSONValue::makeNull();
+      throw asvJSONError("UDE: !" + tag + " requires a value");
     }
     skipWsAndComments();
     std::string anchor;
     if (!eof() && peek() == '&') {
       anchor = parseAnchorName();
+      // Same rule after the anchor: "!null &a" on its own line is a bare null.
+      if (atTagValueEnd()) {
+        if (tag == "null") {
+          auto n = asvJSONValue::makeNull();
+          registerAnchor(anchor, n.get());
+          return n;
+        }
+        throw asvJSONError("UDE: !" + tag + " requires a value");
+      }
       skipWsAndComments();
     }
-    if (eof() || peek() == '\n' || peek() == '\r') {
-      // A bare tag with no value. Only !null is meaningful here.
-      if (tag == "null") return asvJSONValue::makeNull();
-      throw asvJSONError("UDE: !" + tag + " requires a value");
+    // !regex reads the RAW token body: the pattern/options separator has to be
+    // found before escape processing, otherwise an escaped pipe inside the
+    // pattern is indistinguishable from the separator. Only a double-quoted
+    // token can carry escapes, so any other value form uses the decoded-text
+    // fallback in applyTag.
+    regexRaw_.clear();
+    if (tag == "regex" && !eof() && peek() == '"') {
+      std::string_view raw = scanRawQuotedString();
+      regexRaw_.assign(raw.data(), raw.size());
+      std::string decoded;
+      try {
+        decoded = udeUnescape(raw);
+      } catch (const std::exception&) {
+        regexRaw_.clear();
+        throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
+      }
+      auto val = makeUdeString(std::move(decoded));
+      val = applyTag(tag, std::move(val));
+      regexRaw_.clear();
+      if (!anchor.empty()) registerAnchor(anchor, val.get());
+      return val;
     }
     auto val = parseValue(depth);
     // Apply the tag first so the anchor references the final tagged value.
     val = applyTag(tag, std::move(val));
+    regexRaw_.clear();
     if (!anchor.empty()) registerAnchor(anchor, val.get());
     return val;
   }
@@ -1509,6 +1680,37 @@ inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
   os << '"';
 }
 
+// Write `s` as UDE string-body content, additionally turning any literal '|'
+// into \u007C. Used by the !regex encoder so that raw '|' characters appear
+// ONLY as the pattern/options separator and the trailing terminator, never as
+// pattern or option content. The decoder splits the raw token text before
+// unescaping, so the escape is what keeps the two apart. A plain backslash
+// escape is not usable: udeUnescape would collapse "\|" into "|" (and "\|" is
+// not itself a valid UDE escape).
+inline void udeEscPipe(std::ostream& os, std::string_view s) {
+  static constexpr char HEX[] = "0123456789ABCDEF";
+  for (unsigned char c : s) {
+    if (c == '|') { os << "\\u007C"; continue; }
+    switch (c) {
+      case '"': os << "\\\""; break;
+      case '\\': os << "\\\\"; break;
+      case '\n': os << "\\n"; break;
+      case '\r': os << "\\r"; break;
+      case '\t': os << "\\t"; break;
+      case '\b': os << "\\b"; break;
+      case '\f': os << "\\f"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04X", static_cast<unsigned>(c));
+          os << buf;
+        } else {
+          os << static_cast<char>(c);
+        }
+    }
+  }
+}
+
 inline void udeWriteKey(std::ostream& os, const std::string& k, bool strict) {
   // Strict mode requires all keys to be quoted (Section 3).
   if (!strict && udeKeySafe(k)) os << k;
@@ -1603,7 +1805,9 @@ inline bool udeCanFoldEncode(std::string_view s) {
 inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
   size_t k = 0;
   while (k < s.size() && s[s.size() - 1 - k] == '\n') k++;
-  os << (k > 0 ? "|+\n" : "|\n");
+  // The indicator follows the trailing newline count so every count
+  // round-trips: none -> '|-', exactly one -> '|' (clip), several -> '|+'.
+  os << (k == 0 ? "|-\n" : (k == 1 ? "|\n" : "|+\n"));
   std::string_view body = s.substr(0, s.size() - k);
   size_t i = 0;
   while (i < body.size()) {
@@ -1611,21 +1815,23 @@ inline void udeWriteBlockScalar(std::ostream& os, std::string_view s) {
     bool lastLine = (eol == std::string_view::npos);
     if (lastLine) eol = body.size();
     os << "  " << body.substr(i, eol - i);
-    // Only emit a newline after the final content line when chomping is
-    // requested (k > 0): without it the decoded value would gain a trailing
-    // newline that the source string did not have.
+    // The final content line keeps its own line break whenever the value is
+    // meant to end in a newline; under '|-' omitting it is what tells the
+    // decoder the value ends without one.
     if (!lastLine || k > 0) os << '\n';
     i = eol + 1;
   }
-  for (size_t j = 0; j < k; j++) os << '\n';
+  // The decoder keeps one break for the final content line itself, so only the
+  // remaining k-1 newlines need a blank line each. Clip normalises extras away
+  // and '|-' strips them, so a single newline needs none.
+  for (size_t j = 1; j < k; j++) os << '\n';
 }
 
-// Write a string as a folded block scalar. The '>' header with default (clip)
-// chomping preserves exactly one trailing newline; a trailing blank line must
-// be emitted so the decoder captures the break after the last content line,
-// making the value round-trip exactly.
+// Write a string as a folded block scalar. Default (clip) chomping keeps
+// exactly one trailing newline and the decoder adds that break back after
+// folding, so the extra blank line YAML would need here is not necessary.
 inline void udeWriteFoldedScalar(std::ostream& os, std::string_view s) {
-  os << ">\n  " << s.substr(0, s.size() - 1) << "\n\n";
+  os << ">\n  " << s.substr(0, s.size() - 1) << "\n";
 }
 
 // Forward declaration
@@ -1867,20 +2073,37 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       break;
     }
     case T::REGEX: {
-      os << "!regex ";
-      std::string r;
-      fmtRegexVal(v->str_data, r);
-      os << r;
+      // Emit !regex "__REGEX__<pattern>|<opts>|" with any literal '|' inside the
+      // pattern or the options written as \u007C, so raw '|' characters appear
+      // ONLY as the pattern/options boundary and the mandatory trailing
+      // terminator. The terminator is what disambiguates an options-free
+      // pattern that itself ends in '|', and the \u007C escapes keep a pipe
+      // inside a field from being read as a separator. The __REGEX__ marker
+      // keeps this canonical form distinct from the historical "decoded text,
+      // split at the last '|'" form, which the decoder still accepts.
+      // The decoder splits the RAW token text (before unescaping), mirroring
+      // the TRON/GOON convention.
+      size_t sep = v->str_data.rfind('\0');
+      std::string_view pat = (sep != std::string_view::npos)
+          ? std::string_view(v->str_data.data(), sep) : std::string_view(v->str_data);
+      std::string_view opts = (sep != std::string_view::npos && sep + 1 < v->str_data.size())
+          ? std::string_view(v->str_data.data() + sep + 1, v->str_data.size() - sep - 1)
+          : std::string_view();
+      os << "!regex \"" << kUdeRegexMarker;
+      udeEscPipe(os, pat);
+      os << '|';
+      udeEscPipe(os, opts);
+      os << '|';
+      os << '"';
       break;
     }
     case T::CUSTOM_TAG: {
       // str_data holds the tag name; custom_value holds the value. Unknown
       // tags are emitted in the canonical "!<name> <value>" form so that a
-      // name containing special characters still round-trips exactly.
-      bool verbatim = false;
-      if (!v->str_data.empty())
-        for (char ch : v->str_data)
-          if (!udeIsTagChar(ch)) { verbatim = true; break; }
+      // name the parser would not accept back still round-trips exactly.
+      // udeIsSimpleTagName mirrors the parser's TAG validation exactly, so a
+      // name accepted here is guaranteed to be accepted on the way back.
+      bool verbatim = !udeIsSimpleTagName(v->str_data);
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
       if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);

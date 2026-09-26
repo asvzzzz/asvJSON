@@ -2121,7 +2121,12 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 			brk = 0;
 			seen = true;
 		}
-		if (seen) folded.append(static_cast<size_t>(brk), '\n'); // trailing blanks stay literal
+		// The last content line's own line break is content too: "keep"
+		// chomping must be able to preserve it, and "clip" must be able to
+		// keep exactly one. Trailing blank lines follow it and are never
+		// folded away. Both paths therefore end with a break here, and the
+		// chomp stage below decides how many survive.
+		if (seen) folded.append(static_cast<size_t>(brk) + 1, '\n');
 		text = folded;
 	} else {
 		for (const auto& e : entries) {

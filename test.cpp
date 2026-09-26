@@ -6096,8 +6096,10 @@ TEST(testFromYAML) {
 	// Folded block scalar with keep chomp (>+)
 	{
 		asvJSON json;
+		// Identical to the literal case above: "keep" retains every line
+		// break the source carried, including the one ending "hello".
 		ASSERT(json.fromYAML("text: >+\n  hello\n\n"));
-		ASSERT_EQ(std::string(json.getString("text")), "hello\n");
+		ASSERT_EQ(std::string(json.getString("text")), "hello\n\n");
 	}
 	// Block scalar with indent indicator digit (ignored in favor of auto-detect)
 	{
@@ -17244,17 +17246,19 @@ TEST(testFromUDE) {
     ASSERT_EQ(std::string(j.getString("db.host")), "localhost");
     ASSERT_EQ(j.getInt("db.port"), int64_t(5432));
   }
-  // Block scalar '|'
+  // Block scalar '|' -- default (clip) chomping keeps exactly one trailing
+  // newline, matching YAML, so the same document decodes identically in UDE
+  // and in a YAML parser.
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  line1\n  line2\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2");
+    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2\n");
   }
   // Folded scalar '>'
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: >\n  line1\n  line2\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "line1 line2");
+    ASSERT_EQ(std::string(j.getString("msg")), "line1 line2\n");
   }
   // Number bases and doubles
   {
@@ -17674,7 +17678,7 @@ TEST(testUDEEdgeCases) {
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  a\tb\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "a\tb");
+    ASSERT_EQ(std::string(j.getString("msg")), "a\tb\n");
   }
 }
 
@@ -18109,11 +18113,11 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j.fromUDE("msg: |\n  hello\n\n\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "hello\n");
   }
-  // No trailing blank lines -> clip leaves the value unchanged
+  // No trailing blank lines -> clip still supplies the single trailing newline
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  line1\n  line2\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2");
+    ASSERT_EQ(std::string(j.getString("msg")), "line1\nline2\n");
   }
   // '-' strips all trailing newlines
   {
@@ -18121,18 +18125,19 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j.fromUDE("msg: |-\n  hello\n\n\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "hello");
   }
-  // '+' keeps all trailing newlines; empty lines are content and do not
-  // terminate the scalar (blank-line termination was removed)
+  // '+' keeps all trailing newlines: the last content line's own break plus one
+  // per trailing blank line, matching YAML. Empty lines are content and do not
+  // terminate the scalar (blank-line termination was removed).
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |+\n  hello\n\n\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "hello\n\n");
+    ASSERT_EQ(std::string(j.getString("msg")), "hello\n\n\n");
   }
   // Empty first line does not break the block scalar (implicit indent)
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n\n  hello\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "\nhello");
+    ASSERT_EQ(std::string(j.getString("msg")), "\nhello\n");
   }
   // Empty first line with explicit indent: the base indent is known from the
   // indicator, so a blank first line yields an empty value (clip chomping)
@@ -18165,13 +18170,13 @@ TEST(testUDEBlockScalarChomp) {
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: >\n  a\n  b\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "a b");
+    ASSERT_EQ(std::string(j.getString("msg")), "a b\n");
   }
   // Trailing spaces inside block-scalar lines are preserved verbatim
   {
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  a  \n  b\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "a  \nb");
+    ASSERT_EQ(std::string(j.getString("msg")), "a  \nb\n");
   }
   // A string with trailing spaces round-trips (serializer keeps them)
   {
@@ -18222,15 +18227,37 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "\nhello");
   }
-  // A single trailing newline round-trips as a '|+' block scalar
+  // A single trailing newline round-trips as a plain '|' (clip) block scalar
   {
     asvJSON j;
     j.putString("msg", "a\nb\n");
     std::string ude = j.toUDE();
-    ASSERT(ude.find("msg: |+") != std::string::npos);
+    ASSERT(ude.find("msg: |") != std::string::npos);
+    ASSERT(ude.find("msg: |+") == std::string::npos);
+    ASSERT(ude.find("msg: |-") == std::string::npos);
     asvJSON j2;
     ASSERT(j2.fromUDE(ude));
     ASSERT_EQ(std::string(j2.getString("msg")), "a\nb\n");
+  }
+  // No trailing newline needs '|-' so the value does not gain one
+  {
+    asvJSON j;
+    j.putString("msg", "a\nb");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: |-") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "a\nb");
+  }
+  // Several trailing newlines need '|+' to keep them all
+  {
+    asvJSON j;
+    j.putString("msg", "a\nb\n\n\n");
+    std::string ude = j.toUDE();
+    ASSERT(ude.find("msg: |+") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(ude));
+    ASSERT_EQ(std::string(j2.getString("msg")), "a\nb\n\n\n");
   }
   // Internal blank lines round-trip as a '|' block scalar: each blank line
   // becomes a paragraph break, so the serializer no longer falls back to a
@@ -18438,11 +18465,12 @@ TEST(testUDECommentPrefixStrings) {
 }
 
 TEST(testUDEBlockScalarKeepChomping) {
-  // |+ with trailing blank line: the join already captures the separator \n
+  // |+ keeps the last content line's own break plus one per trailing blank
+  // line, which is what YAML does for the same input.
   {
     asvJSON j;
     ASSERT(j.fromUDE("key: |+\n  hello\n\n"));
-    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n\n");
   }
   // |- strips all trailing newlines
   {
@@ -18456,24 +18484,25 @@ TEST(testUDEBlockScalarKeepChomping) {
     ASSERT(j.fromUDE("key: |\n  hello\n\n"));
     ASSERT_EQ(std::string(j.getString("key")), "hello\n");
   }
-  // |+ with no trailing blank line
+  // |+ with no trailing blank line still keeps the content line's own break
   {
     asvJSON j;
     ASSERT(j.fromUDE("key: |+\n  hello"));
-    ASSERT_EQ(std::string(j.getString("key")), "hello");
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
   }
   // |+ with two trailing blank lines
   {
     asvJSON j;
     ASSERT(j.fromUDE("key: |+\n  hello\n\n\n"));
-    ASSERT_EQ(std::string(j.getString("key")), "hello\n\n");
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n\n\n");
   }
   // Folded >+ with trailing blank line: the blank line becomes a paragraph
-  // break ('\n') during folding, same as literal
+  // break ('\n') during folding, same as literal, and the last content line's
+  // own break is kept as well
   {
     asvJSON j;
     ASSERT(j.fromUDE("key: >+\n  hello\n\n"));
-    ASSERT_EQ(std::string(j.getString("key")), "hello\n");
+    ASSERT_EQ(std::string(j.getString("key")), "hello\n\n");
   }
 }
 
@@ -18506,7 +18535,7 @@ TEST(testUDEExtras) {
     // indented "---" is block-scalar content, not a document split
     asvJSON j;
     ASSERT(j.fromUDE("a: |\n  hello\n  ---\n  world\n"));
-    ASSERT_EQ(std::string(j.getString("a")), "hello\n---\nworld");
+    ASSERT_EQ(std::string(j.getString("a")), "hello\n---\nworld\n");
     // trailing-space indicator line at column 0 IS a split (multi-doc)
     asvJSON jm;
     ASSERT(jm.fromUDE("a: 1\n---\nb: 2\n"));
@@ -18649,7 +18678,7 @@ TEST(testUDEHeaderBlockScalarFixes) {
     // valid: comment after indicators
     asvJSON j;
     ASSERT(j.fromUDE("msg: |2 # comment\n  a\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "a");
+    ASSERT_EQ(std::string(j.getString("msg")), "a\n");
   }
   {
     // valid: chomp + comment after indicators
@@ -18658,11 +18687,393 @@ TEST(testUDEHeaderBlockScalarFixes) {
     ASSERT_EQ(std::string(j.getString("msg")), "a");
   }
   {
-    // valid: no indicators
+    // valid: no indicators (clip keeps the single trailing newline)
     asvJSON j;
     ASSERT(j.fromUDE("msg: |\n  a\n"));
-    ASSERT_EQ(std::string(j.getString("msg")), "a");
+    ASSERT_EQ(std::string(j.getString("msg")), "a\n");
   }
+}
+
+TEST(testUDEBlockScalarChompMatchesYAML) {
+  // UDE.md Section 6 defines chomping as "standard YAML behavior", so every
+  // indicator must decode to exactly what a YAML parser produces for the same
+  // text. The clip case used to strip the value's final newline instead of
+  // guaranteeing one, which made a UDE document mean something different here
+  // than in any YAML reader.
+  const char* inputs[] = {
+    "msg: |\n  hello\n\n",
+    "msg: |\n  hello\n\n\n",
+    "msg: |\n  line1\n  line2\n",
+    "msg: |\n\n  hello\n",
+    "msg: |-\n  hello\n\n\n",
+    "msg: |+\n  hello\n\n\n",
+    "msg: |+\n  hello",
+    "msg: >\n  folded text\n",
+    "msg: >-\n  folded text\n",
+    "msg: |2\n  a\n  b\n",
+    // Folded "keep" used to be decoded as if it were clip: the last content
+    // line's own line break was never emitted, so "+" could not preserve it.
+    "msg: >+\n  folded text\n",
+    "msg: >+\n  folded text\n\n",
+    "msg: >+\n  folded text\n\n\n",
+    "msg: >+\n  folded text\n\nnext: 1\n",
+    "msg: >\n  folded text\n\nnext: 1\n",
+    "msg: >-\n  folded text\n\nnext: 1\n",
+    "msg: >+\n  one\n  two\n",
+  };
+  for (const char* in : inputs) {
+    asvJSON u, y;
+    ASSERT(u.fromUDE(in));
+    ASSERT(y.fromYAML(in));
+    ASSERT_EQ(std::string(u.getString("msg")), std::string(y.getString("msg")));
+  }
+  // The encoder picks the indicator from the trailing newline count so the
+  // value survives unchanged, whatever the count is.
+  const char* values[] = {"hello", "hello\n", "hello\n\n", "hello\n\n\n",
+                          "a\nb", "a\nb\n", "a\nb\n\n", "\nhello\n"};
+  for (const char* v : values) {
+    asvJSON j;
+    j.setValue("msg", asvJSONValue::makeStringView(v));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.getString("msg")), std::string(v));
+  }
+  // The folded "keep" values are pinned explicitly: parity with UDE alone would
+  // not catch both readers losing the same line break.
+  struct { const char* in; const char* want; } folded[] = {
+    {"msg: >+\n  fold\n", "fold\n"},
+    {"msg: >+\n  fold\n\n", "fold\n\n"},
+    {"msg: >+\n  fold\n\nnext: 1\n", "fold\n\n"},
+    {"msg: >+\n  one\n  two\n", "one two\n"},
+    {"msg: >+\n  one\n\n  two\n", "one\ntwo\n"},
+    {"msg: >\n  fold\n\nnext: 1\n", "fold\n"},
+    {"msg: >-\n  fold\n\nnext: 1\n", "fold"},
+  };
+  for (const auto& c : folded) {
+    asvJSON y;
+    ASSERT(y.fromYAML(c.in));
+    ASSERT_EQ(std::string(y.getString("msg")), std::string(c.want));
+  }
+}
+
+TEST(testUDEBareNullTag) {
+  // A tag's value may not live on a later line (Appendix A: WS is [ \t]*), so
+  // the bare "!null" form has to be recognised before skipWsAndComments() can
+  // cross the line break. It used to swallow the next line's first token as the
+  // tag's value and then fail on the leftover ':'.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null\nb: 1\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+  }
+  // End of input instead of a line break.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+  }
+  // A comment and a blank line after the tag are not a value either.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null # note\nb: 1\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null\n\nb: 1\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+  }
+  // In a flow collection the delimiter plays the same role as the line break.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("[!null, 1]\n"));
+    ASSERT_EQ(j.serialize(), std::string("[null,1]"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("x: {y: !null, z: 1}\n"));
+    ASSERT_EQ(j.serialize(), std::string("{\"x\":{\"y\":null,\"z\":1}}"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("[!null]\n"));
+    ASSERT_EQ(j.serialize(), std::string("[null]"));
+  }
+  // A bare !null still registers its anchor.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !null &n\nb: *n\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::NULL_VAL);
+    ASSERT(j.get("b") != nullptr && j.get("b")->type == asvJSONValue::NULL_VAL);
+  }
+  // Only !null may omit its value; every other tag must still demand one.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: !int\nb: 1\n"));
+    ASSERT(std::string(j.lastError).find("!int requires a value") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: !regex\nb: 1\n"));
+    ASSERT(std::string(j.lastError).find("!regex requires a value") != std::string::npos);
+  }
+  // A tag that does take a value is unaffected, comments included.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !int 5 # note\nb: 1\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(5));
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: !int /*c*/ 5\nb: 1\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(5));
+  }
+}
+
+TEST(testUDERegexPipeRoundTrip) {
+  // A REGEX node stores "pattern\0options", so that is the expected body.
+  auto expect = [](const char* pat, const char* opts) {
+    return std::string(pat) + '\0' + opts;
+  };
+  // The pattern/options split must happen on the raw token text, before
+  // unescaping: splitting the decoded string turned a "\u007C" inside a
+  // pattern into a separator, so "!regex \"a|b\"" became pattern "a" plus
+  // options "b" and a trailing pipe was lost.
+  {
+    // Pattern containing a pipe, no options.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"__REGEX__a\\u007Cb||\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("a|b", ""));
+  }
+  {
+    // A pattern ending in a pipe is not confused with the terminator.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"__REGEX__a\\u007C||\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("a|", ""));
+  }
+  {
+    // An escaped pipe inside the options, too.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"__REGEX__ab|x\\u007Cy|\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("ab", "x|y"));
+  }
+  // Every pattern/options combination survives encode -> decode unchanged.
+  const char* pats[] = {"^(a|b)$", "a|", "|", "a", "x|y|z", "a\\|b", "^$"};
+  const char* opts[] = {"", "i", "gim"};
+  for (const char* p : pats) {
+    for (const char* o : opts) {
+      asvJSON j;
+      j.setValue("r", asvJSONValue::makeRegex(p, o));
+      asvJSON j2;
+      ASSERT(j2.fromUDE(j.toUDE()));
+      ASSERT(j2.get("r") != nullptr && j2.get("r")->type == asvJSONValue::REGEX);
+      ASSERT_EQ(j2.get("r")->str_data, expect(p, o));
+    }
+  }
+  // The canonical body carries an explicit marker and escapes literal pipes.
+  {
+    asvJSON j;
+    j.setValue("r", asvJSONValue::makeRegex("a|b", "i"));
+    ASSERT(j.toUDE().find("!regex \"__REGEX__a\\u007Cb|i|\"") != std::string::npos);
+  }
+  // The historical body (no marker) still splits at the LAST '|', so an
+  // existing document keeps the meaning it had instead of being read as
+  // canonical and silently truncated.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"a|b\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("a", "b"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"a|b|i\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("a|b", "i"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"abc\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("abc", ""));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex \"abc|i\"\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("abc", "i"));
+  }
+}
+
+TEST(testUDEUnpairedSurrogatesToReplacementChar) {
+  // An unpaired surrogate is not a character. Decoding it into the output used
+  // to emit an invalid UTF-8 sequence (CESU-8 style, ED A0 80) that no consumer
+  // can decode; it must become U+FFFD like every other text format here.
+  auto encode = [](const std::vector<uint16_t>& units) {
+    std::string s;
+    s.push_back(static_cast<char>(0xFF));
+    s.push_back(static_cast<char>(0xFE));
+    for (uint16_t u : units) {
+      s.push_back(static_cast<char>(u & 0xFF));
+      s.push_back(static_cast<char>(u >> 8));
+    }
+    return s;
+  };
+  auto encode32 = [](const std::vector<uint32_t>& units) {
+    std::string s;
+    s.push_back(static_cast<char>(0xFF));
+    s.push_back(static_cast<char>(0xFE));
+    s.push_back(0);
+    s.push_back(0);
+    for (uint32_t u : units) {
+      s.push_back(static_cast<char>(u & 0xFF));
+      s.push_back(static_cast<char>((u >> 8) & 0xFF));
+      s.push_back(static_cast<char>((u >> 16) & 0xFF));
+      s.push_back(static_cast<char>((u >> 24) & 0xFF));
+    }
+    return s;
+  };
+  const std::string kReplacement = "\xEF\xBF\xBD";
+  struct Case { std::string input; const char* label; std::string expected; };
+  std::vector<Case> cases = {
+    {encode({'a', ':', ' ', '"', 0xD800, 'A', '"', '\n'}), "utf16 lone high", kReplacement + "A"},
+    {encode({'a', ':', ' ', '"', 0xDC00, 'A', '"', '\n'}), "utf16 lone low", kReplacement + "A"},
+    {encode32({'a', ':', ' ', '"', 0xD800u, 'A', '"', '\n'}), "utf32 lone high", kReplacement + "A"},
+    {encode32({'a', ':', ' ', '"', 0xDC00u, 'A', '"', '\n'}), "utf32 lone low", kReplacement + "A"},
+    {encode32({'a', ':', ' ', '"', 0x110000u, '"', '\n'}), "utf32 above 10FFFF", kReplacement},
+  };
+  for (const auto& c : cases) {
+    asvJSON j;
+    ASSERT(j.fromUDE(c.input));
+    ASSERT(std::string(j.getString("a")) == c.expected);
+  }
+  // A valid surrogate pair still becomes the real character, not U+FFFD.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE(encode({'a', ':', ' ', '"', 0xD83D, 0xDE00, '"', '\n'})));
+    ASSERT(std::string(j.getString("a")) == "\xF0\x9F\x98\x80");
+  }
+  // A truncated sequence is a normal unterminated-string error, not a crash.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE(encode({'a', ':', ' ', '"', 0xD800})));
+  }
+}
+
+TEST(testUDETagNameValidation) {
+  // Appendix A: TAG ::= '!' ( IDENTIFIER (':' IDENTIFIER | '.' IDENTIFIER)* | ...)
+  // so the first character must be an identifier start. A digit- or dash-led
+  // name used to be accepted, and the encoder then produced a document its own
+  // parser could not read back.
+  const char* bad[] = {"a: !1 hello\n", "a: !-x hello\n", "a: !1a:b hello\n",
+                       "a: !a. hello\n", "a: !.a hello\n", "a: !a: hello\n"};
+  for (const char* in : bad) {
+    asvJSON j;
+    ASSERT(!j.fromUDE(in));
+    ASSERT(std::string(j.lastError).find("invalid tag name") != std::string::npos);
+  }
+  const char* good[] = {"a: !x hello\n", "a: !_x hello\n", "a: !a.b hello\n", "a: !ns:tag hello\n"};
+  for (const char* in : good) {
+    asvJSON j;
+    ASSERT(j.fromUDE(in));
+    ASSERT(j.get("a") != nullptr && j.get("a")->type == asvJSONValue::CUSTOM_TAG);
+  }
+  // A name the grammar cannot spell is written in the verbatim !<...> form, so
+  // a CUSTOM_TAG round-trips whatever name the caller put in str_data.
+  const char* names[] = {"ok", "1bad", "-bad", "a.b", "a:b", "a b", ""};
+  for (const char* n : names) {
+    asvJSON j;
+    j.parse(std::string("{\"t\":{\"$customTag\":{\"name\":\"") + n + "\",\"value\":\"v\"}}}");
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    const asvJSONValue* v = j2.get("t");
+    ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(v->str_data, std::string(n));
+  }
+}
+
+TEST(testUDEExtTypeRange) {
+  // !ext carries a signed type in one byte; 300 and -129 used to wrap silently.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("e: !ext \"300:AAA=\"\n"));
+    ASSERT(std::string(j.lastError).find("out of range") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("e: !ext \"-129:AAA=\"\n"));
+    ASSERT(std::string(j.lastError).find("out of range") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("e: !ext \"127:AAA=\"\n"));
+    ASSERT(j.get("e") != nullptr && j.get("e")->type == asvJSONValue::EXTENSION);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("e: !ext \"-128:AAA=\"\n"));
+    ASSERT(j.get("e") != nullptr && j.get("e")->type == asvJSONValue::EXTENSION);
+  }
+  // The signed byte survives, not a truncated one.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("e: !ext \"127:AAA=\"\n"));
+    ASSERT_EQ(j.serialize(), std::string("{\"e\":{\"$binary\":{\"base64\":\"AAA=\",\"subType\":\"7f\"}}}"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("e: !ext \"-128:AAA=\"\n"));
+    ASSERT_EQ(j.serialize(), std::string("{\"e\":{\"$binary\":{\"base64\":\"AAA=\",\"subType\":\"80\"}}}"));
+  }
+}
+
+TEST(testUDEStringLengthLimit) {
+  // An oversized string used to make makeStringView() return nullptr and then
+  // dereference it, so the parser crashed instead of reporting the limit.
+  const size_t kMiB = 1024 * 1024;
+  {
+    asvJSON j;
+    std::string in = "s: \"";
+    in.append(asvJSONValue::MAX_STRING_LEN, 'a');
+    in += "\"\n";
+    ASSERT(j.fromUDE(in));
+    ASSERT_EQ(j.get("s")->str_data.size(), asvJSONValue::MAX_STRING_LEN);
+  }
+  // The same limit applies to every string form, each with its own closing
+  // delimiter.
+  struct Form { const char* prefix; const char* closer; };
+  const Form forms[] = {{"s: \"", "\""}, {"s: '", "'"}, {"s: !string \"", "\""},
+                        {"s: !regex \"", "\""}, {"s: !base64 \"", "\""}};
+  for (const auto& f : forms) {
+    asvJSON j;
+    std::string in = f.prefix;
+    in.append(12 * kMiB, 'a');
+    in += f.closer;
+    in += "\n";
+    ASSERT(!j.fromUDE(in));
+    ASSERT(std::string(j.lastError).find("string too long") != std::string::npos);
+  }
+  {
+    // A block scalar is bounded too.
+    asvJSON j;
+    std::string in = "s: |\n";
+    in.append(12 * kMiB, 'a');
+    in += "\n";
+    ASSERT(!j.fromUDE(in));
+    ASSERT(std::string(j.lastError).find("string too long") != std::string::npos);
+  }
+}
+
+TEST(testUDEMultiDocumentStreamRoundTrip) {
+  // "---" separates documents and the stream decodes to a root array, so a
+  // round-trip re-encodes that array; the data must still survive unchanged.
+  asvJSON j;
+  ASSERT(j.fromUDE("a: 1\n---\nb: 2\n"));
+  ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+  ASSERT_EQ(j.getRoot()->arr->size(), size_t(2));
+  asvJSON j2;
+  ASSERT(j2.fromUDE(j.toUDE()));
+  ASSERT_EQ(j2.serialize(), j.serialize());
 }
 
 TEST(testByteSizeNullRoot) {
@@ -23802,6 +24213,14 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEHeaderBlockScalarFixes);
 
 	RUN(testUDEExtras);
+	RUN(testUDEBlockScalarChompMatchesYAML);
+	RUN(testUDEBareNullTag);
+	RUN(testUDERegexPipeRoundTrip);
+	RUN(testUDEUnpairedSurrogatesToReplacementChar);
+	RUN(testUDETagNameValidation);
+	RUN(testUDEExtTypeRange);
+	RUN(testUDEStringLengthLimit);
+	RUN(testUDEMultiDocumentStreamRoundTrip);
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
 
