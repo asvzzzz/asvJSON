@@ -16599,6 +16599,25 @@ TEST(testDotenvReviewFixes) {
     ASSERT_EQ(got, std::string("line1\nline2"));
     // The re-encode escapes the value's newline as a literal backslash-n.
     ASSERT_EQ(j.toDotenv(), std::string("M=\"line1\\nline2\"\nK=v\n"));
+    // Every CRLF shape stays CR-free: with a trailing newline, with a bare
+    // trailing CR, and with nothing after the closing quote.
+    const char* crlfDocs[] = {"K=\"a\r\nb\"\r\n", "K=\"a\r\nb\"\r", "K=\"a\r\nb\"",
+                              "K=\"a\r\nb\r\nc\"\r\n", "K=\"a\r\nb\r\nc\""};
+    for (const char* d : crlfDocs) {
+      asvJSON c;
+      ASSERT(c.fromDotenv(std::string(d)));
+      ASSERT(c.get("K") != nullptr);
+      ASSERT_EQ(std::string(c.get("K")->getString()).find('\r'), std::string::npos);
+    }
+    // An interior CR (not before a '\n') is data, not a line ending, and is
+    // preserved -- same as INI.
+    {
+      asvJSON c, ci;
+      ASSERT(c.fromDotenv(std::string("K=\"a\rb\"\n")));
+      ASSERT(ci.fromINI(std::string("K=\"a\rb\"\n")));
+      ASSERT_EQ(std::string(c.get("K")->getString()), std::string("a\rb"));
+      ASSERT_EQ(std::string(ci.get("K")->getString()), std::string(c.get("K")->getString()));
+    }
   }
   // 4. Root leading comments are emitted above the first key. fromDotenv never
   // produces them, so this only matters for trees coming from another format.

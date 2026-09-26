@@ -375,6 +375,14 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
           raw += '\n';
           li++;
           cur = lines[li];
+          // Defense in depth, mirroring INI. splitLines() already drops the CR of
+          // a CRLF pair (detail/common.hpp), so for a well-formed CRLF file this
+          // never fires -- measured byte-identical with and without it. It is kept
+          // so the two formats read the same and so the invariant does not depend
+          // on splitLines staying as it is. A CR that is NOT before a '\n' (an
+          // interior one, e.g. K="a<CR>b") is not a line ending and is data, so it
+          // is kept; INI keeps it too.
+          if (!cur.empty() && cur.back() == '\r') cur.remove_suffix(1);
         }
         std::string text = (q == '"') ? dotenvUnescape(raw) : raw;
         val = asvJSONValue::makeString(text.data(), text.size());
