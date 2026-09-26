@@ -67,6 +67,23 @@ inline int ronHexVal(char c) noexcept {
   return -1;
 }
 
+// Reads the four hex digits of a brace-less `\uXXXX` escape starting at `p` and
+// returns the code point, advancing `p` past them. Exactly four: the Rust-style
+// short form is fixed-width, and a greedy read swallowed the following hex-looking
+// text (`\u0041B` used to decode to U+041B, silently dropping the `B`). Code
+// points above U+FFFF need `\u{...}` or a surrogate pair.
+inline unsigned long ronReadU4(std::string_view in, size_t& p, const char* err) {
+  if (p + 4 > in.size()) throw asvJSONError(err);
+  unsigned long cp = 0;
+  for (int d = 0; d < 4; ++d) {
+    int v = ronHexVal(in[p + static_cast<size_t>(d)]);
+    if (v < 0) throw asvJSONError(err);
+    cp = (cp << 4) | static_cast<unsigned long>(v);
+  }
+  p += 4;
+  return cp;
+}
+
 inline void ronAppendUtf8(std::string& s, unsigned long cp) noexcept {
   if (cp < 0x80) {
     s += static_cast<char>(cp);
@@ -206,10 +223,17 @@ struct RonParser {
         }
       }
       if (c == '#' && p + 1 < in.size() && in[p + 1] == '!') {
-        // #![enable(...)] extension header -- skip to the closing bracket.
-        size_t q = p + 2;
-        while (q < in.size() && in[q] != ']') ++q;
-        if (q >= in.size()) throw asvJSONError("RON: unterminated extension header");
+        // #![enable(...)] extension header. The '[' is mandatory: scanning on
+        // without it turned a bare `#!something` into a search for ']' that ate
+        // the rest of the document before reporting the failure. The ']' search
+        // is also bounded to the header's own line so a missing closer cannot
+        // swallow the following documents.
+        if (p + 2 >= in.size() || in[p + 2] != '[')
+          throw asvJSONError("RON: unterminated extension header");
+        size_t q = p + 3;
+        while (q < in.size() && in[q] != ']' && in[q] != '\n') ++q;
+        if (q >= in.size() || in[q] != ']')
+          throw asvJSONError("RON: unterminated extension header");
         p = q + 1;
         continue;
       }
@@ -334,15 +358,23 @@ struct RonParser {
               break;
             }
             size_t k = i + 2;
-            unsigned long cp = 0;
-            int digits = 0;
-            while (k < in.size() && std::isxdigit(static_cast<unsigned char>(in[k])) && digits < 6) {
-              cp = (cp << 4) | static_cast<unsigned long>(ronHexVal(in[k]));
-              ++k;
-              ++digits;
+            unsigned long cp = ronReadU4(in, k, "RON: invalid \\u escape");
+            // A high surrogate is only half a code point; pair it with the
+            // following \uXXXX low surrogate, else the unpaired one encodes as
+            // invalid UTF-8. Same rule as the parser for the char literal.
+            if (cp >= 0xD800 && cp <= 0xDBFF && k + 6 <= in.size() && in[k] == '\\' && in[k + 1] == 'u' &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 2])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 3])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 4])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 5]))) {
+              size_t k2 = k + 2;
+              unsigned long lo = ronReadU4(in, k2, "RON: invalid \\u escape");
+              if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                k = k2;
+              }
             }
-            if (digits == 0) throw asvJSONError("RON: invalid \\u escape");
-            if (cp > 0x10FFFF) throw asvJSONError("RON: invalid \\u escape");
+            if (cp >= 0xD800 && cp <= 0xDFFF) throw asvJSONError("RON: invalid \\u escape");
             ronAppendUtf8(s, cp);
             i = k;
             break;
@@ -408,15 +440,20 @@ struct RonParser {
         }
         case 'u': {
           size_t k = i + 2;
-          unsigned long cp = 0;
-          int digits = 0;
-          while (k < in.size() && std::isxdigit(static_cast<unsigned char>(in[k])) && digits < 6) {
-            cp = (cp << 4) | static_cast<unsigned long>(ronHexVal(in[k]));
-            ++k;
-            ++digits;
+          unsigned long cp = ronReadU4(in, k, "RON: invalid \\u char escape");
+          if (cp >= 0xD800 && cp <= 0xDBFF && k + 6 <= in.size() && in[k] == '\\' && in[k + 1] == 'u' &&
+              std::isxdigit(static_cast<unsigned char>(in[k + 2])) &&
+              std::isxdigit(static_cast<unsigned char>(in[k + 3])) &&
+              std::isxdigit(static_cast<unsigned char>(in[k + 4])) &&
+              std::isxdigit(static_cast<unsigned char>(in[k + 5]))) {
+            size_t k2 = k + 2;
+            unsigned long lo = ronReadU4(in, k2, "RON: invalid \\u char escape");
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+              cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+              k = k2;
+            }
           }
-          if (digits == 0) throw asvJSONError("RON: invalid \\u char escape");
-          if (cp > 0x10FFFF) throw asvJSONError("RON: invalid \\u char escape");
+          if (cp >= 0xD800 && cp <= 0xDFFF) throw asvJSONError("RON: invalid \\u char escape");
           ronAppendUtf8(ch, cp);
           i = k;
           break;
@@ -530,7 +567,12 @@ struct RonParser {
       tok += in[i];
       ++i;
       if (i < in.size() && (in[i] == '+' || in[i] == '-')) { tok += in[i]; ++i; }
+      size_t expStart = i;
       while (i < in.size() && ((in[i] >= '0' && in[i] <= '9') || in[i] == '_')) { tok += in[i]; ++i; }
+      // The exponent needs at least one digit. Without this check `3.e` turned
+      // into the invalid JSON token `3.0e`, which the JSON layer rejected with
+      // a foreign "digit required after exponent" message instead of RON's.
+      if (i == expStart) throw asvJSONError("RON: invalid number, digit required after exponent");
     }
     if (tok.empty()) throw asvJSONError("RON: invalid number");
     consumeNumberSuffix();
@@ -680,7 +722,14 @@ struct RonParser {
       if (i < in.size() && in[i] == '(') {
         ++i;
         skipWs();
-        if (i < in.size() && in[i] == ')') { ++i; return "null"; } // Some() -> null (lenient)
+        if (i < in.size() && in[i] == ')') { commitClosing(path); ++i; return "null"; } // Some() -> null (lenient)
+        // A comment right after '(' introduces the wrapped value, and the Some
+        // wrapper is transparent (it decodes to that value), so it becomes the
+        // value's leading comment. It has to be committed here: skipWs() above
+        // left it pending, and the inner parseValue/outer container would
+        // otherwise commit it under their own path -- duplicating it or pushing
+        // it out to the root.
+        commitValueLead(path);
         std::string inner = parseValue(depth + 1, path, commit);
         skipWs();
         if (i >= in.size() || in[i] != ')') throw asvJSONError("RON: expected ')' after Some(<value>)");
@@ -911,26 +960,29 @@ inline bool ronIsValidFieldKey(const std::string& k) {
 
 // A RON type name used as a struct/tuple/enum-variant qualifier. Only a single
 // identifier or an `A::B` path (max two segments) is accepted; longer paths are
-// rejected so the decoder's segment scanner cannot misread them. The first
-// segment must be a bare identifier that is not a RON literal, otherwise the
-// decoder would treat it as data rather than a name (true/false/None/Some/inf/NaN).
+// rejected so the decoder's segment scanner cannot misread them. Both segments
+// must be bare identifiers that are not RON literals -- the decoder's segment
+// scanner stops a segment at a literal (true/false/None/Some/inf/NaN) and rolls
+// back, so a name like `A::Some` would encode to RON the decoder then rejects.
+// Such a key simply falls back to the map form, which quotes it.
 inline bool ronIsValidTypeName(const std::string& k) {
   if (k.empty()) return false;
   size_t p = 0;
-  // First segment: a bare identifier that is not a RON literal.
-  if (!ronIsIdentStart(k[p])) return false;
-  ++p;
-  while (p < k.size() && ronIsIdentCont(k[p])) ++p;
-  std::string first(k.data(), p);
-  if (first == "true" || first == "false" || first == "None" ||
-      first == "Some" || first == "inf" || first == "NaN") return false;
-  // Optional single `::B` second segment, then end of input.
-  if (p < k.size()) {
-    if (k.compare(p, 2, "::") != 0) return false;
-    p += 2;
+  for (int seg = 0; seg < 2; ++seg) {
+    if (seg) {
+      if (k.compare(p, 2, "::") != 0) return false;
+      p += 2;
+    }
+    // Segment: a bare identifier that is not a RON literal.
+    if (p >= k.size() || !ronIsIdentStart(k[p])) return false;
     size_t start = p;
+    ++p;
     while (p < k.size() && ronIsIdentCont(k[p])) ++p;
-    if (p == start || p != k.size()) return false; // missing or extra segments
+    std::string seg_text(k.data() + start, p - start);
+    if (seg_text == "true" || seg_text == "false" || seg_text == "None" ||
+        seg_text == "Some" || seg_text == "inf" || seg_text == "NaN") return false;
+    if (p == k.size()) return true;  // single segment, or the last one
+    if (seg == 1) return false;     // more than two segments
   }
   return true;
 }
@@ -1127,10 +1179,11 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           out += '(';
           if (pretty && !childEmpty) out += '\n';
           // Emit the group's own leading comments before its fields/elements.
+          // No extra separator: the '(' already delimits the comment, and in
+          // pretty mode ronIndent() has already placed it at depth + 1.
           if (child->comments && !child->comments->leading.empty()) {
             for (const auto& c : child->comments->leading) {
               if (pretty) ronIndent(out, depth + 1);
-              out += ' ';
               if (c.block) { out += "/*"; out += c.text; out += "*/"; }
               else { out += "//"; out += c.text; }
               if (!c.block && commentNeedsEol(c)) out += '\n';
@@ -1148,17 +1201,32 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
                 out += (pretty || leadCmt) ? ",\n" : ",";
               }
               prevNl = false;
+              // Same as the plain ARRAY case: without this the element's leading
+              // comments were dropped here, since only the group's own comments
+              // are emitted above.
+              if (el->comments) {
+                for (const auto& c : el->comments->leading) {
+                  if (pretty) ronIndent(out, depth + 1);
+                  if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+                  else { out += "//"; out += c.text; }
+                  out += '\n';
+                }
+              }
               if (pretty) ronIndent(out, depth + 1);
               if (ronEmitValueWithTrailing(el.get(), out, depth + 1, pretty, /*commaNeeded=*/i + 1 < ne))
                 prevNl = true;
               i++;
             }
           }
+          // Same order as the plain struct/map forms below: closing comments
+          // first, then the newline+indent that lines the ')' up. Doing it the
+          // other way round emitted a blank line before the comments, and at
+          // depth > 0 stacked the ')' indent on top of the comment indent.
+          ronEmitClosing(out, child, depth, pretty);
           if (pretty && !childEmpty) {
             if (out.back() != '\n') out += '\n';
             ronIndent(out, depth);
           }
-          ronEmitClosing(out, child, depth, pretty);
           out += ')';
           // Comments attached to the wrapped child itself (a `/` same-line
           // trailing after the last field, or closings before `)`) belong to
@@ -1297,16 +1365,21 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
 }
 
 // Emit "closing" comments (collected just before a container closer) right
-// before the closer. Keeps `{ a: 1, /* note */ }` shape on round-trips.
+// before the closer, each on its own line.
 inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, bool pretty) {
   if (!v->comments || v->comments->closing.empty()) return;
-  if (pretty) out += '\n';
+  // Every closing comment goes on its own line, and no comma is emitted. The
+  // parser classifies a comment as *closing* only via its own-line rule; a
+  // same-line comment re-reads as a trailing comment of the preceding entry, so
+  // the round-trip drifted. A comma per comment (the old form) was worse still:
+  // it left comment 2+ exactly where the parser expects a field, so
+  // `{"a":1,/*c1*/,/*c2*/}` failed to parse back.
+  if (!out.empty() && out.back() != '\n') out += '\n';
   for (const auto& c : v->comments->closing) {
     if (pretty) ronIndent(out, depth + 1);
-    else if (!out.empty() && out.back() != '\n') out += ", ";
     if (c.block) { out += "/*"; out += c.text; out += "*/"; }
     else { out += "//"; out += c.text; }
-    if (pretty) out += '\n';
+    out += '\n';
   }
 }
 

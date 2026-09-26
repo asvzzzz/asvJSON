@@ -13835,6 +13835,146 @@ TEST(testRONComments) {
   }
 }
 
+TEST(testRONReviewFixes) {
+  // 1. A type name whose SECOND segment is a RON literal (`A::Some`) is not
+  // decodable -- the segment scanner stops at a literal and rolls back, so the
+  // encoder used to emit RON that the decoder then rejected. It must fall back
+  // to the map form, which quotes the key.
+  {
+    const char* keys[] = {"A::Some", "A::true", "A::false", "A::None", "A::inf", "A::NaN"};
+    for (const char* key : keys) {
+      asvJSON j;
+      asvJSON src;
+      ASSERT(src.parse(std::string_view(std::string("{\"") + key + "\":{\"x\":1}}")));
+      std::string ron = src.toRON(false);
+      ASSERT(ron.find("\"") != std::string::npos);   // quoted key, not `A::Some(`
+      ASSERT(j.fromRON(std::string_view(ron)));
+      ASSERT_EQ(j.getRoot()->get(key)->get("x")->getInt(), int64_t(1));
+      // Data is unchanged by the round-trip.
+      ASSERT_EQ(j.serialize(), src.serialize());
+    }
+    // A legal two-segment name still uses the named form.
+    asvJSON ok;
+    ASSERT(ok.parse(std::string_view("{\"A::Ok\":{\"x\":1}}")));
+    ASSERT_EQ(ok.toRON(false), std::string("A::Ok(x:1)"));
+  }
+  // 2. Several closing comments before `)` / `]` used to get a comma each, which
+  // left the 2nd+ comment where the parser expects a field.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{\n a: 1,\n /* c1 */\n /* c2 */\n}")));
+    std::string s = j.toRON(false);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(j2.toRON(false), s);
+    // Arrays too, and with line comments.
+    asvJSON a;
+    ASSERT(a.fromRON(std::string_view("[\n 1,\n // c1\n // c2\n]")));
+    std::string as = a.toRON(false);
+    asvJSON a2;
+    ASSERT(a2.fromRON(std::string_view(as)));
+    ASSERT_EQ(a2.getRoot()->size(), size_t(1));
+    ASSERT_EQ(a2.toRON(false), as);
+  }
+  // 3. A brace-less `\u` escape is exactly 4 hex digits; the greedy read used to
+  // swallow following hex-looking text.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{\"s\":\"\\u0041B\"}")));
+    ASSERT_EQ(j.getString("s"), std::string("AB"));
+    // Surrogate pairs combine into one code point.
+    asvJSON e;
+    ASSERT(e.fromRON(std::string_view("{\"s\":\"\\uD83D\\uDE00\"}")));
+    ASSERT_EQ(e.getString("s"), std::string("\xF0\x9F\x98\x80"));
+    // Fewer than 4 digits is an error, not a short read.
+    asvJSON bad;
+    ASSERT(!bad.fromRON(std::string_view("{\"s\":\"\\u041\"}")));
+  }
+  // 4. A leading comment inside a named group is indented by exactly one level
+  // (an extra unconditional space used to yield 3 spaces at depth 0).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("N(\n  /* c */\n  x: 1\n)")));
+    std::string s = j.toRON(true);
+    ASSERT(s.find("\n  /* c */\n") != std::string::npos);
+    ASSERT(s.find("\n   /* c */") == std::string::npos);
+  }
+  // 5. A named group emits its closing comments in the same shape as a plain
+  // struct: no blank line before them, `)` on its own indented line.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("N(\n  a: 1,\n  /* c1 */\n  /* c2 */\n)")));
+    std::string s = j.toRON(true);
+    ASSERT_EQ(s, std::string("N(\n  a: 1\n  /* c1 */\n  /* c2 */\n)"));
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.toRON(true), s);
+    // Same shape nested one level deeper.
+    asvJSON n;
+    ASSERT(n.fromRON(std::string_view("(g: N(\n  a: 1,\n  /* c1 */\n))")));
+    std::string ns = n.toRON(true);
+    asvJSON n2;
+    ASSERT(n2.fromRON(std::string_view(ns)));
+    ASSERT_EQ(n2.toRON(true), ns);
+  }
+  // 6. An exponent needs at least one digit; `3.e` used to become `3.0e` and was
+  // rejected by the JSON layer with a foreign message.
+  {
+    asvJSON bad;
+    ASSERT(!bad.fromRON(std::string_view("3.e")));
+    ASSERT(!bad.fromRON(std::string_view("3.e+")));
+    // The 5.e3 form stays legal (the `5.0e3` fixup).
+    asvJSON ok;
+    ASSERT(ok.fromRON(std::string_view("3.e5")));
+    ASSERT_EQ(ok.getRoot()->getDouble(), 3e5);
+  }
+  // 7. A comment inside `Some(...)` leads the wrapped value. It used to be
+  // duplicated and/or pushed out to the root.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("Some(// C\n42)")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("// C") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->getInt(), int64_t(42));
+    ASSERT_EQ(j2.toRON(false), s);
+    // Exactly one copy: it must not also land on the root as a leading comment.
+    ASSERT(s.find("// C") == s.rfind("// C"));
+    asvJSON f;
+    ASSERT(f.fromRON(std::string_view("{\"f\":Some(/* C */7)}")));
+    std::string fs = f.toRON(false);
+    asvJSON f2;
+    ASSERT(f2.fromRON(std::string_view(fs)));
+    ASSERT_EQ(f2.getInt("f"), int64_t(7));
+    ASSERT(fs.find("/* C */") == fs.rfind("/* C */"));
+  }
+  // 8. `#!` must be followed by `[`; a bare `#!something` used to scan for a `]`
+  // to EOF, eating the rest of the document before reporting.
+  {
+    asvJSON ok;
+    ASSERT(ok.fromRON(std::string_view("#![enable(unwrap_newtype)]\n(a: 1)")));
+    ASSERT_EQ(ok.getInt("a"), int64_t(1));
+    asvJSON bad;
+    ASSERT(!bad.fromRON(std::string_view("#!something\n(a: 1)")));
+    // Unterminated header is reported instead of consuming the next document.
+    asvJSON bad2;
+    ASSERT(!bad2.fromRON(std::string_view("#![enable(unwrap_newtype)\n(a: 1)")));
+  }
+  // 9. A named tuple keeps the leading comment of its first element (the named
+  // group array loop dropped it, unlike the plain ARRAY case).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("N(\n  // c\n  1\n)")));
+    std::string s = j.toRON(true);
+    ASSERT(s.find("// c") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.toRON(true), s);
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -24471,6 +24611,7 @@ RUN(testCBORFloat16);
 	RUN(testToRON);
 	RUN(testFromRON);
 	RUN(testRONComments);
+RUN(testRONReviewFixes);
   RUN(testToCpp);
   RUN(testFromCpp);
   RUN(testFromCppArraySizeGuard);
