@@ -8255,6 +8255,138 @@ TEST(testToTOONHeadersStrict) {
 	}
 }
 
+TEST(testTOONReviewFixes) {
+	// 1. valToToon emits "[]\n" for an empty root array, but the decoder's
+	// bare-root-scalar branch required lb == npos and the header branch needs
+	// rb > lb + 1, so the round-trip threw "unrecognized line 1".
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[]")));
+		std::string toon = j.toTOON();
+		ASSERT_EQ(toon, std::string("[]\n"));
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getRoot()->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->size(), size_t(0));
+		// and the literal still parses
+		asvJSON lit;
+		ASSERT(lit.fromTOON("[]\n"));
+		ASSERT_EQ(lit.getRoot()->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(lit.getRoot()->size(), size_t(0));
+		// "[0]:" still reaches the header branch (its trailing ':' keeps it from
+		// parsing as a bare JSON value)
+		asvJSON hdr;
+		ASSERT(hdr.fromTOON("[0]:\n"));
+		ASSERT_EQ(hdr.getRoot()->size(), size_t(0));
+		ASSERT(hdr.parse(std::string_view(hdr.toTOON())));
+	}
+	// 2/3. A '"'/'{'/'['-leading token is only a JSON value if it really is one.
+	// toonIsJsonValue() only looked at the first character, so these were copied
+	// verbatim into the intermediate JSON and broke it.
+	{
+		// Unterminated / invalid shapes become TOON strings, not broken JSON.
+		const char* srcs[] = {"key: [1,2", "key: \"unterminated", "key: {a: 1", "key: {a: 1}",
+		                      "key: [1,2] junk", "key: {\"a\":1} x"};
+		for (const char* s : srcs) {
+			asvJSON j;
+			ASSERT(j.fromTOON(std::string_view(s)));
+			ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+			auto* v = j.getRoot()->getConst("key");
+			ASSERT(v != nullptr);
+			ASSERT_EQ(v->type, asvJSONValue::STRING);
+			asvJSON j2;
+			ASSERT(j2.fromTOON(std::string_view(j.toTOON())));
+			ASSERT_EQ(j2.serialize(), j.serialize());
+		}
+		// Valid JSON values still pass through unquoted.
+		{
+			asvJSON j;
+			ASSERT(j.fromTOON("key: [1,2]\n"));
+			auto* v = j.getRoot()->getConst("key");
+			ASSERT(v != nullptr);
+			ASSERT_EQ(v->type, asvJSONValue::ARRAY);
+			ASSERT_EQ(v->size(), size_t(2));
+		}
+		{
+			asvJSON j;
+			ASSERT(j.fromTOON("key: {\"a\":1}\n"));
+			auto* v = j.getRoot()->getConst("key");
+			ASSERT(v != nullptr);
+			ASSERT_EQ(v->type, asvJSONValue::OBJECT);
+			ASSERT_EQ(v->get("a")->getInt(), int64_t(1));
+		}
+		// The encoder's own round-trip is unaffected: a string value that merely
+		// looks like JSON stays quoted.
+		{
+			asvJSON j;
+			ASSERT(j.parse(std::string_view("{\"s\":\"{a: 1}\",\"t\":\"[1,2\",\"u\":\"a:b\"}")));
+			std::string toon = j.toTOON();
+			asvJSON j2;
+			ASSERT(j2.fromTOON(std::string_view(toon)));
+			ASSERT_EQ(j2.serialize(), j.serialize());
+		}
+	}
+	// 3b. A bare single-line root that is a complete JSON value is taken as-is;
+	// one starting with '{' that is not JSON is a bare string, not a key:value
+	// split at the ':' inside the braces.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("{\"a\":1}\n"));
+		ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+		ASSERT_EQ(j.getInt("a"), int64_t(1));
+		asvJSON a;
+		ASSERT(a.fromTOON("[1,2]\n"));
+		ASSERT_EQ(a.getRoot()->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(a.getRoot()->size(), size_t(2));
+		asvJSON s;
+		ASSERT(s.fromTOON("{a: 1}\n"));
+		ASSERT_EQ(s.getRoot()->type, asvJSONValue::STRING);
+		ASSERT_EQ(std::string(s.getRoot()->getString()), std::string("{a: 1}"));
+	}
+	// 4. Whitespace-only lines count as empty for the bare-root-scalar scan.
+	{
+		asvJSON a;
+		ASSERT(a.fromTOON("hello\n \n"));
+		ASSERT_EQ(std::string(a.getRoot()->getString()), std::string("hello"));
+		asvJSON b;
+		ASSERT(b.fromTOON("hello\n\t\n"));
+		ASSERT_EQ(std::string(b.getRoot()->getString()), std::string("hello"));
+		asvJSON c;
+		ASSERT(c.fromTOON(" \nhello\n"));
+		ASSERT_EQ(std::string(c.getRoot()->getString()), std::string("hello"));
+		// A blank line inside a nested block does not close frames.
+		asvJSON d;
+		ASSERT(d.fromTOON("a:\n  b: 1\n  \n  c: 2\n"));
+		ASSERT_EQ(d.getRoot()->get("a")->size(), size_t(2));
+		ASSERT_EQ(d.getRoot()->get("a")->get("c")->getInt(), int64_t(2));
+	}
+	// 5. The list-form opener "- [3]:" keeps working (behavior unchanged; only
+	// the misleading comment was corrected).
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("- [3]: 1,2,3\n"));
+		ASSERT_EQ(j.getRoot()->get(0)->size(), size_t(3));
+		// and the backward-compat JSON literal "- [1,2]" is still an array
+		asvJSON lit;
+		ASSERT(lit.fromTOON("- [1,2]\n"));
+		ASSERT_EQ(lit.getRoot()->get(0)->size(), size_t(2));
+	}
+	// 6. Encoder: an empty root array/object and nested empty containers.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{\"a\":[],\"b\":{}}")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+		asvJSON r;
+		ASSERT(r.parse(std::string_view("{}")));
+		asvJSON r2;
+		ASSERT(r2.fromTOON(std::string_view(r.toTOON())));
+		ASSERT_EQ(r2.serialize(), std::string("{}"));
+	}
+}
+
 TEST(testToTRON) {
 	// Basic object (no repeated schema -> JSON fallback)
 	{
@@ -24566,6 +24698,7 @@ RUN(testCBORFloat16);
 	RUN(testToTOONAdvanced);
 	RUN(testToTOONSpecListForm);
 	RUN(testToTOONHeadersStrict);
+RUN(testTOONReviewFixes);
 	RUN(testTOONSpecialTypes);
 	RUN(testToonExtras);
 	
