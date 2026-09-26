@@ -18140,11 +18140,22 @@ TEST(testUDEBlockScalarChomp) {
     ASSERT_EQ(std::string(j.getString("msg")), "\nhello\n");
   }
   // Empty first line with explicit indent: the base indent is known from the
-  // indicator, so a blank first line yields an empty value (clip chomping)
+  // indicator, so the blank line is still content. Clip guarantees the final
+  // break whenever the block had a body, even a body of only blank lines.
   {
-    asvJSON j;
+    asvJSON j, y;
     ASSERT(j.fromUDE("msg: |2\n\n"));
+    ASSERT(y.fromYAML("msg: |2\n\n"));
+    ASSERT_EQ(std::string(j.getString("msg")), "\n");
+    ASSERT_EQ(std::string(y.getString("msg")), "\n");
+  }
+  // A header with no body at all has no lines, so clip has nothing to guarantee.
+  {
+    asvJSON j, y;
+    ASSERT(j.fromUDE("msg: |2\n"));
+    ASSERT(y.fromYAML("msg: |2\n"));
     ASSERT_EQ(std::string(j.getString("msg")), "");
+    ASSERT_EQ(std::string(y.getString("msg")), "");
   }
   // Empty lines inside the block are preserved as content; the value ends with
   // a single newline after clip chomping
@@ -18903,6 +18914,192 @@ TEST(testUDERegexPipeRoundTrip) {
     ASSERT(j.fromUDE("r: !regex \"abc|i\"\n"));
     ASSERT_EQ(j.get("r")->str_data, expect("abc", "i"));
   }
+  // A single-quoted body is scanned raw too, so the canonical marker is
+  // honoured in either quoting style: the separator is found before
+  // unescaping, exactly as for a double-quoted body. The canonical split takes
+  // the FIRST raw '|' as the separator, which is why a literal pipe has to be
+  // written as an escape -- and that escape only exists in a double-quoted
+  // body, so a single-quoted canonical form can carry a pipe-free pattern only.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex '__REGEX__abc|i|'\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("abc", "i"));
+  }
+  {
+    // A '' inside the body is an escaped quote, so it does not end the body,
+    // and the fields are decoded with the single-quoted rules.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex '__REGEX__it''s|x|'\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("it's", "x"));
+  }
+  {
+    // A pattern with no pipe is unambiguous in single quotes, canonical or not.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex 'abc'\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("abc", ""));
+    ASSERT(j.fromUDE("r: !regex 'abc|i'\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("abc", "i"));
+  }
+  {
+    // A single-quoted body cannot express a literal pipe (there is no \u007C
+    // escape there), so a pipe in a pattern falls back to the legacy
+    // last-'|' rule -- the same reading a double-quoted unmarked body gets.
+    asvJSON j;
+    ASSERT(j.fromUDE("r: !regex 'a|b'\n"));
+    ASSERT_EQ(j.get("r")->str_data, expect("a", "b"));
+  }
+}
+
+TEST(testUDERegexUnterminatedSingleQuotedBody) {
+  // The raw scan must terminate a single-quoted body only on a real quote and
+  // report the same way the plain single-quoted string scanner does.
+  asvJSON j;
+  ASSERT(!j.fromUDE("r: !regex 'abc\n"));
+  ASSERT(std::string(j.lastError).find("unterminated") != std::string::npos);
+}
+
+TEST(testUDEEscapeErrorNamesTheOffendingEscape) {
+  // udeUnescape names the escape it rejected, but both quoted-string scanners
+  // used to swallow that text and report one generic message, which made the
+  // detailed list in Section 13 of the spec unreachable.
+  const char* cases[][2] = {
+    {"s: \"\\q\"\n",              "\\q"},
+    {"s: \"\\x2\"\n",             "\\x"},
+    {"s: \"\\xZZ\"\n",            "\\x"},
+    {"s: \"\\u12\"\n",            "\\u/\\U"},
+    {"s: \"\\u{110000}\"\n",      "out of range"},
+    {"s: \"\\u{}\"\n",            "\\u{...}"},
+    {"s: \"\\u{41\"\n",           "unterminated \\u{...}"},
+  };
+  for (const auto& c : cases) {
+    asvJSON j;
+    ASSERT(!j.fromUDE(c[0]));
+    std::string err = j.lastError;
+    ASSERT_MSG(err.find(c[1]) != std::string::npos, err);
+    // The position is still reported, so the message keeps its "at line N".
+    ASSERT_MSG(err.find("at line 1") != std::string::npos, err);
+  }
+  // The !regex raw scan reports the same way.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: !regex \"\\q\"\n"));
+    std::string err = j.lastError;
+    ASSERT_MSG(err.find("\\q") != std::string::npos, err);
+    ASSERT_MSG(err.find("at line 1") != std::string::npos, err);
+  }
+  // An over-long string is a length failure, not a bad escape: it must not be
+  // relabelled as one.
+  {
+    asvJSON j;
+    std::string in = "s: \"";
+    in.append(12 * 1024 * 1024, 'a');
+    in += "\"\n";
+    ASSERT(!j.fromUDE(in));
+    ASSERT(std::string(j.lastError).find("string too long") != std::string::npos);
+  }
+}
+
+TEST(testUDEBlockScalarContentMustBeIndented) {
+  // A first content line that is not indented past the header belongs to the
+  // document, not to the scalar. Reading it as content set baseIndent to 0 and
+  // swallowed the following top-level entry, silently losing a key.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |\nnext: 1\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+    ASSERT(j.get("next") != nullptr);
+    ASSERT_EQ(j.get("next")->num, int64_t(1));
+  }
+  {
+    // Chomping indicators do not change that.
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |+\nnext: 1\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+    ASSERT(j.get("next") != nullptr);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |-\nnext: 1"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+    ASSERT(j.get("next") != nullptr);
+  }
+  {
+    // Blank lines are content, so a leading blank is still kept -- clip then
+    // guarantees the final break.
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |\n\nnext: 1\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string("\n"));
+    ASSERT(j.get("next") != nullptr);
+  }
+  {
+    // A block of nothing but blank lines has a final line break to keep.
+    asvJSON j, y;
+    ASSERT(j.fromUDE("key: |\n\n\n"));
+    ASSERT(y.fromYAML("key: |\n\n\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string("\n"));
+    ASSERT_EQ(y.get("key")->str_data, j.get("key")->str_data);
+  }
+  {
+    // A header with no body at all has no lines, so clip has nothing to keep.
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+  }
+  {
+    // The floor is the header line's own indent, not column 0.
+    asvJSON j;
+    ASSERT(j.fromUDE("  key: |\n  next: 1\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+    ASSERT(j.get("next") != nullptr);
+    asvJSON j2;
+    ASSERT(j2.fromUDE("  key: |\n    x\n"));
+    ASSERT_EQ(j2.get("key")->str_data, std::string("x\n"));
+  }
+  {
+    // An explicit indent indicator is bound by the same floor.
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |0\nnext: 1\n"));
+    ASSERT_EQ(j.get("key")->str_data, std::string(""));
+    ASSERT(j.get("next") != nullptr);
+  }
+  {
+    // Unindented content is a syntax error once it is not a key, in UDE and in
+    // YAML alike.
+    asvJSON j, y;
+    ASSERT(!j.fromUDE("key: |\nnotakey\n"));
+    ASSERT(!y.fromYAML("key: |\nnotakey\n"));
+  }
+}
+
+TEST(testUDEUnterminatedBlockCommentAfterTag) {
+  // An unclosed block comment is a syntax error wherever it appears. The
+  // end-of-line lookahead used to slide to EOF and answer "yes, the line ends
+  // here", so "!null /*" was reported as a missing tag value and a bare "!null"
+  // was reported as plain null.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("k: !null /* unterminated\n"));
+    std::string err = j.lastError;
+    ASSERT_MSG(err.find("unterminated block comment") != std::string::npos, err);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("k: !null /*\n"));
+    ASSERT(std::string(j.lastError).find("unterminated block comment") != std::string::npos);
+  }
+  {
+    // A closed one is still just a comment.
+    asvJSON j;
+    ASSERT(j.fromUDE("k: !null /* c */\nl: 2\n"));
+    ASSERT(j.get("k")->type == asvJSONValue::NULL_VAL);
+    ASSERT_EQ(j.get("l")->num, int64_t(2));
+  }
+  {
+    // The comment may also open a line, as skipOneComment() already allowed.
+    asvJSON j;
+    ASSERT(j.fromUDE("k: !null\n/* c */ l: 2\n"));
+    ASSERT_EQ(j.get("l")->num, int64_t(2));
+  }
 }
 
 TEST(testUDEUnpairedSurrogatesToReplacementChar) {
@@ -19054,9 +19251,10 @@ TEST(testUDEStringLengthLimit) {
     ASSERT(std::string(j.lastError).find("string too long") != std::string::npos);
   }
   {
-    // A block scalar is bounded too.
+    // A block scalar is bounded too. The content has to be indented deeper
+    // than the header line, otherwise it is not part of the scalar at all.
     asvJSON j;
-    std::string in = "s: |\n";
+    std::string in = "s: |\n  ";
     in.append(12 * kMiB, 'a');
     in += "\n";
     ASSERT(!j.fromUDE(in));
@@ -24216,6 +24414,10 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEBlockScalarChompMatchesYAML);
 	RUN(testUDEBareNullTag);
 	RUN(testUDERegexPipeRoundTrip);
+	RUN(testUDERegexUnterminatedSingleQuotedBody);
+	RUN(testUDEEscapeErrorNamesTheOffendingEscape);
+	RUN(testUDEBlockScalarContentMustBeIndented);
+	RUN(testUDEUnterminatedBlockCommentAfterTag);
 	RUN(testUDEUnpairedSurrogatesToReplacementChar);
 	RUN(testUDETagNameValidation);
 	RUN(testUDEExtTypeRange);

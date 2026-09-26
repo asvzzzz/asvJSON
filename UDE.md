@@ -152,7 +152,7 @@ key: >-
 Chomping indicators:
 * `+`  -  keep all trailing newlines, including the line break that ends the last content line.
 * `-`  -  strip all trailing newlines.
-* none  -  clip: keep exactly one trailing newline, and exactly one only if the scalar is non-empty. A block scalar with no content at all (immediately followed by a less-indented or non-indented line) is the empty string, not `"\n"`.
+* none  -  clip: keep exactly one trailing newline. The guarantee is keyed on the block having a body at all, not on that body being non-empty text, so a block of nothing but blank lines is `"\n"` and not `""`. A header with no body whatsoever  -  immediately followed by end of file, or by a line that is not more indented than the header  -  is the empty string.
 
 The encoder picks the indicator from the value it is writing: a value with no trailing newline becomes `|-`, a value with exactly one becomes `|` (the default), and a value with two or more becomes `|+`.
 
@@ -167,6 +167,17 @@ fewer leading spaces terminates the scalar. Empty lines are **part of the
 content** (paragraph breaks) and never terminate the scalar by themselves; they
 are preserved, and the default (clip) chomping removes exactly one trailing
 newline.
+
+The base indentation is not free: the first non-empty line of the body must be
+indented **deeper than the line carrying the header**, which is what keeps a
+scalar from reaching out of its own value. `key: |\nnext: 1` is therefore the
+empty string for `key` plus a separate `next: 1` key, not the text
+`"next: 1\n"`. Taking the first non-empty line as the base unconditionally
+would set the base to column 0, let a following top-level entry pass the
+"dedent" test, and swallow it as content, silently losing a key. The floor is
+the header line's own indentation, not column 0, so an indented key keeps an
+indented body. An explicit indentation indicator is bound by the same floor.
+Blank lines may still precede the body: they are content, not indentation.
 
 Tabs (Section 12): a tab is not allowed in the indentation margin of a block
 scalar  -  the margin must consist of spaces only (YAML rule). A tab after the
@@ -234,6 +245,23 @@ The `__REGEX__` marker is what makes the canonical form unambiguous. A body **wi
 | `^(a\|b)$` | (none) | `__REGEX__^(a\|b)$\|\|` |
 | `a\|` | (none) | `__REGEX__a\|\|\|` |
 | `a` | `i` | `__REGEX__a\|i\|` |
+
+The canonical split takes the **first** raw `|` as the separator and the **last**
+as the mandatory terminator, which is exactly why a literal pipe has to be
+written as an escape: it is what guarantees the first raw `|` is the separator
+and never part of a field.
+
+**Quoting style.** The canonical marker is honoured in either quoting style:
+`!regex '__REGEX__abc|i|'` reads the same as its double-quoted twin, and the
+fields are then decoded with the rules of the style actually written (only a
+double-quoted body knows `\u007C`, `\n` and the rest; a single-quoted one knows
+only the `''` doubling). The consequence to keep in mind: because a
+single-quoted body has no `\u007C` escape, **a literal pipe in a pattern is not
+representable in single quotes**. Such a body falls back to the historical
+last-`|` rule and reads as options, e.g. `!regex 'a|b'` is pattern `a`, options
+`b`  -  the same reading an unmarked double-quoted body gets. Use the
+double-quoted canonical form for a pattern that contains a pipe. The encoder
+always writes the double-quoted form.
 
 > **Note on `!!value`:** UDE does **not** support the YAML `!!value` / `!!yaml` core-schema tags. UDE tags are always single-token `!name` forms or verbatim `!<uri>` forms (Section 8.1). The absence of `!!value` is intentional and is **not** a specification discrepancy.
 
@@ -329,8 +357,9 @@ UDE parsing is fail-fast: the parser reports a problem by throwing a C++ excepti
 The following conditions raise an error (non-exhaustive; messages are verbatim):
 
 * **Syntax / structure**  -  `UDE: expected ':' after key ...`, `UDE: expected key at line N`, `UDE: expected value at line N`, `UDE: unterminated object/array/string/single-quoted string/tag URI/block comment at line N`, `UDE: unexpected top-level collection at line N`, `UDE: trailing content after block scalar`, `UDE: trailing content after top-level collection`.
+* **Comments**  -  `UDE: unterminated block comment at line N` is raised wherever an unclosed `/*` appears, including inside the lookahead that decides whether a tag is followed by a value. Answering "the line ends here" for an unclosed comment would turn the real fault into a misleading `UDE: !null requires a value` (or a silent plain `null` for a bare `!null`).
 * **Block scalar**  -  `UDE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
-* **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid \u{...} escape in string`, `UDE: invalid escape sequence in string at line N`. The first group is raised by the escape decoder itself and reaches the caller as a `std::runtime_error` that the parser converts to `asvJSONError`; the last message is the parser's own, raised when it rejects an escape whose text is not a valid sequence at all.
+* **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid \u{...} escape in string`, `UDE: invalid code point in string`, `UDE: invalid escape sequence \<c> in string`, `UDE: invalid escape at end of string`. These are raised by the escape decoder, which names the escape it rejected; the parser that called it appends ` at line <N>` and re-throws it as an `asvJSONError`, so the decoder's text reaches the user intact. A length failure (`UDE: string too long`, Section 12) is raised by the string factory, deliberately outside that wrapper, so it is never relabelled as a bad escape.
 * **Anchors / aliases**  -  `UDE: undefined alias *<name>`, `UDE: cyclic reference detected for alias *<name>`, `UDE: anchor resolution depth exceeded` (depth > 100), `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
 * **Duplicate keys**  -  `UDE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
 * **Strict mode**  -  `UDE: strict mode requires all keys to be quoted (key: ...)`, `UDE: strict mode requires quoting value: <tok>`, `UDE: missing value after ':' at line N`.
@@ -494,6 +523,12 @@ INDENTED_TEXT     ::= (SPACES* TEXT_LINE NEWLINE)* SPACES* TEXT_LINE
 # (paragraph breaks) and never terminate the scalar by themselves
 # (Section 6); a trailing blank line supplies the single line break that clip
 # chomping keeps.
+# Floor: the first non-empty line must be indented deeper than the header line
+# itself, so a body cannot reach out of its own value ('key: |' followed by
+# 'next: 1' is an empty scalar plus a separate key). An explicit
+# INDENT_DIGIT is bound by the same floor. Blank lines may precede the body.
+# Clip: the trailing break is guaranteed whenever the block had a body at all,
+# including a body of only blank lines; only a header with no body yields "".
 # Example:
 #   key: |
 #     alpha

@@ -425,20 +425,28 @@ private:
   // udeUnescape collapses an escaped pipe into a bare one. Empty for any other
   // tag, which then falls back to splitting the decoded text.
   std::string regexRaw_;
+  // Whether regexRaw_ came from a single-quoted body, so applyTag decodes the
+  // split fields with the matching escape rules.
+  bool regexRawSingle_ = false;
 
   // "pat|opts|" -- the first raw '|' separates the fields and the last one is a
   // mandatory terminator, so a field may itself end in a pipe and an empty
   // options field stays distinguishable. Only raw text is inspected, so a
-  // "\u007C" inside a field is never read as a separator.
-  static void udeSplitCanonicalRegex(std::string_view raw, std::string& pattern, std::string& opts) {
+  // "\u007C" inside a field is never read as a separator. `singleQuoted` picks
+  // the field unescaper: a single-quoted body knows only the '' doubling, so
+  // decoding it with the double-quoted rules would leave '' in the pattern.
+  static void udeSplitCanonicalRegex(std::string_view raw, bool singleQuoted, std::string& pattern, std::string& opts) {
+    auto dec = [singleQuoted](std::string_view field) {
+      return singleQuoted ? udeUnescapeSingle(field) : udeUnescape(field);
+    };
     size_t term = raw.rfind('|');
-    if (term == std::string_view::npos) { pattern = udeUnescape(raw); return; }
+    if (term == std::string_view::npos) { pattern = dec(raw); return; }
     size_t sep = raw.find('|');
     if (sep == std::string_view::npos || sep >= term) {
-      pattern = udeUnescape(raw.substr(0, term));
+      pattern = dec(raw.substr(0, term));
     } else {
-      pattern = udeUnescape(raw.substr(0, sep));
-      opts = udeUnescape(raw.substr(sep + 1, term - sep - 1));
+      pattern = dec(raw.substr(0, sep));
+      opts = dec(raw.substr(sep + 1, term - sep - 1));
     }
   }
 
@@ -514,9 +522,20 @@ private:
         return false;
       }
       if (text_[i] == '/' && i + 1 < text_.size() && text_[i + 1] == '*') {
-        i += 2;
-        while (i + 1 < text_.size() && !(text_[i] == '*' && text_[i + 1] == '/')) i++;
-        i += 2;
+        // An unclosed block comment is a syntax error, not the end of the
+        // line: skipOneComment() throws for the same input, and answering
+        // "yes, the line ends here" would report a missing tag value (or a
+        // plain null) for a document whose real fault is the comment.
+        size_t startLine = lineNum_;
+        size_t j = i + 2;
+        bool closed = false;
+        while (j + 1 < text_.size()) {
+          if (text_[j] == '*' && text_[j + 1] == '/') { closed = true; break; }
+          j++;
+        }
+        if (!closed)
+          throw asvJSONError("UDE: unterminated block comment at line " + std::to_string(startLine));
+        i = j + 2;
         continue;
       }
       return false;
@@ -777,33 +796,45 @@ private:
     std::string decoded;
     try {
       decoded = udeUnescape(raw);
-    } catch (const std::exception&) {
-      throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
+    } catch (const std::exception& e) {
+      // udeUnescape already names the offending escape ("UDE: invalid \x
+      // escape in string", ...). Keep that text and only add the position:
+      // collapsing every failure into one generic message would make the
+      // detailed list in Section 13 unreachable and leave the user guessing
+      // which escape was wrong.
+      throw asvJSONError(std::string(e.what()) + " at line " + std::to_string(lineNum_));
     }
     // Outside the try: a length failure must not be reported as a bad escape.
     return makeUdeString(std::move(decoded));
   }
 
-  // Scan a double-quoted string WITHOUT decoding it, returning the raw token
-  // body (between the quotes, escapes intact) and leaving pos_ after the
-  // closing quote. Used by !regex, which must find the pattern/options
-  // separator before escape processing turns a \u007C inside the pattern into
-  // a raw '|' indistinguishable from the separator.
-  std::string_view scanRawQuotedString() {
-    pos_++; // consume '"'
+  // Scan a quoted string WITHOUT decoding it, returning the raw token body
+  // (between the quotes, escapes intact) and leaving pos_ after the closing
+  // quote. Used by !regex, which must find the pattern/options separator before
+  // escape processing turns a \u007C inside the pattern into a raw '|'
+  // indistinguishable from the separator. `q` is the opening quote: a
+  // double-quoted body carries backslash escapes, a single-quoted one only the
+  // '' doubling.
+  std::string_view scanRawQuotedString(char q) {
+    pos_++; // consume the opening quote
     size_t start = pos_;
     bool escaped = false;
     while (!eof()) {
       char c = text_[pos_];
-      if (escaped) { escaped = false; pos_++; continue; }
-      if (c == '\\') { escaped = true; pos_++; continue; }
-      if (c == '"') break;
+      if (q == '"') {
+        if (escaped) { escaped = false; pos_++; continue; }
+        if (c == '\\') { escaped = true; pos_++; continue; }
+      } else if (c == '\'') {
+        // '' is an escaped single quote, otherwise this closes the string.
+        if (pos_ + 1 < text_.size() && text_[pos_ + 1] == '\'') { pos_ += 2; continue; }
+      }
+      if (c == q) break;
       if (c == '\n') lineNum_++;
       pos_++;
     }
-    if (eof()) throw asvJSONError("UDE: unterminated string at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError(std::string("UDE: unterminated ") + (q == '"' ? "" : "single-") + "quoted string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
-    pos_++; // consume '"'
+    pos_++; // consume the closing quote
     return raw;
   }
 
@@ -878,7 +909,23 @@ private:
     return obj;
   }
 
+  // Leading-space count of the line the cursor is on, i.e. the indentation of
+  // the line that introduced a block scalar header.
+  size_t currentLineIndent() const {
+    size_t ls = pos_;
+    while (ls > 0 && text_[ls - 1] != '\n') ls--;
+    size_t n = 0;
+    while (ls + n < pos_ && text_[ls + n] == ' ') n++;
+    return n;
+  }
+
   std::unique_ptr<asvJSONValue> parseBlockScalar() {
+    // Content must be indented deeper than the line carrying the header, so
+    // "key: |\nnext: 1" yields an empty scalar and a separate "next" key. Without
+    // this floor the first non-blank line sets baseIndent to 0, the following
+    // top-level entry is swallowed as content, and the document silently loses
+    // a key. Blank lines may still precede the content (they are content).
+    const size_t parentIndent = currentLineIndent();
     char indicator = text_[pos_++]; // '|' or '>'
     int explicitIndent = -1;
     char chomp = 0;
@@ -922,13 +969,14 @@ private:
 
       if (baseIndent == static_cast<size_t>(-1)) {
         if (!blank) {
+          if (indent <= parentIndent) break; // not part of this scalar
           baseIndent = indent;
           content.emplace_back(line.substr(indent));
         } else {
           content.emplace_back(""); // leading blank line is preserved until the base indent is known
         }
       } else if (!blank) {
-        if (indent < baseIndent) break; // dedent terminates the scalar
+        if (indent < baseIndent || indent <= parentIndent) break; // dedent terminates the scalar
         content.emplace_back(std::string(line.substr(baseIndent < line.size() ? baseIndent : line.size())));
       } else {
         // Empty lines are part of the block scalar content (paragraph breaks).
@@ -989,9 +1037,13 @@ private:
     } else {
       // Clip is a guarantee, not a maximum: trailing newlines are stripped and
       // exactly one is put back, so "x\ny" gains the break and the same document
-      // means the same thing here and in a YAML parser.
+      // means the same thing here and in a YAML parser. The guarantee is keyed
+      // on the source having had a body at all, not on `out` being non-empty:
+      // a block of nothing but blank lines still has a final line break to keep
+      // ("key: |\n\n" is "\n", not ""). Only a scalar with no lines at all -- the
+      // header at end of file, or a first content line that dedents -- has none.
       while (!out.empty() && out.back() == '\n') out.pop_back();
-      if (!out.empty()) out += '\n';
+      if (!content.empty()) out += '\n';
     }
 
     return makeUdeString(std::move(out));
@@ -1216,7 +1268,7 @@ private:
       } else {
         std::string_view raw(regexRaw_);
         if (raw.compare(0, kUdeRegexMarker.size(), kUdeRegexMarker) == 0)
-          udeSplitCanonicalRegex(raw.substr(kUdeRegexMarker.size()), pattern, opts);
+          udeSplitCanonicalRegex(raw.substr(kUdeRegexMarker.size()), regexRawSingle_, pattern, opts);
         else
           udeSplitLegacyRegex(val->str_data, pattern, opts);
       }
@@ -1344,19 +1396,21 @@ private:
     }
     // !regex reads the RAW token body: the pattern/options separator has to be
     // found before escape processing, otherwise an escaped pipe inside the
-    // pattern is indistinguishable from the separator. Only a double-quoted
-    // token can carry escapes, so any other value form uses the decoded-text
-    // fallback in applyTag.
+    // pattern is indistinguishable from the separator. Both quoting styles are
+    // scanned so that the canonical __REGEX__ marker is honoured in either one;
+    // any other value form uses the decoded-text fallback in applyTag.
     regexRaw_.clear();
-    if (tag == "regex" && !eof() && peek() == '"') {
-      std::string_view raw = scanRawQuotedString();
+    if (tag == "regex" && !eof() && (peek() == '"' || peek() == '\'')) {
+      char q = peek();
+      std::string_view raw = scanRawQuotedString(q);
       regexRaw_.assign(raw.data(), raw.size());
+      regexRawSingle_ = (q == '\'');
       std::string decoded;
       try {
-        decoded = udeUnescape(raw);
-      } catch (const std::exception&) {
+        decoded = (q == '"') ? udeUnescape(raw) : udeUnescapeSingle(raw);
+      } catch (const std::exception& e) {
         regexRaw_.clear();
-        throw asvJSONError("UDE: invalid escape sequence in string at line " + std::to_string(lineNum_));
+        throw asvJSONError(std::string(e.what()) + " at line " + std::to_string(lineNum_));
       }
       auto val = makeUdeString(std::move(decoded));
       val = applyTag(tag, std::move(val));
