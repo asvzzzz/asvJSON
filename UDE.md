@@ -158,6 +158,19 @@ The encoder picks the indicator from the value it is writing: a value with no tr
 
 An optional explicit indentation indicator (`|2`, `>-3`) overrides the auto-detected base indentation. The digit comes **before** the chomping indicator and is exactly one digit, so `|2-` is valid and `|+2` is not -  a reversed order is a header error, not a silently accepted spelling.
 
+The digit is **absolute**, not relative to the header: it names the column at
+which the body starts, counted from the beginning of the line. So `key: |2`
+takes a body indented by exactly 2 spaces, and `    key: |2` still takes a body
+indented by exactly 2  -  the four extra spaces of the header line are not
+added to it, and a body indented 6 spaces keeps the remaining 4 as value
+prefix. Note that a conformant YAML reader counts the indicator *relative to
+the parent node*, so it would read that last document as `data` where UDE reads
+`    data`. The two agree only when the header sits at column 0, which is the
+common case and the only one the encoder produces: the encoder never emits a
+digit at all (it lets the base indent be auto-detected), so no UDE round-trip
+depends on this reading. Prefer the implicit form when the value has to be
+portable between UDE and YAML.
+
 `|` and `>` fold identically as far as chomping is concerned, so for the same body text they yield the same trailing breaks; they differ only in how the body's interior line breaks are treated (`>` turns a lone break between two non-empty lines into a space and keeps a run of k blank lines as k breaks).
 
 Block scalar termination: the base indentation is the number of leading spaces
@@ -178,6 +191,13 @@ would set the base to column 0, let a following top-level entry pass the
 the header line's own indentation, not column 0, so an indented key keeps an
 indented body. An explicit indentation indicator is bound by the same floor.
 Blank lines may still precede the body: they are content, not indentation.
+
+The floor counts **spaces** on the header line. A header indented with a tab
+has no structural indentation at all in UDE (Section 12: tabs are never
+structural), so its floor is column 0 and any indented body is accepted. This is
+not a hole in the tab rule: that rule governs the body's indentation margin,
+which is checked separately and does reject a tab there
+(`UDE: tab used as indentation in block scalar at line N`).
 
 Tabs (Section 12): a tab is not allowed in the indentation margin of a block
 scalar  -  the margin must consist of spaces only (YAML rule). A tab after the
@@ -238,12 +258,12 @@ The pattern/options separator has to be located in the **raw** token text, befor
 !regex "__REGEX__^(a\u007Cb)$|i|"     # pattern ^(a|b)$, options i
 ```
 
-The `__REGEX__` marker is what makes the canonical form unambiguous. A body **without** the marker is the historical form and keeps its old meaning  -  the decoded text split at the **last** `|`  -  so an existing `!regex "a|b|c"` still means pattern `a|b` with options `c` instead of being read as canonical and silently truncated. A pattern that needs a literal pipe is emitted as `\u007C`, so all of these round-trip exactly:
+The `__REGEX__` marker is what makes the canonical form unambiguous. A body **without** the marker is the historical form and keeps its old meaning  -  the decoded text split at the **last** `|`  -  so an existing `!regex "a|b|c"` still means pattern `a|b` with options `c` instead of being read as canonical and silently truncated. A pattern that needs a literal pipe is emitted as `\u007C`, and the last column below is literally what the encoder writes; the bare `|` characters in it are the separator and the terminator, not part of a field:
 
 | Pattern | Options | Emitted body |
 |---------|---------|--------------|
-| `^(a\|b)$` | (none) | `__REGEX__^(a\|b)$\|\|` |
-| `a\|` | (none) | `__REGEX__a\|\|\|` |
+| `^(a\|b)$` | (none) | `__REGEX__^(a\u007Cb)$\|\|` |
+| `a\|` | (none) | `__REGEX__a\u007C\|\|` |
 | `a` | `i` | `__REGEX__a\|i\|` |
 
 The canonical split takes the **first** raw `|` as the separator and the **last**
@@ -340,7 +360,7 @@ The parser enforces documented resource limits:
 | Anchor resolution depth | 100 | Alias chains resolving through more than 100 levels are rejected (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
 | Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser. |
-| String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. |
+| String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
 | Object/array size | 1,000,000 entries | Shared core limit. |
 
 Tabs are **not** structural indentation anywhere in UDE (YAML rule). They are

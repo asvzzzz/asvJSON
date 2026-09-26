@@ -18891,6 +18891,24 @@ TEST(testUDERegexPipeRoundTrip) {
     j.setValue("r", asvJSONValue::makeRegex("a|b", "i"));
     ASSERT(j.toUDE().find("!regex \"__REGEX__a\\u007Cb|i|\"") != std::string::npos);
   }
+  // The emitted-body column of the table in Section 8 is what the encoder
+  // writes, escaped-pipe notation included: a pipe inside a pattern is the
+  // \u007C escape, while the bare ones are the separator and the terminator.
+  {
+    struct Row { const char* pattern; const char* opts; const char* body; };
+    const Row rows[] = {
+      {"^(a|b)$", "",  "__REGEX__^(a\\u007Cb)$||"},
+      {"a|",      "",  "__REGEX__a\\u007C||"},
+      {"a",       "i", "__REGEX__a|i|"},
+    };
+    for (const auto& r : rows) {
+      asvJSON j;
+      j.setValue("r", asvJSONValue::makeRegex(r.pattern, r.opts));
+      std::string out = j.toUDE();
+      std::string want = std::string("!regex \"") + r.body + "\"";
+      ASSERT_MSG(out.find(want) != std::string::npos, want + " not in " + out);
+    }
+  }
   // The historical body (no marker) still splits at the LAST '|', so an
   // existing document keeps the meaning it had instead of being read as
   // canonical and silently truncated.
@@ -18956,6 +18974,131 @@ TEST(testUDERegexUnterminatedSingleQuotedBody) {
   asvJSON j;
   ASSERT(!j.fromUDE("r: !regex 'abc\n"));
   ASSERT(std::string(j.lastError).find("unterminated") != std::string::npos);
+}
+
+TEST(testUDEUnterminatedStringMessagesAgree) {
+  // The raw scan and the plain scanners are two entry points to the same
+  // diagnostic, so they must not disagree on its wording: a double-quoted body
+  // says "unterminated string", not "unterminated quoted string" (Section 13
+  // lists the two forms as "string" and "single-quoted string").
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: \"abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated string at line 2");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: 'abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated single-quoted string at line 2");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: !string \"abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated string at line 2");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: !string 'abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated single-quoted string at line 2");
+  }
+  // The !regex raw scan shares the plain scanners' wording.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: !regex \"abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated string at line 2");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("s: !regex 'abc\n"));
+    ASSERT_EQ(std::string(j.lastError), "UDE: unterminated single-quoted string at line 2");
+  }
+}
+
+TEST(testUDEExplicitIndentDigitIsAbsolute) {
+  // Section 6: the digit names the body column counted from the start of the
+  // line, it is not added to the header line's own indentation.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |2\n  data\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "data\n");
+  }
+  {
+    // Header at column 4, digit 2: the body still starts at column 2, so the
+    // four extra spaces stay in the value.
+    asvJSON j;
+    ASSERT(j.fromUDE("    key: |2\n      data\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "    data\n");
+  }
+  {
+    // A body at column 2 is then at or below the header, so it is not part of
+    // the scalar at all.
+    asvJSON j;
+    ASSERT(!j.fromUDE("    key: |2\n  data\n"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |4\n    data\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "data\n");
+  }
+  // The digit obeys the indentation floor like an auto-detected base does.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("key: |0\nnext: 1\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "");
+    ASSERT(j.get("next") != nullptr);
+  }
+}
+
+TEST(testUDEBlockScalarFloorCountsSpacesOnly) {
+  // Tabs are never structural in UDE, so a tab-indented header has floor 0 and
+  // an indented body is fine. The tab rule still governs the body's own
+  // indentation margin and rejects a tab there.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\tkey: |\n  data\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "data\n");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("\tkey: |\n\t data\n"));
+    ASSERT(std::string(j.lastError).find("tab used as indentation") != std::string::npos);
+  }
+  // A space-indented header keeps its floor.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("  key: |\n  data: 1\n"));
+    ASSERT_EQ(std::string(j.getString("key")), "");
+    ASSERT(j.get("data") != nullptr);
+  }
+}
+
+TEST(testUDEStringTagConversionsStillProduceStrings) {
+  // !string on a non-string builds a fresh text value. Those go through the
+  // checked string factory so a null result could never escape as a null
+  // pointer; the buffers are far below the limit, so the checks never fire.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("n: !string 42\nd: !string 1.5\nb: !string true\n"));
+    ASSERT_EQ(std::string(j.getString("n")), "42");
+    ASSERT_EQ(std::string(j.getString("d")), "1.5");
+    ASSERT_EQ(std::string(j.getString("b")), "true");
+    ASSERT(j.get("n")->type == asvJSONValue::STRING);
+    ASSERT(j.get("d")->type == asvJSONValue::STRING);
+    ASSERT(j.get("b")->type == asvJSONValue::STRING);
+  }
+  // A string value passes through untouched.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("s: !string \"abc\"\n"));
+    ASSERT_EQ(std::string(j.getString("s")), "abc");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("n: !string 42\n"));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(std::string(j2.getString("n")), "42");
+  }
 }
 
 TEST(testUDEEscapeErrorNamesTheOffendingEscape) {
@@ -24415,6 +24558,10 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEBareNullTag);
 	RUN(testUDERegexPipeRoundTrip);
 	RUN(testUDERegexUnterminatedSingleQuotedBody);
+	RUN(testUDEUnterminatedStringMessagesAgree);
+	RUN(testUDEExplicitIndentDigitIsAbsolute);
+	RUN(testUDEBlockScalarFloorCountsSpacesOnly);
+	RUN(testUDEStringTagConversionsStillProduceStrings);
 	RUN(testUDEEscapeErrorNamesTheOffendingEscape);
 	RUN(testUDEBlockScalarContentMustBeIndented);
 	RUN(testUDEUnterminatedBlockCommentAfterTag);

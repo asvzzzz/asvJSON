@@ -832,7 +832,7 @@ private:
       if (c == '\n') lineNum_++;
       pos_++;
     }
-    if (eof()) throw asvJSONError(std::string("UDE: unterminated ") + (q == '"' ? "" : "single-") + "quoted string at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError(std::string("UDE: unterminated ") + (q == '"' ? "" : "single-quoted ") + "string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume the closing quote
     return raw;
@@ -1157,19 +1157,26 @@ private:
     }
     if (tag == "string") {
       if (val->type == asvJSONValue::STRING) return val;
+      // The conversions below go through the checked factory rather than
+      // makeStringView() directly: a null result has to become a reported
+      // error, not a null unique_ptr handed back to the caller. None of these
+      // buffers can reach the limit today (an int64 is at most 20 digits, a
+      // double at most ~24), so the check is a guard against a future change
+      // rather than a reachable limit -- but it keeps the Section 12 promise
+      // local instead of resting on "the value was already checked upstream".
       if (val->type == asvJSONValue::INT) {
         char buf[32];
         auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val->num);
         if (ec != std::errc()) throw asvJSONError("UDE: !string conversion failed");
-        return asvJSONValue::makeStringView(std::string_view(buf, ptr - buf));
+        return makeUdeString(std::string(buf, ptr - buf));
       }
       if (val->type == asvJSONValue::DOUBLE) {
         std::string tmp;
         fmtDoubleVal(val->dbl, tmp);
-        return asvJSONValue::makeStringView(tmp);
+        return makeUdeString(std::move(tmp));
       }
       if (val->type == asvJSONValue::BOOL_VAL) {
-        return asvJSONValue::makeStringView(val->flag ? "true" : "false");
+        return makeUdeString(std::string(val->flag ? "true" : "false"));
       }
       throw asvJSONError("UDE: !string cannot convert this value");
     }
