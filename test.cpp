@@ -17130,6 +17130,27 @@ TEST(testFromBencode) {
     ASSERT(!j.fromBencode(std::string("i99999999999999999999999e")));
     ASSERT(!j.fromBencode(std::string("")));
   }
+  // The reader is permissive, as most BitTorrent clients are: key order is not
+  // enforced and duplicate keys are last-wins. (The encoder still always writes
+  // sorted output, so a round-trip through it is canonical.)
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("d1:bi1e1:ai2ee")));  // b before a
+    ASSERT_EQ(j.getRoot()->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->get("a")->getInt(), int64_t(2));
+    asvJSON k;
+    ASSERT(k.fromBencode(std::string("d1:ai1e1:ai2ee")));  // duplicate key
+    ASSERT_EQ(k.getRoot()->size(), size_t(1));
+    ASSERT_EQ(k.getRoot()->get("a")->getInt(), int64_t(2));
+    ASSERT_EQ(k.toBencode(), std::string("d1:ai2ee"));    // re-encoded sorted
+  }
+  // An empty dictionary is a valid document, and survives a round-trip.
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("de")));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::OBJECT);
+    ASSERT_EQ(j.toBencode(), std::string("de"));
+  }
 }
 
 TEST(testToBencode) {
@@ -17233,6 +17254,85 @@ TEST(testBencodeRoundTrip) {
     ASSERT(j.fromAny(in));
     ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
     ASSERT(j.getRoot()->get("pieces")->type == asvJSONValue::BINARY);
+  }
+  // The `d<digits>:` signature must scan the whole key length. A first key of 10
+  // bytes or more is normal in real .torrent files ("announce-list" is 13), and
+  // the old one-digit probe made those fall through to JavaProp, which returned
+  // {"d13":"announce-list..."} -- a silent mis-parse, not just a false negative.
+  {
+    const char* keys[] = {"a", "info", "announce", "abcdefghi", "abcdefghij",
+                          "announce-list", "creation-date-x", "a-long-first-key-here"};
+    for (const char* k : keys) {
+      std::string in = std::string("d") + std::to_string(std::string(k).size()) + ":" + k + "1:xe";
+      asvJSON j;
+      ASSERT(j.fromAny(in));
+      ASSERT(j.getFormatType() == FormatType::Bencode);
+      ASSERT_EQ(j.getRoot()->size(), size_t(1));
+      ASSERT(j.getRoot()->get(k) != nullptr);
+    }
+    // Same in the binary path, where a real torrent's payload is not valid UTF-8
+    // and the input therefore never reaches the text detectors at all.
+    for (const char* k : {"info", "announce-list", "piece-length"}) {
+      std::string in = std::string("d") + std::to_string(std::string(k).size()) + ":" + k + "20:";
+      for (int i = 0; i < 20; i++) in.push_back((char)(i * 7));
+      in += 'e';
+      asvJSON j;
+      ASSERT(j.fromAny(in));
+      ASSERT(j.getFormatType() == FormatType::Bencode);
+      ASSERT(j.getRoot()->get(k)->type == asvJSONValue::BINARY);
+    }
+    // A realistic multi-tracker torrent whose first key is 13 bytes: the
+    // reported case. Built by concatenation so the byte counts cannot be wrong.
+    {
+      auto bs = [](const std::string& s) { return std::to_string(s.size()) + ":" + s; };
+      std::string doc = "d";
+      doc += bs("announce-list") + "l" + bs("http://tracker1/announce") + bs("http://tracker2/announce") + "e";
+      doc += bs("announce") + bs("http://tracker1/announce");
+      doc += bs("info") + "d" + bs("piece-length") + "i262144e" + bs("pieces") + "20:" + std::string(20, '\x01') + "e";
+      doc += "e";
+      asvJSON j;
+      ASSERT(j.fromAny(doc));
+      ASSERT(j.getFormatType() == FormatType::Bencode);
+      ASSERT_EQ(j.getRoot()->get("announce-list")->type, asvJSONValue::ARRAY);
+      ASSERT_EQ(j.getRoot()->get("announce-list")->arr->size(), size_t(2));
+      ASSERT_EQ(j.getRoot()->get("info")->get("piece-length")->getInt(), int64_t(262144));
+      // Re-encoding sorts the keys, so it is canonical bencode but not the input
+      // byte for byte (the input was not in sorted order). Re-encoding is
+      // idempotent, and the re-parse is equal as a document (serialize() alone
+      // would differ, since the object map keeps insertion order).
+      std::string re = j.toBencode();
+      ASSERT(re != doc);
+      asvJSON k;
+      ASSERT(k.fromBencode(re));
+      ASSERT(*k.getRoot() == *j.getRoot());
+      ASSERT_EQ(k.toBencode(), re);
+    }
+    // Still not a bencode signature: 'd' followed by a non-digit, or a digit with
+    // no ':' delimiter, must not be attempted as bencode.
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d1")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("dX:")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d:")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("i1e")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("")));
+    ASSERT(asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d0:")));
+    ASSERT(asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d100:k")));
+  }
+  // A document with no root has no bencode representation: toBencode() returns
+  // the empty string, and that empty string does not parse back. Same as
+  // toMessagePack()/toCBOR(); documented rather than thrown.
+  {
+    asvJSON empty;
+    ASSERT_EQ(empty.toBencode(), std::string(""));
+    asvJSON k;
+    ASSERT(!k.fromBencode(empty.toBencode()));
+    ASSERT(k.lastError.find("unexpected end") != std::string::npos);
+    // An explicit null root, by contrast, is encoded as an empty byte string.
+    asvJSON nul;
+    ASSERT(nul.parse("null"));
+    ASSERT_EQ(nul.toBencode(), std::string("0:"));
+    ASSERT(k.fromBencode("0:"));
+    ASSERT_EQ(k.getRoot()->type, asvJSONValue::STRING);
   }
 }
 

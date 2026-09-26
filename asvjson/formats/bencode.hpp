@@ -7,12 +7,31 @@
 //   l4:spami42ee      list
 //   d3:bar4:spam3:fooi42ee   dictionary (keys sorted as byte strings)
 //
-// Bencode has no booleans, null or floating-point values. Decoding maps
-// integers to INT, byte strings to STRING when the bytes are valid UTF-8 and
-// to BINARY otherwise, lists to ARRAY and dictionaries to OBJECT. Encoding
-// accepts INT, STRING, BINARY, ARRAY and OBJECT; any other type (and an
-// unsupported root) throws. Dictionary keys are emitted in ascending byte
-// order as the specification requires.
+// Bencode has no booleans, null or floating-point values.
+//
+// Decoding maps integers to INT, byte strings to STRING when the bytes are
+// valid UTF-8 and to BINARY otherwise, lists to ARRAY and dictionaries to
+// OBJECT.
+//
+// Encoding accepts every value type. INT, STRING, BINARY, ARRAY and OBJECT have
+// native forms; the remaining types are mapped to the closest one (lossy, and
+// spelled out in README.md; it mirrors the plist/BSON mappings):
+//   BOOL -> integer 0/1, NULL -> empty byte string, DOUBLE -> decimal text,
+//   DATETIME/TIMESTAMP -> integer seconds, OBJECTID/REGEX -> byte string,
+//   EXTENSION -> raw bytes, CUSTOM_TAG -> its payload value.
+// So converting an arbitrary document to bencode never fails on bool/null/
+// double; only a type the encoder does not know about throws.
+//
+// Dictionary keys are emitted in ascending byte order, as the specification
+// requires. On input the order is NOT checked and duplicate keys are accepted
+// with the last one winning -- a permissive reader, like most BitTorrent
+// clients. The encoder always writes sorted output, so the result is canonical
+// bencode either way.
+//
+// A document with no root at all (default-constructed or cleared) serializes to
+// the empty string: bencode has no representation for "nothing", and
+// fromBencode("") fails with "unexpected end of input". asvJSON::toMessagePack()
+// and asvJSON::toCBOR() behave the same way.
 
 #include "../core.hpp"
 
@@ -240,6 +259,8 @@ inline void asvJSONValue::toBencode(std::string& out) const {
 
 inline std::string asvJSON::toBencode() const {
   std::string out;
+  // No root: nothing to encode. Bencode has no "nothing" value, so the result
+  // is the empty string (see the note in the header comment).
   if (root) bencodeEncode(root.get(), out);
   return out;
 }
@@ -264,7 +285,16 @@ inline bool asvJSON::fromBencode(std::string_view input) {
 // Cheap signature used by fromAny() to try bencode on otherwise-binary input:
 // a dictionary whose first key is a byte string (e.g. ".torrent" files).
 inline bool bencodeLooksLikeDictionary(std::string_view s) {
-  return s.size() >= 3 && s[0] == 'd' && s[1] >= '0' && s[1] <= '9' && s[2] == ':';
+  if (s.empty() || s[0] != 'd') return false;
+  // Scan the whole key length, not just one digit: a first key of 10 bytes or
+  // more ("d13:announce-list...") is common in real .torrent files, and testing
+  // only s[2] == ':' rejected those. That was not a harmless false negative --
+  // the text path then let JavaProp claim the document and silently return
+  // {"d13":"announce-list..."}, while the binary path (real torrents, whose
+  // payload has non-UTF-8 bytes) failed to detect any format at all.
+  size_t i = 1;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+  return i > 1 && i < s.size() && s[i] == ':';
 }
 
 } // namespace asvJSONInternal

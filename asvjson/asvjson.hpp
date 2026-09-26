@@ -184,7 +184,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
       }
     }
 #ifndef ASVJSON_DISABLE_BENCODE
-    // Bencode dictionaries (".torrent" files) start with `d<digit>:`. Gated by
+    // Bencode dictionaries (".torrent" files) start with `d<digits>:`. Gated by
     // that signature so it is not attempted for arbitrary binary data.
     if (bencodeLooksLikeDictionary(input)) {
       if (fromBencode(input)) return true;
@@ -255,9 +255,11 @@ inline bool asvJSON::fromAny(std::string_view input) {
   }
 
 #ifndef ASVJSON_DISABLE_BENCODE
-  // Bencode dictionaries: strong `d<digit>:` signature. Tried before the
-  // loose YAML-like formats (GOON/TOON) which otherwise claim short,
-  // colon-heavy inputs like "d1:ai1ee" as ordinary mappings.
+  // Bencode dictionaries: `d<digits>:` signature (the whole key length is
+  // scanned, so a 10+ byte first key works). Tried before the loose YAML-like
+  // formats (GOON/TOON) which otherwise claim short, colon-heavy inputs like
+  // "d1:ai1ee" as ordinary mappings, and before JavaProp, which would read
+  // "d13:announce-list..." as the single property {"d13": "..."}.
   if (bencodeLooksLikeDictionary(s)) {
     if (fromBencode(s)) return true;
   }
