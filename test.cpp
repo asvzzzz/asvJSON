@@ -8327,8 +8327,9 @@ TEST(testTOONReviewFixes) {
 		}
 	}
 	// 3b. A bare single-line root that is a complete JSON value is taken as-is;
-	// one starting with '{' that is not JSON is a bare string, not a key:value
-	// split at the ':' inside the braces.
+	// one that is not is a bare string rather than a key:value split at the ':'
+	// inside the braces. '[' and '{' follow the same rule -- the only exception is
+	// a length-bearing header, which must reach the header branch.
 	{
 		asvJSON j;
 		ASSERT(j.fromTOON("{\"a\":1}\n"));
@@ -8338,10 +8339,45 @@ TEST(testTOONReviewFixes) {
 		ASSERT(a.fromTOON("[1,2]\n"));
 		ASSERT_EQ(a.getRoot()->type, asvJSONValue::ARRAY);
 		ASSERT_EQ(a.getRoot()->size(), size_t(2));
-		asvJSON s;
-		ASSERT(s.fromTOON("{a: 1}\n"));
-		ASSERT_EQ(s.getRoot()->type, asvJSONValue::STRING);
-		ASSERT_EQ(std::string(s.getRoot()->getString()), std::string("{a: 1}"));
+		// Non-JSON '[' and '{' roots are both kept as strings.
+		const char* strs[] = {"{a: 1", "[1,2", "{a: 1}", "[3] 1,2,3", "[1,2] junk"};
+		for (const char* s : strs) {
+			asvJSON t;
+			ASSERT(t.fromTOON(std::string_view(s)));
+			ASSERT_EQ(t.getRoot()->type, asvJSONValue::STRING);
+			asvJSON t2;
+			ASSERT(t2.fromTOON(std::string_view(t.toTOON())));
+			ASSERT_EQ(t2.serialize(), t.serialize());
+		}
+		// Headers are still headers, and a real header error still throws.
+		asvJSON hdr;
+		ASSERT(hdr.fromTOON("[3]: 1,2,3\n"));
+		ASSERT_EQ(hdr.getRoot()->size(), size_t(3));
+		asvJSON tab;
+		ASSERT(tab.fromTOON("[2]{a,b}:\n  x,1\n  y,2\n"));
+		ASSERT_EQ(tab.getRoot()->size(), size_t(2));
+		asvJSON bad;
+		ASSERT(!bad.fromTOON("[3]:\n"));
+	}
+	// 3c. Quoted inline values take the cheap escape-aware scan, not a parse:
+	// a complete quoted string passes through, an unterminated one (or one with
+	// trailing junk) is kept as a string.
+	{
+		asvJSON a;
+		ASSERT(a.fromTOON("s: \"a\\\"b\"\n"));
+		ASSERT_EQ(std::string(a.getString("s")), std::string("a\"b"));
+		asvJSON b;
+		ASSERT(b.fromTOON("s: \"abc\"   \n"));   // trailing blanks are allowed
+		ASSERT_EQ(std::string(b.getString("s")), std::string("abc"));
+		asvJSON c;
+		ASSERT(c.fromTOON("s: \"a\\\\\"\n"));
+		ASSERT_EQ(std::string(c.getString("s")), std::string("a\\"));
+		asvJSON d;
+		ASSERT(d.fromTOON("s: \"unterminated\n"));
+		ASSERT_EQ(std::string(d.getString("s")), std::string("\"unterminated"));
+		asvJSON e;
+		ASSERT(e.fromTOON("s: \"abc\"x\n"));
+		ASSERT_EQ(std::string(e.getString("s")), std::string("\"abc\"x"));
 	}
 	// 4. Whitespace-only lines count as empty for the bare-root-scalar scan.
 	{

@@ -271,23 +271,52 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
   }
 }
 
+// Cheap, allocation-free check for a '"'-leading token: the escape-aware closing
+// quote must be the last non-whitespace character. This is exactly the JSON
+// string rule, so it replaces a full parse on the hot path -- every quoted inline
+// value in a document lands here. Anything that fails is a TOON string.
+inline bool toonJsonStringIsComplete(std::string_view s) {
+  if (s.size() < 2 || s.front() != '"') return false;
+  size_t i = 1;
+  while (i < s.size()) {
+    char c = s[i];
+    if (c == '\\') { i += 2; continue; }        // skip the escaped char
+    if (c == '"') {                            // closing quote: only blanks may follow
+      for (size_t k = i + 1; k < s.size(); k++) {
+        char w = s[k];
+        if (w != ' ' && w != '\t' && w != '\r' && w != '\n') return false;
+      }
+      return true;
+    }
+    i++;
+  }
+  return false;                                 // unterminated
+}
+
 // Wraps a bare TOON string value in JSON quotes if not already a valid JSON value.
 //
 // toonIsJsonValue() only inspects the first character for '"', '{' and '[' (it has
 // to: the encoder relies on that to quote a STRING value that happens to look
 // like JSON, e.g. "{a: 1}"). So on the decode side that first-character test is
 // not enough -- "key: [1,2", "key: {a: 1}" and "key: \"unterminated" all passed
-// and were copied verbatim into the intermediate JSON, breaking it. Confirm
-// those three shapes with the JSON parser itself before passing them through;
-// anything that is not a complete JSON value is a TOON string, so it gets
-// quoted. Numbers and the bare literals are already fully checked by the
-// grammar in toonIsJsonValue and skip the extra parse.
+// and were copied verbatim into the intermediate JSON, breaking it. Numbers and
+// the bare literals are already fully covered by the grammar in
+// toonIsJsonValue, and quoted strings by toonJsonStringIsComplete, so neither
+// pays for a parse. The '{'/'[' forms do use the parser: balancing alone is not
+// enough ({a: 1} is balanced but not JSON), and they are cold anyway -- the
+// encoder emits containers through the header/list forms, never inline, so these
+// only appear in hand-written input.
 inline std::string toonJsonQuoteBare(std::string_view s) {
   if (toonIsJsonValue(s)) {
-    if (s.front() != '"' && s.front() != '{' && s.front() != '[')
-      return std::string(s);
-    asvJSON probe;
-    if (probe.parse(s)) return std::string(s);
+    const char f = s.front();
+    if (f == '"') {
+      if (toonJsonStringIsComplete(s)) return std::string(s);
+    } else if (f == '{' || f == '[') {
+      asvJSON probe;
+      if (probe.parse(s)) return std::string(s);
+    } else {
+      return std::string(s);                    // number / true / false / null
+    }
   }
   return '"' + toonJsonEscape(std::string(s)) + '"';
 }
@@ -400,28 +429,35 @@ inline std::string toonToJson(std::string_view input) {
     bool onlyScalarLine = true;
     for (size_t sli = firstNonEmpty + 1; sli < lines.size() && onlyScalarLine; sli++)
       if (!stripIndent(lines[sli]).empty()) onlyScalarLine = false;
-    // A bare "[]" is a complete value, not a length-bearing header: the header
-    // branch below needs rb > lb + 1 (at least one length digit), so a root "[]"
-    // fell through to the line loop and threw "unrecognized line 1" -- breaking
-    // the round-trip of exactly what valToToon emits for an empty root array.
-    bool bareBracket = (lb != std::string_view::npos) && firstContent.substr(lb, 2) == "[]";
-    // A single-line root that is itself a complete JSON value is taken as-is, the
-    // same way a "[]" root is. Without this a root "{a: 1}" fell through to the
-    // key:value branch below, where the first unquoted ':' *inside* the braces
-    // split it into the nonsense key "{a" and the value "1}". A "[N]:" header is
-    // unaffected -- it always carries the trailing ':' that keeps it from parsing
-    // as a bare JSON value, so "[3]: 1,2,3" still reaches the header branch.
+    // A single-line root that is itself a complete JSON value is taken as-is.
+    // This covers the "[]\n" the encoder emits for an empty root array -- the
+    // length-bearing header branch below needs rb > lb + 1, i.e. at least one
+    // length digit, so a bare "[]" used to fall through to the line loop and throw
+    // "unrecognized line 1". It also covers a root "{...}" / "[1,2]" literal.
     if (onlyScalarLine && !listForm && firstContent.size() >= 2 &&
         (firstContent[0] == '{' || firstContent[0] == '[')) {
       asvJSON probe;
       if (probe.parse(firstContent)) return std::string(firstContent);
-      // Not JSON, so not a value this format can carry structurally. A leading
-      // '{' can never be an array header, so the whole line is unambiguously a
-      // bare string -- quote it instead of letting the key:value branch split it
-      // at the ':' inside the braces (which produced the nonsense key "{a").
-      if (firstContent[0] == '{') return toonJsonQuoteBare(firstContent);
+      // Not JSON, so not a value this format can carry structurally. It may still
+      // be a length-bearing header ("[N]:" or "[N]{fields}:"), which must reach
+      // the header branch below and report its own errors. Anything else is a
+      // bare string -- the same reading the identical text already gets after a
+      // "key: " -- so a root "[1,2" and a root "{a: 1" behave alike instead of
+      // one becoming a string and the other throwing. (A malformed header such as
+      // "[3] 1,2,3" is likewise kept as a string rather than silently wrapped in
+      // an array, matching what "key: [3] 1,2,3" already does.)
+      bool headerShaped = false;
+      if (firstContent[0] == '[') {
+        size_t rb = firstContent.find(']');
+        if (rb != std::string_view::npos && rb > 1) {
+          size_t k = rb + 1;
+          while (k < firstContent.size() && (firstContent[k] == ' ' || firstContent[k] == '\t')) k++;
+          headerShaped = (k < firstContent.size()) && (firstContent[k] == ':' || firstContent[k] == '{');
+        }
+      }
+      if (!headerShaped) return toonJsonQuoteBare(firstContent);
     }
-    if (onlyScalarLine && colon == std::string_view::npos && (lb == std::string_view::npos || bareBracket) && !listForm)
+    if (onlyScalarLine && colon == std::string_view::npos && lb == std::string_view::npos && !listForm)
       return toonJsonQuoteBare(firstContent);
   }
 
