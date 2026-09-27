@@ -11870,7 +11870,7 @@ key = "value" # inline comment)")));
   {
     asvJSON j;
     ASSERT(j.fromTOML(std::string_view("a = [\"\"\"foo\\\"\"\"bar\"\"\"]")));
-    ASSERT_EQ(std::string(j.getString("a[0]")), "foo\\\"\"\"bar");
+    ASSERT_EQ(std::string(j.getString("a[0]")), "foo\"\"\"bar");
   }
   // Multiline literal string inside inline array
   {
@@ -11952,7 +11952,40 @@ key = "value" # inline comment)")));
   {
     asvJSON j;
     ASSERT(j.fromTOML(std::string_view("a = {b = \"\"\"foo\\\"\"\"bar\"\"\"}")));
-    ASSERT_EQ(std::string(j.getString("a.b")), "foo\\\"\"\"bar");
+    ASSERT_EQ(std::string(j.getString("a.b")), "foo\"\"\"bar");
+  }
+  // `\"""` yields `"""`, never a backslash plus three quotes: bare value,
+  // mid-line closer and a closer split across lines (an escaped `"""` must not
+  // be mistaken for the terminator).
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("x = \"\"\"abc\\\"\"\"def\"\"\"")));
+    ASSERT_EQ(std::string(j.getString("x")), "abc\"\"\"def");
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view("x = \"\"\"a\\\"\"\"\nb = 1\"\"\"")));
+    ASSERT_EQ(std::string(j2.getString("x")), "a\"\"\"\nb = 1");
+    asvJSON j3;
+    ASSERT(j3.fromTOML(std::string_view("x = \"\"\"\nabc\\\"\"\"\ndef\"\"\"")));
+    ASSERT_EQ(std::string(j3.getString("x")), "abc\"\"\"\ndef");
+  }
+  // An escaped `"""` with no real terminator left is still unterminated
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("x = \"\"\"a\\\"\"\"")));
+  }
+  // Escaped quote then a 4-quote run: `\"` escape + one content quote + closer
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("x = \"\"\"\\\"\"\"\"\" ")));
+    ASSERT_EQ(std::string(j.getString("x")), "\"\"");
+  }
+  // Literal multi-line strings have no escapes, so `\` never hides a `'''`
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("x = '''a\\'''b'''")));
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view("x = '''a\\'''")));
+    ASSERT_EQ(std::string(j2.getString("x")), "a\\");
   }
   // Multiline basic string inside inline table (re-affirm after array fix)
   {

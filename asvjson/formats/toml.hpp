@@ -4,7 +4,13 @@
 // Known limitations (documented, not bugs):
 // - TOML has no null type: a NULL value is silently dropped by tomlVal(), both
 //   in objects ({"a": null, "b": 1} -> b = 1) and in arrays ([1, null, 2] ->
-//   [1, 2]).
+//   [1, 2]). An object whose members are all NULL is therefore emitted as an
+//   empty table ([a] in pretty mode, a = {} in compact mode).
+// - Multi-line basic/literal strings and dotted keys are decoded but never
+//   emitted: toTOML() writes every string as a single-line basic string with
+//   escapes, and nests objects as [table] headers in pretty mode or as inline
+//   tables in compact mode (toTOML(false)). A TOML -> JSON -> TOML round-trip
+//   is one-way with respect to those three forms.
 // - BINARY and DATETIME do not round-trip: toTOML() emits them as a base64
 //   string / formatted date-time string, and fromTOML() decodes both back as
 //   STRING (they cannot be retagged without an external schema). This includes
@@ -376,6 +382,29 @@ inline bool tomlArrayBalanced(std::string_view s) { return tomlBalanced<'[', ']'
 // value lines (`a = {\n  b = 1,\n}`) until the braces close.
 inline bool tomlTableBalanced(std::string_view s) { return tomlBalanced<'{', '}'>(s); }
 
+// Finds the closing `delim` at or after `from` and returns the offset of its
+// first character, or npos when the string is still open. Mirrors the
+// quote-run rule of parseTomlValue(): a run of 3+ delimiters closes the string
+// with its FINAL three, earlier ones in the run stay as content (`""""` is one
+// content quote plus the closer). In a multi-line basic string a backslash
+// escapes the next character, so `\"""` is the escape `\"` followed by two
+// literal quotes and does not close the string. A multi-line literal string has
+// no escapes, so the first `'''` run always closes it.
+inline size_t tomlFindUnescapedDelim(std::string_view s, size_t from,
+                                     std::string_view delim, bool basic) {
+  const char q = delim[0];
+  const size_t dl = delim.size();
+  for (size_t i = from; i < s.size();) {
+    if (basic && s[i] == '\\') { i += (i + 1 < s.size()) ? 2 : 1; continue; }
+    if (s[i] != q) { i++; continue; }
+    size_t run = 1;
+    while (i + run < s.size() && s[i + run] == q) run++;
+    if (run >= dl) return i + (run - dl);
+    i += run;
+  }
+  return std::string_view::npos;
+}
+
 // Parse a complete TOML value into JSON string
 constexpr int MAX_TOML_DEPTH = 64;
 
@@ -570,11 +599,11 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         continue;
       }
       if (c == '\\') {
-        if (s.size() >= 3 && s[0] == '"' && s[1] == '"' && s[2] == '"') {
-          val += "\\\"\"\"";
-          s.remove_prefix(3);
-          continue;
-        }
+        // A backslash escapes the next character, so `\"""` is the escape `\"`
+        // (one quote) plus the two literal quotes that follow it -- the generic
+        // escape path below already yields `"""` here, and consuming the three
+        // quotes as one unit would swallow a real closer when they start a run
+        // of four (`x = """\"""""`).
         // Check for line continuation (backslash at end of line)
         size_t skip = 0;
         while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t')) skip++;
@@ -1352,14 +1381,10 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           (vtmp.size() >= 3 && (vtmp.substr(0, 3) == "'''"))) {
         bool isBasic = vtmp.substr(0, 3) == "\"\"\"";
         std::string delim = isBasic ? "\"\"\"" : "'''";
-        // A delimiter that closes at (or right after) the opening position is
-        // not a real close -- e.g. `""""""` is an empty string, and
-        // `s="""\n"""""` continues to the next line. Only close at a position
-        // that leaves real content (or a genuine ``"""`` terminator) before it.
-        size_t closePos = vtmp.find(delim, 3);
-        // A `"""` exactly at position 3 usually closes an empty string
-        // (`""""""`); it is a continuation only when escaped as `\"""`.
-        if (closePos == 3 && vtmp.size() > 2 && vtmp[2] == '\\') closePos = vtmp.find("\\" + delim, 3);
+        // A close that lands right at the opening position is the empty-string
+        // form (`""""""`); a close preceded by an escape is content, so the scan
+        // has to skip escapes to find the real terminator.
+        size_t closePos = tomlFindUnescapedDelim(vtmp, 3, delim, isBasic);
         bool hasTrailingContent = false;
         if (closePos != std::string_view::npos && closePos > 2) {
           // Check that everything after the closing delimiter is whitespace/comment
@@ -1391,8 +1416,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           bool found = false;
           for (size_t ml = lineNum + 1; ml < lines.size(); ml++) {
             std::string mlLine = std::string(lines[ml]);
-            size_t cp = mlLine.find(delim);
-            if (cp != std::string::npos) {
+            if (tomlFindUnescapedDelim(mlLine, 0, delim, isBasic) != std::string::npos) {
               // Keep the full line: parseTomlValue enforces the closing
               // delimiter boundary and rejects any trailing content
               // (previously everything after the first `"""` was dropped).
