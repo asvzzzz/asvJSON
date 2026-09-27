@@ -3465,50 +3465,200 @@ TEST(testCBORInvalidUTF8TextString) {
 	}
 	{
 		// Valid 4-byte sequence U+10400 = F0 90 84 80 (third byte is 0x90, fourth < 0xA0)
-		std::vector<uint8_t> data = { 0x66, 0xF0, 0x90, 0x84, 0x80 };
+		std::vector<uint8_t> data = { 0x64, 0xF0, 0x90, 0x84, 0x80 };
 		asvJSON json;
 		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+10400 (F0 90 84 80)");
 	}
 	{
-		// Valid 3-byte sequence U+FFC0 = EF BF C0 (second byte is 0xBF, > 0xBE)
-		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xC0 };
+		// Valid 3-byte sequence U+FFC0 = EF BF 80 (a second byte of 0xBF is
+		// legal as long as the third is a continuation byte)
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0x80 };
 		asvJSON json;
-		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFC0 (EF BF C0)");
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFC0 (EF BF 80)");
 	}
 	{
-		// Valid 3-byte sequence U+FFFF = EF BF FF (second byte is 0xBF, > 0xBE)
+		// Valid 3-byte sequence U+FFFF = EF BF BF (the highest BMP character)
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xBF };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFFF (EF BF BF)");
+	}
+	{
+		// Invalid third byte: EF BF C0. 0xC0 is a lead byte, not a continuation
+		// byte, so the sequence is malformed. This test used to assert the
+		// opposite and believed it was "U+FFC0", which is EF BF 80.
+		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xC0 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted EF BF C0 (0xC0 is not a continuation byte)");
+	}
+	{
+		// Invalid third byte: EF BF FF -- 0xFF is never a continuation byte
 		std::vector<uint8_t> data = { 0x63, 0xEF, 0xBF, 0xFF };
 		asvJSON json;
-		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FFFF (EF BF FF)");
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted EF BF FF (0xFF is not a continuation byte)");
 	}
 	{
 		// Valid 4-byte sequence U+1D400 = F0 9D 90 80 (fourth byte >= 0xA0, old code path still works)
-		std::vector<uint8_t> data = { 0x66, 0xF0, 0x9D, 0x90, 0x80 };
+		std::vector<uint8_t> data = { 0x64, 0xF0, 0x9D, 0x90, 0x80 };
 		asvJSON json;
 		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+1D400 (F0 9D 90 80)");
 	}
 	{
-		// Valid 3-byte sequence in Private Use Area: U+E000 = EF B0 80 (range 0xE1..0xEC, old bug path)
+		// Valid 3-byte sequence in the Supplementary Private Use Area: U+FC00 = EF B0 80 (old bug path)
 		std::vector<uint8_t> data = { 0x63, 0xEF, 0xB0, 0x80 };
 		asvJSON json;
-		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+E000 PUA (EF B0 80)");
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FC00 PUA (EF B0 80)");
 	}
 	{
-		// Valid boundary: U+FFFF = EF BF FF and U+E000 = EF B0 80 — both must succeed
-		std::vector<uint8_t> data1 = { 0x63, 0xEF, 0xBF, 0xFF };
+		// Valid boundary: U+FFFF = EF BF BF and U+FC00 = EF B0 80 — both must succeed
+		std::vector<uint8_t> data1 = { 0x63, 0xEF, 0xBF, 0xBF };
 		std::vector<uint8_t> data2 = { 0x63, 0xEF, 0xB0, 0x80 };
 		asvJSON json;
 		if (!json.fromCBOR(data1.data(), data1.size())) throw std::runtime_error("fromCBOR rejected U+FFFF");
 		json.clear();
-		if (!json.fromCBOR(data2.data(), data2.size())) throw std::runtime_error("fromCBOR rejected U+E000");
+		if (!json.fromCBOR(data2.data(), data2.size())) throw std::runtime_error("fromCBOR rejected U+FC00");
 	}
 	{
-		// Invalid: 0xEE (U+E000..U+EFFF) must be rejected — this was the old bug path falling through to false-positive
-		std::vector<uint8_t> data = { 0x63, 0xEE, 0xA0, 0x80 };
+		// Overlong 3-byte sequence: E0 80 80 must be rejected (E0 requires a second byte >= 0xA0)
+		std::vector<uint8_t> data = { 0x63, 0xE0, 0x80, 0x80 };
 		asvJSON json;
 		bool ok = json.fromCBOR(data.data(), data.size());
-		if (ok) throw std::runtime_error("fromCBOR accepted invalid U+E000 range (0xEE)");
+		if (ok) throw std::runtime_error("fromCBOR accepted overlong 3-byte UTF-8 (E0 80 80)");
 	}
+	{
+		// 0xEE A0 80 is U+EA00, a perfectly valid character. The old code path
+		// treated every 0xEE lead as invalid (a false positive that has since
+		// been fixed), so this must now be ACCEPTED -- the inverse of what this
+		// test used to assert.
+		std::vector<uint8_t> data = { 0x63, 0xEE, 0xA0, 0x80 };
+		asvJSON json;
+		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+EA00 (EE A0 80)");
+	}
+	{
+		// 0xF4 0x90 0x80 0x80 would be above U+10FFFF and must be rejected (F4 caps the second byte at 0x8F)
+		std::vector<uint8_t> data = { 0x64, 0xF4, 0x90, 0x80, 0x80 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted out-of-range U+110000 (F4 90 80 80)");
+	}
+	{
+		// 0xF0 0x80 0x80 0x80 is an overlong 4-byte encoding and must be rejected (F0 requires a second byte >= 0x90)
+		std::vector<uint8_t> data = { 0x64, 0xF0, 0x80, 0x80, 0x80 };
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted overlong 4-byte UTF-8 (F0 80 80 80)");
+	}
+}
+
+TEST(testCBOREncoderRejectsInvalidUTF8) {
+	// RFC 8949 §3.1: a text string MUST be valid UTF-8, and our own decoder
+	// rejects invalid sequences. Library-held bytes are not guaranteed to be
+	// valid UTF-8 -- makeString/putString copy bytes verbatim, and a
+	// CUSTOM_TAG name or a REGEX body is not a JSON string at all -- so the
+	// encoder must reject them rather than silently emit a document that
+	// cannot be read back.
+	auto expectThrow = [](const char* what, auto&& fn) {
+		std::vector<uint8_t> out;
+		try { fn(out); }
+		catch (const std::exception&) { return; }
+		throw std::runtime_error(std::string("toCBOR accepted invalid UTF-8 in ") + what);
+	};
+	// Overlong 2-byte sequence C0 80, the same input the decoder test uses.
+	expectThrow("a string value", [](std::vector<uint8_t>& out) {
+		asvJSONValue::makeString("\xC0\x80", 2)->toCBOR(out);
+	});
+	expectThrow("a string value (truncated 3-byte)", [](std::vector<uint8_t>& out) {
+		asvJSONValue::makeString("\xE2\x82", 2)->toCBOR(out);
+	});
+	expectThrow("a string value (surrogate)", [](std::vector<uint8_t>& out) {
+		asvJSONValue::makeString("\xED\xA0\x80", 3)->toCBOR(out);
+	});
+	expectThrow("an object key", [](std::vector<uint8_t>& out) {
+		auto o = asvJSONValue::makeObject();
+		o->obj->insert_or_assign(std::string("\xC0\x80", 2), asvJSONValue::makeString("v"));
+		o->toCBOR(out);
+	});
+	expectThrow("a CUSTOM_TAG name", [](std::vector<uint8_t>& out) {
+		auto ct = std::make_unique<asvJSONValue>();
+		ct->type = asvJSONValue::CUSTOM_TAG;
+		ct->str_data = std::string("\xC0\x80", 2);
+		ct->custom_value = asvJSONValue::makeString("v");
+		ct->toCBOR(out);
+	});
+	expectThrow("a REGEX body", [](std::vector<uint8_t>& out) {
+		asvJSONValue::makeRegex("\xC0\x80", nullptr)->toCBOR(out);
+	});
+	// The check must also fire for a value nested inside containers, since
+	// the encoder recurses through the same helper.
+	expectThrow("a nested string value", [](std::vector<uint8_t>& out) {
+		asvJSON j;
+		j.parse(std::string(R"({"a":{"b":"x"}})"));
+		j.getRoot()->get("a")->get("b")->str_data = std::string("\xC0\x80", 2);
+		j.getRoot()->toCBOR(out);
+	});
+	// Valid multibyte UTF-8 is unaffected and still round-trips.
+	{
+		asvJSON j;
+		j.putString("k", "\xD0\x9E\xE6\x97\xA5\xF0\x9F\x9A\x80"); // U+041E, U+65E5, U+1F680
+		j.putString("valid", "plain");
+		auto cbor = j.toCBOR();
+		asvJSON j2;
+		ASSERT(j2.fromCBOR(cbor.data(), cbor.size()));
+		ASSERT(j2.getString("k") == std::string("\xD0\x9E\xE6\x97\xA5\xF0\x9F\x9A\x80"));
+		ASSERT(j2.getString("valid") == std::string("plain"));
+	}
+	// A BINARY value is a byte string (major type 2) and carries arbitrary
+	// bytes, so it must stay exempt from the UTF-8 check.
+	{
+		auto bin = asvJSONValue::makeBinary(reinterpret_cast<const uint8_t*>("\xC0\x80"), 2);
+		std::vector<uint8_t> out;
+		bin->toCBOR(out);
+		ASSERT_EQ(out.size(), size_t(3)); // major type 2, length 2, then 2 bytes
+		ASSERT_EQ(out[0], uint8_t(0x42));
+		ASSERT_EQ(out[1], uint8_t(0xC0));
+		ASSERT_EQ(out[2], uint8_t(0x80));
+	}
+}
+
+TEST(testCBORTag1IntegerDecodesAsTimestamp) {
+	// Documented design choice (see the cbor.hpp header): RFC 8949 §3.4.1
+	// defines tag 1 + integer as "epoch-based date/time" and does not draw a
+	// distinction between a timestamp and a datetime. asvJSON keeps the two
+	// node types distinct by looking at the type of the tagged item, so a
+	// hand-written tag 1 + uint decodes as TIMESTAMP even if its author meant
+	// a date/time. External consumers still see a conformant tag 1.
+	const std::vector<uint8_t> uintData = { 0xC1, 0x1A, 0x65, 0x53, 0xF1, 0x00 }; // tag 1, uint32 1700000000
+	asvJSON json;
+	ASSERT(json.fromCBOR(uintData.data(), uintData.size()));
+	ASSERT_EQ(json.getRoot()->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(json.getRoot()->num, int64_t(1700000000));
+	// The same holds for a pre-epoch instant (tag 1 + negative int = -1 - n).
+	const std::vector<uint8_t> negData = { 0xC1, 0x39, 0x00, 0x63 }; // tag 1, negative int -100
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(negData.data(), negData.size()));
+	ASSERT_EQ(json2.getRoot()->type, asvJSONValue::TIMESTAMP);
+	ASSERT_EQ(json2.getRoot()->num, int64_t(-100));
+	// A tagged float64 keeps the DATETIME reading, so the split is by wire
+	// type and not by tag.
+	std::vector<uint8_t> dblData = { 0xC1, 0xFB };
+	{
+		double sec = 1700000000.5;
+		uint64_t bits;
+		memcpy(&bits, &sec, sizeof(bits));
+		for (int i = 7; i >= 0; --i) dblData.push_back(static_cast<uint8_t>(bits >> (i * 8)));
+	}
+	asvJSON json3;
+	ASSERT(json3.fromCBOR(dblData.data(), dblData.size()));
+	ASSERT_EQ(json3.getRoot()->type, asvJSONValue::DATETIME);
+	ASSERT_EQ(json3.getRoot()->timestamp, time_t(1700000000));
+	ASSERT_EQ(json3.getRoot()->datetime_ms, 500);
+	// A tagged string passes through untouched (unknown payload shape).
+	const std::vector<uint8_t> strData = { 0xC1, 0x61, 0x78 }; // tag 1, "x"
+	asvJSON json4;
+	ASSERT(json4.fromCBOR(strData.data(), strData.size()));
+	ASSERT_EQ(json4.getRoot()->type, asvJSONValue::STRING);
+	ASSERT(json4.getRoot()->getString() == std::string("x"));
 }
 
 TEST(testCBORExtras) {
@@ -25786,6 +25936,8 @@ RUN(testCBORFloat16);
 	RUN(testCBORTimestampRoundTrip);
 	RUN(testCBORObjectIdRoundTrip);
 	RUN(testCBORDatetimeVsTimestamp);
+	RUN(testCBORInvalidUTF8TextString);
+	RUN(testCBOREncoderRejectsInvalidUTF8);
 	RUN(testCBORExtras);
 
 	std::cout << "\n--- CBOR v1.26.0 Audit Fixes ---\n";
@@ -25795,6 +25947,7 @@ RUN(testCBORFloat16);
 	RUN(testCBORDuplicateKeysLastWins);
 	RUN(testCBORTag1Boundary);
 	RUN(testCBORTag1MsCarry);
+	RUN(testCBORTag1IntegerDecodesAsTimestamp);
 	RUN(testCBORFromContainsNonAsvJSONExceptions);
 
 	std::cout << "\n--- Protobuf Tests ---\n";

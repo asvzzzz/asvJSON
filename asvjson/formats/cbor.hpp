@@ -1,6 +1,17 @@
 #pragma once
 // CBOR (RFC 8949) serialization/parsing for asvJSON++
-
+//
+// Timestamp vs DateTime (asvJSON-specific extension of tag 1):
+//   DATETIME is written as tag 1 + float64 (seconds, with a .ms fraction) and
+//   TIMESTAMP as tag 1 + an integer number of seconds; the decoder tells them
+//   apart by the type of the tagged item (INT -> TIMESTAMP, DOUBLE ->
+//   DATETIME), so a round-trip is symmetric. RFC 8949 3.4.1 only says "tag 1 +
+//   integer = epoch-based date/time" and does not draw that distinction, so a
+//   hand-written C1 1A ... (tag 1 + uint) decodes here as TIMESTAMP, not as a
+//   DATETIME, even if its author meant a date/time. That is a deliberate
+//   design choice, needed because the two node types otherwise collapse into
+//   one another; external consumers see a conformant tag 1 either way.
+//
 #include "../core.hpp"
 #include <limits>
 
@@ -26,6 +37,20 @@ inline void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
     out.push_back(static_cast<uint8_t>(val >> 24)); out.push_back(static_cast<uint8_t>(val >> 16));
     out.push_back(static_cast<uint8_t>(val >> 8)); out.push_back(static_cast<uint8_t>(val));
   }
+}
+
+
+// RFC 8949 3.1: a text string MUST be valid UTF-8, and our own decoder rejects
+// invalid sequences. Library-held bytes are not guaranteed to be valid UTF-8 --
+// makeString/putString copy bytes verbatim, and a CUSTOM_TAG name or a REGEX
+// body is not a JSON string at all -- so validate before writing instead of
+// silently emitting a document that cannot be read back. Byte strings (major
+// type 2) carry arbitrary bytes and are deliberately not checked.
+inline void cborWriteText(std::vector<uint8_t>& out, const std::string& s) {
+  if (!isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size()))
+    throw asvJSONError("CBOR invalid UTF-8 in text string");
+  cborWriteUint(out, 3, s.size());
+  out.insert(out.end(), s.begin(), s.end());
 }
 
 
@@ -75,8 +100,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       break;
     }
     case T::STRING: {
-      cborWriteUint(out, 3, str_data.size());
-      out.insert(out.end(), str_data.begin(), str_data.end());
+      cborWriteText(out, str_data);
       break;
     }
     case T::BINARY:
@@ -114,8 +138,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       if (!obj) { out.push_back(0xA0); break; }
       cborWriteUint(out, 5, obj->size());
       for (const auto& [k, v] : *obj) {
-        cborWriteUint(out, 3, k.size());
-        out.insert(out.end(), k.begin(), k.end());
+        cborWriteText(out, k);
         v->toCBOR(out);
       }
       break;
@@ -152,16 +175,14 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
     case T::REGEX: {
       // CBOR tag 35 (regular expression) + text string "pattern\0options" (see makeRegex)
       out.push_back(0xD8); out.push_back(0x23); // tag 35
-      cborWriteUint(out, 3, str_data.size());
-      out.insert(out.end(), str_data.begin(), str_data.end());
+      cborWriteText(out, str_data);
       break;
     }
     case T::CUSTOM_TAG: {
       // CBOR tag 258 + array [name(string), value] -- mirrors EXTENSION's tag-257 layout, so the annotation survives round-trips instead of falling through to undefined (0xF7 -> null) as before. The name is always present; a JSON-null custom_value emits an explicit null element.
       out.push_back(0xD9); out.push_back(0x01); out.push_back(0x02); // tag 258 (uint16 argument)
       out.push_back(0x82); // array of 2 items
-      cborWriteUint(out, 3, str_data.size());
-      out.insert(out.end(), str_data.begin(), str_data.end());
+      cborWriteText(out, str_data);
       if (custom_value) custom_value->toCBOR(out); else out.push_back(0xF6); // null value -> explicit CBOR null
       break;
     }
