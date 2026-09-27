@@ -15113,6 +15113,183 @@ TEST(testFromCpp) {
     }
 }
 
+TEST(testFromCppAudit) {
+  // Trailing cv-qualifiers after the type name: `Foo const& r;` used to leave
+  // `const` as the type name, so the field read as an unknown scalar (null).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Foo { int z = 3; };\n"
+      "struct Document {\n"
+      "  Foo const& r;\n"
+      "  const Foo& s;\n"
+      "  Foo* const p;\n"
+      "  const Foo* q;\n"
+      "  Foo const&& rr;\n"
+      "  const char* const c = \"hi\";\n"
+      "  int const& n = 5;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"r":{"z":3},"s":{"z":3},"p":{"z":3},"q":{"z":3},)"
+                               R"("rr":{"z":3},"c":"hi","n":5})"));
+  }
+  // std::map initializers: entries were parsed and then dropped (empty {}).
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::map<int, std::string> m = {{1, \"a\"}, {2, \"b\"}};\n"
+      "  std::map<std::string, int> s = {{\"x\", 1}, {\"y\", 2}};\n"
+      "  std::map<int, int> e;\n"
+      "  std::map<int, int> e2 = {};\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(),
+              std::string_view(R"({"m":{"1":"a","2":"b"},"s":{"x":1,"y":2},"e":{},"e2":{}})"));
+  }
+  // Map values may be struct literals; nested maps decode recursively.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct P { int a = 0; };\n"
+      "struct Document {\n"
+      "  std::map<int, P> m = {{1, {5}}, {2, {6}}};\n"
+      "  std::map<int, std::map<int, int>> n = {{\"a\", {{1, 2}}}};\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"m":{"1":{"a":5},"2":{"a":6}},"n":{"a":{"1":2}}})"));
+  }
+  // `#define F (x) 1` is object-like in C, and capturing it injected `(x) 1`
+  // at the use site; a spaced macro with a trailing body is left unexpanded.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define F (x) 1\n"
+      "struct Document {\n"
+      "  int v = F;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"v":"F"})"));
+  }
+  // ... but `#define WIDTH (800)` parenthesizes the whole value and stays
+  // object-like, as does a plain constant.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define WIDTH (800)\n"
+      "#define K 42\n"
+      "struct Document {\n"
+      "  int w = WIDTH;\n"
+      "  int k = K;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"w":800,"k":42})"));
+  }
+  // File-scope declarators: `struct Foo {...} a, b;` also declares variables.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Foo { int x = 7; } a, b;\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"Foo":{"x":7},"a":{"x":7},"b":{"x":7}})"));
+  }
+  // A declarator whose type is already reachable from the root struct is not
+  // repeated in the output.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Inner { int v = 7; } ia, ib = {};\n"
+      "struct Document {\n"
+      "  Inner innerA, innerB;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"innerA":{"v":7},"innerB":{"v":7}})"));
+  }
+  // Functional / static casts as initializers.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::string s = std::string(\"hello\");\n"
+      "  std::string c = char('a');\n"
+      "  int n = int(5);\n"
+      "  int m = static_cast<int>(7);\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"s":"hello","c":"a","n":5,"m":7})"));
+  }
+  // A `* (expr)` initializer is not a cast and keeps the identifier fallback.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document {\n  int n = a * (b);\n};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"n":"b"})"));
+  }
+  // '<' is a comparison when no '>' closes the list before the ';' -- the
+  // unterminated angle used to hide the ';' and swallow the rest of the struct.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::vector<int> v = { 1 < 2, 3 };\n"
+      "  std::string s;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"v":[0,3],"s":""})"));
+  }
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  int n = 1 < 2;\n"
+      "  std::string s;\n"
+      "  std::map<int, int> m;\n"
+      "  std::vector<int> w = {1, 2};\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"n":0,"s":"","m":{},"w":[1,2]})"));
+  }
+  // Backslash-newline inside a string literal is a line splice: the newline is
+  // deleted, so the value concatenates and the following line keeps its number.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  std::string s = \"ab\\\ncd\";\n"
+      "  int t = 5;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"s":"abcd","t":5})"));
+  }
+  // A real unterminated literal still fails.
+  {
+    asvJSON bad;
+    ASSERT(!bad.fromCpp(std::string_view("struct Document {\n  std::string s = \"a\\\";\n};\n")));
+    ASSERT(!bad.getLastError().empty());
+  }
+  // Singularization: no more `bu`/`ga`/`ye` struct names.
+  {
+    const char* pairs[][2] = {{"bus", "Bus"}, {"gas", "Gas"}, {"yes", "Yes"},
+                              {"boxes", "Box"}, {"class", "Class"}, {"buses", "Buse"},
+                              {"status", "Status"}, {"index", "Index"}, {"alias", "Alias"},
+                              {"crisis", "Crisis"}, {"news", "News"}, {"always", "Always"},
+                              {"series", "Series"}, {"species", "Species"},
+                              {"process", "Process"}, {"address", "Address"}};
+    for (auto& p : pairs) {
+      asvJSON a;
+      ASSERT(a.parse(std::string("{\"") + p[0] + "\":[{\"n\":1},{\"n\":2}]}"));
+      CppWriteOptions o;
+      o.unwrapRootSingleKey = false;
+      std::string cpp = a.toCpp(o);
+      // The element type is the first struct with a body (forward declarations
+      // such as `struct Bus;` come first).
+      auto identChar = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '_';
+      };
+      std::string elemType;
+      for (size_t pos = cpp.find("struct "); pos != std::string::npos;
+           pos = cpp.find("struct ", pos + 1)) {
+        size_t s = pos + 7, e = s;
+        while (e < cpp.size() && identChar(cpp[e])) e++;
+        size_t t = e;
+        while (t < cpp.size() && (cpp[t] == ' ' || cpp[t] == '\t' ||
+                                  cpp[t] == '\n' || cpp[t] == '\r')) t++;
+        if (t < cpp.size() && cpp[t] == '{') { elemType = cpp.substr(s, e - s); break; }
+      }
+      ASSERT_EQ(elemType, std::string(p[1]));
+    }
+  }
+}
+
 TEST(testFromCppArraySizeGuard) {
   // Array size exceeding MAX_ARRAY_SIZE must be rejected (regression C1).
   asvJSON bad;
@@ -26063,8 +26240,9 @@ RUN(testSexprNumberKeys);
 	RUN(testRONComments);
 RUN(testRONReviewFixes);
   RUN(testToCpp);
-  RUN(testFromCpp);
-  RUN(testFromCppArraySizeGuard);
+RUN(testFromCpp);
+RUN(testFromCppAudit);
+RUN(testFromCppArraySizeGuard);
   RUN(testFromCppDefineMacros);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";

@@ -109,14 +109,30 @@ inline std::string cppPascal(std::string_view raw, const char* fallback = "Type"
 inline std::string cppSingular(std::string w) {
   static const char* const keep[] = {
     "series", "species", "status", "data", "analysis", "basis", "crisis",
-    "news", "means", "index", "matrix", "vertex", "appendix"
+    "news", "means", "index", "matrix", "vertex", "appendix", "alias",
+    "bias", "yes", "always", "this", "its", "less", "cross", "address",
+    "process", "access", "class", "glass", "mass", "boss", "gas", "bus"
+  };
+  std::string_view sv(w);
+  auto ends = [&](std::string_view suf) {
+    return sv.size() >= suf.size() &&
+           sv.compare(sv.size() - suf.size(), suf.size(), suf) == 0;
   };
   for (const char* k : keep) if (w == k) return w;
-  if (w.size() > 3 && w.compare(w.size() - 3, 3, "sis") == 0) return w;
-  if (w.size() > 4 && w.compare(w.size() - 3, 3, "ies") == 0)
-    return w.substr(0, w.size() - 3) + "y";            // cities -> city
-  if (w.size() > 3 && w.compare(w.size() - 4, 4, "sses") == 0)
-    return w.substr(0, w.size() - 2);                  // classes -> class
+  // Endings that are already singular: -sis (analysis), -us (bus), -is (basis),
+  // -as (gas), -os (atlas) and a doubled final -s (address). Dropping the last
+  // 's' from these invents a word that does not exist ("bus" -> "bu"), which
+  // is worse than leaving the plural alone. A regular plural never ends in one
+  // of these, so the rule costs nothing.
+  if (ends("sis") || ends("us") || ends("is") || ends("as") || ends("os")) return w;
+  if (w.size() > 1 && w.back() == 's' && w[w.size() - 2] == 's') return w;
+  if (ends("ies")) return w.substr(0, w.size() - 3) + "y";       // cities -> city
+  if (ends("sses")) return w.substr(0, w.size() - 2);            // classes -> class
+  if (ends("ches") || ends("shes") || ends("xes") || ends("zes"))
+    return w.substr(0, w.size() - 2);                            // boxes -> box
+  // Anything else: drop a single trailing 's'. "-ses" is left alone
+  // ("houses" -> "house" is the common case; "buses" -> "buse" is the
+  // unavoidable casualty of English not being reversible).
   if (w.size() > 1 && w.back() == 's' && w[w.size() - 2] != 's') w.pop_back();
   return w;
 }
@@ -957,9 +973,10 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       // Preprocessor directive: consume the logical line (honoring `\`
       // continuations), track conditional-compilation state, and capture
       // object-like `#define NAME repl` macros only in active branches.
-      // Function-like macros (`#define F(x) ...`) are intentionally not captured —
-      // expanding them would require argument substitution, which is out of scope
-      // for this pragmatic reader. They appear as bare identifiers in the token stream.
+      // Function-like macros (`#define F(x) ...`, with or without a space
+      // before the paren) are intentionally not captured — expanding them
+      // would require argument substitution, which is out of scope for this
+      // pragmatic reader. They appear as bare identifiers in the token stream.
       size_t j = i;
       std::string logical;
       while (j < n) {
@@ -1021,7 +1038,33 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             size_t ns = q;
             while (q < logical.size() && cppRdIdentChar(logical[q])) q++;
             std::string name = logical.substr(ns, q - ns);
-            bool functionLike = (q < logical.size() && logical[q] == '(');
+            // Function-like detection. Strict C requires '(' to be adjacent to
+            // the name, so `#define F (x) ...` is object-like there and expands
+            // to the token soup `(x) ...`, which corrupts every use site
+            // (`int v = F;` reads as `int v = (x) ...;`). We also accept the
+            // spaced spelling as function-like, but only when something trails
+            // the parameter list: that is what distinguishes a sloppy
+            // `#define F (x) 1` from `#define WIDTH (800)`, whose parenthesized
+            // value is the whole replacement and must stay object-like.
+            bool functionLike = false;
+            {
+              size_t r = q;
+              while (r < logical.size() && (logical[r] == ' ' || logical[r] == '\t')) r++;
+              if (r < logical.size() && logical[r] == '(') {
+                int pd = 0;
+                size_t close = r;
+                for (size_t k = r; k < logical.size(); k++) {
+                  if (logical[k] == '(') pd++;
+                  else if (logical[k] == ')') { pd--; if (pd == 0) { close = k; break; } }
+                }
+                if (close < logical.size()) {
+                  size_t t2 = close + 1;
+                  while (t2 < logical.size() && (logical[t2] == ' ' || logical[t2] == '\t' ||
+                                                 logical[t2] == '\r')) t2++;
+                  functionLike = (t2 < logical.size());
+                }
+              }
+            }
             if (!name.empty() && !functionLike) {
             std::vector<Tok> rtoks;
             while (q < logical.size() && (logical[q] == ' ' || logical[q] == '\t')) q++;
@@ -1083,6 +1126,12 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         if (in[i] == '\\' && i + 1 < n) {
           char e = in[i + 1];
           i += 2;
+          // A backslash before a newline is a line splice: the newline itself
+          // is not part of the literal and the string continues on the next
+          // line. Advance `line` so error messages stay accurate, and append
+          // nothing to the value (the C++ translation phase deletes the pair).
+          if (e == '\n') { line++; continue; }
+          if (e == '\r') { line++; if (i < n && in[i] == '\n') i++; continue; }
           switch (e) {
             case 'n': val += '\n'; break;
             case 't': val += '\t'; break;
@@ -1227,6 +1276,44 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
          (v.front()->text == "-" || v.front()->text == "+")) {
     if (v.front()->text == "-") neg = !neg;
     v.erase(v.begin());
+  }
+  // A functional cast or constructor call: `std::string("hello")`, `char('a')`,
+  // `int(5)`, `static_cast<int>(7)`. The paren-strip loop above only fires when
+  // the initializer *starts* with '(', so these fell through to the caller's
+  // identifier fallback and lost the value (`std::string("hello")` decoded as
+  // the string "string"). Peel the trailing call argument list and re-read the
+  // literal inside it. The prefix must look like a qualified type or cast name
+  // (identifiers, `::`, and a template argument list) so that an expression
+  // like `a * (b)` or `(x) + (y)` is left alone.
+  if (v.size() >= 3 && v.back()->kind == Tok::Punct && v.back()->text == ")") {
+    int d = 0;
+    size_t open = v.size();
+    for (size_t k = v.size(); k-- > 0;) {
+      if (v[k]->kind != Tok::Punct) continue;
+      if (v[k]->text == ")") d++;
+      else if (v[k]->text == "(") { d--; if (d == 0) { open = k; break; } }
+    }
+    bool castName = open > 0 && open < v.size() - 1;
+    for (size_t k = 0; castName && k < open; k++) {
+      if (v[k]->kind == Tok::Ident) continue;
+      if (v[k]->kind == Tok::Punct && v[k]->text == "::") continue;
+      if (v[k]->kind == Tok::Punct && v[k]->text == "<") {
+        int ad = 0;
+        for (size_t j = k; j < open; j++) {
+          if (v[j]->kind != Tok::Punct) continue;
+          if (v[j]->text == "<") ad++;
+          else if (v[j]->text == ">") { ad--; if (ad == 0) { k = j; break; } }
+        }
+        continue;
+      }
+      castName = false;
+    }
+    if (castName) {
+      std::vector<Tok> inner;
+      for (size_t k = open + 1; k + 1 < v.size(); k++) inner.push_back(*v[k]);
+      if (!inner.empty())
+        if (auto lit = cppRdScalarLiteral(inner, wantDouble)) return lit;
+    }
   }
   if (v.size() == 3 && v[0]->kind == Tok::Number && v[1]->kind == Tok::Punct &&
       v[1]->text == "-" && v[2]->kind == Tok::Number) {
@@ -1444,10 +1531,23 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
     }
     return ty;
   }
-  // Strip both leading and trailing qualifiers (`Foo const field;`, which C
-  // and some C++ styles use). The leading strip is above; trailing here.
+  // Strip leading and trailing qualifiers, in any order. The leading strip is
+  // above; the trailing one has to look past pointer/reference tokens, because
+  // `Foo const&` (a common C++ style) puts `&` last: a strip that only looks at
+  // the final token leaves the range as [Foo, const, &], and the name loop then
+  // picks up the *last* identifier in it, which is "const" -- the field is then
+  // reported as a scalar of unknown type and materializes to null, silently
+  // dropping the value. So alternate: drop trailing quals, then drop trailing
+  // `*`/`&`/`&&`, until neither applies.
   size_t et = e;
-  while (et > i && v[et - 1]->kind == Tok::Ident && cppRdIsQual(v[et - 1]->text)) et--;
+  for (;;) {
+    size_t before = et;
+    while (et > i && v[et - 1]->kind == Tok::Ident && cppRdIsQual(v[et - 1]->text)) et--;
+    while (et > i && v[et - 1]->kind == Tok::Punct &&
+           (v[et - 1]->text == "*" || v[et - 1]->text == "&" || v[et - 1]->text == "&&"))
+      et--;
+    if (et == before) break;
+  }
   std::string name;
   for (size_t k = i; k < et; k++)
     if (v[k]->kind == Tok::Ident) name = v[k]->text;
@@ -1465,12 +1565,65 @@ inline TypeRef cppRdParseType(const std::vector<Tok>& t, size_t b, size_t e) {
   return cppRdParseTypeV(v, 0, v.size());
 }
 
+// Tell a template-argument list apart from a less-than comparison. Real C++
+// needs a full parser; the pragmatic rule here is that an angle list must be
+// closed by a matching '>' before the current statement ends (a top-level ';',
+// '{' or '}'). `std::vector<int> v;` passes, `1 < 2, 3` and `a < b;` do not.
+// Misreading a comparison as a template unbalances every depth counter built
+// on top of it: the ';' that terminates the declaration stops being
+// recognized, so a member swallows the rest of the file.
+inline bool cppRdIsTemplateOpen(const std::vector<Tok>& t, size_t k, size_t limit) {
+  int d = 0;
+  const size_t end = (limit < t.size()) ? limit : t.size();
+  for (size_t j = k; j < end; j++) {
+    if (t[j].kind != Tok::Punct) continue;
+    const std::string& s = t[j].text;
+    if (s == "<") d++;
+    else if (s == ">") { d--; if (d == 0) return true; if (d < 0) return false; }
+    else if (s == ";" || s == "{" || s == "}") return false;
+  }
+  return false;
+}
+
 inline bool cppRdBraceGroup(const std::vector<Tok>& init) {
   size_t b = 0, e = init.size();
   while (b < e && init[b].kind == Tok::Comment) b++;
   while (e > b && init[e - 1].kind == Tok::Comment) e--;
   return e > b && init[b].kind == Tok::Punct && init[b].text == "{" &&
          init[e - 1].kind == Tok::Punct && init[e - 1].text == "}";
+}
+
+// Split a brace-group body at top-level commas. Only ( ) [ ] { } depth is
+// tracked; angle brackets go through cppRdIsTemplateOpen, so a comparison in
+// an initializer (`{ 1 < 2, 3 }`) no longer swallows the separator while a
+// real template expression still protects its own commas. Comments are kept
+// with the group they were written in.
+inline std::vector<std::vector<Tok>> cppRdSplitTop(const std::vector<Tok>& body) {
+  std::vector<std::vector<Tok>> out;
+  std::vector<Tok> cur;
+  int pd = 0, ad = 0, bd = 0, brd = 0;
+  for (size_t i = 0; i < body.size(); i++) {
+    const Tok& tk = body[i];
+    if (tk.kind == Tok::Comment) { if (!cur.empty()) cur.push_back(tk); continue; }
+    if (tk.kind == Tok::Punct) {
+      if (tk.text == "(") pd++;
+      else if (tk.text == ")") { if (pd > 0) pd--; }
+      else if (tk.text == "<") { if (cppRdIsTemplateOpen(body, i, body.size())) ad++; }
+      else if (tk.text == ">") { if (ad > 0) ad--; }
+      else if (tk.text == "[") brd++;
+      else if (tk.text == "]") { if (brd > 0) brd--; }
+      else if (tk.text == "{") bd++;
+      else if (tk.text == "}") { if (bd > 0) bd--; }
+      else if (tk.text == "," && pd == 0 && ad == 0 && bd == 0 && brd == 0) {
+        out.push_back(cur); cur.clear(); continue;
+      }
+    }
+    cur.push_back(tk);
+  }
+  bool empty = true;
+  for (auto& x : cur) if (x.kind != Tok::Comment) { empty = false; break; }
+  if (!empty || out.empty()) out.push_back(cur);
+  return out;
 }
 
 inline std::vector<std::vector<Tok>> cppRdInitGroups(const std::vector<Tok>& init) {
@@ -1486,29 +1639,8 @@ inline std::vector<std::vector<Tok>> cppRdInitGroups(const std::vector<Tok>& ini
     else if (init[i].text == "}") { d--; if (d == 0) { close = i; break; } }
   }
   if (close == e) return out;
-  std::vector<Tok> cur;
-  int pd = 0, ad = 0, bd = 0, brd = 0;
-  for (size_t i = b + 1; i < close; i++) {
-    const Tok& tk = init[i];
-    if (tk.kind == Tok::Comment) { if (!cur.empty()) cur.push_back(tk); continue; }
-    if (tk.kind == Tok::Punct) {
-      if (tk.text == "(") pd++;
-      else if (tk.text == ")") { if (pd > 0) pd--; }
-      else if (tk.text == "<") ad++;
-      else if (tk.text == ">") { if (ad > 0) ad--; }
-      else if (tk.text == "[") brd++;
-      else if (tk.text == "]") { if (brd > 0) brd--; }
-      else if (tk.text == "{") bd++;
-      else if (tk.text == "}") { if (bd > 0) bd--; }
-      else if (tk.text == "," && pd == 0 && ad == 0 && bd == 0 && brd == 0) {
-        out.push_back(cur); cur.clear(); continue;
-      }
-    }
-    cur.push_back(tk);
-  }
-  bool empty = true;
-  for (auto& x : cur) if (x.kind != Tok::Comment) { empty = false; break; }
-  if (!empty || out.empty()) out.push_back(cur);
+  std::vector<Tok> body(init.begin() + static_cast<long>(b) + 1, init.begin() + static_cast<long>(close));
+  out = cppRdSplitTop(body);
   return out;
 }
 
@@ -1535,6 +1667,8 @@ struct Reader {
   std::vector<StructDef> structs;
   std::vector<EnumDef> enums;
   std::vector<AliasDef> aliases;
+  // Variables declared alongside a file-scope struct: `struct Foo {...} a, b;`
+  std::vector<FieldDef> fileScope;
   std::vector<Comment> pending;
   int order = 0;
 
@@ -1648,7 +1782,10 @@ struct Reader {
       if (cur().kind == Tok::Ident) {
         const std::string s = cur().text;
         if (s == "template") { skipTemplateParams(); continue; }
-        if ((s == "struct" || s == "class") && looksLikeNestedDef()) { parseStructDecl(); continue; }
+        if ((s == "struct" || s == "class") && looksLikeNestedDef()) {
+          for (auto& f : parseStructDecl()) fileScope.push_back(std::move(f));
+          continue;
+        }
         if (s == "enum" && looksLikeNestedDef()) { parseEnumDecl(); continue; }
         if (s == "typedef") { parseTypedef(); continue; }
         if (s == "using") { parseUsing(); continue; }
@@ -1730,10 +1867,10 @@ struct Reader {
           for (size_t k = 0; k < trail.size(); k++) {
             if (trail[k].kind != Tok::Punct) continue;
             const std::string& s2 = trail[k].text;
-            if (s2 == "(") dP++;
-            else if (s2 == ")") { if (dP > 0) dP--; }
-            else if (s2 == "<") dA++;
-            else if (s2 == ">") { if (dA > 0) dA--; }
+          if (s2 == "(") dP++;
+              else if (s2 == ")") { if (dP > 0) dP--; }
+              else if (s2 == "<") { if (cppRdIsTemplateOpen(trail, k, trail.size())) dA++; }
+              else if (s2 == ">") { if (dA > 0) dA--; }
             else if (s2 == "[") dBr++;
             else if (s2 == "]") { if (dBr > 0) dBr--; }
             else if (s2 == "{") dB++;
@@ -1814,7 +1951,7 @@ struct Reader {
         const std::string& s = tk.text;
         if (s == "(") { if (paren == 0 && ang == 0 && brk == 0 && brace == 0) sawParen = true; paren++; }
         else if (s == ")") { if (paren > 0) paren--; }
-        else if (s == "<") ang++;
+        else if (s == "<") { if (cppRdIsTemplateOpen(t, i, t.size())) ang++; }
         else if (s == ">") { if (ang > 0) ang--; }
         else if (s == "[") brk++;
         else if (s == "]") { if (brk > 0) brk--; }
@@ -2056,6 +2193,24 @@ struct Reader {
     return asvJSONValue::makeString(std::move(s));
   }
 
+  // A map key has to become a JSON object key, so the parsed key value is
+  // rendered back to text. Strings keep their exact bytes, numbers and bools
+  // use their literal spelling, and anything else falls back to compact JSON
+  // (so a struct-valued key round-trips as its JSON form).
+  static std::string mapKeyText(const asvJSONValue* v) {
+    if (!v) return {};
+    switch (v->type) {
+      case asvJSONValue::STRING:   return v->str_data;
+      case asvJSONValue::INT:      return std::to_string(v->num);
+      case asvJSONValue::BOOL_VAL: return v->flag ? "true" : "false";
+      case asvJSONValue::NULL_VAL: return "null";
+      default: break;
+    }
+    std::string s;
+    v->serialize(s);
+    return s;
+  }
+
   std::unique_ptr<asvJSONValue> numberValue(const std::string& raw, bool asDouble) {
     std::string s = cppRdStripNumSuffix(raw);
     bool flt = asDouble;
@@ -2172,7 +2327,29 @@ struct Reader {
       return materialize(rt.elem ? *rt.elem : TypeRef{}, init, hasInit, depth + 1);
     }
 
-    if (rt.kind == TypeRef::Map) return asvJSONValue::makeObject();
+    if (rt.kind == TypeRef::Map) {
+      // `std::map<K, V> m = {{k1, v1}, {k2, v2}};` -- the initializer groups
+      // were computed but never looked at, so every map decoded as {} and its
+      // contents vanished. Each group is one braced {key, value} pair (the
+      // only shape a map initializer can take, since the comma between key and
+      // value must sit inside the inner braces).
+      auto o = asvJSONValue::makeObject();
+      if (grp && !onlyEmptyGroup) {
+        TypeRef kt, vt;
+        if (rt.elem) { kt = *rt.elem; resolve(kt); }
+        if (rt.value) { vt = *rt.value; resolve(vt); }
+        for (auto& g : groups) {
+          auto parts = cppRdInitGroups(g);
+          if (parts.size() != 2) continue;  // not a {key, value} pair
+          auto key = materialize(kt, parts[0], !parts[0].empty(), depth + 1);
+          std::string name = mapKeyText(key.get());
+          if (name.empty()) continue;
+          auto val = materialize(vt, parts[1], !parts[1].empty(), depth + 1);
+          o->obj->emplace(std::move(name), std::move(val));
+        }
+      }
+      return o;
+    }
 
     // scalar / unresolved
     if (hasInit && !grp) {
@@ -2201,6 +2378,27 @@ struct Reader {
     for (auto& a : t.alts) if (a) collectRefs(*a, out);
   }
 
+  // `struct Foo { ... } a, b;` declares real variables of type Foo at file
+  // scope. Those declarators were parsed and then thrown away, so a single
+  // translation unit decoded to {"Foo": {...}} and the variables it actually
+  // defines were invisible. Add them to the root -- but only when their type is
+  // not already reachable from the chosen roots, so the common
+  // `struct Inner {...} ia, ib;` + `struct Document { Inner a, b; };` case
+  // (where Inner is already represented inside Document) keeps its output.
+  void addFileScopeInst(const std::unique_ptr<asvJSONValue>& out,
+                        const std::vector<const StructDef*>& chosen) {
+    if (fileScope.empty() || !out || out->type != asvJSONValue::OBJECT) return;
+    std::set<std::string> live;
+    for (auto* s : chosen)
+      for (auto& f : s->fields) collectRefs(f.type, live);
+    for (auto& f : fileScope) {
+      if (f.name.empty()) continue;
+      if (live.count(f.type.name)) continue;
+      auto val = materialize(f.type, f.init, f.hasInit, 0);
+      out->obj->emplace(f.name, std::move(val));
+    }
+  }
+
   std::unique_ptr<asvJSONValue> buildRoot() {
     if (!aliases.empty()) {
       // First-declared (lowest order) alias wins - not the last one seen.
@@ -2208,7 +2406,7 @@ struct Reader {
       for (auto& a : aliases) if (a.order < best->order) best = &a;
       return materialize(best->type, std::vector<Tok>(), false, 0);
     }
-    if (structs.empty()) return nullptr;
+    if (structs.empty() && fileScope.empty()) return nullptr;
 
     std::set<std::string> referenced;
     for (auto& s : structs)
@@ -2249,10 +2447,19 @@ struct Reader {
         return val;
       }
       std::vector<const StructDef*> list = {s};
-      return wrap(list);
+      std::unique_ptr<asvJSONValue> out = wrap(list);
+      addFileScopeInst(out, list);
+      return out;
     }
-    if (!roots.empty()) return wrap(roots);
-    return wrap(std::vector<const StructDef*>({&structs[0]}));
+    if (!roots.empty()) {
+      std::unique_ptr<asvJSONValue> out = wrap(roots);
+      addFileScopeInst(out, roots);
+      return out;
+    }
+    std::vector<const StructDef*> list = {&structs[0]};
+    std::unique_ptr<asvJSONValue> out = wrap(list);
+    addFileScopeInst(out, list);
+    return out;
   }
 };
 
