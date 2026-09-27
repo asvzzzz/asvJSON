@@ -22373,6 +22373,117 @@ TEST(testJSONPath) {
 	}
 	// -- slice: negative start/end normalization --
 	{
+TEST(testSchemaJsonPointerRefs) {
+	// resolveRef() used to navigate OBJECT nodes only, so any pointer with an
+	// array token -- "#/allOf/0", "#/anyOf/1" -- failed with "Unresolved $ref",
+	// even though RFC 6901 indexes arrays positionally and draft-07 schemas use
+	// exactly these to point at a specific branch.
+	auto check = [](const char* schemaJson, const char* docJson, bool expectOk) {
+		asvJSON schema, doc;
+		if (!schema.parse(std::string_view(schemaJson))) return false;
+		if (!doc.parse(std::string_view(docJson))) return false;
+		std::string err;
+		bool ok = doc.validate(schema, err);
+		return ok == expectOk && (expectOk || !err.empty());
+	};
+	// -- resolves into an array element --
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})", "5", true));
+	ASSERT(check(R"({"anyOf":[{"type":"string"},{"type":"integer"}],"$ref":"#/anyOf/1"})", "5", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", R"("x")", true));
+	// index 1 really is the second element, not the first
+	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", "5", false));
+	// the resolved subschema is really applied
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})")));
+		ASSERT(doc.parse(std::string_view(R"("x")")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "resolved-subschema-applied");
+	}
+	// -- a chain through several arrays and objects --
+	ASSERT(check(R"({"items":{"allOf":[{"anyOf":[{"type":"null"}]}]},"$ref":"#/items/allOf/0/anyOf/0"})", "null", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0/type"})", "5", true));
+	// -- a non-object array element still resolves (no assertion inside) --
+	ASSERT(check(R"({"allOf":["x"],"$ref":"#/allOf/0"})", "5", true));
+	ASSERT(check(R"({"allOf":[null],"$ref":"#/allOf/0"})", "5", true));
+	// -- object navigation is unchanged, including ~0/~1 and percent escapes --
+	ASSERT(check(R"({"defs":{"a":{"type":"integer"}},"$ref":"#/defs/a"})", "5", true));
+	ASSERT(check(R"({"defs":{"a":{"defs":{"b":{"type":"integer"}}}},"$ref":"#/defs/a/defs/b"})", "5", true));
+	ASSERT(check(R"({"a/b":{"type":"integer"},"$ref":"#/a~1b"})", "5", true));
+	ASSERT(check(R"({"a~b":{"type":"integer"},"$ref":"#/a~0b"})", "5", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/%30"})", "5", true));
+	// -- RFC 6901 array-index ABNF: digits only, no leading zeros --
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/1"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/01"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/-1"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/x"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/~01"})", "5", false));
+	ASSERT(check(R"({"allOf":[],"$ref":"#/allOf/0"})", "5", false));
+	// -- an index too large for size_t must not throw (std::stoul would) --
+	{
+		std::string big = "{\"allOf\":[{\"type\":\"integer\"}],\"$ref\":\"#/allOf/" +
+		                  std::string(40, '9') + "\"}";
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(big)));
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "huge-index");
+		ASSERT(err.find("Unresolved $ref") != std::string::npos);
+	}
+	// -- additionalProperties:false reports the offending property --
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"b":1})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-root");
+		ASSERT_EQ(err, "/b: additional property not allowed");
+	}
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"o":{"properties":{"a":{}},"additionalProperties":false}}})")));
+		ASSERT(doc.parse(std::string_view(R"({"o":{"b":1}})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-nested");
+		ASSERT_EQ(err, "/o/b: additional property not allowed");
+	}
+	{
+		// an unknown key containing '/' is escaped as a JSON Pointer token
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"x/y":1})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-escaped");
+		ASSERT_EQ(err, "/x~1y: additional property not allowed");
+	}
+	{
+		// a literal '~' in the key becomes ~0
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"m~n":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT_EQ(err, "/m~0n: additional property not allowed");
+	}
+	// -- a schema with a valid enum is unaffected by the shape check --
+	ASSERT(check(R"({"enum":[1,2]})", "1", true));
+	ASSERT(check(R"({"enum":[1,2]})", "3", false));
+	// -- empty enum is rejected as a degenerate schema --
+	ASSERT(check(R"({"enum":[]})", "1", false));
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"enum":[]})")));
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "enum-empty");
+		ASSERT(err.find("at least one element") != std::string::npos);
+	}
+	// -- format stays an unasserted annotation in draft-07 --
+	ASSERT(check(R"({"format":"email"})", R"("not-an-email")", true));
+	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
+}
+
 		asvJSON doc;
 		ASSERT(doc.parse(std::string_view(R"(["a","b","c","d","e","f","g"])")));
 		auto r = doc.query("$[-3:-1]");
@@ -26742,3 +26853,4 @@ RUN(testUDEBlockScalarKeepChomping);
 
 	return failed > 0 ? 1 : 0;
 }
+RUN(testSchemaJsonPointerRefs);

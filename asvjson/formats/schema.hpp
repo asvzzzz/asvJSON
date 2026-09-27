@@ -8,6 +8,15 @@
 //   array:  minItems, maxItems, uniqueItems, items, contains,
 //   object: required, properties, patternProperties, additionalProperties,
 //           minProperties, maxProperties, propertyNames, dependentRequired, dependencies.
+//
+// NOT enforced: "format" is a pure annotation in draft-07 (it carries no
+// assertion), so it is accepted anywhere and never checked -- there is no
+// format validation behind the scenes. "contentMediaType"/"contentEncoding"
+// and the "definitions"/"$schema"/"$id" metadata keywords are likewise
+// unasserted. $ref is local only: it resolves against the root schema through
+// RFC 6901 JSON Pointer, so "#", "#/defs/x" and array tokens such as
+// "#/allOf/0" all work, but remote/relative references (other documents,
+// external files) are not resolved.
 
 #include "../core.hpp"
 #include <cstring>
@@ -195,6 +204,22 @@ private:
     return out;
   }
 
+  // RFC 6901 array index: %x30 / ( %x31-39 *(%x30-39) ) -- digits only, and no
+  // leading zeros, so "0" is valid but "01", "-1" and "" are not. Accumulates with
+  // an early bail on the array size, which also makes the arithmetic overflow-safe
+  // (std::stoul would throw std::out_of_range on a long token).
+  static bool parseArrayIndex(std::string_view tok, size_t size, size_t& idx) {
+    if (tok.empty() || (tok.size() > 1 && tok[0] == '0')) return false;
+    size_t n = 0;
+    for (char c : tok) {
+      if (c < '0' || c > '9') return false;
+      n = n * 10 + static_cast<size_t>(c - '0');
+      if (n >= size) return false; // any further digit only grows it
+    }
+    idx = n;
+    return true;
+  }
+
   const asvJSONValue* resolveRef(std::string_view ref) const {
     if (ref.empty() || ref[0] != '#') return nullptr;
     ref.remove_prefix(1);
@@ -213,14 +238,22 @@ private:
       cur = rootSchema_;
       failed = false;
       // JSON Pointer reference tokens are the pieces between '/' (the first may
-      // be an empty string, correctly resolving to the object key "").
+      // be an empty string, correctly resolving to the object key ""). An OBJECT
+      // maps the token to a member; an ARRAY indexes it, so pointers into
+      // subschema arrays ("#/allOf/0", "#/anyOf/1") resolve as well.
       while (true) {
         auto slash = ref.find('/');
         std::string_view seg = (slash == std::string_view::npos) ? ref : ref.substr(0, slash);
-        if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) { failed = true; break; }
-        auto it = cur->obj->find(decodePointerToken(seg));
-        if (it == cur->obj->end()) { failed = true; break; }
-        cur = it->second.get();
+        if (!cur) { failed = true; break; }
+        if (cur->type == asvJSONValue::OBJECT && cur->obj) {
+          auto it = cur->obj->find(decodePointerToken(seg));
+          if (it == cur->obj->end()) { failed = true; break; }
+          cur = it->second.get();
+        } else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
+          size_t idx = 0;
+          if (!parseArrayIndex(decodePointerToken(seg), cur->arr->size(), idx)) { failed = true; break; }
+          cur = (*cur->arr)[idx].get();
+        } else { failed = true; break; }
         if (slash == std::string_view::npos) break;
         ref.remove_prefix(slash + 1);
       }
@@ -349,8 +382,12 @@ private:
   }
 
   // Unicode code-point count of a UTF-8 string, robust for malformed input:
-  // stray continuation bytes count as one character each and a truncated
-  // multibyte tail counts once, so the total never runs away.
+  // stray continuation bytes count as one character each, and a lead byte whose
+  // sequence runs past the end of the string is counted as one character with
+  // len forced to 1, so the scan resumes on the next byte rather than skipping
+  // it -- a truncated tail may therefore count as more than one character
+  // ("\xE0\x80" counts 2: the lead, then the stray continuation). Only the
+  // count matters here, not the boundaries.
   static int64_t utf8Length(const std::string& s) {
     int64_t n = 0;
     size_t i = 0;
@@ -465,6 +502,16 @@ private:
     if (auto e = schemaGet(schema, "enum")) {
       if (e->type != asvJSONValue::ARRAY || !e->arr) {
         setError("Invalid schema: 'enum' must be an array");
+        return false;
+      }
+      // draft-07: "The value of this keyword MUST be an array. This array SHOULD
+      // have at least one element." An empty enum matches nothing at all, so it
+      // rejects every instance -- a schema that can never validate anything is
+      // almost certainly a mistake. Note this is a SHOULD, not a MUST: the
+      // instance-level rejection ("Value not in enum") is already correct on its
+      // own, and this is a deliberate extra strictness for a degenerate schema.
+      if (e->arr->empty()) {
+        setError("Invalid schema: 'enum' should have at least one element");
         return false;
       }
     }
@@ -1179,7 +1226,13 @@ private:
               known = propsSchema->obj->count(kv.first) > 0;
             }
             if (!known) {
-              setError("Additional property '" + kv.first + "' not allowed");
+              // Report against the offending property, like the properties /
+              // patternProperties / propertyNames branches do. setError()
+              // already prefixes path_, so the name appears only once.
+              std::string oldPath = path_;
+              pushPath(kv.first);
+              setError("additional property not allowed");
+              path_ = oldPath;
               return false;
             }
           }
