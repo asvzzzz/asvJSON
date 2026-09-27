@@ -5,11 +5,20 @@
 // Known limitations (documented, not errors):
 // - NULL values are not serialized by the text format (protoTextSerializeVal
 //   skips them); a toProtobufText()/fromProtobufText() round-trip drops nulls.
+//   A null array element is skipped without leaving a separator behind, so
+//   [1, null, 2] is written as [1, 2] (valid text), never as [1, , 2].
+// - A JSON-driven schema must give every field an integer "id"; a field without
+//   one throws asvJSONError instead of being dropped from the schema silently.
 // - Protobuf groups (wire types 3/4) are deprecated and not supported; a
 //   group-typed field terminates the enclosing message frame.
 // - Arrays with mixed element types are not faithfully representable in the
-//   schema-less wire format: they are marked with the unknown type code "A"
-//   and decoded back per-element heuristically instead of as garbage ints.
+//   schema-less wire format: they are marked with the unknown type code "A",
+//   and each element is then decoded purely by its wire type (varint -> int,
+//   64/32-bit fixed -> int built from the raw bits, length-delimited -> string,
+//   bytes or a sub-message). Only the length-delimited case is a real
+//   heuristic, so a double element of a mixed array comes back as an integer
+//   carrying its IEEE-754 bits rather than as garbage: the type is not
+//   recovered, and no double/int guessing is attempted.
 // - Text-format integer literals accept C-style forms (0x.. hex and leading-0
 //   octal); unpaired \u surrogate escapes are replaced with U+FFFD.
 // - Field numbers are limited to 2^29-1; malformed varints (unterminated or a
@@ -38,6 +47,10 @@
 //   roots have no wire representation (an empty protobuf message IS zero bytes,
 //   so this is inherent, not a bug). "{}" nested as a field is preserved (it is
 //   encoded with a schema-less "m" type code / decoded from a zero-length LEN).
+// - The text format accepts a top-level message, a top-level array (the
+//   "[...]" protoTextSerializeVal writes for an ARRAY root, including "[]") and
+//   a top-level scalar; all three round-trip. The empty object root "{}" is
+//   still rejected by the parser, as it is by fromProtobuf.
 // - Text-format float literals accept a trailing f/F suffix ("1.5f").
 
 #include "../core.hpp"
@@ -155,16 +168,16 @@ struct ProtoSchema {
 
 inline ProtoField protoParseOneField(const asvJSONValue* val) {
   ProtoField f;
-  if (!val || val->type != asvJSONValue::OBJECT) return f;
+  if (!val || val->type != asvJSONValue::OBJECT)
+    throw asvJSONError("Protobuf: schema field must be an object");
   auto* n = val->get("id");
-  if (n) {
-    if (n->type != asvJSONValue::INT)
-      throw asvJSONError("Protobuf: field id must be an integer");
-    int64_t id = n->num;
-    if (id < 1 || id > static_cast<int64_t>(protoMaxFieldNum))
-      throw asvJSONError("Protobuf: field id out of range [1, " + std::to_string(protoMaxFieldNum) + "]");
-    f.number = static_cast<int>(id);
-  }
+  if (!n) throw asvJSONError("Protobuf: schema field is missing the required integer \"id\"");
+  if (n->type != asvJSONValue::INT)
+    throw asvJSONError("Protobuf: field id must be an integer");
+  int64_t id = n->num;
+  if (id < 1 || id > static_cast<int64_t>(protoMaxFieldNum))
+    throw asvJSONError("Protobuf: field id out of range [1, " + std::to_string(protoMaxFieldNum) + "]");
+  f.number = static_cast<int>(id);
   auto* t = val->get("type");
   if (t && t->type == asvJSONValue::STRING) f.type.assign(t->str_data.data(), t->str_data.size());
   auto* r = val->get("repeated");
@@ -182,10 +195,8 @@ inline ProtoField protoParseOneField(const asvJSONValue* val) {
       for (const auto& [k, v] : *sub->obj) {
         if (!v) continue;
         auto pf = protoParseOneField(v.get());
-        if (pf.number > 0) {
-          f.schema->fields[k] = pf;
-          f.schema->numberToName[pf.number] = k;
-        }
+        f.schema->fields[k] = pf;
+        f.schema->numberToName[pf.number] = k;
       }
     }
   }
@@ -200,10 +211,8 @@ inline std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaV
   for (const auto& [name, val] : *schemaVal->obj) {
     if (!val) continue;
     auto pf = protoParseOneField(val.get());
-    if (pf.number > 0) {
-      s->fields[name] = pf;
-      s->numberToName[pf.number] = name;
-    }
+    s->fields[name] = pf;
+    s->numberToName[pf.number] = name;
   }
   return s;
 }
@@ -934,6 +943,28 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
   return r;
 }
 
+// Skip a nested construct up to and including its closing delimiter, used by
+// the depth-guard and allocation-failure paths so the caller resumes on the
+// next sibling instead of mis-parsing the inner content. Quoted literals are
+// consumed whole, otherwise a brace or bracket inside a string value (e.g.
+// a: "}{") would skew the depth count and cut the skip short.
+//
+// opens and closes MUST be disjoint: the opens test runs first, so a character
+// listed in both would increment the depth instead of decrementing it and the
+// scan would run to EOF, swallowing every following sibling. Pass only the
+// opening characters ("[", "{<"), never a full bracket set.
+inline void protoTextSkipNested(const std::string& text, size_t& pos, std::string_view opens, std::string_view closes) {
+  int d = 1;
+  while (pos < text.size() && d > 0) {
+    char c = text[pos];
+    if (c == '"' || c == '\'') { protoTextParseStringLit(text, pos); continue; }
+    if (opens.find(c) != std::string_view::npos) d++;
+    else if (closes.find(c) != std::string_view::npos) d--;
+    if (d > 0) pos++;
+  }
+  if (pos < text.size()) pos++;
+}
+
 inline std::string protoTextParseIdent(const std::string& text, size_t& pos) {
   std::string id;
   while (pos < text.size() && (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
@@ -1096,21 +1127,11 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
 
 inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSONValue* arr, int depth) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
-    int d = 1;
-    while (pos < text.size() && d > 0) {
-      if (text[pos] == '[') d++; else if (text[pos] == ']') d--;
-      if (d > 0) pos++;
-    }
-    if (pos < text.size()) pos++;
+    protoTextSkipNested(text, pos, "[", "]");
     return;
   }
   if (!arr || !arr->arr) {
-    int d = 1;
-    while (pos < text.size() && d > 0) {
-      if (text[pos] == '[') d++; else if (text[pos] == ']') d--;
-      if (d > 0) pos++;
-    }
-    if (pos < text.size()) pos++;
+    protoTextSkipNested(text, pos, "[", "]");
     return;
   }
   while (pos < text.size()) {
@@ -1120,12 +1141,12 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
       pos++;
       auto elem = asvJSONValue::makeObject();
       if (elem) { protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
-      else { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } if (pos < text.size()) pos++; }
+      else { protoTextSkipNested(text, pos, "{<", "}>"); }
     } else if (text[pos] == '[') {
       pos++;
       auto elem = asvJSONValue::makeArray();
       if (elem && elem->arr) { protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
-      else { int d = 1; while (pos < text.size() && d > 0) { if (text[pos] == '[') d++; else if (text[pos] == ']') d--; if (d > 0) pos++; } if (pos < text.size()) pos++; }
+      else { protoTextSkipNested(text, pos, "[", "]"); }
     } else {
       size_t before = pos;
       auto elem = protoTextParseScalar(text, pos);
@@ -1143,13 +1164,7 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
     // Skip to the matching closing brace so the parent frame does not
     // mis-parse this body's fields as its own.
-    int d = 1;
-    while (pos < text.size() && d > 0) {
-      if (text[pos] == '{' || text[pos] == '<') d++;
-      else if (text[pos] == '}' || text[pos] == '>') d--;
-      if (d > 0) pos++;
-    }
-    if (pos < text.size()) pos++;
+    protoTextSkipNested(text, pos, "{<", "}>");
     return;
   }
   while (pos < text.size()) {
@@ -1175,7 +1190,7 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
     if (text[pos] == '{' || text[pos] == '<') {
       pos++;
       auto obj = asvJSONValue::makeObject();
-      if (!obj) { int d = 1; while (pos < text.size() && d>0) { if (text[pos]=='{'||text[pos]=='<') d++; else if (text[pos]=='}'||text[pos]=='>') d--; if (d>0) pos++; } if (pos<text.size()) pos++; continue; }
+      if (!obj) { protoTextSkipNested(text, pos, "{<", "}>"); continue; }
       protoTextParseBody(text, pos, obj.get(), depth + 1);
       protoSetField(parent, fname, std::move(obj));
       protoTextSkipWS(text, pos);
@@ -1186,12 +1201,7 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
       if (arr && arr->arr) {
         protoTextParseArrayBody(text, pos, arr.get(), depth + 1);
       } else {
-        int d = 1;
-        while (pos < text.size() && d > 0) {
-          if (text[pos] == '[') d++; else if (text[pos] == ']') d--;
-          if (d > 0) pos++;
-        }
-        if (pos < text.size()) pos++;
+        protoTextSkipNested(text, pos, "[", "]");
       }
       protoSetField(parent, fname, std::move(arr));
       protoTextSkipWS(text, pos);
@@ -1224,7 +1234,7 @@ inline void protoTextQuote(const std::string& s, std::string& out) {
   out += '"';
 }
 
-inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent);
+inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent);
 
 inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) { out += "{}"; return; }
@@ -1238,22 +1248,30 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
   out += "{\n";
   for (const auto& [k, fv] : *val->obj) {
     if (!fv || fv->type == asvJSONValue::NULL_VAL) continue;
+    // Serialize the value into a scratch buffer first: a type the text format
+    // cannot represent writes nothing, and emitting the key anyway would leave
+    // a bare "k: " line with no value behind. The return value is the signal
+    // ("cannot represent"), not an emptiness test on the buffer.
+    std::string vs;
+    if (!protoTextSerializeVal(fv.get(), vs, indent + 1)) continue;
     for (int i = 0; i < indent + 1; i++) out += "  ";
     if (isValidProtoIdent(k)) out += k;
     else { out += '['; out += k; out += ']'; }
-    if (fv->type == asvJSONValue::OBJECT) {
-      out += ' '; protoTextSerializeVal(fv.get(), out, indent + 1);
-    } else {
-      out += ": "; protoTextSerializeVal(fv.get(), out, indent + 1);
-    }
+    if (fv->type == asvJSONValue::OBJECT) out += ' ';
+    else out += ": ";
+    out += vs;
     out += '\n';
   }
   for (int i = 0; i < indent; i++) out += "  ";
   out += '}';
 }
 
-inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent) {
-  if (!val || val->type == asvJSONValue::NULL_VAL) return;
+// Returns true when something was actually appended to out. A value the text
+// format cannot represent (null, and any type with no case below) writes
+// nothing, and callers use the return value to avoid leaving a dangling
+// separator behind -- an element that wrote nothing must not consume ", ".
+inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent) {
+  if (!val || val->type == asvJSONValue::NULL_VAL) return false;
   switch (val->type) {
     case asvJSONValue::BOOL_VAL: out += val->flag ? "true" : "false"; break;
     case asvJSONValue::INT: { char buf[32]; snprintf(buf, sizeof(buf), "%" PRId64, val->num); out += buf; break; }
@@ -1292,18 +1310,23 @@ inline void protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
         out += '[';
         bool firstWritten = false;
         for (size_t i = 0; i < val->arr->size(); i++) {
-          if ((*val->arr)[i]) {
-            if (firstWritten) out += ", ";
-            protoTextSerializeVal((*val->arr)[i].get(), out, indent);
-            firstWritten = true;
+          if (!(*val->arr)[i]) continue;
+          if (firstWritten) out += ", ";
+          // A null element writes nothing; roll the separator back so the
+          // result is "[1, 2]" and never the invalid "[1, , 2]".
+          if (!protoTextSerializeVal((*val->arr)[i].get(), out, indent)) {
+            if (firstWritten) out.resize(out.size() - 2);
+            continue;
           }
+          firstWritten = true;
         }
         out += ']';
       }
       break;
     }
-    default: break;
+    default: return false;
   }
+  return true;
 }
 
 // ======================= asvJSON wrapper implementations =======================
@@ -1358,6 +1381,15 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       if (!obj) return false;
       protoTextParseBody(text, pos, obj.get(), 1);
       if (obj->obj && !obj->obj->empty()) root = std::move(obj);
+    } else if (text[pos] == '[') {
+      // Top-level array. protoTextSerializeVal writes a bare "[...]" for an
+      // ARRAY root, so the parser has to accept that form; without this branch
+      // toProtobufText() -> fromProtobufText() failed for every array root.
+      pos++;
+      auto arr = asvJSONValue::makeArray();
+      if (!arr) return false;
+      protoTextParseArrayBody(text, pos, arr.get(), 1);
+      if (arr->arr) root = std::move(arr);
     } else {
       // Auto-detect implicit object: identifier followed by ':'
       size_t save = pos;

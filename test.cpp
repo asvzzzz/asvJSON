@@ -10004,6 +10004,226 @@ TEST(testProtobufTextArrayOfObjects) {
 	ASSERT(arr->arr->at(1)->get("x") != nullptr && arr->arr->at(1)->get("x")->num == 2);
 }
 
+TEST(testProtobufTextArrayRootAndNulls) {
+	// A top-level ARRAY root used to serialize as "[1, 2, 3]" but
+	// fromProtobufText() could not parse that form back (it only accepted a
+	// message, an implicit "key: value" object or a scalar), so the text
+	// round-trip failed for every array root.
+	{
+		asvJSON j;
+		j.parse(std::string("[1, 2, 3]"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(r->arr->size(), size_t(3));
+		ASSERT(r->arr->at(0)->num == 1 && r->arr->at(1)->num == 2 && r->arr->at(2)->num == 3);
+		// Re-serializing the parsed value must reproduce the same text.
+		ASSERT_EQ(j2.toProtobufText(), text);
+	}
+	// Array of messages as a root, and the empty array.
+	{
+		asvJSON j;
+		j.parse(std::string(R"([{"x":1},{"x":2}])"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::ARRAY && r->arr->size() == 2);
+		ASSERT(r->arr->at(1)->get("x") != nullptr && r->arr->at(1)->get("x")->num == 2);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string("[]"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT(j2.getRoot()->arr->empty());
+	}
+	// A null array element used to leave its separator behind, producing the
+	// invalid "[1, , 2]"; the element is now skipped without a dangling comma.
+	{
+		asvJSON j;
+		j.parse(std::string("[1, null, 2]"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find(", ,") == std::string::npos);
+		ASSERT(text.find("[1, 2]") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::ARRAY && r->arr->size() == 2);
+		ASSERT(r->arr->at(0)->num == 1 && r->arr->at(1)->num == 2);
+	}
+	// A leading and a trailing null must not produce a stray separator either.
+	{
+		asvJSON j;
+		j.parse(std::string("[null, 1, null]"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find(", ,") == std::string::npos);
+		ASSERT(text.find("[1]") != std::string::npos);
+	}
+	// An array of only nulls still yields a well-formed empty list.
+	{
+		asvJSON j;
+		j.parse(std::string("[null, null]"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("[]") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->arr->empty());
+	}
+	// A field whose type the text format cannot represent must not leave a bare
+	// "k: " line behind; the whole field is skipped instead.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":1})"));
+		j.putDateTime("dt", 0, 0);
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("dt:") == std::string::npos);
+		ASSERT(text.find("a: 1") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->get("dt") == nullptr);
+		ASSERT(j2.getRoot()->get("a") != nullptr && j2.getRoot()->get("a")->num == 1);
+	}
+}
+
+TEST(testProtobufSchemaRequiresFieldId) {
+	// A schema field with no "id" used to be dropped in silence (ProtoField
+	// kept number 0 and protoParseSchema only registered numbers > 0), so
+	// {"name": {"type": "string"}} quietly encoded an empty message. A missing
+	// id is a schema error and now throws.
+	auto expectThrow = [](const std::string& schema) {
+		asvJSON j;
+		j.parse(std::string(R"({"name":"x"})"));
+		try { j.toProtobuf(schema); }
+		catch (const std::exception&) { return; }
+		throw std::runtime_error("expected asvJSONError for a schema field without an id");
+	};
+	expectThrow(R"({"name":{"type":"string"}})");
+	// The same rule applies to a nested message field.
+	expectThrow(R"({"msg":{"id":1,"type":"message","fields":{"inner":{"type":"int64"}}}})");
+	// A field that is not an object is a schema error too.
+	expectThrow(R"({"name":"string"})");
+	// A well-formed schema still works, and so does a nested one.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"name":"x","n":7})"));
+		auto mp = j.toProtobuf(R"({"name":{"id":1,"type":"string"},"n":{"id":2,"type":"int64"}})");
+		ASSERT(!mp.empty());
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(mp.data(), mp.size(),
+		    R"({"name":{"id":1,"type":"string"},"n":{"id":2,"type":"int64"}})"));
+		ASSERT(j2.getRoot() != nullptr);
+		ASSERT(j2.getRoot()->get("name") != nullptr && j2.getRoot()->get("name")->str_data == "x");
+		ASSERT(j2.getRoot()->get("n") != nullptr && j2.getRoot()->get("n")->num == 7);
+	}
+}
+
+TEST(testProtobufTextDepthGuardStringAware) {
+	// The depth-guard skip used to count braces/brackets without regard for
+	// string literals, so a quoted value containing one cut the skip short and
+	// the surrounding text was mis-parsed. protoTextSkipNested() now consumes
+	// quoted literals whole.
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("a: \"}{\""));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		ASSERT(r->get("a") != nullptr && r->get("a")->str_data == "}{");
+	}
+	// Deep nesting must still hit the guard without throwing or mis-parsing.
+	{
+		std::string deep;
+		for (int i = 0; i < asvJSONValue::MAX_NESTING_DEPTH + 8; i++) deep += "[";
+		for (int i = 0; i < asvJSONValue::MAX_NESTING_DEPTH + 8; i++) deep += "]";
+		asvJSON j;
+		// The guard truncates the nesting; the call must simply succeed or
+		// fail cleanly, never crash or throw.
+		(void)j.fromProtobufText(deep);
+		ASSERT(true);
+	}
+	// The skip must stop at the MATCHING closer, not run to EOF. A regression
+	// here (passing overlapping open/close sets, so a closer matched opens
+	// first and incremented the depth) made the guard swallow every following
+	// sibling, so assert on a key placed after the over-deep block.
+	const int n = asvJSONValue::MAX_NESTING_DEPTH + 6;
+	{
+		std::string t = "deep: ";
+		for (int i = 0; i < n; i++) t += "[";
+		t += "1";
+		for (int i = 0; i < n; i++) t += "]";
+		t += " after: 7";
+		asvJSON j;
+		ASSERT(j.fromProtobufText(t));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		auto* after = r->get("after");
+		ASSERT(after != nullptr);
+		ASSERT_EQ(after->num, 7);
+	}
+	{
+		std::string t = "deep: ";
+		for (int i = 0; i < n; i++) t += "[";
+		t += "\"]]]}}}\"";
+		for (int i = 0; i < n; i++) t += "]";
+		t += " after: 11";
+		asvJSON j;
+		ASSERT(j.fromProtobufText(t));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		auto* after = r->get("after");
+		ASSERT(after != nullptr);
+		ASSERT_EQ(after->num, 11);
+	}
+	// Same for the message-body skip, driven from the document root so the
+	// observable result is the sibling key rather than the nesting truncation.
+	{
+		std::string t;
+		for (int i = 0; i < n; i++) t += "k: {";
+		t += "v: 1";
+		for (int i = 0; i < n; i++) t += "}";
+		t += " after: 9";
+		asvJSON j;
+		ASSERT(j.fromProtobufText(t));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		auto* after = r->get("after");
+		ASSERT(after != nullptr);
+		ASSERT_EQ(after->num, 9);
+	}
+	// An over-deep message chain nested inside an array value: the message skip
+	// must stop at its matching brace so the sibling key survives.
+	{
+		std::string t = "a: [ ";
+		for (int i = 0; i < n; i++) t += "k: {";
+		t += "v: 1";
+		for (int i = 0; i < n; i++) t += "}";
+		t += " ] b: 8";
+		asvJSON j;
+		ASSERT(j.fromProtobufText(t));
+		auto* r = j.getRoot();
+		ASSERT(r != nullptr);
+		auto* b = r->get("b");
+		ASSERT(b != nullptr);
+		ASSERT_EQ(b->num, 8);
+	}
+	// Array of objects as a root, over-deep, with a sibling-ish tail: the
+	// object skip path must also stop at its matching brace.
+	{
+		std::string t;
+		for (int i = 0; i < n; i++) t += "{k:{";
+		t += "s: \"}\"";
+		for (int i = 0; i < n; i++) t += "}}";
+		t += " tail: 13";
+		asvJSON j;
+		(void)j.fromProtobufText(t);
+		ASSERT(true);
+	}
+}
+
 TEST(testProtobufExtras) {
 	// Numeric field-name keys (text format: field numbers are valid keys) must
 	// round-trip; previously the parser rejected keys starting with a digit.
@@ -25589,6 +25809,9 @@ RUN(testCBORFloat16);
 	RUN(testProtobufPackedFixed);
 	RUN(testProtobufSchemaLessRoundTrip);
 	RUN(testProtobufTextArrayOfObjects);
+	RUN(testProtobufTextArrayRootAndNulls);
+	RUN(testProtobufSchemaRequiresFieldId);
+	RUN(testProtobufTextDepthGuardStringAware);
 	RUN(testProtobufExtras);
 	RUN(testProtobufAuditFixes);
 	RUN(testProtobufAuditFixesRound2);
