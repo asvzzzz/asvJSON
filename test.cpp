@@ -10,6 +10,7 @@ using namespace asvJSONInternal;
 #include <mutex>
 #include <random>
 #include <limits>
+#include <cmath>
 #include <crtdbg.h>
 
 int passed = 0;
@@ -23243,6 +23244,271 @@ TEST(testJsonStream) {
 		 ASSERT(sp.finish());
 		 ASSERT(ok);
 		}
+
+	// -- regression: '*/' split across feeds must close the comment --
+	// processBlockComment() used to consume the last byte of every feed, so a
+	// chunk ending in '*' lost the '*' and the next chunk's '/' started a NEW
+	// comment that ran to EOF: "/* abc *" + "/ 42" -> unterminated comment.
+	{
+		bool got = false;
+		struct : JsonSaxHandler {
+			bool* o;
+			void onIntegerValue(int64_t v) override { *o = (v == 42); }
+		} h;
+		h.o = &got;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("/* abc *"));
+		ASSERT(sp.feed("/ 42"));
+		ASSERT(sp.finish());
+		ASSERT(got);
+	}
+
+	// -- same split inside a container, with the comment between two values --
+	{
+		std::vector<std::string> events;
+		struct : JsonSaxHandler {
+			std::vector<std::string>* ev;
+			void onKey(std::string_view k) override { ev->push_back(std::string("key:") + std::string(k)); }
+			void onIntegerValue(int64_t v) override { ev->push_back("int:" + std::to_string(v)); }
+		} h;
+		h.ev = &events;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("{\"a\":1,/* c *"));
+		ASSERT(sp.feed("/\"b\":2}"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(events.size(), size_t(4));
+		ASSERT_EQ(events[0], "key:a");
+		ASSERT_EQ(events[1], "int:1");
+		ASSERT_EQ(events[2], "key:b");
+		ASSERT_EQ(events[3], "int:2");
+	}
+
+	// -- the retained '*' must still terminate an unclosed comment at EOF --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("/* abc *"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- '*/' split at the leading '*' (feed is a single '*') --
+	{
+		bool ok = false;
+		struct : JsonSaxHandler {
+			bool* o;
+			void onIntegerValue(int64_t v) override { *o = (v == 7); }
+		} h;
+		h.o = &ok;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("/*a"));
+		ASSERT(sp.feed("*"));
+		ASSERT(sp.feed("/7"));
+		ASSERT(sp.finish());
+		ASSERT(ok);
+	}
+
+	// -- a comment that legitimately ends on '*' still needs its '/' --
+	{
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h;
+		h.e = &errored;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("/*/"));
+		ASSERT(sp.feed("*"));
+		ASSERT(!sp.finish());
+		ASSERT(errored);
+	}
+
+	// -- a second comment whose '*/' is split still parses --
+	// The first comment closes inside the first feed, the second one is still
+	// open when the feed ends, so the retained '*' pairs with the next '/'.
+	{
+		bool ok = false;
+		struct : JsonSaxHandler {
+			bool* o;
+			void onIntegerValue(int64_t v) override { *o = (v == 5); }
+		} h;
+		h.o = &ok;
+		JsonStreamParser sp(h);
+		sp.allowComments = true;
+		ASSERT(sp.feed("/* a */ /* b *"));
+		ASSERT(sp.feed("/ 5"));
+		ASSERT(sp.finish());
+		ASSERT(ok);
+	}
+
+	// -- validateUTF8: sequences the DOM rejects must be rejected here too --
+	// The incremental scanner checked only lead/continuation structure, so an
+	// overlong form, a surrogate or a code point above U+10FFFF slipped through
+	// in comments and inter-token whitespace, which the DOM parser rejects.
+	// Fed byte by byte to also cover a sequence split across feeds.
+	{
+		const char* bad[] = {
+			"/* \xE0\x80\x80 */ 1",        // overlong 3-byte in a comment
+			"/* \xED\xA0\x80 */ 1",        // U+D800 surrogate in a comment
+			"/* \xF4\x90\x80\x80 */ 1",    // > U+10FFFF in a comment
+			"/* \xF0\x80\x80\x80 */ 1",    // overlong 4-byte in a comment
+			"{\"k\":\"\xE0\x80\x80\"}",    // overlong 3-byte in a string
+			"{\"k\":\"\xED\xA0\x80\"}",    // surrogate in a string
+			"{\"k\":\"\xF4\x90\x80\x80\"}" // > U+10FFFF in a string
+		};
+		for (const char* src : bad) {
+			asvJSON dom;
+			dom.validateUTF8 = true;
+			bool domOk = dom.parse(src);
+			bool errored = false;
+			struct : JsonSaxHandler {
+				bool* e;
+				void onError(std::string_view) override { *e = true; }
+			} h;
+			h.e = &errored;
+			JsonStreamParser sp(h);
+			sp.validateUTF8 = true;
+			bool spOk = true;
+			for (const char* p = src; *p; p++) spOk = sp.feed(std::string_view(p, 1)) && spOk;
+			if (spOk) spOk = sp.finish();
+			ASSERT(!domOk);   // the strict reference rejects all of these
+			ASSERT(!spOk);    // the stream parser must agree
+			ASSERT(errored);
+		}
+	}
+
+	// -- validateUTF8: well-formed multi-byte sequences still accepted --
+	{
+		const char* good[] = {
+			"/* \xE0\xA0\x80 */ 1",        // U+0800, lowest well-formed 3-byte
+			"/* \xF4\x8F\xBF\xBF */ 1",    // U+10FFFF, highest code point
+			"/* \xF0\x9F\x98\x80 */ 1",    // U+1F600
+			"{\"k\":\"\xD0\xBF\xD1\x80\"}" // U+043F U+0440
+		};
+		for (const char* src : good) {
+			bool errored = false;
+			struct : JsonSaxHandler {
+				bool* e;
+				void onError(std::string_view) override { *e = true; }
+			} h;
+			h.e = &errored;
+			JsonStreamParser sp(h);
+			sp.validateUTF8 = true;
+			bool spOk = true;
+			for (const char* p = src; *p; p++) spOk = sp.feed(std::string_view(p, 1)) && spOk;
+			if (spOk) spOk = sp.finish();
+			ASSERT(spOk);
+			ASSERT(!errored);
+		}
+	}
+
+	// -- number overflow: allowNaNInfinity honors overflow, still rejects underflow --
+	// Overflow (1e999) and underflow (1e-999) both report result_out_of_range from
+	// from_chars, and from_chars is not required to write +/-inf there, so the
+	// result must be decided by strtod -- not by inspecting the from_chars output.
+	{
+		struct : JsonSaxHandler {
+			int count = 0;
+			bool sawPosInf = false, sawNegInf = false, sawFinite = false;
+			void onDoubleValue(double v) override {
+				count++;
+				if (std::isinf(v) && v > 0) sawPosInf = true;
+				else if (std::isinf(v) && v < 0) sawNegInf = true;
+				else sawFinite = true;
+			}
+		} h;
+		JsonStreamParser sp(h);
+		sp.allowNaNInfinity = true;
+		ASSERT(sp.feed("1e999"));
+		ASSERT(sp.finish());
+		ASSERT_EQ(h.count, 1);
+		ASSERT(h.sawPosInf);
+
+		struct : JsonSaxHandler {
+			bool* o;
+			void onDoubleValue(double v) override { *o = (v == -HUGE_VAL); }
+		} h2;
+		bool neg = false;
+		h2.o = &neg;
+		JsonStreamParser sp2(h2);
+		sp2.allowNaNInfinity = true;
+		ASSERT(sp2.feed("-1e999"));
+		ASSERT(sp2.finish());
+		ASSERT(neg);
+
+		// Underflow: same ec, but strtod yields a finite value, so it stays an error.
+		bool errored = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h3;
+		h3.e = &errored;
+		JsonStreamParser sp3(h3);
+		sp3.allowNaNInfinity = true;
+		ASSERT(sp3.feed("1e-999"));
+		ASSERT(!sp3.finish());
+		ASSERT(errored);
+
+		// Overflow without allowNaNInfinity is an error.
+		bool errored4 = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h4;
+		h4.e = &errored4;
+		JsonStreamParser sp4(h4);
+		ASSERT(sp4.feed("1e999"));
+		ASSERT(!sp4.finish());
+		ASSERT(errored4);
+	}
+
+	// -- the same overflow rule in the one-shot SAX parser --
+	{
+		struct : JsonSaxHandler {
+			bool* o;
+			void onDoubleValue(double v) override { *o = (v == HUGE_VAL); }
+		} h;
+		bool pos = false;
+		h.o = &pos;
+		JsonSaxParser p1;
+		p1.allowNaNInfinity = true;
+		ASSERT(p1.parse("1e999", h));
+		ASSERT(pos);
+
+		struct : JsonSaxHandler {
+			bool* o;
+			void onDoubleValue(double v) override { *o = (v == -HUGE_VAL); }
+		} h2;
+		bool neg = false;
+		h2.o = &neg;
+		JsonSaxParser p2;
+		p2.allowNaNInfinity = true;
+		ASSERT(p2.parse("-1e999", h2));
+		ASSERT(neg);
+
+		// Underflow stays rejected even with allowNaNInfinity. parse() reports the
+		// failure through onError and returns false (it does not throw).
+		bool errored3 = false;
+		struct : JsonSaxHandler {
+			bool* e;
+			void onError(std::string_view) override { *e = true; }
+		} h3;
+		h3.e = &errored3;
+		JsonSaxParser p3;
+		p3.allowNaNInfinity = true;
+		ASSERT(!p3.parse("1e-999", h3));
+		ASSERT(errored3);
+	}
 }
 
 TEST(testJsonSaxStrict) {

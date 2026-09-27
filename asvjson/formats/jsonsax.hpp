@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cerrno>
 #include <algorithm>
+#include <limits>
 
 namespace asvJSONInternal {
 
@@ -290,9 +291,19 @@ private:
       } else if (ec == std::errc() && ptr != buf + numLen) {
         throw std::runtime_error("Invalid number");
       } else {
-        // Overflow (e.g. 1e999): from_chars sets d to +/-inf. Honor allowNaNInfinity.
-        // Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected.
-        if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) bad = false;
+        // Overflow (e.g. 1e999) and underflow (e.g. 1e-999) both report
+        // result_out_of_range, and whether from_chars writes +/-inf into `d`
+        // there is not guaranteed by the standard -- so don't read `d` to tell
+        // the two apart. strtod is required to set the value: +/-inf on
+        // overflow, a tiny finite (possibly zero) on underflow. It is also what
+        // the fallback branch below uses, so overflow is honored exactly as it
+        // is there and underflow stays rejected.
+        std::string numStr(buf, numLen);
+        errno = 0;
+        char* end = nullptr;
+        d = std::strtod(numStr.c_str(), &end);
+        if (end != numStr.c_str() + numStr.size()) throw std::runtime_error("Invalid number");
+        if (allowNaNInfinity && std::isinf(d)) bad = false;
         else throw std::runtime_error("Invalid number: out of range");
       }
     #else
@@ -418,7 +429,7 @@ public:
     // An empty chunk is always a no-op (e.g. a read() returning 0); it must not
     // be mistaken for "data after complete value".
     if (chunk.empty()) return true;
-    if (done_) { lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false; }
+    if (done_) { setError("Data after complete value"); return false; }
     buffer_.append(chunk.data(), chunk.size());
     needMore_ = false; // new data may resolve a paused token
 
@@ -439,21 +450,34 @@ public:
     }
 
     // Incremental structural UTF-8 validation over the newly appended region.
-    // Catches truncated sequences and invalid lead bytes immediately; full
-    // sequence semantics (overlong, surrogates, >U+10FFFF) are validated via
-    // isValidUTF8 on complete strings in processString where all bytes are present.
+    // Runs over the raw bytes, so it covers strings, keys, literals, comments and
+    // inter-token whitespace alike. Lead bytes and continuation bytes are checked
+    // here, and the range constraints that rule out overlong forms, surrogates and
+    // code points above U+10FFFF are checked on the first continuation byte --
+    // the same rules isValidUTF8 applies, so the stream parser accepts exactly
+    // what the DOM parser accepts when validateUTF8 is set. The DOM parser runs
+    // isValidUTF8 over the whole input up front; here the check is spread across
+    // feeds, so a sequence is only judged once its bytes have all arrived.
     if (validateUTF8) {
       for (size_t i = utf8ScanPos_; i < buffer_.size(); i++) {
         uint8_t b = static_cast<uint8_t>(buffer_[i]);
         if (utf8Need_ == 0) {
           if (b < 0x80) continue;
           if (b <= 0xC1 || b >= 0xF5) { setError("Invalid UTF-8 in input"); return false; }
-          if ((b & 0xE0) == 0xC0) utf8Need_ = 1;
-          else if ((b & 0xF0) == 0xE0) utf8Need_ = 2;
-          else if ((b & 0xF8) == 0xF0) utf8Need_ = 3;
+          if ((b & 0xE0) == 0xC0) { utf8Need_ = 1; utf8Lead_ = b; }
+          else if ((b & 0xF0) == 0xE0) { utf8Need_ = 2; utf8Lead_ = b; }
+          else if ((b & 0xF8) == 0xF0) { utf8Need_ = 3; utf8Lead_ = b; }
           else { setError("Invalid UTF-8 in input"); return false; }
         } else {
           if ((b & 0xC0) != 0x80) { setError("Invalid UTF-8 in input"); return false; }
+          if (utf8Lead_ != 0) {
+            const bool bad = (utf8Lead_ == 0xE0 && b < 0xA0) ||  // overlong 3-byte
+                             (utf8Lead_ == 0xED && b >= 0xA0) || // U+D800..DFFF surrogate
+                             (utf8Lead_ == 0xF0 && b < 0x90) ||  // overlong 4-byte
+                             (utf8Lead_ == 0xF4 && b > 0x8F);   // > U+10FFFF
+            utf8Lead_ = 0;
+            if (bad) { setError("Invalid UTF-8 in input"); return false; }
+          }
           utf8Need_--;
         }
       }
@@ -585,6 +609,7 @@ private:
   bool needMore_ = false;   // true when processing paused without consuming (awaiting more input)
   bool bomPending_ = true;  // leading bytes might be a UTF-8 BOM
   int utf8Need_ = 0;        // remaining continuation bytes of an in-flight UTF-8 sequence
+  uint8_t utf8Lead_ = 0;    // its lead byte, non-zero until the first continuation is seen
   size_t utf8ScanPos_ = 0;  // end of the buffer region already UTF-8 validated
 
   // Container stack for tracking context; each frame also tracks whether a
@@ -1084,8 +1109,19 @@ private:
         d = std::strtod(numStr.c_str(), &end);
         if (errno == ERANGE) { setError("Invalid number: out of range"); return false; }
         if (end != numStr.c_str() + numStr.size()) { setError("Invalid number"); return false; }
-      } else if (ec == std::errc::result_out_of_range && allowNaNInfinity && std::isinf(d)) {
-        // Overflow honoring allowNaNInfinity, matching the DOM parser.
+      } else if (ec == std::errc::result_out_of_range) {
+        // Overflow (e.g. 1e999) and underflow (e.g. 1e-999) both report
+        // result_out_of_range, and whether from_chars writes +/-inf into `d`
+        // there is not guaranteed by the standard -- so don't read `d` to tell
+        // the two apart. strtod is required to set the value: +/-inf on
+        // overflow, a tiny finite (possibly zero) on underflow. It is also
+        // what the fallback branch and the DOM parser use, so overflow is
+        // honored exactly as they honor it and underflow stays rejected.
+        errno = 0;
+        char* end = nullptr;
+        d = std::strtod(numStr.c_str(), &end);
+        if (end != numStr.c_str() + numStr.size()) { setError("Invalid number"); return false; }
+        if (!(allowNaNInfinity && std::isinf(d))) { setError("Invalid number: out of range"); return false; }
       } else {
         setError("Invalid number: out of range");
         return false;
@@ -1164,7 +1200,7 @@ private:
       if (state_ == State::LINE_COMMENT || state_ == State::BLOCK_COMMENT) return true;
       if (pos_ >= buffer_.size()) return true; // need more data
       if (pendingComment()) { needMore_ = true; return true; } // '/' awaiting a comment start
-      lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false;
+      setError("Data after complete value"); return false;
     }
   }
 
@@ -1189,7 +1225,15 @@ private:
       }
       pos_++;
     }
-    if (pos_ < buffer_.size()) pos_++; // skip last char if odd
+    // At most one byte is left unexamined. If it is '*', it may be the first
+    // half of a '*/' whose '/' arrives in the next chunk, so it must stay in the
+    // buffer: consuming it made a comment split at that boundary swallow the
+    // rest of the document ("/* abc *" + "/ 42" -> unterminated comment, and
+    // "/*abc*" + "/def*/" absorbed "def"). Pause so the next feed pairs it up.
+    if (pos_ < buffer_.size()) {
+      if (buffer_[pos_] == '*') { needMore_ = true; return true; }
+      pos_++;
+    }
     return true; // need more data
   }
 
@@ -1326,6 +1370,10 @@ private:
     stack_.push_back(raw);
   }
 
+  // An unbalanced event stream (a stray onEndObject) is a caller bug, not a
+  // parse error: there is no input left to reject it against, so the extra
+  // end event is a no-op rather than a diagnostic. Well-formed input always
+  // balances, so the guard only fires for such a stream.
   void popContainer() {
     if (!stack_.empty()) stack_.pop_back();
   }
