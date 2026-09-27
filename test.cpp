@@ -21877,6 +21877,119 @@ TEST(testJSONPathExtras) {
 	}
 }
 
+// The validator used to be stricter than the query engine in three ways that
+// RFC 9535 does not require: it required '(' after every '!' and after '?',
+// and it accepted a function call with an argument as a path segment while
+// leaving the closing ')' unconsumed.
+TEST(testJSONPathValidator) {
+	// -- logical-not-op is valid before a test-expr, not only before a paren-expr --
+	{
+		ASSERT(asvJSON::isValidPath("$[?!@.a]"));
+		ASSERT(asvJSON::isValidPath("$[?(!@.a)]"));
+		ASSERT(asvJSON::isValidPath("$[?!(@.a)]"));
+		ASSERT(asvJSON::isValidPath("$[?!length(@.a)]"));
+		ASSERT(asvJSON::isValidPath("$[?!@.a.b]"));
+		ASSERT(asvJSON::isValidPath("$[?!(!(@.a == 1))]"));
+		// a test-expr is not a comparable, so no comparison-op may follow it
+		ASSERT(!asvJSON::isValidPath("$[?(!@.a == 5)]"));
+		ASSERT(!asvJSON::isValidPath("$[?!@.a == 5]"));
+		// RFC 9535 has no recursive not-production: one '!' per basic-expr.
+		// Nesting parens is how several negations are spelled.
+		ASSERT(!asvJSON::isValidPath("$[?!!@.a]"));
+		ASSERT(!asvJSON::isValidPath("$[?!!!!@.a]"));
+		ASSERT(asvJSON::isValidPath("$[?(!(!(@.a == 1)))]"));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":5},{"b":2},{"a":null}])")));
+		ASSERT_EQ(doc.query("$[?!@.a]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(!@.b)]").size(), size_t(3));
+		ASSERT_EQ(doc.query("$[?!(!(@.a == 5))]").size(), size_t(1));
+		// '!' binds a test-expr, so this is not `!(@.a == 5)` and matches nothing
+		ASSERT_EQ(doc.query("$[?(!@.a == 5)]").size(), size_t(0));
+		// existence test: @.a is present even when its value is null
+		ASSERT_EQ(doc.query("$[?@.a]").size(), size_t(3));
+		// '!!' is not well-formed and must not be evaluated as a double negation
+		ASSERT_EQ(doc.query("$[?!!@.a]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?!!!!@.a]").size(), size_t(0));
+	}
+	// -- the parentheses after '?' are optional: filter-selector = "?" S logical-expr --
+	{
+		ASSERT(asvJSON::isValidPath("$[?@.a == 5]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.a == 5)]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.a) && (@.b)]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.a) || (@.b == 1)]"));
+		ASSERT(asvJSON::isValidPath("$['x',?@.a]"));
+		ASSERT(asvJSON::isValidPath("$..[?@.a]"));
+		// still rejected: empty filter, stray ')', empty and dangling parens
+		ASSERT(!asvJSON::isValidPath("$[?]"));
+		ASSERT(!asvJSON::isValidPath("$[?@.a) == 5]"));
+		ASSERT(!asvJSON::isValidPath("$[?()]"));
+		ASSERT(!asvJSON::isValidPath("$[?&&]"));
+	}
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":5},{"b":2}])")));
+		ASSERT_EQ(doc.query("$[?@.a == 5]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(@.a) && (@.b)]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?@.a]").size(), size_t(2));
+	}
+	// -- a function used as a path segment is zero-arg: a call with an argument is not a path --
+	{
+		ASSERT(asvJSON::isValidPath("$.items.length()"));
+		ASSERT(asvJSON::isValidPath("$.name.length()"));
+		ASSERT(asvJSON::isValidPath("$.x.value()"));
+		ASSERT(asvJSON::isValidPath("$.values.min()"));
+		ASSERT(asvJSON::isValidPath("$.values.avg()"));
+		ASSERT(asvJSON::isValidPath("$[?(@.items.length() > 2)]"));
+		ASSERT(asvJSON::isValidPath("$[?(@.x.count() == 1)]"));
+		ASSERT(!asvJSON::isValidPath("$.length(@.a)"));
+		ASSERT(!asvJSON::isValidPath("$[?(@.length(@))]"));
+		ASSERT(!asvJSON::isValidPath("$[?!@.length(@.a)]"));
+	}
+	{
+		// query() is lenient, but a function segment with an argument must not
+		// silently resolve as if the argument were absent
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"s":"ab"},{"s":""},{"t":1}])")));
+		ASSERT_EQ(doc.query("$[?(@.s.length(@.a))]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?(@.s.length() > 1)]").size(), size_t(1));
+	}
+	// -- a filter query has no descendant-segment, unlike a top-level path --
+	{
+		ASSERT(asvJSON::isValidPath("$..a"));
+		ASSERT(!asvJSON::isValidPath("$[?(@..a)]"));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"x":{"a":1}},{"x":{"b":2}}])")));
+		ASSERT_EQ(doc.query("$..a").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(@..a)]").size(), size_t(0));
+	}
+	// -- filter literals follow the RFC int grammar, which is stricter than JSON --
+	{
+		ASSERT(!asvJSON::isValidPath("$[?@.a == -0]"));
+		ASSERT(!asvJSON::isValidPath("$[?@.a == -0.5]"));
+		ASSERT(!asvJSON::isValidPath("$[?@.a == -01]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == 0]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == -1]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == 0.5]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == -1.5]"));
+	}
+	// -- a function-expr in a test position judges its own value; a path does not --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"s":"","n":0},{"s":"ab","n":7},{"t":1}])")));
+		// @.s.length() is a *path* whose last node is a function result, so the
+		// test is "does it select a node" - true for both, INT(0) included
+		ASSERT_EQ(doc.query("$[?(@.s.length())]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?(@.n)]").size(), size_t(2));
+		// length(@.s) is a function-expr, so its own value decides: 0 is false
+		ASSERT_EQ(doc.query("$[?(length(@.s))]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(length(@.s) == 0)]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(value(@.n))]").size(), size_t(2));
+	}
+}
+
 TEST(testJsonSax) {
 	// -- basic object --
 	{
@@ -25573,6 +25686,7 @@ RUN(testUDEBlockScalarKeepChomping);
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testJSONPath);
 	RUN(testJSONPathExtras);
+	RUN(testJSONPathValidator);
 
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);

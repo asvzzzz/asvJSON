@@ -3,18 +3,50 @@
 // Supports:
 //   $ (root), .member, ['member'], [index], [start:end:step] (slice),
 //   ..member / ..* / ..[selectors] (recursive descent), [*] (wildcard), .*,
-//   [?(filter)] with operators: < > <= >= == != && || !
-//   functions: length(), count(), min(), max(), sum(), match(), search(), value()
+//   [?filter] / [?(filter)] with operators: < > <= >= == != && || !
+//   functions: length(), count(), min(), max(), sum(), avg(), match(), search(),
+//   value()
 //
 // RFC compliance notes:
 //   - Numeric selectors/bounds/indices are validated per the RFC int grammar
 //     (no leading zeros) and must lie in the I-JSON exact range
 //     [-(2^53)+1, (2^53)-1]; out-of-range or malformed numbers select nothing
 //     at query time and reject the path in isValidPath.
+//   - Filter *literals* obey the same strict int grammar, which is narrower than
+//     JSON: per 9535 `int = "0" / (["-"] DIGIT1 *DIGIT)` (so -0 is not an int)
+//     and a leading '-' may only introduce a non-zero digit, `-0`, `-0.5` and
+//     `-01` are rejected inside a filter. Such a filter selects nothing at query
+//     time and is reported invalid by isValidPath. This is intentional
+//     conformance, not an oversight, even though the same text is legal JSON.
+//   - Recursive descent is supported at the top level ($..name, $..*, $..[...])
+//     but NOT inside a filter. The RFC grammar allows a descendant-segment in a
+//     filter-query, here `$[?(@..a)]` is rejected by isValidPath (the filter's
+//     query-path grammar has no descendant-segment) and selects nothing through
+//     query(). Not supporting it is a deliberate simplification of the
+//     single-value filter evaluator described below.
 //   - Filter comparisons are exact for int64 operands; an empty/nothing operand
 //     yields false for every operator except == where both sides must be empty.
 //   - A bare query in a filter is an existence test: true iff it selects at
 //     least one node; the selected node's value is irrelevant (null/false/{}).
+//     `!` may precede any basic-expr, i.e. both a paren-expr and a test-expr
+//     ($[?(!(@.a))], $[?!@.a], $[?!length(@.items)]); a comparison-expr may not
+//     follow a negated test-expr, so $[?(!@.a == 5)] is rejected. RFC 9535
+//     allows a single NOT per basic-expr and has no recursive not-production, so
+//     `!!@.a` is rejected too - write $[?(!(@.a))].
+//   - Bare literals and ValueType functions in a test position ($[?0],
+//     $[?length(@.s)]) are *not well-typed* per 9535 2.4.3 - a test-expr is a
+//     filter-query or a LogicalType/NodesType function-expr - so their meaning is
+//     an extension: they evaluate by JSON-ish truthiness, where false, null,
+//     0/0.0 and the empty string are false and anything else is true. An empty
+//     array/object is *not* false (jpValueTruthy falls through to `true` for
+//     them), and no function can produce one here anyway: length/count/sum/avg
+//     yield numbers, min/max only compare numbers, and value() takes the
+//     existence path below. Existence tests (@.a) bypass truthiness entirely:
+//     they are true whenever the node exists, INT 0 and "" included.
+//   - A function used as a path segment must be zero-arg: $.items.length() and
+//     $[?(@.items.length() > 2)] are supported, a segment call with an argument
+//     ($.length(@.a), $[?(@.length(@.a))]) is not a path and is reported
+//     invalid; query() yields no result for it.
 //   - String literals follow the RFC escape rules, including \uXXXX escapes
 //     and surrogate pairs.
 //   - Slice semantics follow the RFC Normalize()/Bounds() algorithm exactly.
@@ -601,7 +633,9 @@ inline bool jpCmpForFilter(const asvJSONValue* lhs, const asvJSONValue* rhs,
 }
 
 // Truthiness of a value-result (filter literals and function results). Queries
-// are handled as existence tests, not via this function.
+// are handled as existence tests, not via this function. See the RFC compliance
+// notes in the file header for why the ValueType/array cases below are
+// extensions, and why the ARRAY/OBJECT fall-through is unreachable today.
 inline bool jpValueTruthy(const asvJSONValue* v) {
   if (!v) return false;
   if (v->type == asvJSONValue::NULL_VAL) return false;
@@ -668,15 +702,25 @@ class JPFilterEval {
   }
 
   bool parseNot() {
-    // Iterative: a chain of NOT prefixes just toggles the negation of the
-    // following comparison. No recursion, so `!!!!...` cannot overflow the
-    // stack regardless of length.
+    // RFC 9535 spells NOT as a single optional prefix on a paren-expr or a
+    // test-expr (`paren-expr = [logical-not-op S] "(" ... ")"`,
+    // `test-expr  = [logical-not-op S] (...)`) and defines no recursive
+    // not-production, so `!!X` is not well-formed - it has to be written
+    // `!(!X)`. The prefix is still consumed in a loop and negation toggled, so a
+    // long run of '!' cannot be used to burn stack, but the second '!' in the
+    // same position is rejected instead of being silently accepted.
     bool negate = false;
     while (lex_.peek().type == TokType::NOT) {
       lex_.next();
-      negate = !negate;
+      if (negate) return false;
+      negate = true;
     }
-    bool r = parseComparison();
+    bool sawCmp = false;
+    bool r = parseComparison(&sawCmp);
+    // logical-not-op binds a test-expr (or a paren-expr), and neither may be
+    // followed by a comparison-op: `!@.a == 5` is not a basic-expr, so it must
+    // not be evaluated as `!(@.a == 5)`. Kept in sync with the validator.
+    if (negate && sawCmp) return false;
     return negate ? !r : r;
   }
 
@@ -701,7 +745,13 @@ class JPFilterEval {
           }
         } else if (jpIsZeroArgFunc(p.val) && lex_.peek().type == TokType::LPAREN) {
           lex_.next();
-          if (lex_.peek().type == TokType::RPAREN) lex_.next();
+          // Segment functions take no argument. An argument used to be left in
+          // the stream while the function was still applied to the current node,
+          // so `@.s.length(@.a)` silently resolved to the length of @.s and the
+          // filter then matched on that; isValidPath rejects such a path, so
+          // drop the whole path here too and let the filter not match.
+          if (lex_.peek().type != TokType::RPAREN) { node = nullptr; break; }
+          lex_.next();
           auto r = jpApplyFunc(p.val, node);
           if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
           else node = nullptr;
@@ -897,7 +947,7 @@ class JPFilterEval {
     return resolvePath();
   }
 
-  bool parseComparison() {
+  bool parseComparison(bool* sawCmp = nullptr) {
     Tok t = lex_.peek();
     if (t.type == TokType::LPAREN) {
       lex_.next();
@@ -917,6 +967,7 @@ class JPFilterEval {
         op.type == TokType::LE || op.type == TokType::GE ||
         op.type == TokType::EQ || op.type == TokType::NE) {
       lex_.next();
+      if (sawCmp) *sawCmp = true;
       const asvJSONValue* rhs = parseFuncValue();
       return jpCmpForFilter(lhs, rhs, op.type);
     }
@@ -1264,9 +1315,15 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
       if (seg.type != TokType::IDENT) return false;
       lex.next();
       if (jpIsZeroArgFunc(seg.val) && lex.peek().type == TokType::LPAREN) {
+        // A function used as a path segment is zero-arg: jpExpand applies it to
+        // the current node and so does resolvePath inside a filter. A call with
+        // an argument is not a path; previously the '(' was consumed, an
+        // argument was validated and the closing ')' was left in the stream for
+        // the caller to trip over. Reject it outright instead, matching query(),
+        // which yields no result for such a path.
         lex.next();
-        if (lex.peek().type == TokType::RPAREN) lex.next();
-        else if (!jpValidateQueryPath(lex)) return false;
+        if (lex.peek().type != TokType::RPAREN) return false;
+        lex.next();
       }
     } else if (p.type == TokType::LBRACKET) {
       lex.next();
@@ -1342,18 +1399,31 @@ inline bool jpValidateOperand(PathLexer& lex) {
 }
 
 inline bool jpValidateNotExpr(PathLexer& lex) {
-  // Consume a run of NOT prefixes iteratively so `!!!!...` cannot overflow the stack.
-  // Per RFC 9535, logical-not-op is only valid before '(' (paren-expr); it is not
-  // allowed before a bare comparison like `!@.a == 5`.
+  // Consume the NOT prefix iteratively so `!!!!...` cannot overflow the stack.
+  // RFC 9535 allows exactly one optional logical-not-op per basic-expr and has
+  // no recursive not-production, so a second '!' is malformed: `!!@.a` is
+  // invalid, `!(!@.a)` is not.
   bool hasNot = false;
-  while (lex.peek().type == TokType::NOT) { lex.next(); hasNot = true; }
-  if (hasNot && lex.peek().type != TokType::LPAREN) return false;
+  while (lex.peek().type == TokType::NOT) {
+    lex.next();
+    if (hasNot) return false;
+    hasNot = true;
+  }
   if (lex.peek().type == TokType::LPAREN) {
+    // paren-expr = [logical-not-op S] "(" S logical-expr S ")"
     lex.next();
     if (!jpValidateExpr(lex)) return false;
     if (lex.peek().type != TokType::RPAREN) return false;
     lex.next();
     return true;
+  }
+  if (hasNot) {
+    // test-expr = [logical-not-op S] (filter-query / function-expr). RFC 9535
+    // allows logical-not-op before *both* basic-expr forms, so `!@.a`,
+    // `!length(@.a)` and `!@.a.b` are all valid -- the earlier version required
+    // a '(' after every `!` and wrongly rejected all of them. No comparison-op
+    // may follow, because a test-expr is not a comparable.
+    return jpValidateOperand(lex);
   }
   if (!jpValidateOperand(lex)) return false;
   Tok op = lex.peek();
@@ -1405,12 +1475,15 @@ inline bool jpValidateBracketContent(PathLexer& lex) {
       if (!inner.ok) return false;
       lex.next();
     } else if (inner.type == TokType::QUESTION) {
-      lex.next();
-      if (lex.peek().type != TokType::LPAREN) return false;
+      // filter-selector = "?" S logical-expr -- RFC 9535 makes the parentheses
+      // optional; they are merely the paren-expr form of logical-expr, so
+      // `$[?@.a == 5]`, `$[?(@.a == 5)]` and `$[?(@.a) && (@.b)]` are the same
+      // grammar. Requiring them made isValidPath() disagree with query(), which
+      // has always accepted the bare form (jpExpandBracket only skips an
+      // immediately following '('). jpValidateNotExpr consumes the matching ')'
+      // of a paren-expr, so there is no wrapper to check for here.
       lex.next();
       if (!jpValidateExpr(lex)) return false;
-      if (lex.peek().type != TokType::RPAREN) return false;
-      lex.next();
     } else if (inner.type == TokType::NUMBER) {
       lex.next();
       if (!inner.ok) return false;
@@ -1487,9 +1560,11 @@ inline bool jpIsValid(std::string_view path) {
       if (seg.type != TokType::IDENT && seg.type != TokType::STAR) return false;
       if (seg.type == TokType::IDENT && jpIsFuncName(seg.val) &&
           lex.peek().type == TokType::LPAREN) {
+        // Zero-arg only, as above: the closing ')' has to be consumed here, and
+        // an argument makes the whole path invalid (jpExpand returns nothing).
         lex.next(); // consume '('
-        if (lex.peek().type == TokType::RPAREN) lex.next();
-        else if (!jpValidateQueryPath(lex)) return false;
+        if (lex.peek().type != TokType::RPAREN) return false;
+        lex.next();
       }
     } else if (t.type == TokType::DOTDOT) {
       lex.next();
