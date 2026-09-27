@@ -16085,6 +16085,64 @@ TEST(testJSON5Audit) {
   }
 }
 
+TEST(testRootFootingComments) {
+  // A document footer must land in the footing group only. Copying it into
+  // leading/trailing as well made toJSON5 print it twice, and because the
+  // collector then saw two comments, the count grew on every round-trip.
+  auto countOf = [](const std::string& s, const char* needle) {
+    int n = 0;
+    size_t p = 0;
+    while ((p = s.find(needle, p)) != std::string::npos) { n++; p++; }
+    return n;
+  };
+  struct Case { const char* src; const char* mark; bool json5; };
+  const Case cases[] = {
+    {"{a: 1}\n// footer\n", "footer", true},
+    {"{a: 1}\n/* footer */\n", "footer", true},
+    {"{a: 1} // footer\n", "footer", true},
+    {"{a: 1} /* footer */\n", "footer", true},
+    {"(a: 1)\n// footer\n", "footer", false},
+    {"(a: 1)\n/* footer */\n", "footer", false},
+    {"(a: 1) // footer\n", "footer", false},
+    {"(a: 1) /* footer */\n", "footer", false},
+  };
+  for (const Case& c : cases) {
+    std::string s1;
+    for (int pass = 0; pass < 3; pass++) {
+      asvJSON a;
+      std::string src = pass ? s1 : std::string(c.src);
+      ASSERT(c.json5 ? a.fromJSON5(src) : a.fromRON(src));
+      std::string out = c.json5 ? a.toJSON5() : a.toRON();
+      ASSERT_EQ(countOf(out, c.mark), 1);
+      if (pass) ASSERT_EQ(out, s1);
+      s1 = std::move(out);
+    }
+  }
+  // A header above the document stays in leading and is not duplicated.
+  {
+    asvJSON a;
+    ASSERT(a.fromJSON5(std::string_view("// header\n{a: 1}\n")));
+    ASSERT_EQ(a.toJSON5(), std::string("// header\n{a:1}"));
+    asvJSON b;
+    ASSERT(b.fromRON(std::string_view("// header\n(a: 1)\n")));
+    ASSERT(b.toRON().find("// header") == 0);
+  }
+  // An inline comment after the root value and a standalone footer keep their
+  // own positions.
+  {
+    asvJSON a;
+    ASSERT(a.fromJSON5(std::string_view("{a: 1} // inline\n// end\n")));
+    std::string s = a.toJSON5();
+    ASSERT(s.find("{a:1} // inline") != std::string::npos);
+    ASSERT(s.find("// end") > s.find("// inline"));
+    ASSERT_EQ(countOf(s, "// inline"), 1);
+    ASSERT_EQ(countOf(s, "// end"), 1);
+    asvJSON b;
+    ASSERT(b.fromJSON5(std::string_view(s)));
+    ASSERT_EQ(b.toJSON5(), s);
+  }
+}
+
 TEST(testJSON5Extras) {
   // Escape round-trip through double-quoted strings: \n \t \r \b \f \\ \"
   {
@@ -26239,6 +26297,7 @@ RUN(testSexprNumberKeys);
 	RUN(testFromRON);
 	RUN(testRONComments);
 RUN(testRONReviewFixes);
+RUN(testRootFootingComments);
   RUN(testToCpp);
 RUN(testFromCpp);
 RUN(testFromCppAudit);

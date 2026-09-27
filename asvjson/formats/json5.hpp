@@ -26,6 +26,13 @@ inline std::string json5ToJson(std::string_view input) {
   enum StrState { NONE, SINGLE, DOUBLE };
   StrState str = NONE;
 
+  // Identifier characters. Deliberately byte-based rather than a UTF-8 decoder:
+  // 0xC0 is the first lead byte of every 2-byte sequence and 0x80 the first
+  // continuation byte, so all valid UTF-8 in the identifier range is accepted
+  // (Unicode letters are a subset of the spec's ranges, which is lenient but
+  // safe). Overlong or truncated sequences are accepted here as well; they can
+  // only reach this point in an unquoted key, and the strict JSON parser
+  // downstream rejects them when it decodes the key as UTF-8.
   auto isIdStart = [](char ch) noexcept { auto u = static_cast<unsigned char>(ch); return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || ch == '_' || ch == '$' || u >= 0xC0; };
   auto isIdCont = [](char ch) noexcept { auto u = static_cast<unsigned char>(ch); return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || ch == '_' || ch == '$' || u >= 0x80; };
 
@@ -590,13 +597,20 @@ inline void json5AttachComments(asvJSONValue* root, const std::vector<Json5Comme
     asvJSONValue* node = e.footing ? json5FindPath(root, "") : json5FindPath(root, e.path);
     if (!node) continue;
     if (!node->comments) node->comments = std::make_unique<Comments>();
+    if (e.footing) {
+      // A document footer belongs to the footing group only. Also copying it
+      // into leading/trailing made toJSON5 print it twice, and since the
+      // collector then saw two comments on re-parse, the count grew on every
+      // round-trip. The comment that trailed the root value inline stays in
+      // `trailing` (emitted right after the value, where it was written);
+      // standalone footer lines go to `footing`.
+      appendAll(node->comments->footing, e.leading);
+      if (!e.trailing.empty()) appendAll(node->comments->trailing, e.trailing);
+      continue;
+    }
     if (!e.leading.empty()) appendAll(node->comments->leading, e.leading);
     if (!e.trailing.empty()) appendAll(node->comments->trailing, e.trailing);
     if (!e.closing.empty()) appendAll(node->comments->closing, e.closing);
-    if (e.footing) {
-      appendAll(node->comments->footing, e.leading);
-      appendAll(node->comments->footing, e.trailing);
-    }
   }
 }
 

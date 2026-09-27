@@ -1431,6 +1431,18 @@ inline void ronAttachComments(asvJSONValue* root, const std::vector<RonCommentEn
     asvJSONValue* node = e.footing ? ronFindPath(root, "") : ronFindPath(root, e.path);
     if (!node) continue;
     if (!node->comments) node->comments = std::make_unique<Comments>();
+    if (e.footing) {
+      // A document footer goes to the footing group only. The `leading.empty()`
+      // guard used to cover the leading copy below, but it cannot help here: the
+      // group is still empty on a first pass, so the footer landed in leading
+      // *and* footing and toRON printed it twice. The comment that trailed the
+      // root value inline stays in `trailing`, which is emitted right after the
+      // value, where it was written.
+      for (const auto& c : e.leading) node->comments->footing.push_back(c);
+      if (!e.trailing.empty() && node->comments->trailing.empty())
+        node->comments->trailing = e.trailing;
+      continue;
+    }
     if (!e.leading.empty() && node->comments->leading.empty()) {
       node->comments->leading = e.leading;
     }
@@ -1439,10 +1451,6 @@ inline void ronAttachComments(asvJSONValue* root, const std::vector<RonCommentEn
     }
     if (!e.closing.empty() && node->comments->closing.empty()) {
       node->comments->closing = e.closing;
-    }
-    if (e.footing) {
-      for (const auto& c : e.leading) node->comments->footing.push_back(c);
-      for (const auto& c : e.trailing) node->comments->footing.push_back(c);
     }
   }
 }
