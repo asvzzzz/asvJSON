@@ -2617,6 +2617,81 @@ TEST(testMessagePackObjectIdRegexTimestamp) {
 	ASSERT_EQ(tsV->num, 1234567890);
 }
 
+TEST(testMessagePackExtWrongLengthKeepsBody) {
+	// A known ext type with a body of the wrong length used to decode to null,
+	// silently dropping the bytes. Now it falls back to a plain EXTENSION that
+	// keeps both the type byte and the raw body -- the same no-data-loss
+	// fallback the custom-tag (ext 4) decoder already used. The encoder never
+	// emits these forms, so only hand-crafted/foreign input reaches the path.
+	auto body = [](size_t n) {
+		std::vector<uint8_t> b;
+		for (size_t i = 0; i < n; i++) b.push_back(static_cast<uint8_t>(0xA0 + i));
+		return b;
+	};
+	// len byte, ext type, container prefix -- 0xC7 is ext8 (1-byte length).
+	auto check = [](const std::vector<uint8_t>& raw, int extType, size_t len) {
+		asvJSON j;
+		if (!j.fromMessagePack(raw.data(), raw.size())) throw std::runtime_error("msgpack ext decode failed");
+		auto* r = j.getRoot();
+		if (r == nullptr || r->type != asvJSONValue::EXTENSION) throw std::runtime_error("expected EXTENSION fallback");
+		if (r->ext_type != extType) throw std::runtime_error("ext_type not preserved");
+		if (r->bin_data.size() != len) throw std::runtime_error("body length not preserved");
+		// decode -> encode -> decode must be stable (the node re-encodes as the
+		// same ext container and decodes back to the same EXTENSION).
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		if (!j2.fromMessagePack(mp.data(), mp.size())) throw std::runtime_error("msgpack ext re-decode failed");
+		auto* r2 = j2.getRoot();
+		if (r2 == nullptr || r2->type != asvJSONValue::EXTENSION) throw std::runtime_error("round-trip lost EXTENSION");
+		if (r2->ext_type != extType || r2->bin_data != r->bin_data) throw std::runtime_error("round-trip body mismatch");
+	};
+	{
+		auto b = body(13);
+		std::vector<uint8_t> raw = {0xC7, 13, 1};
+		raw.insert(raw.end(), b.begin(), b.end());
+		check(raw, 1, 13);
+	}
+	{
+		auto b = body(5);
+		std::vector<uint8_t> raw = {0xC7, 5, 3};
+		raw.insert(raw.end(), b.begin(), b.end());
+		check(raw, 3, 5);
+	}
+	// 0xC8 is ext16 (2-byte length) and 0xC9 is ext32 (4-byte length); the
+	// wrong-length guard has to behave the same in all three containers.
+	{
+		auto b = body(13);
+		std::vector<uint8_t> raw = {0xC8, 0, 13, 1};
+		raw.insert(raw.end(), b.begin(), b.end());
+		check(raw, 1, 13);
+	}
+	{
+		auto b = body(5);
+		std::vector<uint8_t> raw = {0xC9, 0, 0, 0, 5, 3};
+		raw.insert(raw.end(), b.begin(), b.end());
+		check(raw, 3, 5);
+	}
+	// Positive control: the correct lengths still decode to OBJECTID/TIMESTAMP,
+	// so the fallback does not swallow well-formed values.
+	{
+		auto b = body(12);
+		std::vector<uint8_t> raw = {0xC7, 12, 1};
+		raw.insert(raw.end(), b.begin(), b.end());
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		ASSERT(j.getRoot()->type == asvJSONValue::OBJECTID);
+		ASSERT_EQ(j.getRoot()->str_data.size(), static_cast<size_t>(12));
+	}
+	{
+		// 1234567890 = 0x499602D2
+		std::vector<uint8_t> raw = {0xC7, 8, 3, 0x00, 0x00, 0x00, 0x00, 0x49, 0x96, 0x02, 0xD2};
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		ASSERT(j.getRoot()->type == asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(j.getRoot()->num, static_cast<int64_t>(1234567890));
+	}
+}
+
 TEST(testMessagePackCustomTagRoundTrip) {
 	// CUSTOM_TAG must survive a MessagePack round-trip via the asvJSON-specific
 	// ext type 4 (msgpack name-string + msgpack value) instead of degrading to
@@ -2793,8 +2868,9 @@ TEST(testMsgPackRegexFidelity) {
 }
 
 TEST(testMsgpackExtras) {
-	// ext type 3 (timestamp) payload with len != 8 must be consumed as null so sibling
+	// ext type 3 (timestamp) payload with len != 8 must be fully consumed so sibling
 	// array elements parse cleanly (previously the extra bytes leaked into the stream).
+	// The body is kept as a plain EXTENSION instead of being dropped to null.
 	{
 		std::vector<uint8_t> raw;
 		raw.push_back(0x92); // array of 2
@@ -2806,15 +2882,19 @@ TEST(testMsgpackExtras) {
 		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
 		auto* r = j.getRoot();
 		ASSERT(r && r->type == asvJSONValue::ARRAY && r->arr->size() == 2);
-		ASSERT((*r->arr)[0]->type == asvJSONValue::NULL_VAL);
+		auto& e0 = (*r->arr)[0];
+		ASSERT(e0->type == asvJSONValue::EXTENSION && e0->ext_type == 3);
+		ASSERT_EQ(e0->bin_data.size(), static_cast<size_t>(12));
 		ASSERT((*r->arr)[1]->num == 0);
 	}
-	// ext type 3 with len < 8 also consumes the payload and yields null.
+	// ext type 3 with len < 8 also consumes the payload, keeping it as an EXTENSION.
 	{
 		std::vector<uint8_t> raw = {0xC7, 0x04, 0x03, 0x00, 0x00, 0x00, 0x00};
 		asvJSON j;
 		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
-		ASSERT(j.getRoot()->type == asvJSONValue::NULL_VAL);
+		auto* r = j.getRoot();
+		ASSERT(r->type == asvJSONValue::EXTENSION && r->ext_type == 3);
+		ASSERT_EQ(r->bin_data.size(), static_cast<size_t>(4));
 	}
 	// TIMESTAMP extremes survive the fixext8 signed decode path.
 	{
@@ -25453,7 +25533,7 @@ int main() {
 	RUN(testDateTimeDayValidity);
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
-	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);
+	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackExtWrongLengthKeepsBody);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);
 	RUN(testMsgPackRegexFidelity);
 	RUN(testMsgpackExtras);
 	

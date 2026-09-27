@@ -16,6 +16,13 @@
 //                             or the ext8 timestamp-96 12-byte form)
 //
 // Duplicate map keys are last-wins, matching the JSON and CBOR parsers.
+//
+// A well-known ext type carrying a body of the wrong length (ObjectId != 12
+// bytes, Timestamp != 8 bytes) decodes to a plain EXTENSION node keeping the
+// type byte and the raw body, not to null -- the same no-data-loss fallback
+// the custom-tag (ext 4) decoder uses. The encoder never emits those forms, so
+// this only affects hand-crafted or foreign input; a decode -> encode ->
+// decode round-trip of such a node is stable.
 
 #include "../core.hpp"
 
@@ -141,7 +148,8 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 					out.push_back(static_cast<uint8_t>((packed >> (i * 8)) & 0xFF));
 				}
 			} else {
-				// ext8: 8 bytes seconds + 4 bytes nanoseconds
+				// ext8 (timestamp 96): 4 bytes nanoseconds + 8 bytes seconds
+				// (nanoseconds first, per the MessagePack timestamp 96 layout)
 				out.push_back(0xC7);
 				out.push_back(12);
 				out.push_back(static_cast<uint8_t>(-1)); // extType = 0xFF
@@ -295,7 +303,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return d;
 			}
 			if (extType == 1) {
-				if (len != 12) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 12) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += len;
 				if (!val) throw asvJSONError("MsgPack objectid alloc failed");
@@ -308,7 +316,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return re;
 			}
 			if (extType == 3) {
-				if (len != 8) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 8) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				uint64_t ts = 0;
 				for (int i = 7; i >= 0; i--) ts = (ts << 8) | data[pos++];
 				auto v = asvJSONValue::makeTimestamp(static_cast<int64_t>(ts));
@@ -331,7 +339,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			// Note: the 12-byte datetime (timestamp 96) is handled only in the
 			// 0xC7 branch -- MessagePack never emits it as ext16/ext32.
 			if (extType == 1) {
-				if (len != 12) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 12) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += len;
 				if (!val) throw asvJSONError("MsgPack objectid alloc failed");
@@ -344,7 +352,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 				return re;
 			}
 			if (extType == 3) {
-				if (len != 8) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 8) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				uint64_t ts = 0;
 				for (int i = 7; i >= 0; i--) ts = (ts << 8) | data[pos++];
 				auto v = asvJSONValue::makeTimestamp(static_cast<int64_t>(ts));
@@ -367,7 +375,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			// Note: the 12-byte datetime (timestamp 96) is handled only in the
 			// 0xC7 branch -- MessagePack never emits it as ext16/ext32.
 			if (extType == 1) {
-				if (len != 12) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 12) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				auto val = asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(data + pos), 12));
 				pos += len;
 				if (!val) throw asvJSONError("MsgPack objectid alloc failed");
@@ -381,7 +389,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			}
 			if (extType == 3) {
 				// 32-bit wraparound-safe: accumulate unsigned like 0xC7/0xC8/0xD7.
-				if (len != 8) { pos += len; return asvJSONValue::makeNull(); }
+				if (len != 8) { auto v = asvJSONValue::makeExtension(extType, data + pos, len); pos += len; if (!v) throw asvJSONError("MsgPack extension too large"); return v; }
 				uint64_t ts = 0;
 				for (int i = 7; i >= 0; i--) ts = (ts << 8) | data[pos++];
 				auto v = asvJSONValue::makeTimestamp(static_cast<int64_t>(ts));
