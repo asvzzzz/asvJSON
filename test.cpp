@@ -136,6 +136,39 @@ TEST(testMakeRegex) {
 	auto v = asvJSONValue::makeRegex("pattern", "i");
 	ASSERT(v->type == asvJSONValue::REGEX);
 	ASSERT(v->str_data.size() > 0);
+	// Strict-JSON output of a REGEX: the pattern/options split used to build
+	// string_views on temporaries (v->str_data.substr(...)), so the options --
+	// read only after further calls had reused that stack slot -- came out as
+	// garbage: "i"/"im" were emitted as "\u0000"/"\u0000m".
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("r1", asvJSONValue::makeRegex("^a$", "i"));
+		j.getRoot()->obj->emplace("r2", asvJSONValue::makeRegex("^a$", "im"));
+		j.getRoot()->obj->emplace("r3", asvJSONValue::makeRegex("a|b", nullptr));
+		j.getRoot()->obj->emplace("r4", asvJSONValue::makeRegex("a\\b", "g"));
+		ASSERT_EQ(j.serialize(), std::string(
+			R"({"r1":{"$regex":"^a$","$options":"i"},"r2":{"$regex":"^a$","$options":"im"},)"
+			R"("r3":{"$regex":"a|b"},"r4":{"$regex":"a\\b","$options":"g"}})"));
+		// ...and the exact same split holds for the accessors and for the
+		// pretty-printer, so the three views cannot drift apart again.
+		auto [p, o] = j.getRegex("r2");
+		ASSERT_EQ(std::string(p), "^a$");
+		ASSERT_EQ(std::string(o), "im");
+		ASSERT_EQ(std::string(j.getRegexOptions("r1")), "i");
+		ASSERT_EQ(std::string(j.getRegexPattern("r1")), "^a$");
+		// The pretty printer goes through the same writer, so its output must
+		// carry the real options and never the escaped NUL.
+		std::string pretty = j.serialize(true);
+		ASSERT(pretty.find("\"$options\":\"i\"") != std::string::npos);
+		ASSERT(pretty.find("\"$options\":\"im\"") != std::string::npos);
+		ASSERT(pretty.find("\\u0000") == std::string::npos);
+		// Round-trip: the emitted text parses back to the same pattern/options.
+		asvJSON k;
+		ASSERT(k.parse(j.serialize()));
+		ASSERT(k.get("r2")->type == asvJSONValue::REGEX);
+		ASSERT_EQ(std::string(k.getRegexOptions("r2")), "im");
+	}
 }
 
 TEST(testObjectGet) {

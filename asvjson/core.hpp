@@ -2633,9 +2633,19 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 		}
 		case asvJSONValue::REGEX: {
 			{
-				size_t sep = v->str_data.rfind('\0');
-				std::string_view pattern = (sep != std::string_view::npos) ? v->str_data.substr(0, sep) : v->str_data;
-				std::string_view opts = (sep != std::string_view::npos) ? v->str_data.substr(sep + 1) : "";
+				// str_data is the canonical "pattern\0options". The views have to
+				// be taken over the member string: v->str_data.substr(...) returns
+				// a temporary std::string that dies at the end of the statement, so
+				// both views pointed at freed memory -- and `opts`, which is read
+				// only after more calls have reused that slot, was usually garbage
+				// by then (options "i"/"im" were emitted as "\u0000"/"\u0000m").
+				// substr() on a string_view yields a view, so nothing is copied and
+				// nothing dangles; getRegexPattern()/getRegexOptions() use the same
+				// std::string_view(data(), n) idiom.
+				std::string_view sv(v->str_data);
+				size_t sep = sv.rfind('\0');
+				std::string_view pattern = (sep != std::string_view::npos) ? sv.substr(0, sep) : sv;
+				std::string_view opts = (sep != std::string_view::npos) ? sv.substr(sep + 1) : std::string_view();
 				out += "{\"$regex\":\"";
 				appendJsonEscaped(out, pattern);
 				out += "\"";

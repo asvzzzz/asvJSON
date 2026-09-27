@@ -1363,7 +1363,9 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         bool hasTrailingContent = false;
         if (closePos != std::string_view::npos && closePos > 2) {
           // Check that everything after the closing delimiter is whitespace/comment
-          std::string_view after = vtmp.substr(closePos + 3);
+          // (vtmp.substr() would return a temporary std::string, leaving `after`
+          // dangling -- the view has to be taken over the member string)
+          std::string_view after(vtmp.data() + closePos + 3, vtmp.size() - closePos - 3);
           after = trimSV(after);
           if (!after.empty() && after[0] != '#')
             hasTrailingContent = true;
