@@ -37,6 +37,39 @@ struct SexprToken {
   bool marked = false; // true if source string began with a literal SEXPR_KEY_MARK key marker
 };
 
+// Strict JSON number grammar: an optional '-', a digit sequence without
+// leading zeros, then an optional fraction and an optional exponent, with
+// nothing left over. This is the single source of truth for "is this token a
+// number": the tokenizer classifies with it and sexprTokenToJson re-checks
+// with it, so the two can never disagree about which atoms are numbers.
+inline bool sexprIsJsonNumber(const std::string& s) {
+  if (s.empty()) return false;
+  size_t i = 0;
+  if (s[i] == '-') i++;
+  if (i >= s.size()) return false;
+  if (s[i] == '0') {
+    i++;
+    // leading zeros are not valid JSON ("01", "-01")
+    if (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+  } else if (s[i] >= '1' && s[i] <= '9') {
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  } else {
+    return false;
+  }
+  if (i < s.size() && s[i] == '.') {
+    i++;
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  }
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    i++;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+  }
+  return i == s.size();
+}
+
 inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
   std::vector<SexprToken> tokens;
   size_t i = 0;
@@ -159,72 +192,17 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
     else if (val == "#t" || val == "true") tokens.push_back({SEXPR_TRUE, ""});
     else if (val == "#f" || val == "false") tokens.push_back({SEXPR_FALSE, ""});
     else {
-      // Strict number validation
-      bool isNum = false;
-      if (!val.empty()) {
-        size_t start = 0;
-        if (val[0] == '-' || val[0] == '+') start = 1;
-        if (start < val.size() && std::isdigit(static_cast<unsigned char>(val[start]))) {
-          isNum = true;
-          bool hasDot = false;
-          bool hasExp = false;
-          for (size_t j = start + 1; j < val.size(); j++) {
-            char cc = val[j];
-            if (cc == '.') {
-              if (hasDot || hasExp) { isNum = false; break; }
-              hasDot = true;
-            } else if (cc == 'e' || cc == 'E') {
-              if (hasExp) { isNum = false; break; }
-              hasExp = true;
-              if (j + 1 >= val.size()) { isNum = false; break; }
-              if (val[j + 1] == '+' || val[j + 1] == '-') {
-                j++;
-                if (j + 1 >= val.size() || !std::isdigit(static_cast<unsigned char>(val[j + 1]))) {
-                  isNum = false; break;
-                }
-              }
-            } else if (!std::isdigit(static_cast<unsigned char>(cc))) {
-              isNum = false; break;
-            }
-          }
-          // number cannot end with '.' or bare exponent
-          if (isNum && (val.back() == '.' || val.back() == 'e' || val.back() == 'E'))
-            isNum = false;
-        }
-      }
-      if (isNum) tokens.push_back({SEXPR_NUMBER, val});
+      // Classify with the JSON number grammar and nothing else. The previous
+      // ad-hoc scan accepted a leading '+', leading zeros and other forms JSON
+      // rejects ("+5", "01", "007"); those became NUMBER tokens whose JSON form
+      // was a *string*, and sexprKeyJson then quoted that string a second time
+      // as an object key, yielding "\"+5\"" instead of "+5". Anything the JSON
+      // grammar rejects stays a SYMBOL, which already stringifies correctly.
+      if (sexprIsJsonNumber(val)) tokens.push_back({SEXPR_NUMBER, val});
       else tokens.push_back({SEXPR_SYMBOL, val});
     }
   }
   return tokens;
-}
-
-inline bool sexprIsJsonNumber(const std::string& s) {
-  if (s.empty()) return false;
-  size_t i = 0;
-  if (s[i] == '-') i++;
-  if (i >= s.size()) return false;
-  if (s[i] == '0') {
-    i++;
-    // leading zeros are not valid JSON ("01", "-01")
-    if (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) return false;
-  } else if (s[i] >= '1' && s[i] <= '9') {
-    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
-  } else {
-    return false;
-  }
-  if (i < s.size() && s[i] == '.') {
-    i++;
-    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
-    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
-  }
-  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
-    i++;
-    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
-    if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))) return false;
-    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
-  }
-  return i == s.size();
 }
 
 inline std::string sexprTokenToJson(const SexprToken& token) {
@@ -238,10 +216,11 @@ inline std::string sexprTokenToJson(const SexprToken& token) {
       return esc;
     }
     case SEXPR_NUMBER: {
+      // The tokenizer only produces NUMBER for sexprIsJsonNumber() atoms, so
+      // this is normally a bare JSON number. The check is kept as a guard: a
+      // hand-built token degrades to a string here rather than letting invalid
+      // JSON escape into the document.
       if (sexprIsJsonNumber(token.value)) return token.value;
-      // Not a JSON number (leading '+', leading zeros, "1.e5", ...): degrade
-      // to a string like the sibling "1." / "1e" / "1E" cases instead of
-      // letting an invalid token reject the whole document.
       std::string esc;
       esc.reserve(token.value.size() + 2);
       esc += '"';
@@ -272,9 +251,14 @@ inline bool sexprTypeIsKey(int t) {
 inline std::string sexprKeyJson(const std::string& item, int type) {
   if (type == SEXPR_NUMBER || type == SEXPR_TRUE ||
       type == SEXPR_FALSE || type == SEXPR_NIL) {
-    // Bare JSON value -- wrap in quotes for JSON object key. Escaped for
-    // uniformity even though current NUMBER tokens can only contain
-    // [0-9+-.eE] and TRUE/FALSE/NIL are empty strings.
+    // `item` is the token's JSON form -- "1.5" for a NUMBER, and the literals
+    // "true" / "false" / "null" for TRUE/FALSE/NIL (their token.value is empty,
+    // but that is not what arrives here). A JSON object key must be a string,
+    // so the value is quoted and escaped; the extra quotes make it a JSON
+    // string, not the identity.
+    // Already-quoted input is returned as-is: quoting it again would embed the
+    // quotes in the key ("\"+5\"" instead of "+5").
+    if (!item.empty() && item.front() == '"') return item;
     std::string esc;
     esc.reserve(item.size() + 2);
     esc += '"';
@@ -388,7 +372,10 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   }
 
   if (!forceArray && items.size() >= 2 && items.size() % 2 == 0) {
-    // For 2-item lists, only treat as object if first item is a bare symbol
+    // Two-item lists: an object only when the first item is a bare symbol
+    // (a quoted string or a value in position 0 is data -> a 2-element array).
+    // Longer even-length groups are stricter: every even position must be a key
+    // type (SYMBOL/STRING/NUMBER/TRUE/FALSE/NIL).
     if (items.size() == 2) {
       isObj = (itemTypes[0] == SEXPR_SYMBOL);
     } else {

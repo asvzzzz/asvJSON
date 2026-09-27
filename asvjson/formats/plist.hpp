@@ -76,6 +76,9 @@ inline std::string plistUnescape(std::string_view raw) {
         cp = cp * (hex ? 16u : 10u) + v;
       }
       if (!ok || cp == 0 || cp > 0x10FFFF) { out += c; i++; continue; }
+      // A surrogate code point is not a valid Unicode scalar value: encoding it
+      // would emit ill-formed UTF-8 (WTF-8). Substitute U+FFFD, as UDE does.
+      if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
       std::string utf8;
       appendUtf8Codepoint(utf8, cp);
       out += utf8;
@@ -88,12 +91,54 @@ inline std::string plistUnescape(std::string_view raw) {
   return out;
 }
 
-// Heuristic for fromAny(): an XML document declaring a <plist> root.
+// True when "<plist" at i really opens a <plist> element: the name has to end
+// there. "<plistx>" is a different element, so the character after the name
+// must terminate it (whitespace, '>' for a start tag, '/' for an empty tag).
+inline bool isPlistWrapperAt(std::string_view s, size_t i) {
+  if (s.compare(i, 6, "<plist") != 0 || i + 6 >= s.size()) return false;
+  char c = s[i + 6];
+  return c == '>' || c == '/' || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+// Heuristic for fromAny(): an XML document whose first real element is a
+// <plist> root. A bare find("<plist") also fired on the word appearing inside
+// a comment and on elements like <plistx>, so the XML prologue (BOM,
+// <?...?>, <!--...-->, <!DOCTYPE...>) is skipped and the first element name is
+// what decides.
 inline bool plistLooksLike(std::string_view s) {
   size_t p = 0;
-  while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n')) p++;
-  if (p >= s.size() || s[p] != '<') return false;
-  return s.find("<plist") != std::string_view::npos;
+  // UTF-8 BOM: fromPlist strips it, so detection must tolerate it too.
+  if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB &&
+      (unsigned char)s[2] == 0xBF) p = 3;
+  for (;;) {
+    while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n')) p++;
+    if (p >= s.size()) return false;
+    if (s.compare(p, 2, "<?") == 0) {
+      size_t e = s.find("?>", p + 2);
+      if (e == std::string_view::npos) return false;
+      p = e + 2;
+      continue;
+    }
+    if (s.compare(p, 4, "<!--") == 0) {
+      size_t e = s.find("-->", p + 4);
+      if (e == std::string_view::npos) return false;
+      p = e + 3;
+      continue;
+    }
+    if (s.compare(p, 9, "<!DOCTYPE") == 0) {
+      size_t q = p + 9;
+      int brackets = 0;
+      for (; q < s.size(); q++) {
+        if (s[q] == '[') brackets++;
+        else if (s[q] == ']') brackets--;
+        else if (s[q] == '>' && brackets <= 0) break;
+      }
+      if (q >= s.size()) return false;
+      p = q + 1;
+      continue;
+    }
+    return isPlistWrapperAt(s, p);
+  }
 }
 
 inline void plistIndent(std::string& out, int indent) {
@@ -145,9 +190,14 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
       out += pad + "<integer>" + std::to_string(v->num) + "</integer>\n";
       break;
     case T::REGEX: {
-      std::string_view pat(v->str_data);
-      size_t bar = pat.find('|');
-      if (bar != std::string_view::npos) pat = pat.substr(0, bar);
+      // str_data is the canonical "pattern\0options" form (see makeRegex), so
+      // the separator is NUL. Splitting on '|' instead truncated every pattern
+      // containing an alternation ("^(a|b)$" -> "^(a") and, when options were
+      // absent, copied the trailing NUL into the XML text. plist has no regex
+      // type, so options are dropped and the pattern is carried as a <string>.
+      std::string_view full(v->str_data);
+      size_t sep = full.rfind('\0');
+      std::string_view pat = (sep != std::string_view::npos) ? full.substr(0, sep) : full;
       out += pad + "<string>" + xmlEscapeContent(pat) + "</string>\n";
       break;
     }
@@ -243,14 +293,42 @@ struct PlistReader {
     return {std::move(name), selfClose};
   }
 
-  // Read raw text up to the first '</tag>'; pos advances past it.
-  std::string textUntil(const std::string& tag) {
-    std::string closer = "</" + tag + ">";
-    size_t e = s.find(closer, pos);
-    if (e == std::string_view::npos) fail("missing closing </" + tag + ">");
-    std::string out(s.data() + pos, e - pos);
-    pos = e + closer.size();
-    return out;
+  // Consume "</name>" if that is the text at pos, tolerating whitespace before
+  // the '>' the way openTag() does ("</dict >" is valid XML). Returns false
+  // when a different tag (or a longer name such as "</dictx>") is there.
+  bool acceptClose(std::string_view name) {
+    if (pos + 2 + name.size() > s.size() || s[pos] != '<' || s[pos + 1] != '/') return false;
+    if (s.compare(pos + 2, name.size(), name) != 0) return false;
+    size_t q = pos + 2 + name.size();
+    while (q < s.size() && wsChar(s[q])) q++;
+    if (q >= s.size() || s[q] != '>') return false;
+    pos = q + 1;
+    return true;
+  }
+
+  // Read raw text up to the matching '</tag>' and advance past it. XML
+  // comments inside the text are skipped -- they are markup, not part of the
+  // value -- and whitespace before the closing '>' is tolerated.
+  std::string textUntil(std::string_view tag) {
+    std::string out;
+    size_t i = pos;
+    for (;;) {
+      if (i >= s.size()) fail("missing closing </" + std::string(tag) + ">");
+      if (s.compare(i, 4, "<!--") == 0) {
+        size_t e = s.find("-->", i + 4);
+        if (e == std::string_view::npos) fail("unterminated comment");
+        i = e + 3;
+        continue;
+      }
+      if (i + 2 < s.size() && s[i] == '<' && s[i + 1] == '/' &&
+          s.compare(i + 2, tag.size(), tag) == 0) {
+        size_t q = i + 2 + tag.size();
+        while (q < s.size() && wsChar(s[q])) q++;
+        if (q < s.size() && s[q] == '>') { pos = q + 1; return out; }
+      }
+      out += s[i];
+      i++;
+    }
   }
 
   static std::string_view trimSv(std::string_view t) {
@@ -274,7 +352,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
   if (name == "true" || name == "false") {
     if (!sc) {
       skipWs();
-      expect(name == "true" ? "</true>" : "</false>", "expected </" + name + ">");
+      if (!acceptClose(name)) fail("expected </" + name + ">");
     }
     return asvJSONValue::makeBool(name == "true");
   }
@@ -294,9 +372,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     char* end = nullptr;
     long long l = std::strtoll(tmp.c_str(), &end, 10);
     if (errno == ERANGE || end == tmp.c_str() || *end != '\0') fail("invalid <integer>");
-    auto val = asvJSONValue::makeInt(l);
-    if (val) val->raw_number = true;
-    return val;
+    return asvJSONValue::makeInt(l);
   }
 
   if (name == "real") {
@@ -328,7 +404,16 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     for (char c : t) {
       if (c != ' ' && c != '\t' && c != '\r' && c != '\n') clean += c;
     }
-    if (clean.size() % 4 != 0) fail("invalid <data> base64 length");
+    // decodeBase64Fast needs a length that is a multiple of 4; hand-written
+    // plists routinely omit the trailing '=', so re-pad the significant part
+    // instead of rejecting them.
+    if (clean.size() % 4 != 0) {
+      size_t sig = clean.size();
+      while (sig > 0 && clean[sig - 1] == '=') sig--;
+      size_t rem = sig % 4;
+      if (rem == 1) fail("invalid <data> base64 length");
+      clean.append(4 - rem, '=');
+    }
     bool err = false;
     auto bytes = decodeBase64Fast(clean.data(), clean.size(), &err);
     if (err) fail("invalid <data> base64");
@@ -348,7 +433,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
   for (;;) {
     skipWs();
     if (atEnd()) fail("unterminated <dict>");
-    if (s.compare(pos, 7, "</dict>") == 0) { pos += 7; break; }
+    if (acceptClose("dict")) break;
     expect("<key>", "expected <key> in <dict>");
     std::string k = plistUnescape(textUntil("key"));
     if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE) fail("object too large");
@@ -367,7 +452,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseArray(int depth) {
   for (;;) {
     skipWs();
     if (atEnd()) fail("unterminated <array>");
-    if (s.compare(pos, 8, "</array>") == 0) { pos += 8; break; }
+    if (acceptClose("array")) break;
     if (arr->arr->size() >= asvJSONValue::MAX_ARRAY_SIZE) fail("array too large");
     auto v = parseValue(depth + 1);
     if (!v) fail("out of memory");
@@ -410,13 +495,13 @@ inline bool asvJSON::fromPlist(std::string_view input) {
     }
 
     std::unique_ptr<asvJSONValue> val;
-    if (r.s.compare(r.pos, 6, "<plist") == 0) {
+    if (isPlistWrapperAt(r.s, r.pos)) {
       auto[name, sc] = r.openTag();
       if (sc) throw asvJSONError("plist: empty <plist/>");
       r.skipWs();
       val = r.parseValue(0);
       r.skipWs();
-      r.expect("</plist>", "expected </plist>");
+      if (!r.acceptClose("plist")) r.fail("expected </plist>");
       r.skipWs();
       if (!r.atEnd()) throw asvJSONError("plist: trailing content after </plist>");
     } else {

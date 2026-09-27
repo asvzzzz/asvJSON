@@ -12653,6 +12653,97 @@ TEST(testSexprExtras) {
   }
 }
 
+TEST(testSexprNumberKeys) {
+  // A number token that JSON rejects (leading '+', leading zeros) used to be
+  // wrapped once as a JSON string by sexprTokenToJson and then wrapped a second
+  // time by sexprKeyJson, so the key carried embedded quotes: "(+5 a +6 b)"
+  // produced {"\"+5\"": "a", ...}. The tokenizer now classifies with
+  // sexprIsJsonNumber(), so those atoms are symbols and stringify once.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(+5 a +6 b)")));
+    ASSERT_EQ(j.serialize(), std::string(R"({"+5":"a","+6":"b"})"));
+    // The keys really are "+5"/"+6" and not 4-character strings with quotes.
+    asvJSON k;
+    ASSERT(k.parse(j.serialize()));
+    ASSERT(k.getRoot()->obj->find("+5") != k.getRoot()->obj->end());
+    ASSERT(k.getRoot()->obj->find("+6") != k.getRoot()->obj->end());
+    ASSERT_EQ(k.getRoot()->obj->size(), size_t(2));
+    ASSERT_EQ(std::string(k.getString("+5")), "a");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(01 a 02 b)")));
+    ASSERT_EQ(j.serialize(), std::string(R"({"01":"a","02":"b"})"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(007 a 008 b)")));
+    ASSERT_EQ(j.serialize(), std::string(R"({"007":"a","008":"b"})"));
+  }
+  // Valid JSON numbers still tokenize as NUMBER and their keys are the plain
+  // numeric text.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(1 a 2 b)")));
+    ASSERT_EQ(j.serialize(), std::string(R"({"1":"a","2":"b"})"));
+    asvJSON k;
+    ASSERT(k.fromSexpr(std::string_view("(-1 a -0.5 b)")));
+    ASSERT_EQ(k.serialize(), std::string(R"({"-1":"a","-0.5":"b"})"));
+    asvJSON m;
+    ASSERT(m.fromSexpr(std::string_view("(1e5 a 2.5e-3 b)")));
+    ASSERT_EQ(m.serialize(), std::string(R"({"1e5":"a","2.5e-3":"b"})"));
+  }
+  // TRUE/FALSE/NIL keys carry their JSON literal ("true"/"false"/"null"),
+  // not the empty token value.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(#t a #f b)")));
+    ASSERT_EQ(j.serialize(), std::string(R"({"true":"a","false":"b"})"));
+    asvJSON k;
+    ASSERT(k.fromSexpr(std::string_view("(#t a nil b)")));
+    ASSERT_EQ(k.serialize(), std::string(R"({"true":"a","null":"b"})"));
+  }
+  // In value position the same atoms still degrade to strings, as before.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a +5 b 01 c 1.e5)")));
+    ASSERT_EQ(std::string(j.getString("a")), "+5");
+    ASSERT_EQ(std::string(j.getString("b")), "01");
+    ASSERT_EQ(std::string(j.getString("c")), "1.e5");
+  }
+  // Number validation follows the JSON grammar in both directions.
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a .5 b 1. c 1e d 1..2 e 1.2.3 f 1e5e6)")));
+    const char* keys[] = {"a", "b", "c", "d", "e", "f"};
+    const char* vals[] = {".5", "1.", "1e", "1..2", "1.2.3", "1e5e6"};
+    for (size_t i = 0; i < 6; i++) {
+      ASSERT_EQ(std::string(j.getString(keys[i])), std::string(vals[i]));
+      ASSERT(j.get(keys[i])->type == asvJSONValue::STRING);
+    }
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view("(a 1 b -1 c 1.5 d 1e5 e 1.5e-3 f 0 g -0)")));
+    ASSERT(j.get("a")->type == asvJSONValue::INT);
+    ASSERT(j.get("b")->type == asvJSONValue::INT);
+    ASSERT(j.get("c")->type == asvJSONValue::DOUBLE);
+    ASSERT(j.get("d")->type == asvJSONValue::DOUBLE);
+    ASSERT(j.get("e")->type == asvJSONValue::DOUBLE);
+    ASSERT(j.get("f")->type == asvJSONValue::INT);
+    ASSERT(j.get("g")->type == asvJSONValue::INT);
+  }
+  // Encoder output is unaffected: it never produced such NUMBER tokens.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string(R"({"a":1,"b":[1,2,3],"c":{"d":true,"e":null},"f":1.5})")));
+    asvJSON k;
+    ASSERT(k.fromSexpr(j.toSexpr()));
+    ASSERT(k.serialize() == j.serialize());
+  }
+}
+
 TEST(testTOONSpecialTypes) {
   // Special types used to be serialized to `null` (silently lost) on a
   // round-trip. They now serialize via the Extended JSON conventions and the
@@ -17124,6 +17215,111 @@ TEST(testPlistRoundTrip) {
     ASSERT(!inst->get((size_t)1)->getBool());
     ASSERT_EQ(inst->get((size_t)2)->getInt(), int64_t(3));
     std::remove("plist_rt.plist");
+  }
+}
+
+TEST(testPlistAuditRegressions) {
+  // A REGEX value is stored as "pattern\0options". toPlist() must split on the
+  // NUL: splitting on '|' truncated every pattern with an alternation, and a
+  // missing options field leaked a raw NUL byte into the XML text.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string(R"({"r":"x"})")));
+    j.getRoot()->obj->insert_or_assign(std::string("r"), asvJSONValue::makeRegex("^(a|b)$", "i"));
+    std::string out = j.toPlist();
+    ASSERT(out.find('\0') == std::string::npos);
+    ASSERT(out.find("<string>^(a|b)$</string>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    // plist has no regex type, so the pattern survives as a string and the
+    // options are dropped.
+    ASSERT_EQ(std::string(k.getString("r")), std::string("^(a|b)$"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string(R"({"r":"x"})")));
+    j.getRoot()->obj->insert_or_assign(std::string("r"), asvJSONValue::makeRegex("abc", nullptr));
+    std::string out = j.toPlist();
+    ASSERT(out.find('\0') == std::string::npos);
+    ASSERT(out.find("<string>abc</string>") != std::string::npos);
+  }
+  // raw_number marks a STRING holding a numeric literal; an <integer> is a
+  // real INT and must not carry the flag.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>n</key><integer>42</integer></dict></plist>")));
+    ASSERT_EQ(j.getInt("n"), int64_t(42));
+    ASSERT(!j.get("n")->raw_number);
+  }
+  // '<plist' must be a whole element name: '<plistx>' belongs to the XML
+  // parser, and the word inside a comment must not claim the document either.
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("<plistx><dict/></plistx>")));
+    ASSERT(j.getFormatType() == FormatType::XML);
+    asvJSON k;
+    ASSERT(k.fromAny(std::string("<!-- see <plist docs --><dict/>")));
+    ASSERT(k.getFormatType() == FormatType::XML);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromPlist(std::string("<plistx><dict/></plistx>")));
+    ASSERT(j.lastError.find("plistx") != std::string::npos);
+  }
+  // A real <plist> still wins over the XML parser, including after a prologue.
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("<?xml version=\"1.0\"?>\n<!-- c -->\n<plist version=\"1.0\"><dict/></plist>")));
+    ASSERT(j.getFormatType() == FormatType::Plist);
+    asvJSON k;
+    ASSERT(k.fromAny(std::string("\xEF\xBB\xBF<plist><dict/></plist>")));
+    ASSERT(k.getFormatType() == FormatType::Plist);
+  }
+  // Whitespace before the '>' of a closing tag is valid XML.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><integer>1</integer></dict ></plist>")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    asvJSON k;
+    ASSERT(k.fromPlist(std::string("<plist><array><string>x</string></array ></plist>")));
+    ASSERT_EQ(k.getRoot()->arr->size(), size_t(1));
+    asvJSON m;
+    ASSERT(m.fromPlist(std::string("<plist><dict><key>a</key><true></true ></dict></plist>")));
+    ASSERT(m.get("a")->getBool());
+    // ...but a longer name is not this tag.
+    asvJSON n;
+    ASSERT(!n.fromPlist(std::string("<plist><dict><key>a</key><integer>1</integer></dictx></plist>")));
+  }
+  // A surrogate character reference is not a valid Unicode scalar value and
+  // would encode as ill-formed UTF-8; it becomes U+FFFD (as in UDE).
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><string>&#xD800;</string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("a")), std::string("\xEF\xBF\xBD"));
+    asvJSON k;
+    ASSERT(k.fromPlist(std::string("<plist><dict><key>a</key><string>&#xDFFF;</string></dict></plist>")));
+    ASSERT_EQ(std::string(k.getString("a")), std::string("\xEF\xBF\xBD"));
+  }
+  // base64 without the trailing '=' decodes to the same bytes.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ==</data></dict></plist>")));
+    asvJSON k;
+    ASSERT(k.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ</data></dict></plist>")));
+    ASSERT(j.get("a")->bin_data == k.get("a")->bin_data);
+    asvJSON m;
+    ASSERT(!m.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ=</data></dict></plist>")));
+  }
+  // A comment inside a text node is markup, not part of the value.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><string>x<!-- c -->y</string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("a")), std::string("xy"));
+    asvJSON k;
+    ASSERT(k.fromPlist(std::string("<plist><dict><key>a</key><integer>1<!-- c --></integer></dict></plist>")));
+    ASSERT_EQ(k.getInt("a"), int64_t(1));
+    asvJSON m;
+    ASSERT(!m.fromPlist(std::string("<plist><dict><key>a</key><string>x<!-- c</string></dict></plist>")));
   }
 }
 
@@ -25224,6 +25420,7 @@ RUN(testTOONReviewFixes);
     RUN(testSexprAudit);
     RUN(testSexprSpecialTypes);
     RUN(testSexprExtras);
+RUN(testSexprNumberKeys);
 
 	std::cout << "\n--- RON Serialization Tests ---\n";
 	RUN(testToRON);
@@ -25275,6 +25472,7 @@ RUN(testRONReviewFixes);
 	RUN(testFromPlist);
 	RUN(testToPlist);
 	RUN(testPlistRoundTrip);
+RUN(testPlistAuditRegressions);
 	RUN(testPlistFromAny);
 
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
