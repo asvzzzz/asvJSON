@@ -9799,6 +9799,308 @@ TEST(testGOONExtras) {
 	}
 }
 
+// Regressions for GOON special-value handling: a CUSTOM_TAG must survive (it
+// rides the JSON $customTag marker), DATETIME must keep its UTC offset, a
+// leading '+' is not part of a number, and an empty BINARY/EXTENSION keeps its
+// type instead of collapsing to "".
+TEST(testGOONSpecialValues) {
+	// CUSTOM_TAG as an object member
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"k":{"$customTag":{"name":"mytag","value":42}}})")));
+		ASSERT(j.get("k")->type == asvJSONValue::CUSTOM_TAG);
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.get("k");
+		ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(v->str_data), "mytag");
+		ASSERT(v->custom_value != nullptr);
+		ASSERT_EQ(v->custom_value->getInt(), int64_t(42));
+	}
+	// CUSTOM_TAG as a bare-list item
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"([{"$customTag":{"name":"t","value":"v"}}])")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* r = j2.getRoot();
+		ASSERT(r->type == asvJSONValue::ARRAY && r->size() == 1);
+		const auto* v = r->get(0);
+		ASSERT(v->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(v->str_data), "t");
+		ASSERT(v->custom_value != nullptr);
+		ASSERT_EQ(std::string(v->custom_value->getString()), "v");
+	}
+	// CUSTOM_TAG inside an inline cell (goonJsonText path) and in a table
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"$customTag":{"name":"t","value":[1,2]}})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot();
+		ASSERT(v->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(v->str_data), "t");
+		ASSERT(v->custom_value != nullptr && v->custom_value->size() == 2);
+	}
+	// A CUSTOM_TAG cell inside a real tabular array. The row syntax is
+	// `cell1,cell2`, so the splitter must be brace-aware: the marker's inner
+	// commas must not split the cell (it used to yield a broken string cell).
+	{
+		asvJSON src;
+		ASSERT(src.parse(std::string_view(R"({"$customTag":{"name":"mytag","value":42}})")));
+		auto rows = asvJSONValue::makeArray();
+		for (int i = 0; i < 2; i++) {
+			auto row = asvJSONValue::makeObject();
+			row->obj->emplace("t", cloneValue(src.getRoot()));
+			row->obj->emplace("n", asvJSONValue::makeInt(i * 10));
+			rows->arr->push_back(std::move(row));
+		}
+		for (int m = 0; m < 3; m++) {
+			asvJSON j;
+			j.setByPointer("/", cloneValue(rows.get()));
+			GoonWriteOptions opts;
+			opts.mode = static_cast<GoonWriteOptions::Mode>(m);
+			std::string goon = j.toGOON(opts);
+			// The table form must be kept: the marker is a valid cell.
+			ASSERT(goon.find("}:") != std::string::npos);  // tabular header
+			asvJSON j2;
+			ASSERT(j2.fromGOON(std::string_view(goon)));
+			// (No serialize() compare: Compact mode sorts the columns, so the
+			// decoded member order legitimately differs from the source.)
+			const auto* row2 = j2.getRoot()->get(0);
+			ASSERT(row2 != nullptr);
+			const auto* cell = row2->getConst("t");
+			ASSERT(cell != nullptr && cell->type == asvJSONValue::CUSTOM_TAG);
+			ASSERT_EQ(std::string(cell->str_data), "mytag");
+			ASSERT(cell->custom_value != nullptr);
+			ASSERT_EQ(cell->custom_value->getInt(), int64_t(42));
+			ASSERT_EQ(row2->getConst("n")->getInt(), int64_t(0));
+		}
+	}
+	// Same, but the tag payload is a nested array (commas inside brackets)
+	{
+		asvJSON src;
+		ASSERT(src.parse(std::string_view(R"({"$customTag":{"name":"t","value":[1,2,3]}})")));
+		auto rows = asvJSONValue::makeArray();
+		for (int i = 0; i < 2; i++) {
+			auto row = asvJSONValue::makeObject();
+			row->obj->emplace("t", cloneValue(src.getRoot()));
+			row->obj->emplace("n", asvJSONValue::makeInt(i));
+			rows->arr->push_back(std::move(row));
+		}
+		asvJSON j;
+		j.setByPointer("/", std::move(rows));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* cell = j2.getRoot()->get(0)->getConst("t");
+		ASSERT(cell != nullptr && cell->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT(cell->custom_value != nullptr && cell->custom_value->size() == 3);
+		ASSERT_EQ(cell->custom_value->get(2)->getInt(), int64_t(3));
+	}
+	// A cell whose value carries a bare comma cannot use the flat row syntax
+	// (nothing would escape it), so the encoder falls back to list format.
+	{
+		auto re = asvJSONValue::makeRegex("a,b", "i");
+		auto rows = asvJSONValue::makeArray();
+		for (int i = 0; i < 2; i++) {
+			auto row = asvJSONValue::makeObject();
+			row->obj->emplace("re", cloneValue(re.get()));
+			row->obj->emplace("n", asvJSONValue::makeInt(i));
+			rows->arr->push_back(std::move(row));
+		}
+		asvJSON j;
+		j.setByPointer("/", std::move(rows));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		ASSERT(goon.find("}:") == std::string::npos);  // list format, not a table
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.serialize()), std::string(j.serialize()));
+		const auto* cell = j2.getRoot()->get(0)->getConst("re");
+		ASSERT(cell != nullptr && cell->type == asvJSONValue::REGEX);
+	}
+	// A bare colon in a cell keeps the table (one-level rows), as before
+	{
+		auto re = asvJSONValue::makeRegex("a:b", "");
+		auto rows = asvJSONValue::makeArray();
+		for (int i = 0; i < 2; i++) {
+			auto row = asvJSONValue::makeObject();
+			row->obj->emplace("re", cloneValue(re.get()));
+			row->obj->emplace("n", asvJSONValue::makeInt(i));
+			rows->arr->push_back(std::move(row));
+		}
+		asvJSON j;
+		j.setByPointer("/", std::move(rows));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		ASSERT(goon.find("}:") != std::string::npos);  // tabular header
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* cell = j2.getRoot()->get(0)->getConst("re");
+		ASSERT(cell != nullptr && cell->type == asvJSONValue::REGEX);
+	}
+	// A CUSTOM_TAG one nesting level deeper (the inline-cell path)
+	{
+		asvJSON src;
+		ASSERT(src.parse(std::string_view(R"({"$customTag":{"name":"mytag","value":"v"}})")));
+		auto tbl = asvJSONValue::makeArray();
+		tbl->arr->push_back(cloneValue(src.getRoot()));
+		asvJSON j;
+		j.setByPointer("/", std::move(tbl));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(std::string(j2.serialize()), std::string(j.serialize()));
+		const auto* cell = j2.getRoot()->get(0);
+		ASSERT(cell != nullptr && cell->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(cell->str_data), "mytag");
+		ASSERT(cell->custom_value != nullptr);
+		ASSERT_EQ(std::string(cell->custom_value->getString()), "v");
+	}
+	// A bare CUSTOM_TAG (no payload) keeps an explicit null value
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"$customTag":{"name":"bare","value":null}})")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* v = j2.getRoot();
+		ASSERT(v->type == asvJSONValue::CUSTOM_TAG);
+		ASSERT_EQ(std::string(v->str_data), "bare");
+	}
+	// A root-level single-line flow object is a value, not a block mapping
+	// (it used to be mis-parsed into keys like `{"a"`).
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view(R"({"a":1})")));
+		ASSERT_EQ(j.getInt("a"), int64_t(1));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view(R"({a:1})")));
+		ASSERT_EQ(j.getInt("a"), int64_t(1));
+	}
+	// ... but a root value may not be followed by more content
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("{\"a\":1}\nb: 2\n")));
+	}
+	// DATETIME keeps tz_offset_min in both encoder paths
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("dt", asvJSONValue::makeDateTime(1700000000, 250, 300));
+		j.getRoot()->obj->emplace("list", asvJSONValue::makeArray());
+		const_cast<asvJSONValue*>(j.getRoot()->getConst("list"))->arr->emplace_back(
+			asvJSONValue::makeDateTime(1700000000, 250, -330));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("+05:00") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.get("dt")->type, asvJSONValue::DATETIME);
+		ASSERT_EQ(j2.get("dt")->tz_offset_min, 300);
+		ASSERT_EQ(j2.get("dt")->timestamp, time_t(1700000000));
+		ASSERT_EQ(j2.get("dt")->datetime_ms, 250);
+		const auto* l = j2.get("list");
+		ASSERT(l != nullptr && l->size() == 1);
+		ASSERT_EQ(l->get(0)->type, asvJSONValue::DATETIME);
+		ASSERT_EQ(l->get(0)->tz_offset_min, -330);
+	}
+	// A leading '+' is not part of a number
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: +5\n")));
+		ASSERT_EQ(j.get("a")->type, asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j.get("a")->getString()), "+5");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: +5.5\n")));
+		ASSERT_EQ(j.get("a")->type, asvJSONValue::STRING);
+	}
+	// An exponent sign is still a number
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: 1e+5\n")));
+		ASSERT_EQ(j.get("a")->type, asvJSONValue::DOUBLE);
+		ASSERT(j.get("a")->getDouble() == 100000.0);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: -5\n")));
+		ASSERT_EQ(j.get("a")->type, asvJSONValue::INT);
+		ASSERT_EQ(j.getInt("a"), int64_t(-5));
+	}
+	// The encoder quotes a "+..." string, so it round-trips as a string
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("+5"));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.get("a")->type, asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.get("a")->getString()), "+5");
+	}
+	// An empty BINARY keeps its type (marker with an empty payload)
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("bin", asvJSONValue::makeBinary(nullptr, 0));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.get("bin")->type, asvJSONValue::BINARY);
+		ASSERT_EQ(j2.get("bin")->bin_data.size(), size_t(0));
+	}
+	// ... as a document root
+	{
+		asvJSON j;
+		j.setByPointer("/", asvJSONValue::makeBinary(nullptr, 0));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.getRoot()->type, asvJSONValue::BINARY);
+		ASSERT_EQ(j2.getRoot()->bin_data.size(), size_t(0));
+	}
+	// ... and inside an inline cell
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"arr":[]})")));
+		const_cast<asvJSONValue*>(j.getRoot()->getConst("arr"))->arr->emplace_back(
+			asvJSONValue::makeBinary(nullptr, 0));
+		GoonWriteOptions opts;
+		opts.mode = GoonWriteOptions::Mode::Compact;
+		std::string goon = j.toGOON(opts);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		const auto* r = j2.get("arr");
+		ASSERT(r != nullptr && r->size() == 1);
+		ASSERT_EQ(r->get(0)->type, asvJSONValue::BINARY);
+		ASSERT_EQ(r->get(0)->bin_data.size(), size_t(0));
+	}
+	// An empty EXTENSION keeps its type byte
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{}")));
+		j.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(7, nullptr, 0));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.get("ext")->type, asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(j2.get("ext")->ext_type), 7);
+		ASSERT_EQ(j2.get("ext")->bin_data.size(), size_t(0));
+	}
+}
+
 TEST(testProtobufBasic) {
 	// Schema-less: keys must be numeric field numbers
 	asvJSON json;
@@ -22071,6 +22373,117 @@ TEST(testJSONSchemaReviewFixes) {
 	}
 }
 
+TEST(testSchemaJsonPointerRefs) {
+	// resolveRef() used to navigate OBJECT nodes only, so any pointer with an
+	// array token -- "#/allOf/0", "#/anyOf/1" -- failed with "Unresolved $ref",
+	// even though RFC 6901 indexes arrays positionally and draft-07 schemas use
+	// exactly these to point at a specific branch.
+	auto check = [](const char* schemaJson, const char* docJson, bool expectOk) {
+		asvJSON schema, doc;
+		if (!schema.parse(std::string_view(schemaJson))) return false;
+		if (!doc.parse(std::string_view(docJson))) return false;
+		std::string err;
+		bool ok = doc.validate(schema, err);
+		return ok == expectOk && (expectOk || !err.empty());
+	};
+	// -- resolves into an array element --
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})", "5", true));
+	ASSERT(check(R"({"anyOf":[{"type":"string"},{"type":"integer"}],"$ref":"#/anyOf/1"})", "5", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", R"("x")", true));
+	// index 1 really is the second element, not the first
+	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", "5", false));
+	// the resolved subschema is really applied
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})")));
+		ASSERT(doc.parse(std::string_view(R"("x")")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "resolved-subschema-applied");
+	}
+	// -- a chain through several arrays and objects --
+	ASSERT(check(R"({"items":{"allOf":[{"anyOf":[{"type":"null"}]}]},"$ref":"#/items/allOf/0/anyOf/0"})", "null", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0/type"})", "5", true));
+	// -- a non-object array element still resolves (no assertion inside) --
+	ASSERT(check(R"({"allOf":["x"],"$ref":"#/allOf/0"})", "5", true));
+	ASSERT(check(R"({"allOf":[null],"$ref":"#/allOf/0"})", "5", true));
+	// -- object navigation is unchanged, including ~0/~1 and percent escapes --
+	ASSERT(check(R"({"defs":{"a":{"type":"integer"}},"$ref":"#/defs/a"})", "5", true));
+	ASSERT(check(R"({"defs":{"a":{"defs":{"b":{"type":"integer"}}}},"$ref":"#/defs/a/defs/b"})", "5", true));
+	ASSERT(check(R"({"a/b":{"type":"integer"},"$ref":"#/a~1b"})", "5", true));
+	ASSERT(check(R"({"a~b":{"type":"integer"},"$ref":"#/a~0b"})", "5", true));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/%30"})", "5", true));
+	// -- RFC 6901 array-index ABNF: digits only, no leading zeros --
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/1"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/01"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/-1"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/x"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/"})", "5", false));
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/~01"})", "5", false));
+	ASSERT(check(R"({"allOf":[],"$ref":"#/allOf/0"})", "5", false));
+	// -- an index too large for size_t must not throw (std::stoul would) --
+	{
+		std::string big = "{\"allOf\":[{\"type\":\"integer\"}],\"$ref\":\"#/allOf/" +
+		                  std::string(40, '9') + "\"}";
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(big)));
+		ASSERT(doc.parse(std::string_view("5")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "huge-index");
+		ASSERT(err.find("Unresolved $ref") != std::string::npos);
+	}
+	// -- additionalProperties:false reports the offending property --
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"b":1})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-root");
+		ASSERT_EQ(err, "/b: additional property not allowed");
+	}
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"o":{"properties":{"a":{}},"additionalProperties":false}}})")));
+		ASSERT(doc.parse(std::string_view(R"({"o":{"b":1}})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-nested");
+		ASSERT_EQ(err, "/o/b: additional property not allowed");
+	}
+	{
+		// an unknown key containing '/' is escaped as a JSON Pointer token
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"x/y":1})")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "addProps-escaped");
+		ASSERT_EQ(err, "/x~1y: additional property not allowed");
+	}
+	{
+		// a literal '~' in the key becomes ~0
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
+		ASSERT(doc.parse(std::string_view(R"({"m~n":1})")));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT_EQ(err, "/m~0n: additional property not allowed");
+	}
+	// -- a schema with a valid enum is unaffected by the shape check --
+	ASSERT(check(R"({"enum":[1,2]})", "1", true));
+	ASSERT(check(R"({"enum":[1,2]})", "3", false));
+	// -- empty enum is rejected as a degenerate schema --
+	ASSERT(check(R"({"enum":[]})", "1", false));
+	{
+		asvJSON schema, doc;
+		ASSERT(schema.parse(std::string_view(R"({"enum":[]})")));
+		ASSERT(doc.parse(std::string_view("1")));
+		std::string err;
+		ASSERT_MSG(!doc.validate(schema, err), "enum-empty");
+		ASSERT(err.find("at least one element") != std::string::npos);
+	}
+	// -- format stays an unasserted annotation in draft-07 --
+	ASSERT(check(R"({"format":"email"})", R"("not-an-email")", true));
+	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
+}
+
 TEST(testJSONPath) {
 	// -- dot notation --
 	{
@@ -22373,117 +22786,6 @@ TEST(testJSONPath) {
 	}
 	// -- slice: negative start/end normalization --
 	{
-TEST(testSchemaJsonPointerRefs) {
-	// resolveRef() used to navigate OBJECT nodes only, so any pointer with an
-	// array token -- "#/allOf/0", "#/anyOf/1" -- failed with "Unresolved $ref",
-	// even though RFC 6901 indexes arrays positionally and draft-07 schemas use
-	// exactly these to point at a specific branch.
-	auto check = [](const char* schemaJson, const char* docJson, bool expectOk) {
-		asvJSON schema, doc;
-		if (!schema.parse(std::string_view(schemaJson))) return false;
-		if (!doc.parse(std::string_view(docJson))) return false;
-		std::string err;
-		bool ok = doc.validate(schema, err);
-		return ok == expectOk && (expectOk || !err.empty());
-	};
-	// -- resolves into an array element --
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})", "5", true));
-	ASSERT(check(R"({"anyOf":[{"type":"string"},{"type":"integer"}],"$ref":"#/anyOf/1"})", "5", true));
-	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", R"("x")", true));
-	// index 1 really is the second element, not the first
-	ASSERT(check(R"({"allOf":[{"type":"integer"},{"type":"string"}],"$ref":"#/allOf/1"})", "5", false));
-	// the resolved subschema is really applied
-	{
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0"})")));
-		ASSERT(doc.parse(std::string_view(R"("x")")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "resolved-subschema-applied");
-	}
-	// -- a chain through several arrays and objects --
-	ASSERT(check(R"({"items":{"allOf":[{"anyOf":[{"type":"null"}]}]},"$ref":"#/items/allOf/0/anyOf/0"})", "null", true));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0/type"})", "5", true));
-	// -- a non-object array element still resolves (no assertion inside) --
-	ASSERT(check(R"({"allOf":["x"],"$ref":"#/allOf/0"})", "5", true));
-	ASSERT(check(R"({"allOf":[null],"$ref":"#/allOf/0"})", "5", true));
-	// -- object navigation is unchanged, including ~0/~1 and percent escapes --
-	ASSERT(check(R"({"defs":{"a":{"type":"integer"}},"$ref":"#/defs/a"})", "5", true));
-	ASSERT(check(R"({"defs":{"a":{"defs":{"b":{"type":"integer"}}}},"$ref":"#/defs/a/defs/b"})", "5", true));
-	ASSERT(check(R"({"a/b":{"type":"integer"},"$ref":"#/a~1b"})", "5", true));
-	ASSERT(check(R"({"a~b":{"type":"integer"},"$ref":"#/a~0b"})", "5", true));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/%30"})", "5", true));
-	// -- RFC 6901 array-index ABNF: digits only, no leading zeros --
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/1"})", "5", false));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/01"})", "5", false));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/-1"})", "5", false));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/x"})", "5", false));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/"})", "5", false));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/~01"})", "5", false));
-	ASSERT(check(R"({"allOf":[],"$ref":"#/allOf/0"})", "5", false));
-	// -- an index too large for size_t must not throw (std::stoul would) --
-	{
-		std::string big = "{\"allOf\":[{\"type\":\"integer\"}],\"$ref\":\"#/allOf/" +
-		                  std::string(40, '9') + "\"}";
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(big)));
-		ASSERT(doc.parse(std::string_view("5")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "huge-index");
-		ASSERT(err.find("Unresolved $ref") != std::string::npos);
-	}
-	// -- additionalProperties:false reports the offending property --
-	{
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
-		ASSERT(doc.parse(std::string_view(R"({"b":1})")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "addProps-root");
-		ASSERT_EQ(err, "/b: additional property not allowed");
-	}
-	{
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"properties":{"o":{"properties":{"a":{}},"additionalProperties":false}}})")));
-		ASSERT(doc.parse(std::string_view(R"({"o":{"b":1}})")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "addProps-nested");
-		ASSERT_EQ(err, "/o/b: additional property not allowed");
-	}
-	{
-		// an unknown key containing '/' is escaped as a JSON Pointer token
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
-		ASSERT(doc.parse(std::string_view(R"({"x/y":1})")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "addProps-escaped");
-		ASSERT_EQ(err, "/x~1y: additional property not allowed");
-	}
-	{
-		// a literal '~' in the key becomes ~0
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"properties":{"a":{}},"additionalProperties":false})")));
-		ASSERT(doc.parse(std::string_view(R"({"m~n":1})")));
-		std::string err;
-		ASSERT(!doc.validate(schema, err));
-		ASSERT_EQ(err, "/m~0n: additional property not allowed");
-	}
-	// -- a schema with a valid enum is unaffected by the shape check --
-	ASSERT(check(R"({"enum":[1,2]})", "1", true));
-	ASSERT(check(R"({"enum":[1,2]})", "3", false));
-	// -- empty enum is rejected as a degenerate schema --
-	ASSERT(check(R"({"enum":[]})", "1", false));
-	{
-		asvJSON schema, doc;
-		ASSERT(schema.parse(std::string_view(R"({"enum":[]})")));
-		ASSERT(doc.parse(std::string_view("1")));
-		std::string err;
-		ASSERT_MSG(!doc.validate(schema, err), "enum-empty");
-		ASSERT(err.find("at least one element") != std::string::npos);
-	}
-	// -- format stays an unasserted annotation in draft-07 --
-	ASSERT(check(R"({"format":"email"})", R"("not-an-email")", true));
-	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
-}
-
 		asvJSON doc;
 		ASSERT(doc.parse(std::string_view(R"(["a","b","c","d","e","f","g"])")));
 		auto r = doc.query("$[-3:-1]");
@@ -26643,6 +26945,7 @@ RUN(testTOONReviewFixes);
 	RUN(testToGOON);
 	RUN(testGOONAudit);
 	RUN(testGOONExtras);
+RUN(testGOONSpecialValues);
 	
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);
@@ -26785,6 +27088,7 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testJSONSchema);
 	RUN(testJSONSchemaExtras);
 	RUN(testJSONSchemaReviewFixes);
+RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testJSONPath);
@@ -26853,4 +27157,3 @@ RUN(testUDEBlockScalarKeepChomping);
 
 	return failed > 0 ? 1 : 0;
 }
-RUN(testSchemaJsonPointerRefs);

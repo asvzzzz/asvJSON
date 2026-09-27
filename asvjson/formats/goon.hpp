@@ -8,18 +8,34 @@
 //   []:                          -- bare list with `- value` items
 //   T / F / _ / ~                -- true / false / null / empty string
 //   $: $1="value" then $1        -- dictionary references
-// Special types use __BASE64__/__EXT__ prefixes. Decoder builds intermediate
-// JSON then parses via the JSON parser; full round-trip via toGOON()/fromGOON().
+// Special types use __BASE64__/__EXT__/__TS__/__OID__/__REGEX__ prefixes (an
+// empty payload still emits its prefix). Decoder builds intermediate JSON then
+// parses via the JSON parser; full round-trip via toGOON()/fromGOON().
+// CUSTOM_TAG has no GOON-native form, so it rides the JSON convention
+// {"$customTag":{"name":...,"value":...}} that the core parser recognizes --
+// the tag name and payload both survive instead of degrading to null.
 //
-// Known limitations: an empty BINARY/EXTENSION inside an *inline* `[...]` cell
-// serializes as an empty string (goonJsonText) and therefore decodes as a
-// STRING, not a BINARY/EXTENSION (the __BASE64__ path only applies to
-// unquoted/cell values); `+Infinity` / `+NaN` in manual input are plain
-// strings, not numbers.  Tabular column names are NOT unescaped on read
+// Number grammar: a leading '+' is not part of a number, so hand-written
+// "+5" / "+Infinity" / "+NaN" are plain STRINGS (the encoder quotes such
+// strings too). A sign inside an exponent ("1e+5") is accepted.
+//
+// Prototype keys: the spec asks implementations to reject the keys
+// __proto__ / constructor / prototype, which guards against prototype-chain
+// pollution in JavaScript hosts. That class of bug cannot occur here -- keys
+// live in a std::map/unordered_map, never in an object prototype -- so they are
+// accepted as ordinary keys and round-trip like any other member.
+//
+// Known limitations: Tabular column names are NOT unescaped on read
 // (except when explicitly quoted) - the encoder never emits escaped bare
 // identifiers so this is a robustness-only gap for external input.  Column
 // sorting (`autoSort`) runs unconditionally in Compact mode; Balanced/LLM
 // preserve insertion order (already lost by unordered_map).
+//
+// Tabular row cells: the flat `cell1,cell2` row syntax has no escape, so the
+// decoder splits rows with a quote- AND brace-aware scan (commas inside a
+// balanced marker group belong to that cell) and the encoder refuses the table
+// form for a cell carrying a depth-0 comma (e.g. `__REGEX__a,b|c`), falling
+// back to list format rather than splitting the cell.
 
 #include "../core.hpp"
 
@@ -45,6 +61,7 @@ inline std::string goonLiteral(const asvJSONValue* v) {
 // Forward declarations for mutual recursion
 inline std::string goonFormatSpecial(const asvJSONValue* v);
 inline bool goonNeedsQuotes(const std::string& s);
+inline size_t goonFindCellSeparator(std::string_view s, char target);
 inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 
@@ -67,18 +84,18 @@ inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0)
       return;
     case asvJSONValue::DATETIME: {
       out += '"';
-      fmtDateTimeVal(v->timestamp, v->datetime_ms, out);
+      fmtDateTimeVal(v->timestamp, v->datetime_ms, out, v->tz_offset_min);
       out += '"';
       return;
     }
     case asvJSONValue::BINARY:
-      if (v->bin_data.empty()) { out += "\"\""; return; }
+      // An empty payload still uses the $binary marker (base64 of nothing is
+      // "") so a zero-length BINARY decodes back to BINARY instead of "".
       out += "{\"$binary\":{\"base64\":\"";
       out += encodeBase64(v->bin_data.data(), v->bin_data.size());
       out += "\",\"subType\":\"00\"}}";
       return;
     case asvJSONValue::EXTENSION: {
-      if (v->bin_data.empty()) { out += "\"\""; return; }
       out += "{\"$binary\":{\"base64\":\"";
       out += encodeBase64(v->bin_data.data(), v->bin_data.size());
       out += "\",\"subType\":\"";
@@ -135,6 +152,19 @@ inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0)
       out += ']';
       return;
     }
+    case asvJSONValue::CUSTOM_TAG: {
+      // Unknown tags ride the {"$customTag":{"name":...,"value":...}} marker
+      // the core JSON parser recognizes, so both the tag name and its payload
+      // survive a round-trip instead of degrading to null. A bare tag (no
+      // payload) carries an explicit null value, matching yaml/ron.
+      out += "{\"$customTag\":{\"name\":\"";
+      appendJsonEscaped(out, v->str_data);
+      out += "\",\"value\":";
+      if (v->custom_value) goonJsonText(v->custom_value.get(), out, depth + 1);
+      else out += "null";
+      out += "}}";
+      return;
+    }
     default: out += "null"; return;
   }
 }
@@ -142,11 +172,12 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
   if (!v) return "_";
   switch (v->type) {
     case asvJSONValue::DATETIME: {
-      std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+      std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
       return '"' + dt + '"';
     }
     case asvJSONValue::BINARY: {
-      if (v->bin_data.empty()) return "\"\"";
+      // No empty-payload special case: "__BASE64__" with nothing after it is
+      // the marker for a zero-length BINARY and the decoder restores the type.
       std::string r("__BASE64__");
       r += encodeBase64(v->bin_data.data(), v->bin_data.size());
       return r;
@@ -181,11 +212,19 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
     case asvJSONValue::TIMESTAMP:
       return "__TS__" + std::to_string(v->num);
     case asvJSONValue::EXTENSION: {
-      if (v->bin_data.empty()) return "\"\"";
+      // "__EXT__<type>_" with an empty payload is a valid zero-length
+      // EXTENSION; the decoder maps the marker to a typed $binary value.
       std::string r("__EXT__");
       r += std::to_string(v->ext_type);
       r += '_';
       r += encodeBase64(v->bin_data.data(), v->bin_data.size());
+      return r;
+    }
+    case asvJSONValue::CUSTOM_TAG: {
+      // The block/list/table path has no dedicated GOON tag form, so reuse the
+      // JSON marker text goonJsonText builds (decoded by the same JSON parser).
+      std::string r;
+      goonJsonText(v, r);
       return r;
     }
     default: return {};
@@ -360,9 +399,14 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       if (bad) { tabular = false; break; }
     }
   }
+  // Render every cell up front: the flat `val1,val2` row syntax has no escape
+  // for a bare comma, so a cell carrying one forces the list format below.
+  int iw = opts.indentWidth >= 1 ? opts.indentWidth : 1;
+  std::string pad(static_cast<size_t>(indent) * static_cast<size_t>(iw), ' ');
+  std::vector<std::vector<std::string>> grid;
+  bool bareColon = false;
+  bool bareComma = false;
   if (tabular && !cols.empty()) {
-    int iw = opts.indentWidth >= 1 ? opts.indentWidth : 1;
-    std::string pad(static_cast<size_t>(indent) * static_cast<size_t>(iw), ' ');
     auto buildCells = [&](const asvJSONValue* obj) {
       std::vector<std::string> cells;
       cells.reserve(cols.size());
@@ -393,19 +437,29 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       }
       return cells;
     };
-    std::vector<std::vector<std::string>> grid;
     grid.reserve(arr->size());
-    bool bareColon = false;
     for (size_t r = 0; r < arr->size(); r++) {
       grid.push_back(buildCells(arr->get(r)));
       if (bareColon) continue;
       for (const auto& cell : grid.back()) {
-        if (!cell.empty() && cell.front() != '"' && cell.find(':') != std::string::npos) {
-          bareColon = true;
-          break;
-        }
+        if (cell.empty()) continue;
+        // A depth-0 colon (not quoted, not inside a balanced group) would make
+        // the decoder read the cell as a `key: value` sibling.
+        if (goonFindCellSeparator(cell, ':') != std::string::npos) { bareColon = true; break; }
       }
     }
+    // A depth-0 comma cannot be escaped in the flat `val1,val2` row syntax --
+    // the decoder would split the cell in two and silently drop the rest (e.g.
+    // a REGEX pattern `__REGEX__a,b|c`, which emits no quotes/braces). Fall
+    // back to list format, which quotes such values robustly.
+    for (const auto& cells : grid) {
+      if (bareComma) break;
+      for (const auto& cell : cells)
+        if (!cell.empty() && goonFindCellSeparator(cell, ',') != std::string::npos) { bareComma = true; break; }
+    }
+    if (bareComma) tabular = false;
+  }
+  if (tabular && !cols.empty()) {
     // Spec minimalIndent: rows of llm/compact tables sit at the header's own
     // indentation, so the table stays aligned to its header ("minimal"). That
     // layout is only unambiguous while no bare cell contains ':' (a regex
@@ -473,8 +527,6 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
     return;
   }
   // List format
-  int iw = opts.indentWidth >= 1 ? opts.indentWidth : 1;
-  std::string pad(static_cast<size_t>(indent) * static_cast<size_t>(iw), ' ');
   std::string itemIndent(static_cast<size_t>(iw), ' ');
   if (!key.empty() || depth > 0) {
     out += pad;
@@ -751,6 +803,55 @@ inline size_t goonFindUnquoted(std::string_view s, char target) {
   return std::string_view::npos;
 }
 
+// Same as goonFindUnquoted, but depth-aware for a tabular row CELL: a separator
+// inside a quoted string OR inside a balanced `{...}`/`[...]` group belongs to
+// that value and cannot act as a row separator. Used by the encoder to decide
+// whether a cell is safe in the flat `val1,val2` row syntax.
+inline size_t goonFindCellSeparator(std::string_view s, char target) {
+  bool inQ = false, esc = false;
+  int depth = 0;
+  for (size_t ci = 0; ci < s.size(); ci++) {
+    char c = s[ci];
+    if (esc) { esc = false; continue; }
+    if (inQ && c == '\\') { esc = true; continue; }
+    if (c == '"') { inQ = !inQ; continue; }
+    if (inQ) continue;
+    if (c == '{' || c == '[') { depth++; continue; }
+    if (c == '}' || c == ']') { if (depth > 0) depth--; continue; }
+    if (depth == 0 && c == target) return ci;
+  }
+  return std::string_view::npos;
+}
+
+// True when `s` is a single self-contained flow collection: it opens with the
+// given bracket, closes it before any trailing content, and stays balanced
+// (braces inside quoted strings are ignored). Used to accept a root value such
+// as {"$customTag":{...}} as one scalar instead of a block mapping.
+inline bool goonIsCompleteFlow(std::string_view s, char open, char close) {
+  if (s.size() < 2 || s.front() != open) return false;
+  int depth = 0;
+  bool inQ = false, esc = false;
+  for (size_t ci = 0; ci < s.size(); ci++) {
+    char c = s[ci];
+    if (esc) { esc = false; continue; }
+    if (inQ && c == '\\') { esc = true; continue; }
+    if (c == '"') { inQ = !inQ; continue; }
+    if (inQ) continue;
+    if (c == open) depth++;
+    else if (c == close) {
+      depth--;
+      if (depth == 0) {
+        // Nothing but spaces/tabs may follow the closing bracket.
+        for (size_t k = ci + 1; k < s.size(); k++)
+          if (s[k] != ' ' && s[k] != '\t') return false;
+        return true;
+      }
+      if (depth < 0) return false;
+    }
+  }
+  return false;
+}
+
 // GOON -> JSON text converter (GOON decoder)
 inline std::string goonToJson(std::string_view input) {
   auto lines = splitLines(input);
@@ -856,12 +957,14 @@ inline std::string goonToJson(std::string_view input) {
     if (s == "F") return "false";
     if (s == "_") return "null";
     if (s == "~") return "\"\"";
-    // Number
-    if ((!s.empty() && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) ||
-      (s.size() > 1 && s[0] == '+' && s[1] >= '0' && s[1] <= '9')) {
+    // Number. Per the GOON number grammar a leading '+' is NOT part of a
+    // number, so "+5" stays the string "+5" -- which is also what the encoder
+    // writes (goonNeedsQuotes quotes a leading '+'). A sign inside the exponent
+    // ("1e+5") is still accepted below.
+    if (!s.empty() && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))) {
       bool isNum = true;
       bool hasDot = false, hasExp = false;
-      for (size_t ci = (s[0] == '-' || s[0] == '+') ? 1 : 0; ci < s.size(); ci++) {
+      for (size_t ci = (s[0] == '-') ? 1 : 0; ci < s.size(); ci++) {
         if (s[ci] >= '0' && s[ci] <= '9') continue;
         if (s[ci] == '.' && !hasDot && !hasExp) { hasDot = true; continue; }
         if ((s[ci] == 'e' || s[ci] == 'E') && !hasExp && ci > 0 && ci + 1 < s.size()) {
@@ -870,10 +973,7 @@ inline std::string goonToJson(std::string_view input) {
         if ((s[ci] == '+' || s[ci] == '-') && hasExp && ci > 0 && (s[ci-1] == 'e' || s[ci-1] == 'E')) continue;
         isNum = false; break;
       }
-      if (isNum && !s.empty()) {
-        if (s.size() > 1 && s[0] == '+') s = s.substr(1);
-        return s;
-      }
+      if (isNum && !s.empty()) return s;
     }
     // NaN/Infinity
     if (s == "NaN" || s == "-NaN" || s == "Infinity" || s == "-Infinity") return s;
@@ -948,17 +1048,25 @@ inline std::string goonToJson(std::string_view input) {
   // the object path and silently produced "{}". Expanded to JSON here so
   // scalar roots round-trip exactly like the JSON layer.
   if (!rootIsArr) {
+    auto noTrailingLines = [&]() {
+      for (size_t k = firstLine + 1; k < lines.size(); k++)
+        if (!lines[k].empty())
+          throw GoonDecodeError("GOON: unexpected trailing content after root value");
+    };
+    // A root marker object (CUSTOM_TAG, or any complete single-line flow
+    // object) is a value, not a block mapping: {"$customTag":{...}}. A
+    // multi-line flow object still falls through to the block path below.
+    if (goonIsCompleteFlow(firstContent, '{', '}')) {
+      noTrailingLines();
+      return expandCell(firstContent);
+    }
     bool hasColon = goonFindUnquoted(firstContent, ':') != std::string_view::npos;
     bool looksScalar = !hasColon &&
       !firstContent.empty() && (firstContent[0] != '-' || minusScalar) &&
       firstContent[0] != '{' && firstContent[0] != '[' && firstContent[0] != ']' &&
       firstContent[0] != '}';
     if (looksScalar) {
-      for (size_t k = firstLine + 1; k < lines.size(); k++) {
-        if (!lines[k].empty()) {
-          throw GoonDecodeError("GOON: unexpected trailing content after root value");
-        }
-      }
+      noTrailingLines();
       if (firstContent == "null") return "null";
       if (firstContent == "true") return "true";
       if (firstContent == "false") return "false";
@@ -1107,12 +1215,18 @@ inline std::string goonToJson(std::string_view input) {
                   bool inQb = false;
                   bool escb = false;
                   bool seenComma = false;
+                  int depthb = 0;
                   for (size_t ci2 = 0; ci2 < rc3.size(); ci2++) {
                     char cb2 = rc3[ci2];
                     if (escb) { escb = false; continue; }
                     if (inQb && cb2 == '\\') { escb = true; continue; }
                     if (cb2 == '"') { inQb = !inQb; continue; }
                     if (inQb) continue;
+                    // Colons/brackets inside a balanced group (a marker cell)
+                    // belong to that cell, not to the surrounding structure.
+                    if (cb2 == '{' || cb2 == '[') depthb++;
+                    else if (cb2 == '}' || cb2 == ']') { if (depthb > 0) depthb--; }
+                    else if (depthb > 0) continue;
                     if (cb2 == ',') { seenComma = true; continue; }
                     if (cb2 == ':') {
                       if (seenComma) { seenComma = false; continue; }
@@ -1125,17 +1239,22 @@ inline std::string goonToJson(std::string_view input) {
               }
               lastRl = rl;
               std::string_view rcont = stripIndent(rline);
-              // Check for RLE: value*N (respecting quotes and \" escapes)
+              // Check for RLE: value*N (respecting quotes, \" escapes and
+              // balanced groups -- a `*` inside a marker cell is not a repeat)
               size_t asterisk = std::string_view::npos;
               {
                 bool inQAst = false;
                 bool escAst = false;
+                int depthAst = 0;
                 for (size_t ci = 0; ci < rcont.size(); ci++) {
                   char c_char = rcont[ci];
                   if (escAst) { escAst = false; continue; }
                   if (c_char == '\\') { escAst = true; continue; }
-                  if (c_char == '"') { inQAst = !inQAst; }
-                  else if (c_char == '*' && ci > 0 && !inQAst) { asterisk = ci; break; }
+                  if (c_char == '"') { inQAst = !inQAst; continue; }
+                  if (inQAst) continue;
+                  if (c_char == '{' || c_char == '[') depthAst++;
+                  else if (c_char == '}' || c_char == ']') { if (depthAst > 0) depthAst--; }
+                  else if (c_char == '*' && ci > 0 && depthAst == 0) { asterisk = ci; break; }
                 }
               }
               int repeat = 1;
@@ -1171,15 +1290,23 @@ inline std::string goonToJson(std::string_view input) {
               for (int ri = 0; ri < repeat; ri++) {
                 std::vector<std::string> vals;
                   {
+                    // Quote- AND brace-aware: a row cell may hold a balanced
+                    // JSON group (e.g. the {"$customTag":{...}} marker), whose
+                    // inner commas must not split it into extra cells.
                     std::string cur2;
                     bool inQ = false;
                     bool escape = false;
+                    int depth = 0;
                     for (size_t ci = 0; ci < rowStr.size(); ci++) {
                       char c2 = rowStr[ci];
                       if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
                       if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
                       escape = false;
-                      if (c2 == ',' && !inQ) { vals.push_back(cur2); cur2.clear(); continue; }
+                      if (!inQ) {
+                        if (c2 == '{' || c2 == '[') depth++;
+                        else if (c2 == '}' || c2 == ']') { if (depth > 0) depth--; }
+                      }
+                      if (c2 == ',' && !inQ && depth == 0) { vals.push_back(cur2); cur2.clear(); continue; }
                       cur2 += c2;
                     }
                   vals.push_back(cur2);

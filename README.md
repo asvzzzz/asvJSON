@@ -740,7 +740,13 @@ GOON features:
 - RLE repeat counts are range-checked with overflow detection (an over-limit `*N` throws instead of invoking `atoi` UB)
 - The dictionary is capped at 256 entries, so a huge document cannot grow an unbounded `$:` header
 - Empty roots (`{}`/`[]`) serialize as a single line and parse back
-- Known limitation: an empty BINARY/EXTENSION inside an *inline* `[...]` cell serializes as an empty string and decodes back as a STRING
+- A leading `+` is not part of a number, so a hand-written `+5` (or `+Infinity`) is a STRING, matching what the encoder writes; a sign inside an exponent (`1e+5`) is still a number
+- `DATETIME` keeps its UTC offset in both encoder paths (e.g. `2023-11-15T03:13:20.250+05:00`)
+- An empty BINARY/EXTENSION keeps its type: the marker is still emitted (`__BASE64__`, `__EXT__<type>_`, an empty payload) instead of degrading to `""`
+- `CUSTOM_TAG` (an unknown tag from YAML/UDE/JSON) rides the `{"$customTag":{"name":...,"value":...}}` marker the JSON parser recognizes, so the tag name and payload both round-trip - including as a tabular cell, whose row splitter is quote- and brace-aware
+- A cell whose value carries a bare comma (e.g. the REGEX pattern `a,b`) cannot be expressed in the flat `val1,val2` row syntax, so such a table falls back to list format instead of silently splitting the cell
+- A root single-line flow object is decoded as a value, not a block mapping (`{"a":1}` no longer parses as the key `{"a"`)
+- The prototype keys `__proto__`, `constructor` and `prototype` are accepted as ordinary keys: the spec asks implementations to reject them to prevent prototype-chain pollution, which cannot occur here (keys live in a map, never in an object prototype)
 
 ### Protobuf
 
