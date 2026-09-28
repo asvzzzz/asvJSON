@@ -18061,11 +18061,15 @@ TEST(testFromDotenv) {
     ASSERT(!j.fromDotenv(std::string("A=\"unterminated\n")));
     ASSERT(!j.fromDotenv(std::string("A=\"x\" junk\n")));
   }
-  // Bare '#' at value start is an inline comment -> empty string
+  // A '#' starting the value is data, not an inline comment: KEY=#text keeps
+  // the text, and only a '#' preceded by space/tab becomes a comment (so a
+  // whole-line " #" spelling after '=' also stays data -- the parser already
+  // trimmed that line's leading whitespace).
   {
     asvJSON j;
-    ASSERT(j.fromDotenv(std::string("E=# just a comment\n")));
-    ASSERT_EQ(std::string(j.getString("E")), std::string(""));
+    ASSERT(j.fromDotenv(std::string("E=# just a comment\nG=#\n")));
+    ASSERT_EQ(std::string(j.getString("E")), std::string("# just a comment"));
+    ASSERT_EQ(std::string(j.getString("G")), std::string("#"));
   }
 }
 
@@ -18307,6 +18311,89 @@ TEST(testDotenvReviewFixes) {
     ASSERT(j.get("KEY") != nullptr && j.get("KEY")->comments);
     ASSERT_EQ(j.get("KEY")->comments->leading.size(), size_t(1));
     ASSERT_EQ(j.toDotenv(), std::string("# c1\nKEY=val\n"));
+  }
+}
+
+TEST(testDotenvAuditFixes) {
+  // 1. A '#' that starts the value is data, not an inline comment (see the
+  // updated testFromDotenv block). Re-emit quotes the hash-having value
+  // because '#' still earns quotes; the text survives.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("E=#text\nS=v # note\n")));
+    ASSERT_EQ(std::string(j.getString("E")), std::string("#text"));
+    auto* v = j.get("S");
+    ASSERT(v != nullptr && v->comments);
+    ASSERT_EQ(v->comments->trailing.size(), size_t(1));
+    ASSERT_EQ(v->comments->trailing[0].text, std::string(" note"));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    ASSERT_EQ(std::string(j2.getString("E")), std::string("#text"));
+  }
+  // 2. The unterminated-quoted-value error names the line where the quote
+  // OPENED, not the last line consumed by the continuation loop.
+  {
+    asvJSON j;
+    ASSERT(!j.fromDotenv(std::string("K1=a\nK2=b\nK3=\"value\n   continues\n")));
+    ASSERT(j.getLastError().find("line 3") != std::string::npos);
+  }
+  // 3. Control bytes mirror INI's escape table: \0 \a \b \f \v are escaped on
+  // encode (and forced into quotes by needQuote) and decoded back on parse.
+  {
+    std::string v;
+    v += '\0'; v += '\a'; v += '\b'; v += '\f'; v += '\v'; v += '\t';
+    asvJSON j;
+    j.putString("C", std::string("a") + v + "b");
+    std::string env = j.toDotenv();
+    ASSERT(env.find("\\0") != std::string::npos);
+    ASSERT(env.find("\\a") != std::string::npos);
+    ASSERT(env.find("\\b") != std::string::npos);
+    ASSERT(env.find("\\f") != std::string::npos);
+    ASSERT(env.find("\\v") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT_EQ(std::string(j2.getString("C")), std::string("a") + v + "b");
+  }
+  // 4. '$' is not special: no variable expansion, and '\$' inside double
+  // quotes is an unknown escape, preserved verbatim like any other (e.g. \q).
+  // A bare '$' value earns no quotes.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("D=\"a\\$b\"\nH=\"$HOME\"\n")));
+    ASSERT_EQ(std::string(j.getString("D")), std::string("a\\$b"));
+    ASSERT_EQ(std::string(j.getString("H")), std::string("$HOME"));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    ASSERT_EQ(std::string(j2.getString("D")), std::string("a\\$b"));
+    ASSERT_EQ(std::string(j2.getString("H")), std::string("$HOME"));
+    asvJSON k;
+    k.putString("P", "$HOME");
+    ASSERT_EQ(k.toDotenv(), std::string("P=$HOME\n"));
+  }
+  // 5. ';' is not a dotenv comment marker, so it no longer forces quotes (the
+  // INI leftover was dropped from the quote set).
+  {
+    asvJSON j;
+    j.putString("S", "a;b");
+    ASSERT_EQ(j.toDotenv(), std::string("S=a;b\n"));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(std::string("T=x;y\n")));
+    ASSERT_EQ(std::string(j2.getString("T")), std::string("x;y"));
+  }
+  // 6. Quoted strings funnel through dotenvParseVal too (single creation point
+  // for STRING), and a full ISO-8601 timestamp infers as DATETIME -- unlike
+  // INI -- with the documented lossy re-encode back to STRING. A bare date is
+  // too short for the datetime parser and stays a STRING.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("D=2024-01-01T12:00:00Z\nB=2024-01-01\n")));
+    ASSERT(j.get("D") != nullptr && j.get("D")->type == asvJSONValue::DATETIME);
+    ASSERT(j.get("B") != nullptr && j.get("B")->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getString("B")), std::string("2024-01-01"));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    ASSERT(j2.get("D") != nullptr && j2.get("D")->type == asvJSONValue::STRING);
+    ASSERT(j2.get("B") != nullptr && j2.get("B")->type == asvJSONValue::STRING);
   }
 }
 
@@ -27680,6 +27767,7 @@ RUN(testINIReviewFixes);
 	RUN(testDotenvRoundTrip);
 	RUN(testDotenvComments);
 	RUN(testDotenvReviewFixes);
+	RUN(testDotenvAuditFixes);
 
 	std::cout << "\n--- Java Properties Serialization Tests ---\n";
 	RUN(testFromJavaProp);

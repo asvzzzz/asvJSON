@@ -9,14 +9,24 @@
 //   PORT=8080
 //   DEBUG=true
 //
-// Bare values are type-inferred (null/bool/int/double/datetime/string) exactly
-// like INI; single-quoted values are always literal strings; double-quoted
+// Bare values are type-inferred (null/bool/int/double/string) mirroring the
+// INI convention for numbers, booleans and null. Additionally a full ISO-8601
+// timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|±hh:mm]`) is inferred as DATETIME --
+// unlike INI, which never date-parses -- and this is lossy on re-encode:
+// DATETIME serializes as a quoted string and decodes back as STRING (see
+// below). A bare date like `2024-01-01` is too short for the parser and stays
+// a STRING. Container braces are not INI syntax either: `K={}` stays the
+// string "{}". Single-quoted values are always literal strings; double-quoted
 // values process C-style escapes and may span multiple lines. Unknown escape
 // sequences (e.g. \q) are preserved verbatim rather than decoded. Inline
-// comments (` # ...`) are stripped from bare values. Duplicate keys follow
-// last-wins. Comment text is stored without the leading '#' but with its
-// following space, so `# hello` parses to " hello" and re-emits as "# hello"
-// (the writer is symmetric -- no progressive space drift on round-trip).
+// comments are stripped from bare values only when the '#' is preceded by
+// space or tab (`KEY=v # note`); a '#' at the start of the value
+// (`KEY=#text`) is data, so `KEY=#text` parses to the string "#text" and
+// `KEY=#` to "#" instead of silently collapsing to an empty value plus a
+// comment. Duplicate keys follow last-wins. Comment text is stored without
+// the leading '#' but with its following space, so `# hello` parses to
+// " hello" and re-emits as "# hello" (the writer is symmetric -- no
+// progressive space drift on round-trip).
 //
 // Nested objects and arrays have no dotenv syntax: toDotenv() writes their
 // compact JSON text as a quoted string (a documented lossy round-trip -- the
@@ -32,6 +42,10 @@
 //   new flag on the shared Comment struct used by every format.
 // - Comments always precede the first key as whole lines, and only a value's own
 //   line can hold an inline comment, so comment placement is normalized.
+// - Several trailing comments on one value share the single inline slot: they are
+//   emitted joined on the value's line ("K=1 # a # b") and re-parse as ONE
+//   comment whose text is the whole joined string. Nothing is lost, only the
+//   comment count folds (the joined text re-emits verbatim).
 
 #include "../core.hpp"
 
@@ -55,7 +69,11 @@ inline std::string_view dotenvTrimR(std::string_view s) {
 }
 inline std::string_view dotenvTrim(std::string_view s) { return dotenvTrimR(dotenvTrimL(s)); }
 
-// Infer a typed value from a bare dotenv string (quoted values stay strings).
+// Infer a typed value from a bare dotenv string. With quoted=true the
+// input is a string value (always STRING, no inference). Both fromDotenv's
+// quoted paths and the encoder's quoting probe funnel through this one
+// function, so the MAX_STRING_LEN limit lives in a single place (makeString
+// returns null on overflow).
 // Mirrors the INI convention: JSON-shaped numbers only, leading-zero/hex
 // literals kept as text, out-of-range numbers preserved as raw_number strings.
 inline std::unique_ptr<asvJSONValue> dotenvParseVal(const std::string& s, bool quoted) {
@@ -95,7 +113,13 @@ inline std::unique_ptr<asvJSONValue> dotenvParseVal(const std::string& s, bool q
   return asvJSONValue::makeString(s.data(), s.size());
 }
 
-// Process C-style escapes inside a double-quoted dotenv value.
+// Process C-style escapes inside a double-quoted dotenv value. The table is the
+// inverse of dotenvEscape, which itself mirrors INI's: \0 \a \b \f \v are real
+// escapes so no control byte is ever written raw (one would truncate the line
+// in an external reader). '$' is deliberately NOT in the table: this parser
+// never expands variables, the writer never emits '\$', and treating '\$' as an
+// unknown escape keeps it verbatim -- exactly like any other unrecognized
+// sequence. '\'' stays as an input-compat alias inside double quotes.
 inline std::string dotenvUnescape(std::string_view s) {
   std::string out;
   out.reserve(s.size());
@@ -106,10 +130,14 @@ inline std::string dotenvUnescape(std::string_view s) {
         case 'n': out += '\n'; break;
         case 'r': out += '\r'; break;
         case 't': out += '\t'; break;
+        case '0': out += '\0'; break;
+        case 'a': out += '\a'; break;
+        case 'b': out += '\b'; break;
+        case 'f': out += '\f'; break;
+        case 'v': out += '\v'; break;
         case '\\': out += '\\'; break;
         case '"': out += '"'; break;
         case '\'': out += '\''; break;
-        case '$': out += '$'; break;
         default: out += '\\'; out += e; break;
       }
     } else {
@@ -127,6 +155,11 @@ inline std::string dotenvEscape(std::string_view s) {
       case '\n': out += "\\n"; break;
       case '\r': out += "\\r"; break;
       case '\t': out += "\\t"; break;
+      case '\0': out += "\\0"; break;
+      case '\a': out += "\\a"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\v': out += "\\v"; break;
       case '\\': out += "\\\\"; break;
       case '"': out += "\\\""; break;
       default: out += c; break;
@@ -163,8 +196,14 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
       std::string_view sv(v->str_data);
       bool needQuote = sv.empty();
       for (char c : sv) {
-        if (c == ' ' || c == '\t' || c == '#' || c == '=' || c == '"' ||
-            c == '\'' || c == '\\' || c == ';' || c == '\n' || c == '\r') {
+        // ';' is not special here (unlike INI) and earns no quotes. Control
+        // bytes below 0x20 force quoting because the escape table (dotenvEscape)
+        // only runs inside quotes; without this a NUL/bell/etc. would be written
+        // raw and truncate the value in an external reader. '\n'/'\r'/'\t' are
+        // listed explicitly below and also caught by the range check.
+        if ((unsigned char)c < 0x20 || c == ' ' || c == '\t' || c == '#' ||
+            c == '=' || c == '"' || c == '\'' || c == '\\' || c == '\n' ||
+            c == '\r') {
           needQuote = true;
           break;
         }
@@ -341,6 +380,7 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
 
       if (!rest.empty() && (rest[0] == '"' || rest[0] == '\'')) {
         char q = rest[0];
+        const size_t quoteStartLine = li; // li advances inside the continuation loop
         std::string raw;
         bool closed = false;
         std::string_view cur = rest.substr(1);
@@ -371,7 +411,7 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
           }
           if (li + 1 >= n)
             throw asvJSONError("dotenv: unterminated quoted value at line " +
-                               std::to_string(li + 1));
+                               std::to_string(quoteStartLine + 1));
           raw += '\n';
           li++;
           cur = lines[li];
@@ -385,14 +425,18 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
           if (!cur.empty() && cur.back() == '\r') cur.remove_suffix(1);
         }
         std::string text = (q == '"') ? dotenvUnescape(raw) : raw;
-        val = asvJSONValue::makeString(text.data(), text.size());
+        val = dotenvParseVal(text, true);
         if (!val)
-          throw asvJSONError("dotenv: string too long at line " + std::to_string(li + 1));
+          throw asvJSONError("dotenv: string too long at line " + std::to_string(quoteStartLine + 1));
       } else {
         std::string_view v = rest;
         size_t cut = npos;
+        // A '#' only starts an inline comment when it is preceded by space or
+        // tab on the value line. A '#' at the very start of the value
+        // (`KEY=#text`) is data and survives as the string "#text" instead of
+        // silently collapsing into an empty value plus a comment.
         for (size_t i = 0; i < v.size(); i++) {
-          if (v[i] == '#' && (i == 0 || v[i - 1] == ' ' || v[i - 1] == '\t')) {
+          if (v[i] == '#' && i > 0 && (v[i - 1] == ' ' || v[i - 1] == '\t')) {
             cut = i;
             break;
           }
