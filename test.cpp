@@ -18640,6 +18640,35 @@ TEST(testJavaPropRoundTrip) {
     ASSERT(j2.getRoot()->comments && j2.getRoot()->comments->footing.size() == size_t(1));
     ASSERT_EQ(j2.toJavaProp(), once);
   }
+  // Comment MARKUP normalizes: '!' markers and space-less '#text' re-emit a `# `.
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("! hi\n#no-space\nk=1\n")));
+    std::string once = j.toJavaProp();
+    ASSERT(once.find("# hi\n") != std::string::npos);
+    ASSERT(once.find("# no-space\n") != std::string::npos);
+    ASSERT(once.find("! ") == std::string::npos);
+    ASSERT(once.find("#no-space") == std::string::npos);
+  }
+  // A value's trailing comment block (only reachable programmatically) is
+  // emitted under the value and re-reads as the NEXT key's leading comment.
+  {
+    asvJSON j;
+    auto root = asvJSONValue::makeObject();
+    auto a = asvJSONValue::makeInt(1);
+    auto ac = new Comments();
+    ac->trailing.emplace_back(Comment{"note"});
+    a->comments.reset(ac);
+    root->obj->emplace("a", std::move(a));
+    root->obj->emplace("b", asvJSONValue::makeInt(2));
+    ASSERT(j.setByPointer("/", std::move(root)));
+    asvJSON j2;
+    ASSERT(j2.fromJavaProp(j.toJavaProp()));
+    auto* w = j2.get("b");
+    ASSERT(w != nullptr && w->comments);
+    ASSERT_EQ(w->comments->leading.size(), size_t(1));
+    ASSERT_EQ(w->comments->leading[0].text, std::string("note"));
+  }
   // A literal space in final position is stripped by the loader (the JDK rule),
   // so the encoder has to escape it -- otherwise "a " silently came back as "a".
   // Only the last character needs escaping: the loader stops at the first
@@ -18764,6 +18793,33 @@ TEST(testJavaPropFromAny) {
     ASSERT_EQ(std::string(j2.getString("A")), std::string("b"));
     ASSERT_EQ(j2.getInt("C"), int64_t(3));
     std::remove("javaprop_test.properties");
+  }
+  // '#' comment lines are not a JavaProp signal: their text must not misread
+  // '='/':'/'\\u' inside the comment as data.
+  {
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("#foo=bar")));
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("# foo=bar")));
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("# see \\u00xx")));
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("  #a=b")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("!note")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("a=1")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("a:b")));
+  }
+  // A '#' comment carrying '=' before real content must not hand the document
+  // to JavaProp; "k: v" (spaced colon) belongs to the later YAML cascade.
+  {
+    asvJSON j;
+    ASSERT(j.fromAny(std::string("# comment says foo=bar\nk: v\n")));
+    ASSERT(j.getFormatType() != FormatType::JavaProp);
+  }
+  // Empty keys are rejected on load, symmetric with the encoder.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJavaProp(std::string("=v\n")));
+    ASSERT(j.lastError.find("empty key") != std::string::npos);
+    asvJSON k;
+    ASSERT(!k.fromJavaProp(std::string(":v\n")));
+    ASSERT(k.lastError.find("empty key") != std::string::npos);
   }
 }
 

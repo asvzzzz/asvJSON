@@ -18,8 +18,18 @@
 // JDK behavior); leading whitespace of a value is skipped.
 //
 // Bare values are type-inferred (null/bool/int/double/datetime/string) like
-// dotenv/INI. Duplicate keys follow last-wins. Comments are preserved via the
-// shared `Comments` metadata (leading/footing) and re-emitted by toJavaProp().
+// dotenv/INI. Duplicate keys follow last-wins. Empty keys, which the format
+// formally allows (`=value`), are rejected on BOTH sides: fromJavaProp() and
+// toJavaProp() each throw "javaprop: empty key", because the object store
+// cannot hold a nameless member and a parsed one could not be re-emitted.
+// Comments are preserved via the shared `Comments` metadata (leading, trailing,
+// footing) and re-emitted by toJavaProp(). The MARKUP normalizes, though: the
+// loader strips exactly one space after the marker, and the encoder always
+// writes `# `, so a `!`-style comment or a space-less `#text` loads as text and
+// comes back as `# text`. And a comment block the encoder emits under a value's
+// `trailing` is read back as the NEXT key's `leading` (or the root's `footing`
+// after the last value), because the parser never produces trailing comments
+// itself (there is no inline-comment syntax).
 //
 // Lossy on encode, because .properties has no syntax for these:
 //   - nested objects and arrays are written as their compact JSON text, escaped
@@ -183,6 +193,9 @@ inline std::vector<std::string> javapropLogicalLines(std::string_view input) {
   size_t li = 0;
   while (li < lines.size()) {
     std::string cur = lines[li];
+    // Defense in depth: splitLines() already drops a trailing CR on every line,
+    // so one here only means a caller fed us raw input through an exotic path.
+    // Keeping it would fold the CR into the key or value. Mirrors INI/dotenv.
     if (!cur.empty() && cur.back() == '\r') cur.pop_back();
     for (;;) {
       size_t bs = 0;
@@ -192,7 +205,7 @@ inline std::vector<std::string> javapropLogicalLines(std::string_view input) {
       if (li + 1 >= lines.size()) break; // trailing backslash at EOF
       li++;
       std::string next = lines[li];
-      if (!next.empty() && next.back() == '\r') next.pop_back();
+      if (!next.empty() && next.back() == '\r') next.pop_back(); // as above
       size_t k = 0;
       while (k < next.size() && (next[k] == ' ' || next[k] == '\t' || next[k] == '\r')) k++;
       cur += next.substr(k);
@@ -350,7 +363,9 @@ inline std::string asvJSON::toJavaProp() const {
 // fromAny() heuristic: an '!' comment line, a '\u' escape, or a line with an
 // '=' separator or an unspaced ':' separator. Whitespace-separated pairs and
 // ':' followed by a space are not distinctive enough (YAML/TOON/... style) and
-// are left for the later YAML/GOON/TOON cascade.
+// are left for the later YAML/GOON/TOON cascade. '#' comment lines are SKIPPED
+// entirely -- unlike '!', a '#' is not a JavaProp signal (too many formats use
+// it), and its text must not misread `=`/`:`/`\u` inside the comment as data.
 inline bool javapropLooksLike(std::string_view s) {
   size_t p = 0;
   int sig = 0;
@@ -366,6 +381,7 @@ inline bool javapropLooksLike(std::string_view s) {
     if (!line.empty()) {
       lines++;
       if (line[0] == '!') { sig |= 4; break; }
+      if (line[0] == '#') continue; // comment: not data, and '#' is no signal
       if (line.find("\\u") != std::string_view::npos) { sig |= 8; break; }
       for (size_t i = 0; i < line.size(); i++) {
         char c = line[i];
@@ -421,6 +437,10 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
       while (q < line.size()) {
         char c = line[q];
         if (c == '\\' && q + 1 < line.size()) {
+          // Collect a run of consecutive escape sequences into one contiguous
+          // span so a single javapropUnescape() call decodes the whole backslash
+          // batch -- the decoder has to see complete sequences to size its
+          // `\uXXXX` (and surrogate-pair) reads, which span several chars each.
           const char* segStart = line.data() + q;
           size_t segLen = 0;
           while (q < line.size()) {
@@ -454,6 +474,13 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
         key += c;
         q++;
       }
+      // Empty keys are rejected on load too, doubling the encoder's check: a
+      // `=value` row would otherwise create key "" (which a .properties file
+      // formally allows), and that document could never be re-emitted without
+      // throwing. Mirrors dotenv.
+      if (key.empty())
+        throw asvJSONError("javaprop: empty key");
+
       if (sep == 0) {
         // No separator at all: the whole trimmed line is the key, value empty.
         rawVal.clear();
@@ -482,8 +509,7 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
 
       if (!pending.empty()) {
         val->comments.reset(new Comments());
-        val->comments->leading.swap(pending);
-        pending.clear();
+        val->comments->leading.swap(pending); // swap leaves `pending` empty
       }
 
       auto it = obj->obj->find(key);
