@@ -19800,6 +19800,42 @@ TEST(testUBJSONNoopInTyped) {
   }
 }
 
+TEST(testUBJSONTypedElementType) {
+  // The $<type> header is a promise about the payload: a container-typed
+  // element must begin with the very marker it declares. A declared '[' whose
+  // payload opens with '{' (or vice versa) is malformed, not permission to
+  // re-interpret the element.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUBJSON(std::string("[$[#i\x01", 6) + "{" + std::string("U\x01", 2) + "a" + std::string("i\x02", 2) + "}"));
+    ASSERT(j.lastError.find("typed array element marker mismatch") != std::string::npos);
+    asvJSON k;
+    ASSERT(!k.fromUBJSON(std::string("{${#i\x01", 6) + std::string("U\x01K", 3) + "[" + std::string("i\x05", 2) + "]"));
+    ASSERT(k.lastError.find("typed object element marker mismatch") != std::string::npos);
+  }
+  // Matching markers still parse: declared '{' with an object element...
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[${#i\x01", 6) + "{" + std::string("U\x01", 2) + "a" + std::string("i\x02", 2) + "}"));
+    ASSERT_EQ(j.serialize(), std::string("[{\"a\":2}]"));
+    asvJSON k;
+    ASSERT(k.fromUBJSON(std::string("{${#i\x01", 6) + std::string("U\x01K", 3) + "{" + std::string("U\x01", 2) + "a" + std::string("i\x02", 2) + "}"));
+    ASSERT_EQ(k.serialize(), std::string("{\"K\":{\"a\":2}}"));
+  }
+  // ...and a declared '[' with an array element.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$[#i\x01", 6) + "[" + std::string("i\x07", 2) + "]"));
+    ASSERT_EQ(j.serialize(), std::string("[[7]]"));
+  }
+  // Nested typed containers recurse through the check at every level.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$[#i\x01", 6) + std::string("[${#i\x01", 6) + "{" + std::string("U\x01", 2) + "b" + std::string("i\x09", 2) + "}"));
+    ASSERT_EQ(j.serialize(), std::string("[[{\"b\":9}]]"));
+  }
+}
+
 TEST(testUBJSONRejectDollarBrackets) {
   // $[ and ${ without a # count are rejected (typed container requires #n).
   {
@@ -27880,6 +27916,7 @@ RUN(testPlistAuditRegressions);
 	RUN(testUBJSONRoundTrip);
 	RUN(testUBJSONSpecialTypes);
 	RUN(testUBJSONNoopInTyped);
+	RUN(testUBJSONTypedElementType);
 	RUN(testUBJSONRejectDollarBrackets);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";

@@ -341,8 +341,20 @@ inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t&
       if (!v) throw asvJSONError("UBJSON: string alloc failed");
       return v;
     }
-    case '[': case '{':
+    case '[': case '{': {
+      // Only reachable from ubjParseTyped (the declared $<type> element type):
+      // ubjParseValue consumes the real marker before dispatching, so it never
+      // forwards a container marker here. A container declared by the header
+      // must begin with that very marker in the payload -- a mismatch means the
+      // typed container is malformed (the declared type is a promise about the
+      // payload format), not permission to re-interpret the element.
+      if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end of input");
+      char actual = static_cast<char>(data[pos]);
+      if (actual != m)
+        throw asvJSONError(m == '[' ? "UBJSON: typed array element marker mismatch"
+                                    : "UBJSON: typed object element marker mismatch");
       return ubjParseValue(data, pos, dataLen, depth);
+    }
     default:
       throw asvJSONError("UBJSON: unknown marker");
   }
