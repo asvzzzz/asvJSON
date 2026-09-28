@@ -18395,6 +18395,38 @@ TEST(testDotenvAuditFixes) {
     ASSERT(j2.get("D") != nullptr && j2.get("D")->type == asvJSONValue::STRING);
     ASSERT(j2.get("B") != nullptr && j2.get("B")->type == asvJSONValue::STRING);
   }
+  // 7. Every control byte without a short escape (0x01-0x06, 0x0E-0x1F) and
+  // DEL (0x7F) is emitted as \xHH, so no raw control byte ever lands inside a
+  // quoted value; \xHH decodes back on parse. DEL is not in the quote set (it
+  // is safe bare) but inside an already-quoted value it is still \x7F.
+  {
+    asvJSON j;
+    std::string v;
+    for (int i = 1; i <= 0x1F; i++) v += (char)i;
+    v += (char)0x7F;
+    v += 'Z';
+    j.putString("C", v);
+    std::string env = j.toDotenv();
+    ASSERT(env.size() > 3 && env[0] == 'C' && env[1] == '=' && env[2] == '"');
+    size_t close = env.rfind('"');
+    ASSERT(close != std::string::npos && close > 3);
+    std::string payload = env.substr(3, close - 3);
+    for (unsigned char c : payload)
+      if (c < 0x20 || c == 0x7f) ASSERT(false);
+    ASSERT(payload.find("\\x01") != std::string::npos);
+    ASSERT(payload.find("\\x7F") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(env));
+    ASSERT_EQ(std::string(j2.getString("C")), v);
+    // Hand-written \xNN decodes as a hex escape (like INI).
+    asvJSON h;
+    ASSERT(h.fromDotenv(std::string("H=\"a\\x2Ab\"\n")));
+    ASSERT_EQ(std::string(h.getString("H")), std::string("a*b"));
+    // An incomplete \x4 stays an unknown escape, verbatim.
+    asvJSON k;
+    ASSERT(k.fromDotenv(std::string("K=\"x\\x4\"\n")));
+    ASSERT_EQ(std::string(k.getString("K")), std::string("x\\x4"));
+  }
 }
 
 TEST(testFromJavaProp) {

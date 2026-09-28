@@ -17,10 +17,12 @@
 // below). A bare date like `2024-01-01` is too short for the parser and stays
 // a STRING. Container braces are not INI syntax either: `K={}` stays the
 // string "{}". Single-quoted values are always literal strings; double-quoted
-// values process C-style escapes and may span multiple lines. Unknown escape
-// sequences (e.g. \q) are preserved verbatim rather than decoded. Inline
-// comments are stripped from bare values only when the '#' is preceded by
-// space or tab (`KEY=v # note`); a '#' at the start of the value
+// values process C-style escapes and may span multiple lines; a control byte
+// with no short escape form (0x01-0x06, 0x0E-0x1F, 0x7F) is written as \xHH so
+// no control byte ever lands raw in the file. Unknown escape sequences (e.g.
+// \q) are preserved verbatim rather than decoded. Inline comments are stripped
+// from bare values only when the '#' is preceded by space or tab
+// (`KEY=v # note`); a '#' at the start of the value
 // (`KEY=#text`) is data, so `KEY=#text` parses to the string "#text" and
 // `KEY=#` to "#" instead of silently collapsing to an empty value plus a
 // comment. Duplicate keys follow last-wins. Comment text is stored without
@@ -113,18 +115,35 @@ inline std::unique_ptr<asvJSONValue> dotenvParseVal(const std::string& s, bool q
   return asvJSONValue::makeString(s.data(), s.size());
 }
 
-// Process C-style escapes inside a double-quoted dotenv value. The table is the
-// inverse of dotenvEscape, which itself mirrors INI's: \0 \a \b \f \v are real
-// escapes so no control byte is ever written raw (one would truncate the line
-// in an external reader). '$' is deliberately NOT in the table: this parser
-// never expands variables, the writer never emits '\$', and treating '\$' as an
-// unknown escape keeps it verbatim -- exactly like any other unrecognized
-// sequence. '\'' stays as an input-compat alias inside double quotes.
+// Process C-style escapes inside a double-quoted dotenv value. The table is
+// the exact inverse of dotenvEscape: \0 \a \b \f \v \n \r \t \\ \" use short
+// escapes, and every remaining control byte (0x01-0x06, 0x0E-0x1F, 0x7F) uses
+// the \xHH hex form, so no control byte is ever written raw (a raw one would
+// truncate the line in an external reader; INI's unescape already reads \xHH
+// too, and dotenv now both reads and writes it). '$' is deliberately NOT
+// decoded: this parser never expands variables, the writer never emits '\$',
+// and treating '\$' as an unknown escape keeps it verbatim -- exactly like any
+// other unrecognized sequence. '\'' stays as an input-compat alias inside
+// double quotes.
+inline int dotenvHexVal(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
 inline std::string dotenvUnescape(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '\\' && i + 1 < s.size()) {
+      // \xHH first, mirroring INI: the switch below would otherwise decode
+      // "\x41" to 'x' and leave "41" behind.
+      if (s[i + 1] == 'x' && i + 3 < s.size() &&
+          dotenvHexVal(s[i + 2]) >= 0 && dotenvHexVal(s[i + 3]) >= 0) {
+        out += (char)((dotenvHexVal(s[i + 2]) << 4) | dotenvHexVal(s[i + 3]));
+        i += 3;
+        continue;
+      }
       char e = s[++i];
       switch (e) {
         case 'n': out += '\n'; break;
@@ -162,7 +181,20 @@ inline std::string dotenvEscape(std::string_view s) {
       case '\v': out += "\\v"; break;
       case '\\': out += "\\\\"; break;
       case '"': out += "\\\""; break;
-      default: out += c; break;
+      default: {
+        // No short form for the remaining controls (0x01-0x06, 0x0E-0x1F) or
+        // DEL (0x7F): emit them as \xHH so no control byte is ever written
+        // raw. dotenvUnescape reads \xHH back.
+        unsigned char uc = (unsigned char)c;
+        if (uc < 0x20 || uc == 0x7f) {
+          static const char hexdig[] = "0123456789ABCDEF";
+          out += '\\'; out += 'x';
+          out += hexdig[uc >> 4]; out += hexdig[uc & 0x0F];
+        } else {
+          out += c;
+        }
+        break;
+      }
     }
   }
   return out;
@@ -199,8 +231,12 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
         // ';' is not special here (unlike INI) and earns no quotes. Control
         // bytes below 0x20 force quoting because the escape table (dotenvEscape)
         // only runs inside quotes; without this a NUL/bell/etc. would be written
-        // raw and truncate the value in an external reader. '\n'/'\r'/'\t' are
-        // listed explicitly below and also caught by the range check.
+        // raw and truncate the value in an external reader. DEL (0x7F) is
+        // deliberately not in this set -- it is not a space or a boundary any
+        // reader splits on, so a bare DEL is safe -- but inside an already-quoted
+        // value it is still escaped (\x7F) by the short/hex table.
+        // '\n'/'\r'/'\t' are listed explicitly below and also caught by the
+        // range check.
         if ((unsigned char)c < 0x20 || c == ' ' || c == '\t' || c == '#' ||
             c == '=' || c == '"' || c == '\'' || c == '\\' || c == '\n' ||
             c == '\r') {
