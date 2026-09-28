@@ -19112,6 +19112,29 @@ TEST(testFromBencode) {
     ASSERT(!j.fromBencode(std::string("d1:ai1e")));
     ASSERT(!j.fromBencode(std::string("i99999999999999999999999e")));
     ASSERT(!j.fromBencode(std::string("")));
+    // Too many digits is rejected before strtoll (an int64 needs <= 19).
+    {
+      asvJSON k; // 20 digits, would be ERANGE anyway
+      ASSERT(!k.fromBencode(std::string("i10000000000000000000e")));
+      ASSERT(k.lastError.find("integer too long") != std::string::npos);
+      ASSERT(!k.fromBencode(std::string("i-100000000000000000000e"))); // 21 digits
+    }
+    // 19 digits still parse (int64 max/min) or fail on ERANGE, not on the bound.
+    {
+      asvJSON jmax;
+      ASSERT(jmax.fromBencode(std::string("i9223372036854775807e")));
+      ASSERT_EQ(jmax.getRoot()->getInt(), int64_t(9223372036854775807LL));
+      asvJSON jmin;
+      ASSERT(jmin.fromBencode(std::string("i-9223372036854775808e")));
+      ASSERT_EQ(jmin.getRoot()->getInt(), std::numeric_limits<int64_t>::min());
+    }
+  }
+  // Empty byte string: a `0:` is the one empty form, so it is a STRING "".
+  {
+    asvJSON j;
+    ASSERT(j.fromBencode(std::string("0:")));
+    ASSERT(j.getRoot()->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->getString()), std::string(""));
   }
   // The reader is permissive, as most BitTorrent clients are: key order is not
   // enforced and duplicate keys are last-wins. (The encoder still always writes
@@ -19177,6 +19200,59 @@ TEST(testToBencode) {
     asvJSON j;
     j.putDateTime("t", 1700000000, 0);
     ASSERT_EQ(j.toBencode(), std::string("d1:ti1700000000ee"));
+  }
+  // REGEX -> byte string of the PATTERN only; the options after the NUL are
+  // dropped (mirrors plist), so "foo\0gi" encodes as a plain "3:foo" and the
+  // type does not survive a round-trip -- it comes back as a STRING.
+  {
+    asvJSON j;
+    j.setByPointer("/", asvJSONValue::makeRegex("foo", "gi"));
+    ASSERT_EQ(j.toBencode(), std::string("3:foo"));
+    ASSERT_EQ(std::string_view(j.getRoot()->str_data), std::string_view("foo\0gi", 6));
+  }
+  // Bencode has a single empty form (`0:`), so an empty STRING, an empty BINARY
+  // and NULL are indistinguishable downstream and all decode back as STRING "".
+  {
+    asvJSON s;
+    s.setByPointer("/", asvJSONValue::makeString("", 0));
+    ASSERT_EQ(s.toBencode(), std::string("0:"));
+    asvJSON b;
+    b.setByPointer("/", asvJSONValue::makeBinary(nullptr, 0));
+    ASSERT_EQ(b.toBencode(), std::string("0:"));
+    asvJSON r1, r2;
+    ASSERT(r1.fromBencode(b.toBencode()));
+    ASSERT(r1.getRoot()->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(r1.getRoot()->getString()), std::string(""));
+    // An empty STRING root round-trips to the very same "0:" form.
+    ASSERT(r2.setByPointer("/", asvJSONValue::makeString("", 0)));
+    ASSERT_EQ(r1.toBencode(), r2.toBencode());
+  }
+  // The encoder mirrors the parser's depth guard: a tree built programmatically
+  // deeper than MAX_NESTING_DEPTH throws instead of overflowing the stack.
+  {
+    // MAX+1 nested arrays: the deepmost array is entered at depth
+    // MAX_NESTING_DEPTH and its leaf encodes at depth MAX+1 -> throws.
+    std::unique_ptr<asvJSONValue> node = asvJSONValue::makeInt(1);
+    for (int i = 0; i < asvJSONValue::MAX_NESTING_DEPTH + 1; i++) {
+      auto outer = asvJSONValue::makeArray();
+      outer->arr->push_back(std::move(node));
+      node = std::move(outer);
+    }
+    asvJSON deep;
+    ASSERT(deep.setByPointer("/", std::move(node)));
+    bool threw = false;
+    try { deep.toBencode(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+    // The same tree one level shallower (a leaf at exactly depth MAX) is fine.
+    std::unique_ptr<asvJSONValue> lim = asvJSONValue::makeInt(1);
+    for (int i = 0; i < asvJSONValue::MAX_NESTING_DEPTH; i++) {
+      auto outer = asvJSONValue::makeArray();
+      outer->arr->push_back(std::move(lim));
+      lim = std::move(outer);
+    }
+    asvJSON ok;
+    ASSERT(ok.setByPointer("/", std::move(lim)));
+    ASSERT_EQ(ok.toBencode().size(), size_t(asvJSONValue::MAX_NESTING_DEPTH * 2 + 3));
   }
 }
 
@@ -19300,6 +19376,10 @@ TEST(testBencodeRoundTrip) {
     ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("")));
     ASSERT(asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d0:")));
     ASSERT(asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d100:k")));
+    // A leading zero in the key length fails the heuristic too: "d01:...":
+    // invalid bencode, so not a dictionary signature even though it scans.
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d01:")));
+    ASSERT(!asvJSONInternal::bencodeLooksLikeDictionary(std::string_view("d012:k")));
   }
   // A document with no root has no bencode representation: toBencode() returns
   // the empty string, and that empty string does not parse back. Same as

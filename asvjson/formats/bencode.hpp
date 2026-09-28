@@ -17,10 +17,19 @@
 // native forms; the remaining types are mapped to the closest one (lossy, and
 // spelled out in README.md; it mirrors the plist/BSON mappings):
 //   BOOL -> integer 0/1, NULL -> empty byte string, DOUBLE -> decimal text,
-//   DATETIME/TIMESTAMP -> integer seconds, OBJECTID/REGEX -> byte string,
+//   DATETIME/TIMESTAMP -> integer seconds, OBJECTID -> byte string,
+//   REGEX -> byte string of the PATTERN only (the options after the NUL are
+//     dropped, exactly as plist does -- a regex with options round-trips as a
+//     STRING of its pattern text, neither type nor options survive),
 //   EXTENSION -> raw bytes, CUSTOM_TAG -> its payload value.
 // So converting an arbitrary document to bencode never fails on bool/null/
-// double; only a type the encoder does not know about throws.
+// double; the encoder's default branch throws only for a type with no explicit
+// mapping (any type core gains in the future, say). A byte string is the only
+// empty form here, so NULL, an empty STRING and an empty BINARY all encode as
+// `0:` and decode back as the empty STRING -- the empty-BINARY and NULL types
+// cannot survive a round-trip. Like the parser, the encoder bounds recursion at
+// MAX_NESTING_DEPTH: a deeper tree cannot be built by parsing, but one built
+// programmatically throws "nesting too deep" instead of overflowing the stack.
 //
 // Dictionary keys are emitted in ascending byte order, as the specification
 // requires. On input the order is NOT checked and duplicate keys are accepted
@@ -29,9 +38,9 @@
 // bencode either way.
 //
 // A document with no root at all (default-constructed or cleared) serializes to
-// the empty string: bencode has no representation for "nothing", and
-// fromBencode("") fails with "unexpected end of input". asvJSON::toMessagePack()
-// and asvJSON::toCBOR() behave the same way.
+// the empty string, which fromBencode rejects ("unexpected end of input"):
+// bencode has no value for "nothing", so that state cannot round-trip.
+// asvJSON::toMessagePack() and asvJSON::toCBOR() behave the same way.
 
 #include "../core.hpp"
 
@@ -55,6 +64,8 @@ inline std::string bencodeParseString(std::string_view s, size_t& pos) {
   }
   if (pos == start || pos >= s.size() || s[pos] != ':')
     throw asvJSONError("bencode: invalid byte-string length");
+  // Safe to read s[start]: `pos != start` was checked above, so the length has
+  // at least one digit in range.
   if (s[start] == '0' && pos - start > 1)
     throw asvJSONError("bencode: leading zero in byte-string length");
   if (len > asvJSONValue::MAX_STRING_LEN)
@@ -74,6 +85,10 @@ inline int64_t bencodeParseInt(std::string_view s, size_t& pos) {
   size_t digits = pos;
   while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') pos++;
   if (pos == digits) throw asvJSONError("bencode: invalid integer");
+  // Symmetric with the byte-string length bounds: int64 needs at most 19
+  // digits, so reject longer lexemes before strtoll (a million digits should
+  // not be scanned-and-converted just to hit ERANGE).
+  if (pos - digits > 19) throw asvJSONError("bencode: integer too long");
   if (s[digits] == '0' && pos - digits > 1)
     throw asvJSONError("bencode: leading zero in integer");
   if (neg && s[digits] == '0')
@@ -140,8 +155,13 @@ inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_
   throw asvJSONError("bencode: unexpected byte");
 }
 
-inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
+inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
   if (!v) throw asvJSONError("bencode: invalid null value");
+  // Mirror the parser's depth guard: parsing cannot build a tree this deep, but
+  // a programmatic one can -- deep recursion here is a stack overflow, not an
+  // error. Keep the bound identical on both sides.
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("bencode: nesting too deep");
   using T = asvJSONValue::Type;
   switch (v->type) {
     case T::INT:
@@ -163,7 +183,7 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
       if (v->arr->size() > asvJSONValue::MAX_ARRAY_SIZE)
         throw asvJSONError("bencode: list too large");
       out += 'l';
-      for (const auto& e : *v->arr) bencodeEncode(e.get(), out);
+      for (const auto& e : *v->arr) bencodeEncode(e.get(), out, depth + 1);
       out += 'e';
       break;
     }
@@ -203,10 +223,14 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
       out += ':';
       out += v->str_data;
       break;
-    case T::REGEX: {
-      size_t sep = v->str_data.find('\0');
+case T::REGEX: {
+      // str_data is the canonical "pattern\0options" form (see makeRegex), so
+      // the separator is NUL. Split at the LAST one, like plist (and UBJSON):
+      // bencode has no regex type, so only the pattern is carried -- options
+      // are dropped (documented in the header and README).
+      size_t sep = v->str_data.rfind('\0');
       std::string_view pat = (sep != std::string::npos) ? std::string_view(v->str_data).substr(0, sep)
-                                                       : std::string_view(v->str_data);
+                                                        : std::string_view(v->str_data);
       out += std::to_string(pat.size());
       out += ':';
       out.append(pat.data(), pat.size());
@@ -218,7 +242,7 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
       out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
       break;
     case T::CUSTOM_TAG:
-      if (v->custom_value) bencodeEncode(v->custom_value.get(), out);
+      if (v->custom_value) bencodeEncode(v->custom_value.get(), out, depth + 1);
       else out += "0:";
       break;
     case T::OBJECT: {
@@ -243,7 +267,7 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
         out += std::to_string(k.size());
         out += ':';
         out.append(k.data(), k.size());
-        bencodeEncode(val, out);
+        bencodeEncode(val, out, depth + 1);
       }
       out += 'e';
       break;
@@ -254,14 +278,14 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out) {
 }
 
 inline void asvJSONValue::toBencode(std::string& out) const {
-  bencodeEncode(this, out);
+  bencodeEncode(this, out, 0);
 }
 
 inline std::string asvJSON::toBencode() const {
   std::string out;
   // No root: nothing to encode. Bencode has no "nothing" value, so the result
   // is the empty string (see the note in the header comment).
-  if (root) bencodeEncode(root.get(), out);
+  if (root) bencodeEncode(root.get(), out, 0);
   return out;
 }
 
@@ -294,6 +318,10 @@ inline bool bencodeLooksLikeDictionary(std::string_view s) {
   // payload has non-UTF-8 bytes) failed to detect any format at all.
   size_t i = 1;
   while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+  // A leading zero in the key length ("d01:...") is invalid bencode -- the
+  // parser rejects it -- so it is not a dictionary signature either, even
+  // though it passes the scan. `d0:` (a zero-length first key) stays valid.
+  if (i > 2 && s[1] == '0') return false;
   return i > 1 && i < s.size() && s[i] == ':';
 }
 
