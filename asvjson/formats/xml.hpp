@@ -677,15 +677,33 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 			// until the next '<'. Never stalls; worst case is a linear per-
 			// stray-'<' re-scan (O(n^2) on pathological input, no crash).
 			if (std::string_view(s.data() + q, e - q) == elemName) {
-				// Only a genuinely OPENING tag balances against a later
-				// </name>. A self-closing tag -- "<x/>" or "<x />" -- completes its
-				// element instead of opening a nested one, so counting it left the
-				// outer </name> unbalanced: <x xsi:nil="true"><x/></x> never found
+				// Only a genuinely OPENING tag balances against a later </name>.
+				// A self-closing tag -- "<x/>", "<x />" or "<x a=\"1\"/>" -- completes
+				// its element instead of opening a nested one, so counting it left
+				// the outer </name> unbalanced: <x xsi:nil="true"><x/></x> never found
 				// its closing tag, pos did not advance, and the leftover </x> was
 				// later parsed as a new element ("empty element name").
+				// The tag end has to be found by scanning, not by skipping blanks
+				// and expecting '>': that only recognises an attribute-less tag, so
+				// <x attr="v"> was taken for self-closing, the inner </x> was
+				// matched at depth 0, and the outer </x> was left behind (the same
+				// false match also swallowed the unterminated-element diagnostic).
+				// Quoted attribute values may legally hold '>' ('<x a=">">') and
+				// '/' ('<x a="b/c">'), so the scan skips over quoted runs first and
+				// only stops on an unquoted '/'.
 				size_t a = e;
-				while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
-				if (a >= s.size() || s[a] == '>') depth++;
+				while (a < s.size() && s[a] != '>' && s[a] != '/') {
+					if (s[a] == '"' || s[a] == '\'') {
+						char quote = s[a++];
+						while (a < s.size() && s[a] != quote) a++;
+						if (a < s.size()) a++;
+					} else {
+						a++;
+					}
+				}
+				// Unterminated tag (no '>' at all) is not counted: the body scan
+				// then runs to EOF and the caller reports it as unterminated.
+				if (a < s.size() && s[a] != '/') depth++;
 			}
 			p = e;
 			continue;

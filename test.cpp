@@ -4311,6 +4311,59 @@ TEST(testFromXML) {
 		ASSERT(inner != nullptr);
 		ASSERT(inner->get("age")->type != asvJSONValue::NULL_VAL);
 	}
+	// An xsi:nil body may legally contain a nested element of the SAME name, so
+	// skipping it to the matching </name> has to count nesting. Locating the tag
+	// end by skipping blanks and expecting '>' only recognises an attribute-less
+	// tag: <x attr="v"> was read as self-closing, the inner </x> matched at depth
+	// 0, and the outer </x> was left for the caller ("empty element name"). The
+	// scan also has to look past a quoted value holding '>' or '/'.
+	{
+		const std::string nilNs = " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:nil=\"true\"";
+		struct { const char* body; const char* what; } nested[] = {
+			{"<x/>",                 "self-closing"},
+			{"<x ></x>",             "space before >"},
+			{"<x></x>",              "plain"},
+			{"<x attr=\"v\"></x>",   "double-quoted attr"},
+			{"<x a='1'></x>",       "single-quoted attr"},
+			{"<x a=\">\"></x>",      "'>' inside attr"},
+			{"<x a=\"b/c\"></x>",    "'/' inside attr"},
+			{"<x a=\"1\"/>",         "self-closing with attr"},
+			{"<x a='>'/>",           "self-closing, '>' in attr"},
+			{"<x a=\"1\" />",        "space before />"},
+			{"<x a=\"1\"><x b=\"2\"></x></x>",       "double nested with attrs"},
+			{"<x a=\"1\"><x b=\"2\"><x c=\"3\"></x></x></x>", "three deep with attrs"},
+			{"<!-- c --><x a=\"1\"></x>",           "comment then nested"},
+			{"<![CDATA[<x>]]>",     "CDATA holding <x>"},
+			{"<![CDATA[</x>]]>",    "CDATA holding </x>"},
+			{"<?pi?>",               "processing instruction"},
+			{"<x  a = \"1\" ></x>",  "spaces and tabs around '='"},
+			{"<x a=\"'\" b=\"'q'\"></x>", "quotes of both kinds inside values"},
+		};
+		for (const auto& c : nested) {
+			asvJSON json;
+			ASSERT_MSG(json.fromXML("<x" + nilNs + ">" + c.body + "</x>"), c.what);
+			auto* inner = json.getRoot()->get("x");
+			ASSERT_MSG(inner != nullptr, c.what);
+			ASSERT_MSG(inner->type == asvJSONValue::NULL_VAL, c.what);
+		}
+		// An opening tag with a non-nil xsi:nil sibling must still be balanced.
+		{
+			asvJSON json;
+			ASSERT(json.fromXML("<r><x xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:nil=\"true\"><x a=\"1\"></x></x></r>"));
+			ASSERT(json.getRoot()->get("r")->get("x")->type == asvJSONValue::NULL_VAL);
+		}
+		// The same false match used to swallow the unterminated-element
+		// diagnostic: with the inner <x attr="v"> uncounted, its </x> satisfied
+		// the depth-0 close and the missing outer </x> went unnoticed.
+		{
+			const char* unterminated[] = {"<x a=\"1\"></x>", "<x></x>", "<x/>", ""};
+			for (const char* body : unterminated) {
+				asvJSON json;
+				ASSERT_MSG(!json.fromXML("<x" + nilNs + ">" + body), body);
+				ASSERT_MSG(json.getLastError().find("unterminated element") != std::string::npos, body);
+			}
+		}
+	}
 	// DOCTYPE skipped before root
 	{
 		asvJSON json;
