@@ -8703,6 +8703,89 @@ TEST(testToTOONSpecListForm) {
 	}
 }
 
+TEST(testTOONAuditFixes) {
+	// 1. toonDecodeKey: a quoted key whose final quote is escaped (the token
+	// `"a\"` from the line `"a\": 1`) must not have both quotes stripped -- that
+	// used to build invalid intermediate JSON ("a\":"... ) and fail with a
+	// confusing JSON error. The whole token now falls back to the bare-escape
+	// path, so it survives as an ordinary key.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("\"a\\\": 1\nb: 2"));
+		ASSERT_EQ(j.getInt("b"), int64_t(2));
+		ASSERT_EQ(j.getInt("\"a\\\""), int64_t(1));
+	}
+	// A well-formed quoted key still strips its quotes.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("\"name\": 7"));
+		ASSERT_EQ(j.getInt("name"), int64_t(7));
+	}
+
+	// 2/3. Nesting past MAX_NESTING_DEPTH is a hard TOON error from toTOON(),
+	// never a silent truncation -- both through the plain recursion and through
+	// toonNestedArrayItem's self-recursion (array-of-arrays never returns to
+	// valToToon, so its guard is the one that fires).
+	{
+		auto tree = asvJSONValue::makeArray();
+		asvJSONValue* cur = tree.get();
+		for (int i = 0; i < 60; i++) {
+			auto next = asvJSONValue::makeArray();
+			asvJSONValue* np = next.get();
+			cur->arr->push_back(std::move(next));
+			cur = np;
+		}
+		cur->arr->push_back(asvJSONValue::makeInt(1));
+		asvJSON j;
+		ASSERT(j.setByPointer("", std::move(tree)));
+		bool threw = false;
+		try { (void)j.toTOON(); }
+		catch (const asvJSONError& e) { threw = std::string(e.what()).find("nesting depth") != std::string::npos; }
+		ASSERT(threw);
+	}
+	{
+		auto tree = asvJSONValue::makeObject();
+		asvJSONValue* cur = tree.get();
+		for (int i = 0; i < 60; i++) {
+			auto next = asvJSONValue::makeObject();
+			asvJSONValue* np = next.get();
+			cur->obj->emplace("k", std::move(next));
+			cur = np;
+		}
+		cur->obj->emplace("leaf", asvJSONValue::makeInt(1));
+		asvJSON j;
+		ASSERT(j.setByPointer("", std::move(tree)));
+		bool threw = false;
+		try { (void)j.toTOON(); }
+		catch (const asvJSONError& e) { threw = std::string(e.what()).find("nesting depth") != std::string::npos; }
+		ASSERT(threw);
+	}
+	// Shallow trees still round-trip fine below the guard.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[[[[[1]]]]]")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT(*j.getRoot() == *j2.getRoot());
+	}
+
+	// 4. A '[' only forces quotes on KEYS (a[3]-style keys collide with the
+	// key[N]: header shape); a string VALUE containing '[' stays bare.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{\"k\":{\"a[b\":1,\"v\":\"x[y\"}}")));
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("\"a[b\": 1") != std::string::npos);
+		ASSERT(toon.find("v: x[y") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT(*j.getRoot() == *j2.getRoot());
+		ASSERT_EQ(j2.getInt("k.a[b"), int64_t(1));
+		ASSERT_EQ(std::string(j2.getString("k.v")), "x[y");
+	}
+}
+
 TEST(testToTOONHeadersStrict) {
 	// Named "key[N]:" length-bearing headers (Sec. 9.1) -- encoder emits them and
 	// the decoder round-trips them for primitive arrays.
@@ -27507,6 +27590,7 @@ RUN(testCBORFloat16);
 	RUN(testToTOON);
 	RUN(testToTOONAdvanced);
 	RUN(testToTOONSpecListForm);
+	RUN(testTOONAuditFixes);
 	RUN(testToTOONHeadersStrict);
 RUN(testTOONReviewFixes);
 	RUN(testTOONSpecialTypes);

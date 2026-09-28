@@ -11,6 +11,8 @@
 //                           the encoder never emits this shape; uniform-object arrays render as
 //                           list-form instead, so tabular is a one-way parse path)
 // Strings are quoted only when required; full round-trip via toTOON()/fromTOON().
+// Nesting past the core MAX_NESTING_DEPTH (48) is a hard error from toTOON()
+// ("TOON: maximum nesting depth exceeded"), never a silent truncation.
 
 #include "../core.hpp"
 
@@ -56,19 +58,19 @@ inline bool toonIsJsonValue(std::string_view s) {
   return false;
 }
 
-inline bool toonValNeedsQuotes(const std::string& s) {
+inline bool toonValNeedsQuotes(const std::string& s, bool forKey) {
   if (s.empty()) return true;
   if (toonIsJsonValue(s)) return true;             // number-shaped / true / false / null / "{...}" / "[...]"
   if (s.front() == '-') return true;               // leading '-' could be misread as a list item / root array
   for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
-  if (s.find('[') != std::string::npos) return true;  // keys like a[3] collide with key[N]: headers
+  if (forKey && s.find('[') != std::string::npos) return true;  // keys like a[3] collide with key[N]: headers
   if (s.find('"') != std::string::npos) return true;  // embedded quotes must not break quote-aware key parsing
   return false;
 }
 
-inline std::string toonQuoteVal(const std::string& s) {
-  if (toonValNeedsQuotes(s)) return '"' + toonJsonEscape(s) + '"';
+inline std::string toonQuoteVal(const std::string& s, bool forKey = true) {
+  if (toonValNeedsQuotes(s, forKey)) return '"' + toonJsonEscape(s) + '"';
   return s;
 }
 
@@ -76,7 +78,7 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
   if (!v) return "null";
   switch (v->type) {
     case asvJSONValue::NULL_VAL: return "null";
-    case asvJSONValue::STRING: return toonQuoteVal(v->str_data);
+    case asvJSONValue::STRING: return toonQuoteVal(v->str_data, false);  // values may hold '[' bare; only keys need the key[N]: collision guard
     case asvJSONValue::INT: return std::to_string(v->num);
     case asvJSONValue::BOOL_VAL: return v->flag ? "true" : "false";
     case asvJSONValue::DOUBLE: {
@@ -163,6 +165,11 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
 //     depth +1 relative to the hyphen line (Sec. 9.4). Tabular form is not
 //     available in list-item position, so nested objects/arrays use list form.
 inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int indent, int depth) {
+  // Self-recursion happens only through the ARRAY branch below (never through a
+  // valToToon round-trip), so the depth guard must live here -- and it throws
+  // rather than silently truncating, matching valToToon.
+  if (!asvJSONValue::checkNestingDepth(depth))
+    throw asvJSONError("TOON: maximum nesting depth exceeded");
   if (!v || v->type != asvJSONValue::ARRAY || v->size() == 0) {
     out += std::string(static_cast<size_t>(indent) * 2, ' ') + "- [0]:\n";
     return;
@@ -170,6 +177,11 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
   bool allPrim = true;
   for (size_t i = 0; i < v->size(); i++) {
     auto* e = v->get(i);
+    // BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP/DATETIME count as non-primitives
+    // even though toonLeafVal renders them: their JSON-object text carries
+    // depth-0 commas (e.g. {"$binary":{...,"subType":".."}}) and the decoder's
+    // cell splitter is quote-aware, not brace-aware, so they cannot live in an
+    // inline row next to a length header without being cut into extra cells.
     if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
                e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
                e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
@@ -205,7 +217,11 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
 
 inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth = 0) {
   if (!v) return;
-  if (!asvJSONValue::checkNestingDepth(depth)) return;
+  // A tree parsed or built past MAX_NESTING_DEPTH must not silently vanish
+  // from the output (the old behavior returned and left a truncated document):
+  // throw, so toTOON() reports data loss instead of hiding it.
+  if (!asvJSONValue::checkNestingDepth(depth))
+    throw asvJSONError("TOON: maximum nesting depth exceeded");
   // An EMPTY key is only the document root when nothing wraps it; an object
   // member whose key is the empty string ("" ) must still be emitted as a
   // quoted key or the round-trip loses it.
@@ -230,6 +246,10 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
     // Spec Sec. 9.1: length-bearing header "key[N]:" for non-empty arrays. All
     // primitive members render inline on the header line ("key[N]: v1,v2");
     // otherwise the header opens a list whose items nest at indent + 1 (Sec. 9.4).
+    // BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP/DATETIME are non-primitives here
+    // for the same reason as in toonNestedArrayItem: their toonLeafVal text
+    // contains depth-0 commas that the decoder's quote-aware cell splitter would
+    // cut into extra inline cells.
     bool allPrim = true;
     for (size_t i = 0; i < v->size(); i++) {
       auto* e = v->get(i);
@@ -399,7 +419,13 @@ inline size_t toonFindFirstUnquoted(std::string_view s, char target) {
 // through unchanged -- re-escaping would double-escape \n, \" etc. into
 // literal backslashes. Bare tokens are JSON-escaped here.
 inline std::string toonDecodeKey(std::string_view key) {
-  if (key.size() >= 2 && key.front() == '"' && key.back() == '"')
+  // A token counts as a quoted key only when its quotes enclose a complete JSON
+  // string. A token whose final quote is escaped (e.g. the four characters of
+  // `"a\": 1`, where the trailing \ " is an escaped quote, not a closer) would
+  // otherwise have both quotes stripped and emit broken intermediate JSON; the
+  // escape-aware completeness check catches it and the whole token falls back to
+  // the bare-escape path so the value survives as an ordinary (quoted) key.
+  if (key.size() >= 2 && key.front() == '"' && key.back() == '"' && toonJsonStringIsComplete(key))
     return std::string(key.substr(1, key.size() - 2));
   return toonJsonEscape(std::string(key));
 }
