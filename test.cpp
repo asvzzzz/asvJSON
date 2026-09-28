@@ -21686,6 +21686,151 @@ TEST(testUDEUnterminatedBlockCommentAfterTag) {
   }
 }
 
+TEST(testUDEAuditFixes) {
+  // #1: alias resolution is a single deep copy of the anchored value. Forward
+  // references and self references are "undefined alias" errors (there is no
+  // cycle to detect - an anchor is registered only after its value parses),
+  // and alias-of-alias chains have no depth bound.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: *x\nb: &x 1\n"));
+    ASSERT(std::string(j.lastError).find("undefined alias *x") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: &x *x\n"));
+    ASSERT(std::string(j.lastError).find("undefined alias *x") != std::string::npos);
+    ASSERT(std::string(j.lastError).find("cyclic") == std::string::npos);
+  }
+  // A long alias-of-alias chain resolves fine (no 100-level depth limit).
+  {
+    asvJSON j;
+    std::string doc = "a0: &a0 1\n";
+    for (int i = 1; i <= 150; i++)
+      doc += "a" + std::to_string(i) + ": &a" + std::to_string(i) + " *a" + std::to_string(i - 1) + "\n";
+    doc += "end: *a150\n";
+    ASSERT(j.fromUDE(doc));
+    ASSERT_EQ(j.getInt("end"), int64_t(1));
+  }
+
+  // #2: a scalar-root document must consume the whole input.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"hello\""));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "hello");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("\"hello\" extra"));
+    ASSERT(std::string(j.lastError).find("expected ':'") != std::string::npos ||
+            std::string(j.lastError).find("trailing content") != std::string::npos);
+  }
+  // A comment after a quoted scalar root is still fine (comments are not content).
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("\"hello\" # note"));
+    ASSERT_EQ(std::string(j.getRoot()->getString()), "hello");
+  }
+
+  // #3: tagged / anchored / aliased scalar roots parse as real values.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("!null"));
+    ASSERT(j.getRoot()->type == asvJSONValue::NULL_VAL);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("!int 42"));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(42));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("!foo bar"));
+    ASSERT(j.getRoot()->type == asvJSONValue::CUSTOM_TAG);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("!ns:tag value"));
+    ASSERT(j.getRoot()->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string(j.getRoot()->str_data), "ns:tag");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("&x 42"));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(42));
+  }
+  // Anchor defined inline in a flow collection resolves for the alias after it.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("[&x 1, *x]"));
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(2));
+    ASSERT_EQ(j.getRoot()->arr->at(0)->getInt(), int64_t(1));
+    ASSERT_EQ(j.getRoot()->arr->at(1)->getInt(), int64_t(1));
+  }
+  // A malformed tagged scalar root still errors instead of degrading to text.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("!int absent"));
+  }
+
+  // #4: strict serialization quotes multiline strings (no | / > blocks); the
+  // quoted form round-trips in strict mode; lax mode still uses block scalars.
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"a\":\"line1\\nline2\",\"b\":\"multi\\n\\n\\npara\"}"));
+    std::string s = j.toUDE(true);
+    ASSERT(s.find('|') == std::string::npos);
+    ASSERT(s.find("line1\\nline2") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromUDE(s, true));
+    ASSERT(*j.getRoot() == *j2.getRoot());
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"a\":\"line1\\nline2\"}"));
+    std::string lax = j.toUDE(false);
+    ASSERT(lax.find("|") != std::string::npos);
+  }
+
+  // #5: space-only separators inside flow collections are tolerated (a
+  // documented parser extension beyond SEP ::= WS? ',' WS? | NEWLINE).
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("v: {a: 1 b: 2}"));
+    ASSERT_EQ(j.getInt("v.a"), int64_t(1));
+    ASSERT_EQ(j.getInt("v.b"), int64_t(2));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("[1 2 3]"));
+    ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->arr->size(), size_t(3));
+  }
+
+  // #6: digit separators validate per the token's base, not as hex digits:
+  // hex letters next to '_' stay valid, but a base mismatch is a plain string.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("h: 0xFF_FF\nl: 0x1_A\n8: 0o1_2\n2: 0b10_10\n-: -0x1_2\n"));
+    ASSERT_EQ(j.getInt("h"), int64_t(65535));
+    ASSERT_EQ(j.getInt("l"), int64_t(26));
+    ASSERT_EQ(j.getInt("8"), int64_t(10));
+    ASSERT_EQ(j.getInt("2"), int64_t(10));
+    ASSERT_EQ(j.getInt("-"), int64_t(-18));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: 1__000\nb: _1\nc: 1_\nd: 0b1_2\ne: 1_A\nf: 0o8_8_8\n"));
+    ASSERT(std::string(j.getString("a")) == "1__000");
+    ASSERT(std::string(j.getString("b")) == "_1");
+    ASSERT(std::string(j.getString("c")) == "1_");
+    ASSERT(std::string(j.getString("d")) == "0b1_2");
+    ASSERT(std::string(j.getString("e")) == "1_A");
+    ASSERT(std::string(j.getString("f")) == "0o8_8_8");
+  }
+}
+
 TEST(testUDEUnpairedSurrogatesToReplacementChar) {
   // An unpaired surrogate is not a character. Decoding it into the output used
   // to emit an invalid UTF-8 sequence (CESU-8 style, ED A0 80) that no consumer
@@ -27517,6 +27662,7 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEExtTypeRange);
 	RUN(testUDEStringLengthLimit);
 	RUN(testUDEMultiDocumentStreamRoundTrip);
+	RUN(testUDEAuditFixes);
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
 

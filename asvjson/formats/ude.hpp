@@ -245,14 +245,28 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
 // stores the exact literal as a STRING with raw_number set (so it round-trips).
 inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
   if (tok.empty()) return nullptr;
-  // Validate digit separators: '_' must sit between two digits.
+  // Validate digit separators: '_' must sit between two digits, where "digit"
+  // means a digit of the token's own base (Appendix A: INT ::= DIGITS |
+  // DIGITS '_' DIGITS, and the same rule applies inside HEX/OCTAL/BINARY - so
+  // 0xFF_FF is fine, 0b1_2 and 1__000 are not). The bare-hexdigit test is not
+  // enough: it would accept "1_A" (an A is a hex digit but not a decimal one),
+  // so the base is determined from the sign and prefix first.
+  int seppBase = 10;
+  {
+    size_t bi = (!tok.empty() && tok[0] == '-') ? 1 : 0;
+    if (bi + 1 < tok.size() && tok[bi] == '0') {
+      char n = tok[bi + 1];
+      if (n == 'x' || n == 'X') seppBase = 16;
+      else if (n == 'o' || n == 'O') seppBase = 8;
+      else if (n == 'b' || n == 'B') seppBase = 2;
+    }
+  }
   for (size_t i = 0; i < tok.size(); i++) {
     if (tok[i] != '_') continue;
-    bool ok = i > 0 && i + 1 < tok.size();
-    if (!ok) return nullptr;
-    char a = tok[i - 1], b = tok[i + 1];
-    if (!((a >= '0' && a <= '9') || udeHexDigit(a) >= 0) ||
-        !((b >= '0' && b <= '9') || udeHexDigit(b) >= 0)) return nullptr;
+    if (i == 0 || i + 1 >= tok.size()) return nullptr;
+    int a = udeHexDigit(tok[i - 1]);
+    int b = udeHexDigit(tok[i + 1]);
+    if (a < 0 || a >= seppBase || b < 0 || b >= seppBase) return nullptr;
   }
   std::string t;
   t.reserve(tok.size());
@@ -390,14 +404,18 @@ public:
   std::unique_ptr<asvJSONValue> parseDocument();
   std::unique_ptr<asvJSONValue> parseScalarDocValue() {
     skipWsAndComments();
-    return parseValue(1);
+    auto v = parseValue(1);
+    skipWsAndComments();
+    // A scalar document must consume the whole input: "hello" extra is a parse
+    // error, not a silently dropped suffix (matching how a mapping document
+    // rejects trailing content after its last value).
+    if (!eof()) throw asvJSONError("UDE: trailing content after scalar at line " + std::to_string(lineNum_));
+    return v;
   }
 
 private:
   // Documented resource limits (Section 12 of the UDE spec): the maximum
-  // alias resolution depth (100, matching the spec) and the maximum number of
-  // anchors that may be registered while parsing a document.
-  static constexpr int kMaxAliasDepth = 100;
+  // number of anchors that may be registered while parsing a document.
   static constexpr size_t kMaxAnchors = 1000000;
 
   // A parsed key plus whether it was quoted. Quoted keys are always literal;
@@ -417,9 +435,6 @@ private:
   // Anchors store a deep copy of the anchored value so that aliases never
   // reference values that may be moved or destroyed by later key insertions.
   std::unordered_map<std::string, std::unique_ptr<asvJSONValue>> anchors_;
-  // Anchor names currently being resolved (cycle detection).
-  std::unordered_set<std::string> resolving_anchors_;
-  int aliasDepth_ = 0;
   // Raw (still-escaped) token body of the value of the !regex tag currently
   // being parsed, so applyTag can split the pattern from the options before
   // udeUnescape collapses an escaped pipe into a bare one. Empty for any other
@@ -872,7 +887,10 @@ private:
       if (eof()) throw asvJSONError("UDE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
       if (peek() == ']') { pos_++; break; }
-      // newline-separated element (already consumed above)
+      // A single space between elements on the same line ("[1 2]") is
+      // tolerated as an extension: the grammar asks for ',' or a newline
+      // (SEP ::= WS? ',' WS? | NEWLINE), but skipping whitespace here lets the
+      // next element start right after it without consuming a separator.
     }
     return arr;
   }
@@ -905,6 +923,8 @@ private:
       if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
       if (peek() == '}') { pos_++; break; }
+      // A single space between "key: value" pairs on the same line
+      // ("{a: 1 b: 2}") is tolerated as an extension, mirroring parseArray.
     }
     return obj;
   }
@@ -929,6 +949,12 @@ private:
     char indicator = text_[pos_++]; // '|' or '>'
     int explicitIndent = -1;
     char chomp = 0;
+    // An explicit indent of 0 is degenerate: baseIndent becomes 0, so the
+    // content is never stripped of indentation (|2 strips 2 columns, |0 strips
+    // none) and a body line at or above the header's indentation terminates
+    // the scalar and is re-parsed as the next entry. That behaviour is
+    // documented (and tested: "key: |0\nnext: 1" is an empty scalar "key"
+    // followed by "next"), so |0 is legal, not an error.
     if (!eof() && text_[pos_] >= '0' && text_[pos_] <= '9') { explicitIndent = text_[pos_] - '0'; pos_++; }
     if (!eof() && (text_[pos_] == '+' || text_[pos_] == '-')) { chomp = text_[pos_]; pos_++; }
     // Only whitespace, a comment (# or //), or end-of-line may follow the indicators.
@@ -945,7 +971,6 @@ private:
     if (!eof()) { pos_++; lineNum_++; }
 
     std::vector<std::string> content;
-    //bool terminatedByBlank = false; // removed - no longer needed
     size_t baseIndent = (explicitIndent >= 0) ? static_cast<size_t>(explicitIndent) : static_cast<size_t>(-1);
 
     while (!eof()) {
@@ -1106,23 +1131,13 @@ private:
     std::string name = parseAnchorName();
     auto it = anchors_.find(name);
     if (it == anchors_.end()) throw asvJSONError("UDE: undefined alias *" + name);
-    // Cycle detection: if the anchor is already being resolved, the alias
-    // graph contains a cycle and must be rejected (Appendix A, security).
-    if (resolving_anchors_.count(name))
-      throw asvJSONError("UDE: cyclic reference detected for alias *" + name);
-    if (aliasDepth_ >= kMaxAliasDepth) throw asvJSONError("UDE: anchor resolution depth exceeded");
-    resolving_anchors_.insert(name);
-    aliasDepth_++;
-    std::unique_ptr<asvJSONValue> res;
-    try {
-      res = cloneValue(it->second.get());
-    } catch (...) {
-      resolving_anchors_.erase(name);
-      aliasDepth_--;
-      throw;
-    }
-    resolving_anchors_.erase(name);
-    aliasDepth_--;
+    // An anchor is registered only after its value is fully parsed, so a value
+    // can never refer to itself or to an anchor defined later in the document:
+    // both are caught above as an undefined alias. Resolving an alias is a
+    // single deep copy of the anchored value (cloneValue, bounded by
+    // MAX_CLONE_NODES) and never recurses into further anchor resolution, so
+    // there is no cycle to detect and no resolution-depth chain to bound.
+    auto res = cloneValue(it->second.get());
     if (!res) throw asvJSONError("UDE: failed to resolve alias *" + name);
     return res;
   }
@@ -1587,13 +1602,18 @@ inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& tex
   if (t.empty()) return nullptr;
   if (t.find('\n') != std::string_view::npos) return nullptr;
   char c = t[0];
-  if (c == '[' || c == '{' || c == '|' || c == '>' || c == '!' || c == '&' || c == '*') return nullptr;
-  // A ':' only disambiguates a key if the text is not a quoted scalar root;
-  // inside quotes it is part of the string and must be preserved.
-  if (c != '"' && c != '\'' && t.find(':') != std::string_view::npos) return nullptr;
+  if (c == '[' || c == '{' || c == '|' || c == '>') return nullptr;
+  // A ':' only disambiguates a key if the text is not a quoted scalar root or
+  // a tagged value; inside quotes it is part of the string, and inside a tag
+  // name ('!ns:tag') it is a namespace separator, so both must be preserved.
+  if (c != '"' && c != '\'' && c != '!' && t.find(':') != std::string_view::npos) return nullptr;
   // Unquoted multi-word plain text is a verbatim string (a scalar token never
-  // contains a space), so keep the whole trimmed line as-is.
-  if (c != '"' && c != '\'' && t.find(' ') != std::string_view::npos)
+  // contains a space), so keep the whole trimmed line as-is. A leading '!',
+  // '&' or '*' is a structured start (tag / anchor / alias) and is handed to
+  // the scalar-document parse below, which yields a real value for valid
+  // documents (e.g. a root "!null", "&x 1" or "*x" after "&x 1") and rethrows
+  // the original error for malformed ones.
+  if (c != '"' && c != '\'' && c != '!' && c != '&' && c != '*' && t.find(' ') != std::string_view::npos)
     return asvJSONValue::makeStringView(t);
   // Keep the temporary buffer alive for the whole parse: UDEParser stores a
   // string_view, so the std::string must outlive the parser object.
@@ -1983,7 +2003,7 @@ inline void udeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int
   if (v->comments && !v->comments->closing.empty()) {
     udeWriteCommentLines(os, v->comments->closing, indent);
   }
-  udeWriteIndent(os, indent - 1);
+  udeWriteIndent(os, indent > 0 ? indent - 1 : 0);
   os << '}';
 }
 
@@ -2005,7 +2025,7 @@ inline void udeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int 
   if (v->comments && !v->comments->closing.empty()) {
     udeWriteCommentLines(os, v->comments->closing, indent);
   }
-  udeWriteIndent(os, indent - 1);
+  udeWriteIndent(os, indent > 0 ? indent - 1 : 0);
   os << ']';
 }
 
@@ -2086,9 +2106,12 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
         }
         break;
       }
-      if (lineContext && udeCanFoldEncode(v->str_data)) {
+      // Block/folded scalars (|, >) carry unquoted content, so strict mode
+      // never emits them: a strict document must be fully quotable, and a
+      // multiline string is written as a quoted (JSON-escaped) string instead.
+      if (lineContext && !strict && udeCanFoldEncode(v->str_data)) {
         udeWriteFoldedScalar(os, v->str_data);
-      } else if (lineContext && udeCanBlockEncode(v->str_data)) {
+      } else if (lineContext && !strict && udeCanBlockEncode(v->str_data)) {
         udeWriteBlockScalar(os, v->str_data);
       } else if (udeStringNeedsQuote(v->str_data, strict)) {
         udeWriteQuoted(os, v->str_data);

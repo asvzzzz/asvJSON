@@ -66,11 +66,11 @@ Examples:
 | **Number** | Decimal, hexadecimal (`0x`), octal (`0o`), binary (`0b`). Floating point uses standard C-style notation. | No leading zeros unless `0` itself.
 | **Boolean** | `true`, `false` (case-insensitive).
 | **Null** | `null`.
-| **Array start/end** | `[` and `]`. Elements separated by commas or newlines; a trailing comma is permitted in both modes and is safely ignored by the parser (does not create an extra null element).
-| **Object start/end** | `{` and `}`. Key/value pairs separated by commas or newlines; duplicate keys are only reported as errors when strict mode is enabled. In default (permissive) mode a duplicate key does **not** raise an error  -  the last occurrence silently overrides earlier values for that key (`insert_or_assign` semantics).
+| **Array start/end** | `[` and `]`. Elements separated by commas or newlines; a trailing comma is permitted in both modes and is safely ignored by the parser (does not create an extra null element). A single space between elements on one line (`[1 2]`) is also tolerated as an extension beyond the grammar's `SEP ::= WS? ',' WS? | NEWLINE`; the encoder always emits commas.
+| **Object start/end** | `{` and `}`. Key/value pairs separated by commas or newlines; duplicate keys are only reported as errors when strict mode is enabled. In default (permissive) mode a duplicate key does **not** raise an error  -  the last occurrence silently overrides earlier values for that key (`insert_or_assign` semantics). A single space between pairs on one line (`{a: 1 b: 2}`) is also tolerated as an extension beyond the grammar's `SEP ::= WS? ',' WS? | NEWLINE`. |
 | **Block scalar indicator** | `|` (literal) or `>` (folded). Followed by an optional indentation level and optional chomping indicators (`+`, `-`). If no chomping indicator is supplied, the default is to keep a single trailing newline (standard YAML behavior).
 | **Anchor** | `&name`. Creates a reference that can be reused with `*name`.
-| **Alias** | `*name`. Replaces the anchor with its value; aliasing an alias is disallowed and will raise a cycle-detected error. Maximum anchor depth is 100 levels.
+| **Alias** | `*name`. Replaces the anchor with a deep copy of its value. An alias whose anchor is not defined yet (a forward reference, a typo, or a value that refers to itself) is an `undefined alias *<name>` error - genuine cycles are impossible because an anchor is registered only after its value has fully parsed. |
 | **Tag** | `!type` prefix before any value (e.g., `!base64 "..."`). Tags are parsed by custom handlers; unknown tags are preserved as `CUSTOM_TAG` with name and value stored separately (Section 8.1). The parser does not enforce the semantics of a tag  -  validation is delegated to user callbacks.
 
 ### 3.1 String Escape Sequences
@@ -171,6 +171,16 @@ digit at all (it lets the base indent be auto-detected), so no UDE round-trip
 depends on this reading. Prefer the implicit form when the value has to be
 portable between UDE and YAML.
 
+A `0` indicator (`key: |0`) is degenerate: with base indentation 0 the parser
+strips **no** indentation from the body, and a body line at or above the
+header's indentation terminates the scalar and is re-parsed as the next
+document entry. `key: |0` followed by `next: 1` is therefore an empty `key`
+and a separate `next`; a deeper body line keeps its full leading whitespace
+(`key: |0` over `"  hello"` yields a value of two leading spaces + `hello`).
+The parser accepts it (it is legal, just avoids stripping), but prefer any
+positive indicator or the implicit form when the value has to be portable
+between UDE and YAML.
+
 `|` and `>` fold identically as far as chomping is concerned, so for the same body text they yield the same trailing breaks; they differ only in how the body's interior line breaks are treated (`>` turns a lone break between two non-empty lines into a space and keeps a run of k blank lines as k breaks).
 
 Block scalar termination: the base indentation is the number of leading spaces
@@ -213,7 +223,7 @@ default: &def {x: 1, y: 2}
 point1: *def
 point2: {x: 3, y: 4}
 ```
-Aliases (`*name`) are replaced with the anchored value during parsing. An alias that has no matching anchor  -  whether it is a forward reference (referenced before the `&anchor` is defined) or a typo  -  is a hard error in **all** modes: the parser raises `UDE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Cycles (`*a` resolving to a value that contains `*a`) are likewise rejected with a cycle-detected error; the maximum resolution depth is 100 levels.
+Aliases (`*name`) are replaced with a deep copy of the anchored value during parsing. An alias that has no matching anchor  -  whether it is a forward reference (referenced before the `&anchor` is defined) or a typo  -  is a hard error in **all** modes: the parser raises `UDE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Because an anchor is registered only after its value has fully parsed, a value can never refer to itself or to an anchor defined later in the document, so genuine cycles are impossible: `a: &x *y` together with `b: &y *x` is caught as an `undefined alias`. Resolving an alias is a single deep copy of the anchored value (bounded by the clone node budget in Section 12) and never recurses into further anchor resolution, so there is no alias-chain depth limit.
 
 ### 7.1 Merge Keys
 
@@ -318,6 +328,12 @@ A parser can be instantiated in **strict mode** where the following rules apply:
 * Mixed type arrays (e.g., `[1, "two"]`) are allowed; schema validation may reject them if desired.
 * Anchors must be defined before they are referenced (an undefined alias is rejected in all modes, not only strict  -  see Section 7).
 
+In strict mode the **serializer** also never emits block (folded) scalars:
+multiline strings are written as quoted, JSON-escaped strings, because a block
+scalar's body is unquoted content and strict documents must remain fully
+quotable by construction. (The strict *parser* still accepts `|` / `>` values
+for compatibility with documents produced by other tools.)
+
 Strict mode is useful when data integrity is critical; the default permissive mode aims for maximum compatibility with existing YAML/INI files.
 
 ---
@@ -357,7 +373,7 @@ The parser enforces documented resource limits:
 
 | Limit | Value | Notes |
 |-------|-------|-------|
-| Anchor resolution depth | 100 | Alias chains resolving through more than 100 levels are rejected (Section 7). |
+| Anchor resolution | single deep copy | An alias is resolved by copying the anchored value (bounded by the clone node budget); it never recurses into further alias resolution, so there is no alias-chain depth limit (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
 | Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser. |
 | String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
@@ -380,7 +396,7 @@ The following conditions raise an error (non-exhaustive; messages are verbatim):
 * **Comments**  -  `UDE: unterminated block comment at line N` is raised wherever an unclosed `/*` appears, including inside the lookahead that decides whether a tag is followed by a value. Answering "the line ends here" for an unclosed comment would turn the real fault into a misleading `UDE: !null requires a value` (or a silent plain `null` for a bare `!null`).
 * **Block scalar**  -  `UDE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
 * **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid \u{...} escape in string`, `UDE: invalid code point in string`, `UDE: invalid escape sequence \<c> in string`, `UDE: invalid escape at end of string`. These are raised by the escape decoder, which names the escape it rejected; the parser that called it appends ` at line <N>` and re-throws it as an `asvJSONError`, so the decoder's text reaches the user intact. A length failure (`UDE: string too long`, Section 12) is raised by the string factory, deliberately outside that wrapper, so it is never relabelled as a bad escape.
-* **Anchors / aliases**  -  `UDE: undefined alias *<name>`, `UDE: cyclic reference detected for alias *<name>`, `UDE: anchor resolution depth exceeded` (depth > 100), `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
+* **Anchors / aliases**  -  `UDE: undefined alias *<name>`, `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
 * **Duplicate keys**  -  `UDE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
 * **Strict mode**  -  `UDE: strict mode requires all keys to be quoted (key: ...)`, `UDE: strict mode requires quoting value: <tok>`, `UDE: missing value after ':' at line N`.
 * **Tags**  -  e.g. `UDE: !int requires an integral value`, `UDE: !base64 requires a string value`, `UDE: !datetime requires a string value`, `UDE: !ext requires "type:data"`, `UDE: extension type out of range [-128, 127]`, `UDE: invalid base64 data`, `UDE: invalid regex`, `UDE: invalid tag name '!<name>' at line N`, `UDE: <tag> requires a value` (a tag written without a value other than `!null`), `UDE: unterminated tag URI at line N`.
@@ -569,9 +585,8 @@ BOOLEAN           ::= [tT][rR][uU][eE] | [fF][aA][lL][sS][eE]
 NULL              ::= [nN][uU][lL][lL]
 ```
 ### Security constraints
-* Anchor resolution depth must not exceed 100 levels.
-* Cyclic references are forbidden; the parser must detect and report an error.
-* The parser MUST track anchors visited during resolution (e.g., a visited/visiting set of anchor names) so that a cycle such as `a: &x *y` / `b: &y *x` is rejected instead of recursing indefinitely.
+* Alias resolution is a single deep copy of the anchored value (bounded by the clone node budget); it cannot recurse, so there is no alias-chain depth limit.
+* Genuine cycles are impossible: an anchor is registered only after its value has fully parsed, so a value can never refer to itself or to an anchor defined later - `a: &x *y` together with `b: &y *x` is reported as `UDE: undefined alias *<name>`, never recursed.
 
 ---
 
