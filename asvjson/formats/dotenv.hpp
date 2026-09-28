@@ -11,7 +11,7 @@
 //
 // Bare values are type-inferred (null/bool/int/double/string) mirroring the
 // INI convention for numbers, booleans and null. Additionally a full ISO-8601
-// timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|±hh:mm]`) is inferred as DATETIME --
+// timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|+/-hh:mm]`) is inferred as DATETIME --
 // unlike INI, which never date-parses -- and this is lossy on re-encode:
 // DATETIME serializes as a quoted string and decodes back as STRING (see
 // below). A bare date like `2024-01-01` is too short for the parser and stays

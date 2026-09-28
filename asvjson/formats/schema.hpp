@@ -440,7 +440,7 @@ private:
       case asvJSONValue::OBJECTID:
       case asvJSONValue::REGEX:
       case asvJSONValue::CUSTOM_TAG: return t == "string";
-      // Timestamp stores epoch seconds as int64 — maps to integer.
+      // Timestamp stores epoch seconds as int64 -- maps to integer.
       case asvJSONValue::TIMESTAMP: return t == "integer" || t == "number";
       // Binary data can appear as a base64 string or (when decoded) an object;
       // accept both for schema compatibility.

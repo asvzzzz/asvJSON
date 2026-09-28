@@ -2987,7 +2987,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		if (hasAmp && content.find('&') != std::string_view::npos) {
 			// Strip &anchor tags that were registered by the pre-scan.
 			// Only strip anchors present in the map to keep the pre-scan and
-			// main pass in sync — unregistered &name text is left as-is so
+			// main pass in sync -- unregistered &name text is left as-is so
 			// downstream parsing sees it rather than silently dropping it.
 			auto pc = yamlPrecomputeQuotes(content);
 			std::string cleaned;
@@ -3015,7 +3015,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 		// A pending explicit key ("? key") must be satisfied by a ": value" line.
 		// Use yamlFindKeyColonSep: if the line does not start with ': ' (or ':'
 		// at EOL), it is either a multi-line key continuation (deeper indent)
-		// or an error — never silently treated as a new sibling entry.
+		// or an error -- never silently treated as a new sibling entry.
 		if (!pendingKey.empty() && yamlFindKeyColonSep(content) != 0) {
 			// A deeper-indented line folds into a multi-line explicit key
 			// (YAML plain-scalar continuation). Any other non-": value" content

@@ -12,7 +12,7 @@
 //   - Plus sign: +42
 //   - Comments // /* */ # (already handled by JSON parser)
 // NOTE: unescaped U+000A/U+000D inside strings is accepted (lenient, per json5ToJson)
-// and escaped to \n / \r via escapeControl; spec §5.2 forbids them — use line-continuation
+// and escaped to \n / \r via escapeControl; spec sec 5.2 forbids them -- use line-continuation
 // with backslash for actual multi-line strings.
 
 #include "../core.hpp"

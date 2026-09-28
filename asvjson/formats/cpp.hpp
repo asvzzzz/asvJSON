@@ -583,7 +583,7 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
       if (busyObjects_.count(key)) {
         // Recursive reference: break the cycle with a pointer.
         // objTypeCache_ was populated by registerStruct before child processing,
-        // so cac (checked above) already covers this case — we only reach here
+        // so cac (checked above) already covers this case -- we only reach here
         // if the cache hit failed for some reason; fall back to deriving a name.
         usedUniquePtr_ = true;
         t.kind = CppType::Struct;
@@ -974,7 +974,7 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       // continuations), track conditional-compilation state, and capture
       // object-like `#define NAME repl` macros only in active branches.
       // Function-like macros (`#define F(x) ...`, with or without a space
-      // before the paren) are intentionally not captured — expanding them
+      // before the paren) are intentionally not captured -- expanding them
       // would require argument substitution, which is out of scope for this
       // pragmatic reader. They appear as bare identifiers in the token stream.
       size_t j = i;
@@ -1438,7 +1438,7 @@ inline TypeRef::ScalarKind cppRdClassify(const std::string& n) {
 // Note: `unsigned char` and `signed char` both set anyInt=true (via "unsigned"
 // / "signed") and fall through to SInt. This matches the numeric range of
 // those types but means a hand-written `unsigned char flags;` round-trips as
-// INT rather than STRING/BINARY — toCpp() never emits those raw types anyway.
+// INT rather than STRING/BINARY -- toCpp() never emits those raw types anyway.
 inline TypeRef::ScalarKind cppRdClassifyRegion(const std::vector<const Tok*>& v,
                                                 size_t b, size_t e) {
   bool anyInt = false, anyFloat = false, anyChar = false, anyBool = false;
@@ -1908,7 +1908,7 @@ struct Reader {
       if (cur().kind == Tok::Ident) {
         const std::string s = cur().text;
         // Treat `public`/`private`/`protected` as access-specifiers only when
-        // followed by `:` — otherwise they could be a field name in a
+        // followed by `:` -- otherwise they could be a field name in a
         // declaration like `int public;` (invalid C++, but we should not mis-parse).
         if (s == "public" || s == "private" || s == "protected") {
           adv(); skipTrivia();
@@ -2072,7 +2072,7 @@ struct Reader {
     // (`int a, ;`) can never leave p stuck and loop forever.
     if (end != npos) {
       // parsedAny is set after def.fields.push_back(...) in the loop above, so
-      // a non-empty fields vector is the expected invariant — but check explicitly
+      // a non-empty fields vector is the expected invariant -- but check explicitly
       // to avoid UB on a future refactoring that could decouple the two.
       if (parsedAny && !def.fields.empty()) {
         FieldDef& lastField = def.fields.back();

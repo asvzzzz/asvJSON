@@ -270,7 +270,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       bool terminated = false;
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; terminated = true; break; }
-        // RFC 8949 §3.2.2: chunks of an indefinite-length string must be definite-length.
+        // RFC 8949 sec 3.2.2: chunks of an indefinite-length string must be definite-length.
         if ((data[pos] & 0x1F) == 31) throw asvJSONError("CBOR indefinite string with indefinite chunk");
         auto chunk = parseCBOR(data, pos, dataLen, depth + 1);
         if (!chunk) throw asvJSONError("CBOR indefinite string chunk");
@@ -328,7 +328,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     case 3: { // Text string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
       if (len64 > dataLen - pos) throw asvJSONError("CBOR string overflow");
-      // RFC 8949 §3.1: text strings MUST be valid UTF-8; reject invalid sequences outright.
+      // RFC 8949 sec 3.1: text strings MUST be valid UTF-8; reject invalid sequences outright.
        if (!isValidUTF8(data + pos, static_cast<size_t>(len64))) throw asvJSONError("CBOR invalid UTF-8 in text string");
       auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(len64));
       pos += static_cast<size_t>(len64);

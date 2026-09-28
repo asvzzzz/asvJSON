@@ -386,7 +386,7 @@ private:
 	void eraseAt(std::size_t pos) {
 		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
 		if (!slots_.empty()) rebuildIndex();
-		// NOTE: rebuildIndex() is O(n), so erasing N keys one by one is O(N²).
+		// NOTE: rebuildIndex() is O(n), so erasing N keys one by one is O(N^2).
 		// This is an intentional trade-off for the small-object path; bulk
 		// erase should be done via a dedicated method if performance matters.
 	}

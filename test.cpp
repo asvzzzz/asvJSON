@@ -1266,14 +1266,14 @@ TEST(testMessagePackInvalidUTF8) {
 	}
 	// Valid multi-byte UTF-8 must still parse fine.
 	{
-		const char* utf8 = "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"; // "привет"
+		const char* utf8 = "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"; // "privet"
 		std::vector<uint8_t> data = {0xac};
 		data.insert(data.end(), (uint8_t*)utf8, (uint8_t*)utf8 + 12);
 		asvJSON json2;
 		bool ok = json2.fromMessagePack(data.data(), data.size());
 		if (!ok) throw std::runtime_error("valid UTF-8 fixstr should succeed");
 		std::string_view sv = json2.getRoot()->getString();
-		if (sv != "привет") throw std::runtime_error("UTF-8 value mismatch");
+		if (sv != "\xd0\xbf\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82") throw std::runtime_error("UTF-8 value mismatch");
 	}
 }
 
@@ -3632,7 +3632,7 @@ TEST(testCBORIndefiniteStringTruncated) {
 }
 
 TEST(testCBORIndefiniteStringWithIndefiniteChunk) {
-	// RFC 8949 §3.2.2: chunks of an indefinite-length string must be definite-length.
+	// RFC 8949 sec 3.2.2: chunks of an indefinite-length string must be definite-length.
 	// Outer indefinite text string (0x7F), first chunk is itself indefinite (0x7F).
 	std::vector<uint8_t> data = { 0x7F, 0x7F, 0x61, 0xFF, 0xFF };
 	asvJSON json;
@@ -3642,10 +3642,10 @@ TEST(testCBORIndefiniteStringWithIndefiniteChunk) {
 }
 
 TEST(testCBORInvalidUTF8TextString) {
-	// RFC 8949 §3.1: text strings MUST be valid UTF-8. Reject invalid sequences.
+	// RFC 8949 sec 3.1: text strings MUST be valid UTF-8. Reject invalid sequences.
 	{
 		// Overlong 2-byte sequence: C0 80 (encodes U+0000, should be just 0x00)
-		std::vector<uint8_t> data = { 0x63, 0xC0, 0x80, 0x61 }; // "??a" — invalid UTF-8
+		std::vector<uint8_t> data = { 0x63, 0xC0, 0x80, 0x61 }; // "??a" -- invalid UTF-8
 		asvJSON json;
 		bool ok = json.fromCBOR(data.data(), data.size());
 		if (ok) throw std::runtime_error("fromCBOR accepted overlong UTF-8");
@@ -3660,7 +3660,7 @@ TEST(testCBORInvalidUTF8TextString) {
 		ASSERT(!json.getLastError().empty());
 	}
 	{
-		// 0xED + A0..FF → surrogate range, invalid in UTF-8
+		// 0xED + A0..FF -> surrogate range, invalid in UTF-8
 		std::vector<uint8_t> data = { 0x63, 0xED, 0xA0, 0x80 };
 		asvJSON json;
 		bool ok = json.fromCBOR(data.data(), data.size());
@@ -3727,7 +3727,7 @@ TEST(testCBORInvalidUTF8TextString) {
 		if (!json.fromCBOR(data.data(), data.size())) throw std::runtime_error("fromCBOR rejected valid U+FC00 PUA (EF B0 80)");
 	}
 	{
-		// Valid boundary: U+FFFF = EF BF BF and U+FC00 = EF B0 80 — both must succeed
+		// Valid boundary: U+FFFF = EF BF BF and U+FC00 = EF B0 80 -- both must succeed
 		std::vector<uint8_t> data1 = { 0x63, 0xEF, 0xBF, 0xBF };
 		std::vector<uint8_t> data2 = { 0x63, 0xEF, 0xB0, 0x80 };
 		asvJSON json;
@@ -3768,7 +3768,7 @@ TEST(testCBORInvalidUTF8TextString) {
 }
 
 TEST(testCBOREncoderRejectsInvalidUTF8) {
-	// RFC 8949 §3.1: a text string MUST be valid UTF-8, and our own decoder
+	// RFC 8949 sec 3.1: a text string MUST be valid UTF-8, and our own decoder
 	// rejects invalid sequences. Library-held bytes are not guaranteed to be
 	// valid UTF-8 -- makeString/putString copy bytes verbatim, and a
 	// CUSTOM_TAG name or a REGEX body is not a JSON string at all -- so the
@@ -3838,7 +3838,7 @@ TEST(testCBOREncoderRejectsInvalidUTF8) {
 }
 
 TEST(testCBORTag1IntegerDecodesAsTimestamp) {
-	// Documented design choice (see the cbor.hpp header): RFC 8949 §3.4.1
+	// Documented design choice (see the cbor.hpp header): RFC 8949 sec 3.4.1
 	// defines tag 1 + integer as "epoch-based date/time" and does not draw a
 	// distinction between a timestamp and a datetime. asvJSON keeps the two
 	// node types distinct by looking at the type of the tagged item, so a
@@ -23147,7 +23147,7 @@ TEST(testJSONSchemaReviewFixes) {
 		ASSERT(doc.validate(schema, err));
 	}
 	// R2.1a/5: legitimate deep recursion past the old 48-deep cap. The
-	// (value,schema) pair-­keyed cycle guard allows exactly as many levels as
+	// (value,schema) pair-keyed cycle guard allows exactly as many levels as
 	// the data has; a plain depth counter would reject a 63-level document.
 	{
 		asvJSON schema;

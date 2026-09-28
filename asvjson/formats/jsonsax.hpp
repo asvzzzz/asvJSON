@@ -683,7 +683,7 @@ private:
       size_t consumed = pos_;
       buffer_.erase(0, consumed);
       pos_ = 0;
-      tokenStart_ = 0; // keep in sync — future states relying on it need a clean slate
+      tokenStart_ = 0; // keep in sync -- future states relying on it need a clean slate
       // Bytes [0, consumed) were already UTF-8 validated and are now gone; keep
       // the scan pointer aligned with the remaining (already validated) region.
       utf8ScanPos_ = (utf8ScanPos_ >= consumed) ? utf8ScanPos_ - consumed : 0;
