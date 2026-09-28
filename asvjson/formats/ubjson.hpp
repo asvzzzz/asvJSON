@@ -18,20 +18,32 @@
 //   EXTENSION payload + ext_type -> typed uint8 array `[$U#<n>...`; ext_type
 //     is lost on round-trip, value decodes back to plain BINARY
 //   ARRAY   -> '[' items ']'      OBJECT -> '{' key/value pairs '}'
-//   DATETIME-> double seconds (decodes to DOUBLE, type identity is lost)
+//   DATETIME-> double seconds (decodes to DOUBLE, type identity is lost; the
+//     fraction is double-precision, so a timestamp holds about 10 microseconds
+//     of resolution, NOT exact milliseconds)
 //   TIMESTAMP -> int64 seconds (decodes to INT, type identity is lost)
 //   REGEX   -> S
 // Decoding reverses the mapping; H stays a STRING (exact text, no precision
 // loss), C becomes a 1-char STRING, and a typed uint8 array decodes to BINARY
 // (the spec's binary-data convention, matching py-ubjson and the reference
-// C library). Unoptimized containers may be counted (`[#<n>`, `{#<n>`) or
-// unbounded (closed by `]`/`}`); `$` requires a `#` count per spec.
+// C library). The encoder has no C or H forms: C re-encodes as an S ('A' ->
+// "A"), and strings always go out as S. Unoptimized containers may be counted
+// (`[#<n>`, `{#<n>`) or unbounded (closed by `]`/`}`); `$` requires a `#`
+// count per spec. The encoder always writes the plain unbounded form -- the
+// counted form is spec-legal (and preferred by some preallocating readers)
+// but the simple form is a deliberate choice.
 //
-// `N` is a no-op and never produces a value. Inside a container it is skipped
-// without consuming a count slot; at the top level any run of `N` before or after
-// the document's value is skipped, and a document consisting only of no-ops is
-// rejected ("no value"). `N` in a *type* position is a different thing -- `{$N#n`
-// legitimately fixes every value of a typed object to null.
+// `N` is a no-op and never produces a value. Inside an UNTYPED container it is
+// skipped without consuming a count slot; at the top level any run of `N`
+// before or after the document's value is skipped, and a document consisting
+// only of no-ops is rejected ("no value"). Typed containers do NOT skip
+// no-ops: their elements are bare payload bytes with no markers, so a 0x4E
+// byte there is data (an int8 78), not a no-op -- in a typed object a 0x4E at
+// a key-length position is simply an error. `N` in a *type* position is a
+// different thing yet again -- `$N#n` declares an array of n no-ops, which per
+// the spec have an empty body and yield an EMPTY array (a no-op is not a
+// value; `$Z#n` is the null-filling form), while `{$N#n` fixes every value of
+// a typed object to null.
 //
 // Typed containers: the `$<type>` marker describes the element payloads, so
 // `[$i#3` is followed by three BARE int8 bytes with no per-element `i` marker.
@@ -62,6 +74,10 @@ namespace asvJSONInternal {
 // Encoding
 
 inline void ubjWriteBE(std::vector<uint8_t>& out, uint64_t v, int n) {
+  // Callers pass static_cast<uint64_t>(signed) values. Sign extension fills the
+  // high bits (e.g. -32768 -> 0xFFFFFFFFFFFF8000), but only the low n bytes are
+  // written, which is exactly the big-endian two's-complement representation of
+  // the negative number. Easy to break in a refactor, hence this note.
   for (int i = n - 1; i >= 0; i--)
     out.push_back(static_cast<uint8_t>(v >> (8 * i)));
 }
@@ -204,7 +220,8 @@ inline uint64_t ubjReadLen(const uint8_t* data, size_t& pos, size_t dataLen) {
   if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (length)");
   char m = static_cast<char>(data[pos++]);
   uint64_t v = 0;
-  int64_t sv = 0;  // signed reading, so a negative length can be rejected
+  int64_t sv = 0;  // signed reading, so a negative length can be rejected.
+                   // 'U' never touches sv (uint8 can't be negative) -- it stays 0.
   if (m == 'i') {
     if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (int8)");
     sv = static_cast<int8_t>(data[pos++]);
@@ -252,13 +269,18 @@ inline std::unique_ptr<asvJSONValue> ubjParseTyped(const uint8_t* data, size_t& 
 inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& pos,
                                                    size_t dataLen, int depth);
 
-inline std::unique_ptr<asvJSONValue> ubjParseTyped(const uint8_t* data, size_t& pos,
-                                                   size_t dataLen, int depth, char m) {
+// Scalar value from an already-known marker. Shared by ubjParseValue (which
+// reads the marker from the stream) and ubjParseTyped (which receives it from a
+// typed container's $<type> header). Both paths previously duplicated the same
+// ~100-line switch; a single switch here means a future scalar type cannot
+// drift between the two.
+inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t& pos,
+                                                    size_t dataLen, int depth, char m) {
   switch (m) {
-    // 'N' is a no-op and never yields a value: the container loops that reach here
-    // have already skipped it, so seeing one means a no-op sat where a value was
-    // required. The type position of a typed container is a different thing --
-    // {$N#..} legitimately fixes every value to null.
+    // 'N' is a no-op and never yields a value. Container loops skip no-ops
+    // BEFORE calling here, so reaching this case means a no-op sat where a
+    // value was required. The $N *type* position is handled by the container
+    // branch, not here.
     case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
     case 'Z': return asvJSONValue::makeNull();
     case 'T': return asvJSONValue::makeBool(true);
@@ -322,8 +344,14 @@ inline std::unique_ptr<asvJSONValue> ubjParseTyped(const uint8_t* data, size_t& 
     case '[': case '{':
       return ubjParseValue(data, pos, dataLen, depth);
     default:
-      throw asvJSONError("UBJSON: unknown typed value marker");
+      throw asvJSONError("UBJSON: unknown marker");
   }
+}
+
+inline std::unique_ptr<asvJSONValue> ubjParseTyped(const uint8_t* data, size_t& pos,
+                                                   size_t dataLen, int depth, char m) {
+  // Scalar element of a typed container; m is known from the $<type> header.
+  return ubjParseScalar(data, pos, dataLen, depth, m);
 }
 
 inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& pos,
@@ -354,13 +382,21 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
         pos += static_cast<size_t>(count);
         return bin;
       }
-      // $Z/$N/$T/$F have no payload; each element's value is implicit.
-      if (t == 'Z' || t == 'N') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeNull()); }
+      // $Z/$T/$F have no payload; each element's value is implicit. $N is a
+      // no-op: per spec its array is count no-op values with an EMPTY body --
+      // a no-op produces no value, so the array is empty (deliberately unlike
+      // $Z#n, which is n nulls).
+      if (t == 'Z') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeNull()); }
       else if (t == 'T' || t == 'F') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeBool(t == 'T')); }
-        else {
+      else if (t == 'N') {
+        // Empty: the no-op array carries no values (spec: "equivalent to an
+        // array containing count N markers", and the body must be empty).
+      }
+      else {
         for (uint64_t i = 0; i < count; ) {
           if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed array");
-          if (data[pos] == 'N') { pos++; continue; }
+          // No no-op skip here: typed elements are bare payload bytes, so a
+          // 0x4E byte is data (int8 78), not a marker to consume.
           arr->arr->push_back(ubjParseTyped(data, pos, dataLen, depth + 1, t));
           i++;
         }
@@ -406,7 +442,8 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
         if (count > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("UBJSON: object too large");
         for (uint64_t i = 0; i < count; ) {
           if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed object");
-          if (data[pos] == 'N') { pos++; continue; }
+          // No no-op skip: the key-length byte is bare payload -- a 0x4E there
+          // is an invalid length marker, not a no-op to consume.
           std::string key = ubjReadRawString(data, pos, dataLen);
           std::unique_ptr<asvJSONValue> val;
           if (t == 'Z' || t == 'N') val = asvJSONValue::makeNull();
@@ -448,70 +485,9 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
     return obj;
   }
 
-  switch (m) {
-    // See ubjParseTyped: 'N' is a no-op, not a null value.
-    case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
-    case 'Z': return asvJSONValue::makeNull();
-    case 'T': return asvJSONValue::makeBool(true);
-    case 'F': return asvJSONValue::makeBool(false);
-    case 'i': {
-      if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (int8)");
-      return asvJSONValue::makeInt(static_cast<int8_t>(data[pos++]));
-    }
-    case 'U': {
-      if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (uint8)");
-      return asvJSONValue::makeInt(data[pos++]);
-    }
-    case 'I': {
-      if (pos + 2 > dataLen) throw asvJSONError("UBJSON: unexpected end (int16)");
-      int64_t v = static_cast<int16_t>(ubjReadBE(data, pos, 2));
-      pos += 2;
-      return asvJSONValue::makeInt(v);
-    }
-    case 'l': {
-      if (pos + 4 > dataLen) throw asvJSONError("UBJSON: unexpected end (int32)");
-      int64_t v = static_cast<int32_t>(ubjReadBE(data, pos, 4));
-      pos += 4;
-      return asvJSONValue::makeInt(v);
-    }
-    case 'L': {
-      if (pos + 8 > dataLen) throw asvJSONError("UBJSON: unexpected end (int64)");
-      int64_t v = static_cast<int64_t>(ubjReadBE(data, pos, 8));
-      pos += 8;
-      return asvJSONValue::makeInt(v);
-    }
-    case 'd': {
-      if (pos + 4 > dataLen) throw asvJSONError("UBJSON: unexpected end (float32)");
-      uint32_t bits = static_cast<uint32_t>(ubjReadBE(data, pos, 4));
-      pos += 4;
-      float f;
-      memcpy(&f, &bits, sizeof(f));
-      auto v = asvJSONValue::makeDouble(f);
-      if (v) v->is_float32 = true;
-      return v;
-    }
-    case 'D': {
-      if (pos + 8 > dataLen) throw asvJSONError("UBJSON: unexpected end (float64)");
-      uint64_t bits = ubjReadBE(data, pos, 8);
-      pos += 8;
-      double d;
-      memcpy(&d, &bits, sizeof(d));
-      return asvJSONValue::makeDouble(d);
-    }
-    case 'C': {
-      if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (char)");
-      char c = static_cast<char>(data[pos++]);
-      return asvJSONValue::makeString(&c, 1);
-    }
-    case 'S': case 'H': {
-      std::string s = ubjReadRawString(data, pos, dataLen);
-      auto v = asvJSONValue::makeString(s.data(), s.size());
-      if (!v) throw asvJSONError("UBJSON: string alloc failed");
-      return v;
-    }
-    default:
-      throw asvJSONError("UBJSON: unknown marker");
-  }
+  // All scalar types share one switch with the typed-container path; m was
+  // read from the stream here but is handled identically everywhere.
+  return ubjParseScalar(data, pos, dataLen, depth, m);
 }
 
 inline void asvJSONValue::toUBJSON(std::vector<uint8_t>& out) const {

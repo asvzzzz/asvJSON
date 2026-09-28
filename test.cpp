@@ -19749,15 +19749,54 @@ TEST(testUBJSONSpecialTypes) {
   }
 }
 
-TEST(testUBJSONNTypedContainer) {
-  // N noops are skipped inside typed containers without consuming count slots.
+TEST(testUBJSONNoopInTyped) {
+  // Typed containers do NOT skip 0x4E bytes: elements there are bare payload,
+  // so 0x4E is data (int8 78), not a no-op marker. N-skip only applies to
+  // untyped containers, where every element carries its own marker.
   {
     asvJSON j;
-    ASSERT(j.fromUBJSON(std::string("[$i#i\x03", 6) + std::string("\x01", 1) + "N" + std::string("\x02", 1) + std::string("\x03", 1)));
-    ASSERT_EQ(j.getRoot()->arr->size(), size_t(3));
-    ASSERT_EQ(j.getRoot()->arr->at(0)->getInt(), int64_t(1));
-    ASSERT_EQ(j.getRoot()->arr->at(1)->getInt(), int64_t(2));
-    ASSERT_EQ(j.getRoot()->arr->at(2)->getInt(), int64_t(3));
+    ASSERT(j.fromUBJSON(std::string("[$i#i\x03", 6) + std::string("\x01", 1) + std::string("\x4E", 1) + std::string("\x03", 1)));
+    ASSERT_EQ(j.serialize(), std::string("[1,78,3]"));
+  }
+  // Same contract in a typed object: an 0x4E on the key-length position is an
+  // invalid length marker, not a skip.
+  {
+    asvJSON k;
+    ASSERT(!k.fromUBJSON(std::string("{$i#i\x02", 6) + std::string("\x4E", 1) + "i" + std::string("\x01", 1) + "a" + std::string("\x07", 1)));
+    ASSERT(k.lastError.find("invalid length type marker") != std::string::npos);
+  }
+  // $N in the TYPE position of an array is count no-ops with an EMPTY body --
+  // an empty array, not n nulls (that is $Z).
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$N#i\x03", 6)));
+    ASSERT_EQ(j.serialize(), std::string("[]"));
+    asvJSON z;
+    ASSERT(z.fromUBJSON(std::string("[$Z#i\x02", 6)));
+    ASSERT_EQ(z.serialize(), std::string("[null,null]"));
+  }
+  // $N in an object type position still fixes every value to null.
+  {
+    asvJSON o;
+    ASSERT(o.fromUBJSON(std::string("{$N#i\x01", 6) + std::string("U\x01", 2) + "K"));
+    ASSERT_EQ(o.serialize(), std::string("{\"K\":null}"));
+  }
+  // [$U#0 (int8 and uint8 count) is a valid empty BINARY, not an empty array.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$U#i\x00", 6)));
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::BINARY);
+    ASSERT(j.getRoot()->bin_data.empty());
+    asvJSON k;
+    ASSERT(k.fromUBJSON(std::string("[$U#U\x00", 6)));
+    ASSERT_EQ(k.getRoot()->type, asvJSONValue::BINARY);
+    ASSERT(k.getRoot()->bin_data.empty());
+  }
+  // Untyped containers still skip N markers (regression guard).
+  {
+    asvJSON u;
+    ASSERT(u.fromUBJSON(std::string("[", 1) + "N" + std::string("i\x05", 2) + "N" + std::string("i\x07", 2) + "N]"));
+    ASSERT_EQ(u.serialize(), std::string("[5,7]"));
   }
 }
 
@@ -27840,7 +27879,7 @@ RUN(testPlistAuditRegressions);
 	RUN(testToUBJSON);
 	RUN(testUBJSONRoundTrip);
 	RUN(testUBJSONSpecialTypes);
-	RUN(testUBJSONNTypedContainer);
+	RUN(testUBJSONNoopInTyped);
 	RUN(testUBJSONRejectDollarBrackets);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
