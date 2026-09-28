@@ -229,17 +229,15 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
       bool needQuote = sv.empty();
       for (char c : sv) {
         // ';' is not special here (unlike INI) and earns no quotes. Control
-        // bytes below 0x20 force quoting because the escape table (dotenvEscape)
-        // only runs inside quotes; without this a NUL/bell/etc. would be written
-        // raw and truncate the value in an external reader. DEL (0x7F) is
-        // deliberately not in this set -- it is not a space or a boundary any
-        // reader splits on, so a bare DEL is safe -- but inside an already-quoted
-        // value it is still escaped (\x7F) by the short/hex table.
-        // '\n'/'\r'/'\t' are listed explicitly below and also caught by the
-        // range check.
-        if ((unsigned char)c < 0x20 || c == ' ' || c == '\t' || c == '#' ||
-            c == '=' || c == '"' || c == '\'' || c == '\\' || c == '\n' ||
-            c == '\r') {
+        // bytes -- everything below 0x20 plus DEL (0x7F) -- force quoting
+        // because the escape table (dotenvEscape) only runs inside quotes;
+        // without this a NUL/bell/DEL would be written raw and could be
+        // truncated or mangled by an external reader (DEL behaviour varies
+        // across tr/sed/editors). '\n'/'\r'/'\t' are listed explicitly below
+        // and also caught by the range check.
+        if ((unsigned char)c < 0x20 || c == 0x7f || c == ' ' || c == '\t' ||
+            c == '#' || c == '=' || c == '"' || c == '\'' || c == '\\' ||
+            c == '\n' || c == '\r') {
           needQuote = true;
           break;
         }

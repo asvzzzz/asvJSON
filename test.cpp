@@ -18397,8 +18397,8 @@ TEST(testDotenvAuditFixes) {
   }
   // 7. Every control byte without a short escape (0x01-0x06, 0x0E-0x1F) and
   // DEL (0x7F) is emitted as \xHH, so no raw control byte ever lands inside a
-  // quoted value; \xHH decodes back on parse. DEL is not in the quote set (it
-  // is safe bare) but inside an already-quoted value it is still \x7F.
+  // quoted value; \xHH decodes back on parse. DEL is in the quote set like any
+  // control byte, so a DEL-only STRING is quoted and escaped as \x7F.
   {
     asvJSON j;
     std::string v;
@@ -18426,6 +18426,22 @@ TEST(testDotenvAuditFixes) {
     asvJSON k;
     ASSERT(k.fromDotenv(std::string("K=\"x\\x4\"\n")));
     ASSERT_EQ(std::string(k.getString("K")), std::string("x\\x4"));
+    // A bare-looking STRING that contains DEL is quoted (DEL is in the quote
+    // set), so the raw byte never reaches the file; the same holds for a
+    // STRING that is exactly one DEL.
+    asvJSON b;
+    std::string embedded = std::string("abc") + (char)0x7F;
+    b.putString("B", embedded);
+    std::string benv = b.toDotenv();
+    ASSERT_EQ(benv, std::string("B=\"abc\\x7F\"\n"));
+    asvJSON d;
+    std::string delOnly(1, (char)0x7F);
+    d.putString("D", delOnly);
+    std::string denv = d.toDotenv();
+    ASSERT_EQ(denv, std::string("D=\"\\x7F\"\n"));
+    asvJSON b2;
+    ASSERT(b2.fromDotenv(denv));
+    ASSERT_EQ(std::string(b2.getString("D")), delOnly);
   }
 }
 
