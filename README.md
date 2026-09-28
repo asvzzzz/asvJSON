@@ -1048,7 +1048,7 @@ ip = 10.0.0.1
 retries = 3
 ```
 
-**Features:** sections `[name]` with dot-notation nesting (`[parent.child]`), `;`/`#` comments, quoted `"values"` with escape sequences (`\n`, `\t`, `\\`, `\;`, `\#`, `\=`), line continuation (`\` at end of line), global keys (before any section), `=`/`:`/space delimiters, duplicate key override, array of objects support.
+**Features:** sections `[name]` with dot-notation nesting (`[parent.child]`), `;`/`#` comments, quoted `"values"` with escape sequences (`\n`, `\t`, `\r`, `\0`, `\a`, `\b`, `\'`, `\\`, `\;`, `\#`, `\=`, `\:`), line continuation (`\` at end of line), global keys (before any section), `=`/`:`/space delimiters, duplicate key override, array of objects support. The escape table is the exact inverse of the decode table: every escape `toINI()` writes, `fromINI()` reads back, and `\xNN` is understood on decode (as it already was in section paths), so a literal `\x41` must be written `\\x41`. A value holding a space, a quote, a delimiter, a comment introducer, a backslash or a control byte that has an escape (`\0`, `\a`, `\b`) is always emitted quoted, so the escapes are always reachable; a key starting with `[` has no INI spelling and makes the encoder throw.
 
 On decoding, all values are stored as strings. On encoding, types are formatted appropriately (numbers bare, booleans `true`/`false`, objects as nested sections, arrays of objects as duplicate sections).
 

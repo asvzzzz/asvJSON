@@ -30,6 +30,16 @@
 //     {k:1, k:2} and reading it back yields {k:[1,2]}. Comments collected for
 //     both occurrences then attach to that array node and are emitted above
 //     its first element.
+//   - An object holding only sub-objects emits no [prefix] header of its own,
+//     so its leading comments are written above the first section this level
+//     produces (the text is never dropped). On re-parse they bind to that
+//     section, not to the object they came from: INI cannot express a comment
+//     on a node that has no line of its own.
+//   - \xNN is understood on decode, so a value whose TEXT starts with "\x" +
+//     two hex digits is rewritten as "\\xNN" to survive a round trip. Escapes
+//     and unescapes are otherwise exact inverses (\n \t \r \0 \a \b \' \\ \; \#
+//     \= \:), and a value is quoted whenever it holds a character with an
+//     escape, so every escape the encoder writes is reachable.
 
 #include "../core.hpp"
 
@@ -58,11 +68,27 @@ inline size_t iniFindComment(std::string_view s) {
   return std::string_view::npos;
 }
 
+inline int iniHexVal(char c) noexcept {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
 // Unescape INI value
 inline std::string iniUnescape(std::string_view s) {
   std::string out;
   for (size_t i = 0; i < s.size(); i++) {
     if (s[i] == '\\' && i + 1 < s.size()) {
+      // \xNN first, like iniUnescapeSectionKey: the generic rule below would
+      // otherwise decode "\x41" to 'x' and leave "41" behind. This is the
+      // inverse of the hex escape emitted for keys and of a hand-written value.
+      if (s[i + 1] == 'x' && i + 3 < s.size() &&
+          iniHexVal(s[i + 2]) >= 0 && iniHexVal(s[i + 3]) >= 0) {
+        out += (char)((iniHexVal(s[i + 2]) << 4) | iniHexVal(s[i + 3]));
+        i += 3;
+        continue;
+      }
       switch (s[i + 1]) {
         case 'n': out += '\n'; i++; break;
         case 't': out += '\t'; i++; break;
@@ -86,7 +112,15 @@ inline std::string iniUnescape(std::string_view s) {
   return out;
 }
 
-// Escape an INI value for output
+// Escape an INI value for output. The table is the exact inverse of
+// iniUnescape: NUL, \a and \b are escaped too (they already have escapes on the
+// decode side), so no control byte is ever written raw. A literal NUL in an INI
+// file survives string_view-based parsing here but truncates the line in any
+// external INI reader or editor, so escaping it is what makes the output
+// portable. The quote forms matter for symmetry with needsQuotes(): a value
+// holding a lone apostrophe is wrapped in double quotes, and a value holding a
+// double quote is wrapped or escaped accordingly, so an unescaped \' / \" in the
+// output would be a hole in the table.
 inline std::string iniEscape(std::string_view s) {
   std::string out;
   for (auto c : s) {
@@ -94,8 +128,12 @@ inline std::string iniEscape(std::string_view s) {
       case '\n': out += "\\n"; break;
       case '\t': out += "\\t"; break;
       case '\r': out += "\\r"; break;
+      case '\0': out += "\\0"; break;
+      case '\a': out += "\\a"; break;
+      case '\b': out += "\\b"; break;
       case '\\': out += "\\\\"; break;
       case '"': out += "\\\""; break;
+      case '\'': out += "\\'"; break;
       case ';': out += "\\;"; break;
       case '#': out += "\\#"; break;
       case '=': out += "\\="; break;
@@ -154,13 +192,6 @@ inline std::string iniEscapeSectionKey(std::string_view s) {
   return iniEscapeKey(s);
 }
 
-inline int iniHexVal(char c) noexcept {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
 // Unescape a key path segment read from a header or a dotted key. Handles the
 // \xNN form emitted by iniEscapeKey plus the historical "a backslash escapes
 // the next character" rule for '.', '\', '[', ']' and anything else.
@@ -186,12 +217,18 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
   return out;
 }
 
-// Escape a flat (key = value side) key. An empty key has no INI spelling at
-// all: " = v" is skipped by the decoder and "[...]" would need a nameless
-// section, so reject it rather than silently dropping the whole branch.
+// Escape a flat (key = value side) key. Two keys have no INI spelling as a flat
+// key, both rejected here rather than at each of the four call sites: an empty
+// key (" = v" is skipped by the decoder and "[...]" would need a nameless
+// section) and a key starting with '[' (the decoder would read it as the start
+// of a section header). Section-header keys have no such restriction -- there
+// '[' is hex-escaped by iniEscapeKey -- so this restriction is deliberately
+// not applied to iniEscapeSectionKey.
 inline std::string iniEscapeFlatKey(std::string_view s) {
   if (s.empty())
     throw asvJSONError("cannot represent empty key in INI"); // {"": ...} has no INI spelling
+  if (s[0] == '[')
+    throw asvJSONError("cannot represent key starting with '[' in INI");
   return iniEscapeKey(s);
 }
 
@@ -253,9 +290,16 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
     case T::STRING:
       {
         std::string_view sv(v->str_data);
+        // \0, \a and \b are in this set because iniEscape only runs on a QUOTED
+        // value: a bare value is copied verbatim, so a value holding them
+        // escaped nowhere and the raw NUL landed in the file (which truncates
+        // the line in any external INI reader). Forcing quotes puts it through
+        // iniEscape, where \0 / \a / \b now have escapes.
         bool needsQuotes = false;
         for (auto c : sv) {
-          if (c == ' ' || c == '\t' || c == ';' || c == '#' || c == '=' || c == ':' || c == '"' || c == '\'' || c == '\\' || c == '\n' || c == '\r') {
+          if (c == ' ' || c == '\t' || c == ';' || c == '#' || c == '=' || c == ':' ||
+              c == '"' || c == '\'' || c == '\\' || c == '\n' || c == '\r' ||
+              c == '\0' || c == '\a' || c == '\b') {
             needsQuotes = true;
             break;
           }
@@ -497,17 +541,39 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
       continue;
     }
     if (line.empty()) continue;
-    // Continuation: a line ending with '\' joins the next; skip its comment
-    // classification (rare edge case -- same as fromINI).
+    // Continuation: a line ending with '\' joins the next. Mirror fromINI and
+    // classify the JOINED text as one logical line, exactly like the decoder
+    // does. Skipping the classification of the first line only (the previous
+    // behavior) left the continuation lines to be classified on their own, so a
+    // ';' or '#' line inside a continuation became a pending comment and was
+    // then attached as a leading comment to whatever key came next:
+    //
+    //   a = 1 \
+    //   ; part of the value, not a comment
+    //   b = 2
+    //
+    // fromINI keeps "; part of the value..." in a's value, while the collector
+    // handed it to b. Joining also lets a comment above the run bind to the key
+    // the run defines, and keeps the inline-comment scan on the whole value.
+    std::string joined;
     if (line.back() == '\\') {
-      size_t j = li + 1;
+      joined.assign(line.substr(0, line.size() - 1));      size_t j = li + 1;
       while (j < lineCount) {
         std::string_view nx = iniTrim(lines[j]);
         if (nx.empty()) { j++; continue; }
-        if (nx.back() == '\\') j++;
-        else break;
+        if (nx.back() == '\\') {
+          joined.append(nx.data(), nx.size() - 1);
+          j++;
+        } else {
+          joined.append(nx.data(), nx.size());
+          j++;
+          break;
+        }
       }
-      continue;
+      // Every line up to and including j-1 is part of the logical line, so the
+      // loop's own ++ must resume at j.
+      li = j - 1;
+      line = joined;
     }
     // Comment-only line.
     if (line[0] == ';' || line[0] == '#') {
@@ -788,9 +854,29 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   // required dotted `a.b.c = 42` (the "compact dotted 2+" audit case).
   bool headerEmitted = pretty && emitHeader && hasDirectKeys && !prefix.empty();
 
+  // Leading comments must not depend on a section header being written for THIS
+  // level. An intermediate object -- one holding only sub-objects -- has no
+  // direct keys, so headerEmitted is false and the comments were dropped
+  // entirely: {"a": {comment "note-a", {"b": {"c": 1}}}} encoded as
+  //
+  //   [a.b]
+  //   c = 1
+  //
+  // with "note-a" gone, and on re-parse there is nowhere left to recover it from
+  // (a comment above [a.b] binds to the path a.b, not to a). Write the level's
+  // comments once, immediately before whatever this level emits first: the
+  // header, the first bare key line, or the first nested section/table.
+  bool wroteLeading = false;
+  auto writeLeading = [&]() {
+    if (wroteLeading) return;
+    wroteLeading = true;
+    if (obj->comments && !obj->comments->leading.empty())
+      iniWriteCommentLines(out, obj->comments->leading);
+  };
+
   if (headerEmitted) {
     if (!out.empty() && out.back() != '\n') out += '\n';
-    if (obj->comments) iniWriteCommentLines(out, obj->comments->leading);
+    writeLeading();
     out += '[' + prefix + "]\n";
   }
 
@@ -800,16 +886,17 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   for (const auto& [key, val] : *obj->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
     std::string dottedKey = prefix.empty() ? flatKey : prefix + "." + flatKey;
-    if (!key.empty() && key[0] == '[')
-      throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
+        writeLeading();
         iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
       }
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       if (val->arr->empty()) {
+        writeLeading();
         iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
       } else if (iniIsBareChild(val.get())) {
+        writeLeading();
         if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& elem : *val->arr) {
           out += (headerEmitted ? flatKey : dottedKey) + " = ";
@@ -818,6 +905,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         }
       }
     } else {
+      writeLeading();
       iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
     }
   }
@@ -833,6 +921,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           if (iniIsBareChild(sv.get())) { subHasDirect = true; break; }
         }
       }
+      writeLeading();
       iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool isObj = true;
@@ -844,6 +933,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         for (const auto& elem : *val->arr) {
           std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
+          writeLeading();
           if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
           out += "[[" + newPrefix + "]]\n";
           if (elem->type == asvJSONValue::OBJECT) iniEmitElement(elem.get(), out, newPrefix);
@@ -869,8 +959,6 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
   for (const auto& [key, val] : *obj->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
     std::string full = dk.empty() ? flatKey : dk + "." + flatKey;
-    if (!key.empty() && key[0] == '[')
-      throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
         iniWriteKeyValue(out, full, val.get());
@@ -917,8 +1005,6 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *elem->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
-    if (!key.empty() && key[0] == '[')
-      throw asvJSONError("cannot represent key starting with '[' in INI");
     if (val->type == asvJSONValue::OBJECT) {
       if (val->obj && val->obj->empty()) {
         iniWriteKeyValue(out, flatKey, val.get());
@@ -971,8 +1057,6 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         // arrays-of-objects.  Bare lines must precede tables.
         for (const auto& [key, val] : *obj) {
           std::string flatKey = iniEscapeFlatKey(key);
-          if (!key.empty() && key[0] == '[')
-            throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
               iniWriteKeyValue(out, flatKey, val.get());
@@ -1016,8 +1100,6 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         // Pretty: first pass -- bare-line producers
         for (const auto& [key, val] : *obj) {
           std::string flatKey = iniEscapeFlatKey(key);
-          if (!key.empty() && key[0] == '[')
-            throw asvJSONError("cannot represent key starting with '[' in INI");
           if (val->type == T::OBJECT) {
             if (val->obj && val->obj->empty()) {
               iniWriteKeyValue(out, flatKey, val.get());

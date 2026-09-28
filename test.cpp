@@ -17540,6 +17540,172 @@ TEST(testINIDottedKeyRoundTrip) {
   }
 }
 
+TEST(testINIReviewFixes) {
+  // 1. A ';'/'#' line inside a CONTINUATION run must not be collected as a
+  //    comment. fromINI joins the whole run first, so the text after ';' becomes
+  //    a's inline comment; the collector skipped only the first line's
+  //    classification, so the continuation line was classified on its own,
+  //    queued as a comment-only line and handed to the NEXT key as a leading
+  //    comment -- the comment text migrated to an unrelated node.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("; lead-a\na = 1 \\\n; part of the value\nb = 2\n")));
+    auto* a = j.getRoot()->get("a");
+    auto* b = j.getRoot()->get("b");
+    ASSERT(a != nullptr && a->type == asvJSONValue::INT);
+    ASSERT_EQ(a->getInt(), int64_t(1));
+    // The continuation text is a's inline comment, exactly as fromINI parsed it.
+    ASSERT(a->comments && !a->comments->trailing.empty());
+    ASSERT(a->comments->trailing[0].text.find("part of the value") != std::string::npos);
+    // ... and it must NOT have been re-emitted as a comment above b.
+    ASSERT(b != nullptr && b->type == asvJSONValue::INT);
+    ASSERT(!(b->comments && !b->comments->leading.empty()));
+    // A comment above the run binds to the key the run defines.
+    ASSERT(a->comments && !a->comments->leading.empty());
+    ASSERT(a->comments->leading[0].text.find("lead-a") != std::string::npos);
+    std::string ini = j.toINI();
+    ASSERT(ini.find("; part of the value") == std::string::npos);
+    ASSERT(ini.find("; lead-a\n") != std::string::npos);
+  }
+  // A multi-line continuation run keeps its value across the join.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = one \\\ntwo \\\nthree\n")));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("one two three"));
+  }
+  // 2. An object holding only sub-objects gets no [prefix] header, so writing
+  //    its leading comments with the header dropped them entirely. The text
+  //    must now be emitted (above the first section this level produces).
+  {
+    auto leaf = asvJSONValue::makeObject();
+    leaf->obj->emplace("c", asvJSONValue::makeInt(1));
+    auto inner = asvJSONValue::makeObject();
+    inner->obj->emplace("b", std::move(leaf));
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("a", std::move(inner));
+    doc->obj->begin()->second->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment lead;
+    lead.text = "note-a";
+    doc->obj->begin()->second->comments->leading.push_back(lead);
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("; note-a") != std::string::npos);
+    ASSERT(ini.find("[a.b]") != std::string::npos);
+    // The value survives, and the comment text is not lost on re-parse: INI has
+    // no spelling for a comment on an object that emits no header, so it binds
+    // to the section that was written in its place.
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* a = back.getRoot()->get("a");
+    ASSERT(a != nullptr);
+    auto* bnode = a->get("b");
+    ASSERT(bnode != nullptr);
+    ASSERT_EQ(bnode->get("c")->getInt(), int64_t(1));
+    ASSERT(bnode->comments && !bnode->comments->leading.empty());
+    ASSERT(bnode->comments->leading[0].text.find("note-a") != std::string::npos);
+  }
+  // A level that DOES emit a header still writes its comments above it, once.
+  {
+    auto child = asvJSONValue::makeObject();
+    child->obj->emplace("c", asvJSONValue::makeInt(1));
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("a", std::move(child));
+    doc->obj->begin()->second->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment lead;
+    lead.text = "note-a";
+    doc->obj->begin()->second->comments->leading.push_back(lead);
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("; note-a\n[a]\n") != std::string::npos);
+    ASSERT(ini.find("note-a") == ini.rfind("note-a"));
+  }
+  // 3./4. The escape table is the exact inverse of the unescape table: \0, \a,
+  //      \b and \' now have escapes, and a value holding them is quoted so it
+  //      reaches iniEscape at all (a bare value is copied verbatim).
+  {
+    std::string raw("a\0b\ac\bd", 7);
+    asvJSON j;
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("k", asvJSONValue::makeString(raw.data(), raw.size()));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("\\0") != std::string::npos);
+    ASSERT(ini.find("\\a") != std::string::npos);
+    ASSERT(ini.find("\\b") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* k = back.getRoot()->get("k");
+    ASSERT(k != nullptr && k->str_data == raw);
+  }
+  {
+    asvJSON j;
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("k", asvJSONValue::makeString("it's"));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("\\'") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    ASSERT_EQ(std::string(back.getString("k")), std::string("it's"));
+  }
+  // 5. The '['-prefixed key rejection lives in iniEscapeFlatKey, so it fires
+  //    from every encoder path (root, nested section, compact mode).
+  {
+    auto leaf = asvJSONValue::makeObject();
+    leaf->obj->emplace("[x", asvJSONValue::makeInt(1));
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("r", std::move(leaf));
+    std::string ini;
+    bool threw = false;
+    try { doc->toINI(ini); } catch (const asvJSONError& e) {
+      threw = true;
+      ASSERT(std::string(e.what()).find("starting with '['") != std::string::npos);
+    }
+    ASSERT(threw);
+    std::string compact;
+    threw = false;
+    try { doc->toINI(compact, false); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  // A section-header key may still contain '[' (hex-escaped), so the rejection
+  // must not leak into iniEscapeSectionKey.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("[[a\\x5Bx]]\ny = 1\n")));
+    ASSERT(j.getRoot()->get("a[x") != nullptr);
+  }
+  // 6. \xNN is understood in values, matching iniUnescapeSectionKey. It is
+  //     tested before the generic rule, so a literal "\x41" (written with a
+  //     doubled backslash) still decodes to itself, and an incomplete or
+  //     non-hex form falls back to the generic backslash rule.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = \\x41\\x42\n")));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("AB"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = \"\\x41\"\n")));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("A"));
+  }
+  {
+    asvJSON j, back;
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("k", asvJSONValue::makeString("lit\\x41"));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(back.fromINI(ini));
+    ASSERT_EQ(std::string(back.getString("k")), std::string("lit\\x41"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = \"\\xZZ\"\n")));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("\\xZZ"));
+    ASSERT(j.fromINI(std::string("k = \"\\x\"\n")));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("\\x"));
+  }
+}
+
 TEST(testFromDotenv) {
   {
     asvJSON j;
@@ -27061,6 +27227,7 @@ RUN(testFromCppArraySizeGuard);
 	RUN(testINIKeyLeadingBracket);
 	RUN(testINIReviewFidelity);
 	RUN(testINIDottedKeyRoundTrip);
+RUN(testINIReviewFixes);
 
 	std::cout << "\n--- Dotenv Serialization Tests ---\n";
 	RUN(testFromDotenv);
