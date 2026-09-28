@@ -12,7 +12,8 @@
 //     block scalars (| and > with indent + chomp indicators)
 //   - Strings: double-quoted with JSON escapes + \xHH/\uXXXX/\UXXXXXXXX/\u{...}
 //     and line continuation; single-quoted (literal, '' escape); multiline
-//   - Anchors (&name) and aliases (*name) with cycle detection
+//   - Anchors (&name) and aliases (*name); aliases deep-copy the anchored
+//     value and forward/self references are rejected (undefined alias)
 //   - Tags: !base64, !bin, !datetime, !ext, !regex, !objectid, !timestamp;
 //     unknown tags preserve value
 //   - Strict mode rejects duplicate keys, unquoted keys, and special
