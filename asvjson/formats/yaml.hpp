@@ -56,14 +56,14 @@ inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 	return yamlQuote(s);
 }
 
-// Trailing comment suffix for a value line ("" when the node carries none).
-inline std::string yamlTrail(const asvJSONValue* v) {
-	if (v->comments && !v->comments->trailing.empty()) {
-		const auto& t = v->comments->trailing.back();
-		if (t.block) return std::string(); // multi-line block cannot go inline
-		return " #" + t.text;
-	}
-	return std::string();
+// Trailing comment suffix for a value line ("" when the node carries none or
+// comments are not being emitted, i.e. Auto/Flow output must stay comment-free
+// -- leading comments are gated by wc but the trailing suffix was leaking).
+inline std::string yamlTrail(const asvJSONValue* v, bool wc) {
+	if (!wc || !v->comments || v->comments->trailing.empty()) return std::string();
+	const auto& t = v->comments->trailing.back();
+	if (t.block) return std::string(); // multi-line block cannot go inline
+	return " #" + t.text;
 }
 
 inline bool yamlNeedQuoteOpt(std::string_view s, const YamlWriteOptions& o) {
@@ -272,20 +272,20 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 
 	switch (v->type) {
 		case T::NULL_VAL:
-			out += prefix() + "~" + yamlTrail(v) + "\n"; break;
+			out += prefix() + "~" + yamlTrail(v, wc) + "\n"; break;
 		case T::BOOL_VAL:
-			out += prefix() + (v->flag ? "true" : "false") + yamlTrail(v) + "\n"; break;
+			out += prefix() + (v->flag ? "true" : "false") + yamlTrail(v, wc) + "\n"; break;
 		case T::INT: {
 			char buf[32];
 			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v) + "\n";
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v, wc) + "\n";
 			break;
 		}
 		case T::DOUBLE: {
-			if (std::isnan(v->dbl)) { out += prefix() + ".nan" + yamlTrail(v) + "\n"; break; }
-			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf" : "-.inf") + yamlTrail(v) + "\n"; break; }
+			if (std::isnan(v->dbl)) { out += prefix() + ".nan" + yamlTrail(v, wc) + "\n"; break; }
+			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf" : "-.inf") + yamlTrail(v, wc) + "\n"; break; }
 			std::string val; fmtDoubleVal(v->dbl, val);
-			out += prefix() + val + yamlTrail(v) + "\n"; break;
+			out += prefix() + val + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::STRING: {
 			if (v->str_data.find('\n') != std::string_view::npos && !v->str_data.empty() && v->str_data[0] != '\n') {
@@ -320,8 +320,8 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					if (nb < 1 || nb > 9) needQuote = true; // no single-digit explicit indent
 					else ind = ind.substr(0, 1) + char('0' + nb) + ind.substr(1);
 				}
-				if (needQuote) { out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v) + "\n"; break; }
-				out += prefix() + ind + yamlTrail(v) + "\n";
+				if (needQuote) { out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v, wc) + "\n"; break; }
+				out += prefix() + ind + yamlTrail(v, wc) + "\n";
 				for (size_t i = 0; i < v->str_data.size(); ) {
 					size_t eol = v->str_data.find('\n', i);
 					if (eol == std::string_view::npos) eol = v->str_data.size();
@@ -329,36 +329,36 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					i = eol + 1;
 				}
 			} else if (v->str_data.find('\n') != std::string_view::npos) {
-				out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v) + "\n";
+				out += prefix() + yamlDQuote(v->str_data) + yamlTrail(v, wc) + "\n";
 			} else if (yamlNeedQuoteOpt(v->str_data, o)) {
-				out += prefix() + yamlQuoteStr(v->str_data, o) + yamlTrail(v) + "\n";
+				out += prefix() + yamlQuoteStr(v->str_data, o) + yamlTrail(v, wc) + "\n";
 			} else {
-				out += prefix() + v->str_data + yamlTrail(v) + "\n";
+				out += prefix() + v->str_data + yamlTrail(v, wc) + "\n";
 			}
 			break;
 		}
 		case T::DATETIME: {
 			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
-			out += prefix() + dt + yamlTrail(v) + "\n"; break;
+			out += prefix() + dt + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::BINARY:
-			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + yamlTrail(v) + "\n"; break;
+			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + yamlTrail(v, wc) + "\n"; break;
 		case T::OBJECTID: {
 			std::string hex; fmtObjectIdHexVal(v->str_data, hex);
-			out += prefix() + "!objectid " + hex + yamlTrail(v) + "\n"; break;
+			out += prefix() + "!objectid " + hex + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::REGEX: {
 			std::string r; fmtRegexVal(v->str_data, r);
-			out += prefix() + "!regex " + r + yamlTrail(v) + "\n"; break;
+			out += prefix() + "!regex " + r + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::TIMESTAMP: {
 			char buf[32];
 			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v->num);
-			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v) + "\n";
+			if (ec == std::errc()) out += prefix() + std::string(buf, ptr) + yamlTrail(v, wc) + "\n";
 			break;
 		}
 		case T::EXTENSION:
-			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + yamlTrail(v) + "\n";
+			out += prefix() + "!ext " + std::to_string(v->ext_type) + " " + yamlQuote(encodeBase64(v->bin_data.data(), v->bin_data.size())) + yamlTrail(v, wc) + "\n";
 			break;
 		case T::CUSTOM_TAG: {
 			// "key: !name <value>"; the value stays inline (force-flow) so the
@@ -367,11 +367,11 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + " " + childOut + yamlTrail(v) + "\n";
+				out += prefix() + "!" + nm + " " + childOut + yamlTrail(v, wc) + "\n";
 			} else {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + yamlTrail(v) + "\n";
+				out += prefix() + "!" + nm + yamlTrail(v, wc) + "\n";
 			}
 			break;
 		}
@@ -380,33 +380,33 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 				// Block form of a YAML !!set:
 				//   root / keyed:  key: !!set      seq item:  - !!set
 				//                  - a                        - a
-				if (!v->obj || v->obj->empty()) { out += prefix() + "!!set {}" + yamlTrail(v) + "\n"; break; }
+				if (!v->obj || v->obj->empty()) { out += prefix() + "!!set {}" + yamlTrail(v, wc) + "\n"; break; }
 				if (key.empty() && !isArrayItem) {
 					out += "!!set\n";
 					for (const auto& [k, val] : *v->obj) out += std::string(indent * iw, ' ') + "- " + yamlQuoteKey(k) + "\n";
 				} else {
-					out += prefix() + "!!set" + yamlTrail(v) + "\n";
+					out += prefix() + "!!set" + yamlTrail(v, wc) + "\n";
 					for (const auto& [k, val] : *v->obj) out += std::string((indent + 1) * iw, ' ') + "- " + yamlQuoteKey(k) + "\n";
 				}
 				break;
 			}
-			if (!v->obj || v->obj->empty()) { out += prefix() + "{}" + yamlTrail(v) + "\n"; break; }
+			if (!v->obj || v->obj->empty()) { out += prefix() + "{}" + yamlTrail(v, wc) + "\n"; break; }
 			if (key.empty() && !isArrayItem) {
 				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc);
 			} else {
-				out += prefix() + yamlTrail(v) + "\n";
+				out += prefix() + yamlTrail(v, wc) + "\n";
 				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o, wc);
 			}
 			break;
 		}
 		case T::ARRAY: {
-			if (!v->arr || v->arr->empty()) { out += prefix() + "[]" + yamlTrail(v) + "\n"; break; }
+			if (!v->arr || v->arr->empty()) { out += prefix() + "[]" + yamlTrail(v, wc) + "\n"; break; }
 			if (!isArrayItem && key.empty()) {
 				out += "---\n";
 				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o, wc);
 				break;
 			}
-			out += prefix() + yamlTrail(v) + "\n";
+			out += prefix() + yamlTrail(v, wc) + "\n";
 			// A nested sequence used as a sequence item must indent its own
 			// items one level deeper than its dash, otherwise the block parser
 			// cannot tell parent items from child items ("m: [[1],[2]]").
@@ -415,7 +415,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 			break;
 		}
 		default:
-			out += prefix() + "~" + yamlTrail(v) + "\n"; break;
+			out += prefix() + "~" + yamlTrail(v, wc) + "\n"; break;
 	}
 }
 
@@ -430,17 +430,32 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 		return "";
 	};
 
+	// flowMaxLen is a LINE budget, so the key/indent/dash prefix counts too --
+	// measuring the value alone let "a_very_long_key_name: {x: 1, y: 2}" stay
+	// flow even when the rendered line was far past the limit.
+	auto fitsLine = [&](const std::string& pre, const std::string& inner) {
+		if (forceFlow) return true;
+		return pre.size() + inner.size() <= static_cast<size_t>(o.flowMaxLen);
+	};
+
 	if (v->type == T::OBJECT && v->yaml_set) {
 		std::string inner;
 		yamlTryFlowVal(v, inner, o, true);
+		std::string trial = prefix();
+		if (!fitsLine(trial, inner)) {
+			// Too long for one line: emit the set in block form instead of
+			// silently ignoring the length budget.
+			yamlBlockVal(v, out, indent, key, isArrayItem, o, true);
+			return;
+		}
 		if (key.empty() && !isArrayItem) out += inner + "\n";
-		else out += prefix() + inner + "\n";
+		else out += trial + inner + "\n";
 		return;
 	}
 	if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner, o, forceFlow)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow) && fitsLine(trial, inner)) {
 			if (key.empty() && !isArrayItem) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {
@@ -454,7 +469,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner, o, forceFlow)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow) && fitsLine(trial, inner)) {
 			if (key.empty() && !isArrayItem) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {
@@ -566,6 +581,7 @@ inline std::string_view yamlStripComment(std::string_view s) {
 }
 
 // Convert YAML scalar to JSON (auto-detect type)
+inline std::string yamlQuoteJsonScalar(std::string_view s);
 inline std::string yamlScalarToJson(std::string_view s) {
 	auto fmtDbl = [](double d) {
 		std::string n;
@@ -580,6 +596,19 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		return "true";
 	if (s == "false" || s == "FALSE" || s == "False" || s == "no" || s == "NO" || s == "No" || s == "off" || s == "OFF" || s == "Off")
 		return "false";
+	// Non-finite floats: the YAML 1.1 spellings, with either sign. Checked
+	// BEFORE the leading-'+' handling below because std::from_chars follows
+	// strtod's grammar minus the sign -- it happily parses "Infinity" and
+	// "NaN" -- so "+Infinity" used to become a bare "inf" token in the
+	// intermediate JSON and failed there with a misleading "Unexpected: i".
+	{
+		std::string_view tok = s;
+		bool neg = false;
+		if (!tok.empty() && (tok[0] == '+' || tok[0] == '-')) { neg = (tok[0] == '-'); tok.remove_prefix(1); }
+		if (tok == "NaN" || tok == ".NaN" || tok == ".nan" || tok == ".NAN") return "NaN";
+		if (tok == "Infinity" || tok == ".Inf" || tok == ".inf" || tok == ".INF")
+			return neg ? "-Infinity" : "Infinity";
+	}
 	// JSON accepts '-' but not '+' as a number sign. Strip the plus, validate
 	// the remainder with the C++ number grammar, and re-emit a normalised
 	// unsigned token (std::from_chars float formats reject a leading '+').
@@ -592,6 +621,9 @@ inline std::string yamlScalarToJson(std::string_view s) {
 			long long iv = 0;
 			auto [ip, ie] = std::from_chars(rest.data(), rest.data() + rest.size(), iv);
 			if (ie == std::errc() && ip == rest.data() + rest.size()) return std::to_string(iv);
+			// A spelling like "+Inf" is not YAML's, so it stays a string: the
+			// "inf" token is not representable in the intermediate JSON.
+			if (!std::isfinite(dv)) return yamlQuoteJsonScalar(s);
 			return fmtDbl(dv);
 		}
 	#else
@@ -600,13 +632,17 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		long long iv = std::strtoll(tmp.c_str(), &end, 10);
 		if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
 		double dv = std::strtod(tmp.c_str(), &end);
-		if (end == tmp.c_str() + tmp.size()) return fmtDbl(dv);
-		return tmp;
+		if (end == tmp.c_str() + tmp.size()) {
+			if (!std::isfinite(dv)) return yamlQuoteJsonScalar(s);
+			return fmtDbl(dv);
+		}
+		return yamlQuoteJsonScalar(tmp);
 	#endif
 	}
-	if (s == "NaN" || s == ".NaN" || s == ".nan" || s == ".NAN") return "NaN";
-	if (s == "Infinity" || s == ".Inf" || s == ".inf" || s == ".INF") return "Infinity";
-	if (s == "-Infinity" || s == "-.Inf" || s == "-.inf" || s == "-.INF") return "-Infinity";
+	// Non-finite floats: the YAML 1.1 spellings, with either sign. A sign is
+	// accepted here because a signed number is already a number in this
+	// implementation (see the leading-'+' handling below), so rejecting
+	// "+.inf" while accepting "-.inf" was just an oversight.
 	// Validate that the string is a valid number (not a YAML plain scalar that looks like a number)
 	{
 		bool validNumber = false;
@@ -634,39 +670,43 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				if (de2 == std::errc() && dp2 == rest.data() + rest.size()) {
 					return fmtDbl(dv);
 				}
-				return std::string(rest);
+				// Not a number after all: it is a plain scalar, so it must be
+				// QUOTED. Returning the raw token would splice unquoted text
+				// into the intermediate JSON and fail there with a misleading
+				// parser error ("Unexpected: i" for "k: +Infinity").
+				return yamlQuoteJsonScalar(rest);
 			}
 			// JSON rejects leading-zero integers ("007", "01e2") even though
 			// the YAML 1.2 spec allows them as plain scalars. Re-emit a
 			// normalized JSON-compatible number instead of a raw token.
 	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
-			size_t sign = 0;
-			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
-			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
-			    s[sign + 1] >= '0' && s[sign + 1] <= '9') {
-				long long iv = 0;
-				auto [ip, ie] = std::from_chars(s.data(), s.data() + s.size(), iv);
-				if (ie == std::errc() && ip == s.data() + s.size()) return std::to_string(iv);
-				double dv = 0.0;
-				auto [dp2, de2] = std::from_chars(s.data(), s.data() + s.size(), dv);
-				if (de2 == std::errc() && dp2 == s.data() + s.size()) {
-					return fmtDbl(dv);
-				}
+		size_t sign = 0;
+		if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
+		if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
+		    s[sign + 1] >= '0' && s[sign + 1] <= '9') {
+			long long iv = 0;
+			auto [ip, ie] = std::from_chars(s.data(), s.data() + s.size(), iv);
+			if (ie == std::errc() && ip == s.data() + s.size()) return std::to_string(iv);
+			double dv = 0.0;
+			auto [dp2, de2] = std::from_chars(s.data(), s.data() + s.size(), dv);
+			if (de2 == std::errc() && dp2 == s.data() + s.size()) {
+				return fmtDbl(dv);
 			}
+		}
 	#else
-			if (!s.empty() && s[0] == '+') {
-				std::string tmp(s.substr(1));
-				char* end = nullptr;
-				long long iv = std::strtoll(tmp.c_str(), &end, 10);
-				if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
-				double dv = std::strtod(tmp.c_str(), &end);
-				if (end == tmp.c_str() + tmp.size()) {
-					std::string norm;
-					fmtDoubleVal(dv, norm);
-					return norm;
-				}
-				return tmp;
+		if (!s.empty() && s[0] == '+') {
+			std::string tmp(s.substr(1));
+			char* end = nullptr;
+			long long iv = std::strtoll(tmp.c_str(), &end, 10);
+			if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
+			double dv = std::strtod(tmp.c_str(), &end);
+			if (end == tmp.c_str() + tmp.size()) {
+				std::string norm;
+				fmtDoubleVal(dv, norm);
+				return norm;
 			}
+			return yamlQuoteJsonScalar(tmp);
+		}
 			size_t sign = 0;
 			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
 			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
@@ -683,6 +723,18 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				}
 			}
 	#endif
+			// A token the C++ number grammar accepts but YAML has no spelling for
+			// ("inf", "nan", "INF" without a dot, "1e999" overflowing to inf)
+			// must stay a quoted string -- the raw token is not valid JSON.
+			{
+				double probe = 0.0;
+				const char* cstr = nullptr;
+				std::string tmp(s);
+				cstr = tmp.c_str();
+				char* end = nullptr;
+				probe = std::strtod(cstr, &end);
+				if (end == cstr + tmp.size() && !std::isfinite(probe)) return yamlQuoteJsonScalar(s);
+			}
 			return std::string(s);
 		}
 	}
@@ -1242,8 +1294,12 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		}
 		return std::string(val);
 	}
-	// !!omap -- ensure array of single-key objects; for flow [{a:1},{b:2}] already correct
-	// !!pairs -- ensure array of pairs; for flow [[a,1],[b,2]] already correct
+	// !!omap / !!pairs -- an ordered sequence of single-key mappings. The flow
+	// forms ([{a:1},{b:2}] and [[a,1],[b,2]]) are already the right shape and
+	// parse through the flow parser. A BLOCK form ("!!omap\n- a: 1") is handled
+	// by yamlTaggedBlockValue; reaching here with a non-flow, non-empty value
+	// means the tag annotated something that is not a sequence, which used to
+	// be reported as a silent empty array.
 	if (tag == "!!omap" || tag == "!!pairs") {
 		if (val.empty()) return "[]";
 		if (val[0] == '[' || val[0] == '{') {
@@ -1251,7 +1307,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			size_t fp = 0;
 			return yamlParseFlowValue(tmp, fp, nullptr, nullptr, 0);
 		}
-		return "[]";
+		throw asvJSONError(std::string("YAML: ") + std::string(tag) + " tag applied to a non-sequence value");
 	}
 	// !!map, !!seq -- the value is a flow collection; parse it to JSON so
 	// unquoted keys and YAML scalars become proper JSON (block context is
@@ -1332,22 +1388,39 @@ inline YamlPrecomp yamlPrecomputeQuotes(std::string_view s) {
 	}
 	return r;
 }
-// Resolve *alias with cycle detection
+// Resolve *alias. No recursion happens here: the anchor map already holds
+// fully-parsed JSON text, so the result is a plain lookup. A self-referential
+// anchor ("&x [*x]") is caught earlier, while the anchor is being built, by
+// yamlAnchorRefsSelf -- the previous "resolving" bookkeeping here could never
+// fire, because nothing resolved an alias while another was in progress.
 inline std::string yamlResolveAlias(std::string_view aliasName,
                                     std::unordered_map<std::string, std::string>& anchors,
-                                    std::unordered_set<std::string>& resolving) {
+                                    std::unordered_set<std::string>& /*resolving*/) {
 	std::string name(aliasName);
-	if (resolving.count(name)) {
-		throw asvJSONError("YAML: cyclic alias '" + name + "'");
-	}
 	auto it = anchors.find(name);
 	if (it == anchors.end()) {
 		throw asvJSONError("YAML: undefined alias '" + name + "'");
 	}
-	resolving.insert(name);
-	std::string result = it->second;
-	resolving.erase(name);
-	return result;
+	return it->second;
+}
+
+// True when "text" references the anchor "name" as a bare alias, which for an
+// anchor that is still being defined is a self-reference (an infinite
+// structure this tree-based model cannot represent). Quoted occurrences do not
+// count; an alias nested in a flow collection does, because it is still the
+// same anchor. "*x" matches name "x" but not "xy" or "x.y" being a prefix of a
+// longer name.
+inline bool yamlAnchorRefsSelf(std::string_view text, std::string_view name) {
+	auto pc = yamlPrecomputeQuotes(text);
+	for (size_t i = 0; i + 1 < text.size(); i++) {
+		if (text[i] != '*' || pc.inQuote[i]) continue;
+		if (name.size() > text.size() - (i + 1)) continue;
+		if (text.compare(i + 1, name.size(), name) != 0) continue;
+		size_t after = i + 1 + name.size();
+		if (after < text.size() && yamlIsAnchorChar(text[after])) continue;
+		return true;
+	}
+	return false;
 }
 
 // Forward declarations for flow parsers (anchored versions support &/* inside flow)
@@ -1445,7 +1518,23 @@ inline std::string yamlEscKey(std::string_view s) {
 			case '\\': out += "\\\\"; break;
 			case '\n': out += "\\n"; break;
 			case '\t': out += "\\t"; break;
-			default: out += c;
+			// The escaped form is what the double-quoted KEY reader (and the JSON
+			// text in between) understands, and it is the only way a CR survives:
+			// emitted raw it truncates the key for every reader, and CRLF input
+			// (common on Windows) puts CRs in plain keys.
+			case '\r': out += "\\r"; break;
+			case '\b': out += "\\b"; break;
+			case '\f': out += "\\f"; break;
+			// Any other control byte has no short escape; \u00XX is. U+007F (DEL)
+			// is not a control byte for this purpose and stays literal.
+			default:
+				if (static_cast<unsigned char>(c) < 0x20) {
+					char buf[8];
+					std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+					out += buf;
+				} else {
+					out += c;
+				}
 		}
 	}
 	return out;
@@ -1958,6 +2047,13 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 			std::string_view rest = content.substr(ne);
 			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
 
+			// A bare "*name" anywhere in the value being anchored refers to this
+			// very anchor, i.e. a self-referential (infinite) structure. Report it
+			// here instead of silently turning the alias into a plain string
+			// ("&x [*x]" used to yield {"a":[["*x"]]}).
+			if (yamlAnchorRefsSelf(rest, name))
+				throw asvJSONError("YAML: cyclic alias '" + name + "'");
+
 			if (!rest.empty() && rest[0] != '#') {
 				if (yamlIsSoloTag(rest)) {
 					// Anchor on a solo-tag line: the anchored value is the block
@@ -2015,6 +2111,14 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 					}
 				}
 				if (!childLines.empty()) {
+					// The anchored block must not reference the anchor it is
+					// defining. Without this the recursive parse below could not
+					// see the (still uninserted) name and reported the misleading
+					// "undefined alias 'x'".
+					for (const auto& cl : childLines) {
+						if (yamlAnchorRefsSelf(stripIndent(cl), name))
+							throw asvJSONError("YAML: cyclic alias '" + name + "'");
+					}
 					// Normalize indentation: strip the minimum indent in place
 					if (minIndent != SIZE_MAX && minIndent > 0) {
 						for (auto& cl : childLines) {
@@ -2072,20 +2176,43 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	// splitLines does not emit a phantom trailing empty line at EOF, so all
 	// remaining lines here are real content (a genuine trailing blank line is
 	// collected and keeps block-scalar chomp semantics correct).
+	//
+	// Tabs. YAML 1.2 forbids tabs in INDENTATION, never in content: only SPACES
+	// count as indentation here, and once the content indent is known exactly
+	// that many spaces are stripped while everything past them -- including a
+	// tab -- is content. A tab standing where indentation is still expected
+	// (before the content indent is established, or short of it) is the
+	// indentation error it looks like. A line holding nothing but spaces and
+	// tabs is an empty line wherever it sits, never a tab-indent error.
 	while (ci < lines.size()) {
-		int si = countIndent(lines[ci]);
-		yamlRejectTabIndent(lines[ci], static_cast<int>(ci) + 1);
-		std::string_view sc = stripIndent(lines[ci]);
-		if (sc.empty()) { entries.push_back({"", 0, true}); ci++; continue; }
+		const std::string& raw = lines[ci];
+		size_t spaces = 0;
+		while (spaces < raw.size() && raw[spaces] == ' ') spaces++;
+		const std::string_view after = std::string_view(raw).substr(spaces);
+		if (after.find_first_not_of(" \t\r") == std::string_view::npos) {
+			entries.push_back({"", 0, true});
+			ci++;
+			continue;
+		}
+		if (!after.empty() && after[0] == '\t') {
+			// A tab may only appear here as content, i.e. at or past the content
+			// indent; otherwise it would be doing indentation work.
+			if (contentIndent < 0 || static_cast<int>(spaces) < contentIndent) {
+				yamlRejectTabIndent(raw, static_cast<int>(ci) + 1);
+				ci++;
+				continue;
+			}
+		}
+		const int si = static_cast<int>(spaces);
 		// A '#'-prefixed line is only a trailing comment when it sits BELOW the
 		// block scalar's content indent; at (or above) content indent it is
 		// literal content (YAML 1.2.2 Ex 8.5). Before the content indent is
 		// known the first non-empty line establishes it and is data too.
-		if (sc[0] == '#' && contentIndent >= 0 && si < contentIndent) { ci++; continue; }
+		if (!after.empty() && after[0] == '#' && contentIndent >= 0 && si < contentIndent) { ci++; continue; }
 		if (parentIndent >= 0 && si <= parentIndent) break;
 		if (contentIndent < 0) contentIndent = si;
 		if (si >= contentIndent) {
-			entries.push_back({std::string(sc), si - contentIndent, false});
+			entries.push_back({std::string(after), si - contentIndent, false});
 			ci++;
 			continue;
 		}
@@ -2424,6 +2551,7 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 		// No deeper child: defaults matching the inline solo-tag forms.
 		if (tagStr == "!!map") return "{}";
 		if (tagStr == "!!seq") return "[]";
+		if (tagStr == "!!omap" || tagStr == "!!pairs") return "[]";
 		if (tagStr == "!!binary") return "{\"$binary\":{\"base64\":\"\",\"subType\":\"00\"}}";
 		if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!')
 			return yamlParseTaggedValue(tagStr); // scalar core tags: 0/0.0/false/""/null/...
@@ -2524,6 +2652,15 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 			    ((tagStr == "!!map") ? "mapping" : "sequence") + " value");
 		return childJson;
 	}
+	// !!omap / !!pairs block form: a sequence of single-key mappings, which is
+	// exactly what the sequence of child items parses to, so the block form and
+	// the flow form produce the same JSON. A mapping (not a sequence) is a
+	// representational error rather than a silently empty array.
+	if (tagStr == "!!omap" || tagStr == "!!pairs") {
+		if (childJson.empty() || childJson[0] != '[')
+			throw asvJSONError(std::string("YAML: ") + tagStr + " tag applied to a non-sequence value");
+		return childJson;
+	}
 	if (tagStr == "!" || tagStr == "?") return childJson;
 	if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!')
 		throw asvJSONError(std::string("YAML: ") + tagStr + " tag applied to a non-scalar value");
@@ -2615,6 +2752,53 @@ inline std::string yamlParseDoc(std::string_view input, int depth) {
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 	return yamlParseDocImpl(lines, depth);
+}
+
+// A plain (unquoted, untagged, non-block) scalar may span several lines in
+// YAML: every line break folds to a space, and N-1 blank lines between two
+// content lines fold to N-1 line breaks. Without this the continuation line was
+// handled as a node of its own, so "k:\n  line1\n  line2" emitted the value
+// "line1" and then a keyless "line2" (invalid JSON, rejected downstream) and
+// "- p\n  q" silently turned one item into two.
+//
+// `first` is the scalar text already emitted for line `li`, and `out` holds
+// the JSON text of the value starting at `valStart`. When a continuation line
+// exists the emitted text is rolled back and the whole folded scalar is
+// re-emitted from scratch, so the fold is interpreted by the regular scalar
+// rules (a "true" split across lines stays the string "true" rather than
+// becoming a boolean). Continuation lines must be indented at least
+// `contIndent`, and anything that starts a new construct (a key, a sequence
+// item, a flow collection, an explicit key, a comment) ends the scalar instead
+// of extending it. Blank lines are consumed only when a later line does
+// continue the scalar, so trailing blanks stay with the enclosing block.
+inline bool yamlFoldPlainScalar(std::vector<std::string>& lines, size_t& li, int contIndent,
+                                std::string& out, size_t valStart, std::string_view first) {
+	size_t scan = li + 1;
+	std::string folded(first);
+	int breaks = 0;
+	size_t lastFolded = li;
+	bool any = false;
+	while (scan < lines.size()) {
+		std::string_view sv = stripIndent(lines[scan]);
+		if (sv.empty()) { breaks++; scan++; continue; }
+		if (countIndent(lines[scan]) < contIndent) break;
+		if (sv[0] == '#') break;
+		if (yamlIsDashStart(sv)) break;
+		if (yamlFindKeyColonSep(sv) != std::string_view::npos) break;
+		if (sv[0] == '{' || sv[0] == '[' || sv[0] == '?' || sv[0] == '|' || sv[0] == '>') break;
+		if (breaks == 0) folded += ' ';
+		else folded.append(static_cast<size_t>(breaks), '\n');
+		folded.append(sv);
+		breaks = 0;
+		any = true;
+		lastFolded = scan;
+		scan++;
+	}
+	if (!any) return false;
+	out.resize(valStart);
+	out += yamlParseInlineValue(folded, 0);
+	li = lastFolded;
+	return true;
 }
 
 inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) {
@@ -2983,6 +3167,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			yamlCheckFrameIndent(stack, indent);
 
 			std::string jsonKey = isCompoundKey ? ("\"" + compoundKey + "\"") : ("\"" + yamlEscKey(rawKey) + "\"");
+			const size_t inlineValStart = out.size();
 			if (!inlineVal.empty() && inlineVal[0] != '#') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
@@ -3015,6 +3200,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					out += yamlResolveAlias(std::string_view(inlineVal).substr(1), anchors, resolving);
 				} else {
 					out += yamlParseInlineValue(inlineVal);
+					yamlFoldPlainScalar(lines, li, indent + 1, out, inlineValStart, inlineVal);
 				}
 			} else {
 				pendingKey = isCompoundKey ? compoundKey : yamlEscKey(rawKey);
@@ -3125,7 +3311,9 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				}
 				out += "\"" + escaped + "\"";
 			} else {
+				const size_t itemValStart = out.size();
 				out += yamlParseInlineValue(rest);
+				yamlFoldPlainScalar(lines, li, indent + 1, out, itemValStart, rest);
 			}
 			continue;
 		}
@@ -3271,7 +3459,9 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
 					out += yamlResolveAlias(std::string_view(valPart).substr(1), anchors, resolving);
 				} else {
+					const size_t valStart = out.size();
 					out += yamlParseInlineValue(valPart);
+					yamlFoldPlainScalar(lines, li, indent + 1, out, valStart, valPart);
 				}
 			} else {
 				addComma(stack, out);
@@ -3341,9 +3531,17 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 							else
 								out += yamlParseTaggedValue(dc);
 						}
-						else out += yamlParseInlineValue(dc);
+						else {
+							const size_t dcStart = out.size();
+							out += yamlParseInlineValue(dc);
+							// A plain scalar in the deeper position continues on
+							// the following lines at the SAME indent (they are all
+							// part of this value), which is what
+							// "key:\n  line1\n  line2" means.
+							yamlFoldPlainScalar(lines, scan, countIndent(lines[scan]), out, dcStart, dc);
+						}
 					}
-					li = scan; // consume the value line
+					li = scan; // consume the value line(s)
 					stack.back().hasVal = true;
 				} else if (deeperMapping) {
 					// The value is a mapping whose entries follow on deeper lines:
@@ -3460,7 +3658,11 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 		std::string_view c = stripIndent(lines[li]);
 
 		if (blockBody >= 0) {
-			if (indent > blockBody) continue;  // block-scalar body text is data
+			// A blank line inside the body is body text, not the end of it: the
+			// parser keeps collecting until a non-blank line at the header's
+			// indent or shallower. Resetting here let a comment after such a line
+			// be bound to the wrong node (or to nothing at all).
+			if (c.empty() || indent > blockBody) continue;
 			blockBody = -1;
 		}
 		if (!c.empty() && indent == 0 && yamlIsBoundaryMarker(c, true)) {
@@ -3658,6 +3860,40 @@ inline std::string yamlToJson(std::string_view input) {
 	auto lines = splitLines(input);
 	if (lines.empty()) return "{}";
 
+	// "---" may be followed by the document's first content on the SAME line
+	// ("--- a: 1", "--- [1, 2]", "--- !!map"). Such a line is still a document
+	// BOUNDARY, so the marker is left in place and the content is stashed for
+	// buildDocInput to emit as the document's first line (rewriting the line in
+	// place would have merged "--- a: 1\n--- b: 2" into one document). A trailing
+	// "# comment" is dropped: it comments the marker line, not the value.
+	std::vector<std::string> markerInline;  // per line: content after "---", if any
+	markerInline.resize(lines.size());
+	for (size_t i = 0; i < lines.size(); i++) {
+		if (countIndent(lines[i]) != 0) continue;
+		std::string_view s = lines[i];
+		if (s.compare(0, 3, "---") != 0) continue;
+		if (s.size() == 3) continue;
+		if (s[3] != ' ' && s[3] != '\t') continue;   // "---abc" is content, not a marker
+		size_t cs = 4;
+		while (cs < s.size() && (s[cs] == ' ' || s[cs] == '\t')) cs++;
+		if (cs >= s.size()) continue;                 // "---" + whitespace only
+		if (s[cs] == '#') continue;                   // "--- # comment"
+		std::string_view tail = s.substr(cs);
+		// Keep only the part before a trailing comment ("# ..." at a space).
+		for (size_t k = 0; k < tail.size(); k++) {
+			if (tail[k] == '#' && (k == 0 || tail[k - 1] == ' ' || tail[k - 1] == '\t')) {
+				while (k > 0 && (tail[k - 1] == ' ' || tail[k - 1] == '\t')) k--;
+				tail = tail.substr(0, k);
+				break;
+			}
+		}
+		if (tail.empty()) continue;
+		markerInline[i] = std::string(tail);
+		// Normalize the line to a bare marker so the boundary scan below sees
+		// it as one; buildDocInput puts the stashed content back.
+		lines[i] = "---";
+	}
+
 	// Find document boundaries. Each document is a half-open line range [start, end)
 // plus flags for explicit start ("---" seen) and real content. "---" at column 0
 // begins an explicit document (which may be empty => null); "..." at column 0
@@ -3680,14 +3916,30 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 			if (inDoc) docs.emplace_back(docStart, i, isExplicit, hasContent);
 			inDoc = true;
 			isExplicit = true;
-			hasContent = false;
+			// "--- a: 1" carries the document's first content on the marker line,
+			// so that line belongs to the range and counts as content.
+			hasContent = !markerInline[i].empty();
 			// Include any pending directives in the explicit document's range.
-			docStart = (pendingDirStart == SIZE_MAX) ? i + 1 : pendingDirStart;
+			docStart = (pendingDirStart == SIZE_MAX) ? i : pendingDirStart;
 			pendingDirStart = SIZE_MAX;
 			continue;
 		}
 		if (atIndent0 && yamlIsBoundaryMarker(stripped, false)) { // "..."
-			if (inDoc) docs.emplace_back(docStart, i, isExplicit, hasContent);
+			// The boundary line itself may carry no content, but a "---" line with
+			// inline content does (it was folded into the range by docStart = i).
+			bool bodyHas = hasContent;
+			if (!bodyHas) {
+				for (size_t j = docStart; j < i; j++) {
+					if (countIndent(lines[j]) != 0) continue;
+					std::string_view bc = stripIndent(lines[j]);
+					if (bc.empty() || bc[0] == '%') continue;
+					if (yamlIsBoundaryMarker(bc, true) || yamlIsBoundaryMarker(bc, false)) continue;
+					if (!markerInline[j].empty()) { bodyHas = true; break; }
+					bodyHas = true;
+					break;
+				}
+			}
+			if (inDoc) docs.emplace_back(docStart, i, isExplicit, bodyHas);
 			inDoc = false;
 			isExplicit = false;
 			hasContent = false;
@@ -3726,11 +3978,19 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 		bool lastEmpty = false;
 		for (size_t i = start; i < end; i++) {
 			std::string_view c = stripIndent(lines[i]);
-			if ((c == "---" || c == "...") && countIndent(lines[i]) == 0) continue;
+			const bool atIndent0 = countIndent(lines[i]) == 0;
+			// The marker line may still carry a trailing comment ("--- # c") or
+			// trailing spaces, so test for a real boundary rather than "== \"---\"".
+			const bool marker = atIndent0 &&
+			    (yamlIsBoundaryMarker(c, true) || yamlIsBoundaryMarker(c, false));
+			if (marker && markerInline[i].empty()) continue;
+			// A "---" line with inline content contributes that content as the
+			// document's first line; the marker itself is not part of the body.
+			const std::string& body = marker ? markerInline[i] : lines[i];
 			if (haveAny) sub += '\n';
-			sub += lines[i];
+			sub += body;
 			haveAny = true;
-			lastEmpty = lines[i].empty();
+			lastEmpty = body.empty();
 		}
 		// A trailing empty line must survive the round-trip through splitLines:
 		// joining with '\n' drops one trailing newline, so restore it here.

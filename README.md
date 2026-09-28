@@ -569,6 +569,14 @@ Output:
 
 `fromYAML()` parses YAML back into JSON, supporting the same features plus single/double-quoted strings, comments, and document markers.
 
+YAML parsing details:
+- **Multi-line plain scalars** - block-context plain scalars fold across continuation lines (one line break becomes a space; each blank line becomes `\n`), both after a key (`k: line1` + deeper `line2`) and as deeper values of an empty key (`k:` + deeper lines), including sequence items; a continuation that looks like a nested key/flow value ends the fold.
+- **Block scalar whitespace** - tabs at/after the content indent are data (never indentation); a whitespace-only line is blank at any depth; excess leading spaces past the content indent are preserved; a tab used as indentation (before the content indent) is still rejected.
+- **`---` markers carry content** - a `---` marker may hold the first document's content on its own line (`--- a: 1`); `---abc:` is ordinary content, not a marker.
+- **Signed non-finite floats** - `+.inf`, `-.inf`, `+.nan`, `+Infinity`, `-Infinity` parse as doubles; unrecognized spellings (`inf`, `+Inf`) stay strings.
+- **Block-form `!!omap` / `!!pairs`** - accepted in block style; applying the tag to a non-sequence block value is an error (was a silent empty array).
+- **Self-referential anchors** - `&x [*x]` and aliases pointing at an anchor that recursively contains itself are reported as an error (guard against infinite pre-scan expansion), while plain aliases keep working.
+
 `toYAML()` also accepts a `YamlWriteOptions` struct for fine-grained control:
 ```cpp
 YamlWriteOptions o;
@@ -583,6 +591,8 @@ std::string yaml = json.toYAML(o);
 - `Style::Block`  -  pure indentation-based output (matches `toYAML(true)`, the default).
 - `Style::Auto`  -  flow style with automatic block fallback for values longer than `flowMaxLen` (matches `toYAML(false)`).
 - `Style::Flow`  -  flow style everywhere with no length limit; multiline strings are inlined as double-quoted scalars.
+
+Comments are emitted only in `Block` style; `Auto` and `Flow` output is comment-free.
 
 Input:
 ```json

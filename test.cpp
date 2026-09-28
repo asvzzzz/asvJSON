@@ -2545,6 +2545,221 @@ TEST(testYamlControlKeyRoundTrip) {
 	ASSERT(back.serialize() == j.serialize());
 }
 
+TEST(testYamlAuditFixes) {
+	// #1 multi-line plain scalars fold to a space (blank line -> newline),
+	// in the deeper position, after a key, and as sequence items
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k:\n  line1\n  line2"));
+		ASSERT_EQ(std::string(j.getString("k")), "line1 line2");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: line1\n  line2\n  line3"));
+		ASSERT_EQ(std::string(j.getString("k")), "line1 line2 line3");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: line1\n\n  line2"));
+		ASSERT_EQ(std::string(j.getString("k")), "line1\nline2");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("- p\n  q\n- r"));
+		ASSERT_EQ(j.serialize(), "[\"p q\",\"r\"]");
+	}
+	{
+		// a fold must not swallow a following sibling key
+		asvJSON j;
+		ASSERT(j.fromYAML("k: v1\n  v2\nz: 9"));
+		ASSERT_EQ(j.serialize(), "{\"k\":\"v1 v2\",\"z\":9}");
+	}
+	{
+		// a continuation that looks like a mapping entry terminates the
+		// plain scalar and cannot attach at that indent -> syntax error
+		asvJSON j;
+		ASSERT(!j.fromYAML("k:\n  v1\n  a: 1"));
+	}
+
+	// #2/#10 tabs in a block-scalar body are content, not indentation
+	{
+		// a tab at/after the content indent is data
+		asvJSON j;
+		ASSERT(j.fromYAML("k: |\n  foo\n  \tbar"));
+		ASSERT_EQ(std::string(j.getString("k")), "foo\n\tbar\n");
+	}
+	{
+		// double-quoted (escaped) tab content round-trips too
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"foo\\tbar\""));
+		ASSERT_EQ(std::string(j.getString("k")), "foo\tbar");
+	}
+	{
+		// a tab-only line (at any depth) is a blank line, never a tab-indent error
+		asvJSON j;
+		ASSERT(j.fromYAML("k: |\n  foo\n\t\n  bar"));
+		ASSERT_EQ(std::string(j.getString("k")), "foo\n\nbar\n");
+	}
+	{
+		// excess leading spaces past the content indent are data
+		asvJSON j;
+		ASSERT(j.fromYAML("k: |\n  foo\n    bar"));
+		ASSERT_EQ(std::string(j.getString("k")), "foo\n  bar\n");
+	}
+	{
+		// a tab used as indentation (before the content indent) is an error
+		asvJSON j;
+		ASSERT(!j.fromYAML("k: |\n  foo\n\tbar"));
+	}
+
+	// #5 control characters in keys round-trip
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{\"a\\rb\":1}")));
+		std::string y = j.toYAML(true);
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT(back.serialize() == j.serialize());
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("{\"a\\x01b\":1}")));
+		std::string y = j.toYAML(true);
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT(back.serialize() == j.serialize());
+	}
+
+	// #8 signed non-finite floats are numbers, not plain strings
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: +.inf"));
+		ASSERT(j.isDouble("k"));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: +.nan"));
+		ASSERT(j.isDouble("k"));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: +Infinity"));
+		ASSERT(j.isDouble("k"));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: -Infinity"));
+		ASSERT(j.isDouble("k"));
+	}
+	{
+		// a non-YAML spelling stays a string, not a corrupt JSON token
+		asvJSON j;
+		ASSERT(j.fromYAML("k: Inf"));
+		ASSERT(j.isString("k"));
+		ASSERT_EQ(std::string(j.getString("k")), "Inf");
+	}
+
+	// #7 block-form !!omap / !!pairs parse to arrays of single-key mappings
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: !!omap\n  - a: 1\n  - b: 2"));
+		ASSERT_EQ(j.serialize(), "{\"k\":[{\"a\":1},{\"b\":2}]}");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: !!pairs\n  - a: 1\n  - b: 2"));
+		ASSERT_EQ(j.serialize(), "{\"k\":[{\"a\":1},{\"b\":2}]}");
+	}
+	{
+		// a mapping under !!omap is an error, not a silent empty array
+		asvJSON j;
+		ASSERT(!j.fromYAML("k: !!omap\n  a: 1"));
+	}
+
+	// #3 self-referential anchors are a cycle error, not a garbage value
+	{
+		asvJSON j;
+		ASSERT(!j.fromYAML("a: &x [*x]"));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromYAML("a: &x\n  b: *x"));
+	}
+	// ...while ordinary aliases keep working
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("a: &x 1\nb: *x"));
+		ASSERT_EQ(j.serialize(), "{\"a\":1,\"b\":1}");
+	}
+
+	// #9 a "---" marker may carry the document's first content on its line
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("--- a: 1"));
+		ASSERT_EQ(j.serialize(), "{\"a\":1}");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("--- {a: 1}"));
+		ASSERT_EQ(j.serialize(), "{\"a\":1}");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("--- a: 1\n--- b: 2"));
+		ASSERT_EQ(j.serialize(), "[{\"a\":1},{\"b\":2}]");
+	}
+	{
+		// "---abc" is content, not a marker
+		asvJSON j;
+		ASSERT(j.fromYAML("---abc: 1"));
+		ASSERT_EQ(j.serialize(), "{\"---abc\":1}");
+	}
+
+	// #11 a bare '#' line after a block scalar is a comment, not content
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("# head\nk: |\n  a\n# tail\nz: 1"));
+		ASSERT_EQ(j.serialize(), "{\"k\":\"a\\n\",\"z\":1}");
+	}
+
+	// #14 sequence items inside a mapping keep their own indentation in Auto
+	// even when the mapping value falls back to block layout
+	{
+		asvJSON j;
+		YamlWriteOptions o;
+		o.style = YamlWriteOptions::Style::Auto;
+		o.flowMaxLen = 4; // force block fallback
+		ASSERT(j.parse(std::string("{\"k\":[1,2,3,4]}")));
+		std::string y = j.toYAML(o);
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT_EQ(back.serialize(), j.serialize());
+	}
+
+	// #15 CRLF line endings in block scalars
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: |\r\n  a\r\n  b\r\n"));
+		ASSERT_EQ(std::string(j.getString("k")), "a\nb\n");
+	}
+
+	// #6 Auto/Flow output is comment-free (only Block keeps comments)
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("a: 1 # inline\nb: 2\n# foot\nc: 3"));
+		YamlWriteOptions o;
+		o.style = YamlWriteOptions::Style::Auto;
+		std::string y = j.toYAML(o);
+		ASSERT(y.find('#') == std::string::npos);
+		o.style = YamlWriteOptions::Style::Flow;
+		y = j.toYAML(o);
+		ASSERT(y.find('#') == std::string::npos);
+		// Block keeps trailing/leading comments
+		std::string b = j.toYAML(YamlWriteOptions{});
+		ASSERT(b.find('#') != std::string::npos);
+	}
+}
+
 TEST(testDateTimeDayValidity) {
 	// non-existent calendar days are rejected (fall back to plain string)
 	// instead of silently normalizing into the following month
@@ -27033,6 +27248,7 @@ int main() {
 	RUN(testUTF8StrictValidation);
 	RUN(testTrimmedUnicodeEscapeRejected);
 	RUN(testYamlControlKeyRoundTrip);
+	RUN(testYamlAuditFixes);
 	RUN(testDateTimeDayValidity);
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
