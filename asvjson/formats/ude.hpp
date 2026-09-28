@@ -2068,7 +2068,7 @@ inline void udeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, b
       if (i + 1 < v->arr->size()) os << ',';
       os << '\n';
     }
-    udeWriteIndent(os, indent - 1);
+    udeWriteIndent(os, indent > 0 ? indent - 1 : 0);
     os << ']';
   } else {
     os << '[';
