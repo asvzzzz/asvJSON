@@ -15,6 +15,20 @@
 //   string / formatted date-time string, and fromTOML() decodes both back as
 //   STRING (they cannot be retagged without an external schema). This includes
 //   the RFC 3339 form `t = 2024-01-01T00:00:00Z`, which decodes to STRING.
+// - Mixed-type arrays are accepted, a lenient extension: TOML 1.0 requires an
+//   array to be homogeneous ("data types may not be mixed"), but fromTOML()
+//   parses `[1, "two"]` without complaint. It has to: toTOML() writes whatever
+//   JSON array it is given, so a mixed array must survive the round-trip.
+// - Multi-line inline tables are accepted, a lenient extension: TOML 1.0
+//   allows no newline inside `{...}`, but continuation lines are gathered until
+//   the braces balance and a '#' comment on a continuation line is dropped, so
+//   `a = { b = 1, # c` + `d = 2 }` parses. The one-line form stays strict: a
+//   '#' before the closing brace is a comment that swallows it, which leaves
+//   the table unterminated, so `a = {b = 1 # c}` is an error.
+// - Table redefinition is scoped to the resolved tree: a repeated `[a.b]`
+//   header is an error, but `[items.s]` after a new `[[items]]` element is
+//   accepted, because every reference to an array of tables resolves to its
+//   most recently defined element.
 
 #include "../core.hpp"
 
@@ -167,6 +181,11 @@ inline std::string tomlVal(const asvJSONValue* v) {
       if (std::isinf(v->dbl)) return v->dbl > 0 ? "inf" : "-inf";
       std::string s;
       fmtDoubleVal(v->dbl, s);
+      // TOML separates int from float lexically, so an integral double must
+      // keep a '.' or an exponent: fmtDoubleVal renders 1.0 as "1", which
+      // would re-read as INT and lose the DOUBLE type. Mirrors the .0 suffix
+      // the INI/dotenv/UDE encoders append.
+      if (s.find_first_of(".eE") == std::string::npos) s += ".0";
       return s;
     }
     case T::STRING: return tomlEscapeStr(v->str_data);
@@ -213,20 +232,6 @@ inline std::string_view trimSV(std::string_view s) {
   while (!s.empty() && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r' || s[0] == '\n')) s.remove_prefix(1);
   while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n')) s.remove_suffix(1);
   return s;
-}
-
-// Strip comment (#) from line, respecting quoted strings
-inline std::string_view stripComment(std::string_view line, bool& inBasic, bool& inLiteral) {
-  bool escape = false;
-  for (size_t i = 0; i < line.size(); i++) {
-    char c = line[i];
-    if (escape) { escape = false; continue; }
-    if (c == '\\' && inBasic) { escape = true; continue; }
-    if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
-    if (c == '\'' && !inBasic) { inLiteral = !inLiteral; continue; }
-    if (!inBasic && !inLiteral && c == '#') return line.substr(0, i);
-  }
-  return line;
 }
 
 // Parse a single TOML key (bare or quoted), advances s past it
@@ -403,6 +408,63 @@ inline size_t tomlFindUnescapedDelim(std::string_view s, size_t from,
     i += run;
   }
   return std::string_view::npos;
+}
+
+// Strip a comment (# to end of line) from one line, respecting quoted strings.
+// A `"""`/`'''` multi-line string is consumed as ONE delimiter and its body is
+// skipped in a single step: a '#' inside a multi-line string is content, not a
+// start of a comment, so the quote run must not be counted as individual
+// single-line toggles. Counting them truncated the text after an even number of
+// quotes on the opening line (`key = """a" # kept` lost ` # kept`, and a
+// multi-line string nested in a one-line array `[ """a" # b" ]` no longer
+// balanced). A body with no closer on this line runs to the end of the line:
+// the caller gathers the continuation lines unstripped, so nothing inside a
+// multi-line string can be eaten as a comment.
+inline std::string_view stripComment(std::string_view line, bool& inBasic, bool& inLiteral) {
+  bool escape = false;
+  for (size_t i = 0; i < line.size(); i++) {
+    char c = line[i];
+    if (escape) { escape = false; continue; }
+    if (c == '\\' && inBasic) { escape = true; continue; }
+    if (!inBasic && !inLiteral && (c == '"' || c == '\'')) {
+      if (i + 2 < line.size() && line[i + 1] == c && line[i + 2] == c) {
+        size_t after = tomlSkipString(line, i);
+        if (after >= line.size()) return line; // unterminated here: rest is content
+        i = after - 1;
+        continue;
+      }
+    }
+    if (c == '"' && !inLiteral) { inBasic = !inBasic; continue; }
+    if (c == '\'' && !inBasic) { inLiteral = !inLiteral; continue; }
+    if (!inBasic && !inLiteral && c == '#') return line.substr(0, i);
+  }
+  return line;
+}
+
+// Length of the leading date/date-time token in `s` (offset-date-time, local
+// date-time, optionally space-separated from the time part), or npos when `s`
+// does not start with one. Month/day ranges are validated; the bare local-time
+// form (HH:MM:SS) is recognised by its own branch in parseTomlValue.
+inline size_t tomlDateTimeEnd(std::string_view s) {
+  if (s.size() < 10 || !std::isdigit(static_cast<unsigned char>(s[0])) ||
+      s[4] != '-' || s[7] != '-')
+    return std::string_view::npos;
+  int month = (s[5] - '0') * 10 + (s[6] - '0');
+  int day = (s[8] - '0') * 10 + (s[9] - '0');
+  if (month < 1 || month > 12 || day < 1 || day > 31) return std::string_view::npos;
+  auto isDt = [](char ch) {
+    return std::isdigit(static_cast<unsigned char>(ch)) || ch == 'T' || ch == ':' ||
+           ch == '.' || ch == 'Z' || ch == '+' || ch == '-';
+  };
+  size_t end = 10;
+  while (end < s.size() && isDt(s[end])) end++;
+  // A space may separate the date and the time (local date-time)
+  if (end < s.size() && s[end] == ' ' && end + 1 < s.size() &&
+      std::isdigit(static_cast<unsigned char>(s[end + 1]))) {
+    end++;
+    while (end < s.size() && isDt(s[end])) end++;
+  }
+  return end;
 }
 
 // Parse a complete TOML value into JSON string
@@ -772,28 +834,10 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   }
 
   // Date/time (optionally space-separated local datetime)
-  if (s.size() >= 10 && std::isdigit(static_cast<unsigned char>(s[0])) &&
-      s[4] == '-' && s[7] == '-') {
-    // Validate month (01-12) and day (01-31)
-    int month = (s[5] - '0') * 10 + (s[6] - '0');
-    int day = (s[8] - '0') * 10 + (s[9] - '0');
-    if (month < 1 || month > 12 || day < 1 || day > 31)
-      goto notDate;
-    auto isDt = [&](char ch) {
-      return std::isdigit(static_cast<unsigned char>(ch)) || ch == 'T' || ch == ':' ||
-             ch == '.' || ch == 'Z' || ch == '+' || ch == '-';
-    };
-    size_t end = 10;
-    while (end < s.size() && isDt(s[end])) end++;
-    if (end < s.size() && s[end] == ' ' && end + 1 < s.size() &&
-        std::isdigit(static_cast<unsigned char>(s[end + 1]))) {
-      end++;
-      while (end < s.size() && isDt(s[end])) end++;
-    }
-    checkTailLen(end);
-    return "\"" + std::string(s.substr(0, end)) + "\"";
+  if (size_t dtEnd = tomlDateTimeEnd(s); dtEnd != std::string_view::npos) {
+    checkTailLen(dtEnd);
+    return "\"" + std::string(s.substr(0, dtEnd)) + "\"";
   }
-notDate:;
 
   // Local time: HH:MM:SS[.ffffff]
   if (s.size() >= 8 && std::isdigit(static_cast<unsigned char>(s[0])) &&
@@ -1096,36 +1140,15 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
         if (val->type == T::OBJECT) {
           tomlEmitVal(val.get(), fullKey, true, out, true);
         } else {
-          // Array of tables: emitting `[[path]]` for every element is only
-          // well-formed when the elements' own subtables do not collide on the
-          // same name -- TOML forbids redefining a [path.sub] header (e.g.
-          // {"items":[{"s":{"x":1}},{"s":{"y":2}}]} cannot use [items.s] twice).
-          // On a collision, fall back to the inline-table form so the value
-          // still round-trips through fromTOML.
-          bool subtableNameCollision = false;
-          {
-            std::vector<std::string> seen;
-            for (const auto& elem : *val->arr) {
-              if (elem->type != T::OBJECT || !elem->obj) continue;
-              for (const auto& [sk, sv] : *elem->obj) {
-                if (!isSubtable(sv.get())) continue;
-                bool dup = false;
-                for (const auto& s2 : seen)
-                  if (s2 == sk) { dup = true; break; }
-                if (dup) { subtableNameCollision = true; break; }
-                seen.push_back(sk);
-              }
-              if (subtableNameCollision) break;
-            }
-          }
-          if (subtableNameCollision) {
-            std::string vs = tomlVal(val.get());
-            if (!vs.empty()) out += qk + " = " + vs + "\n";
-          } else {
-            for (const auto& elem : *val->arr) {
-              emitHeader(fullKey, true);
-              tomlEmitVal(elem.get(), fullKey, false, out, true);
-            }
+          // Array of tables: one `[[path]]` header per element. Elements may
+          // carry subtables with the same name -- TOML resolves every reference
+          // to an array of tables to the most recently defined element, so
+          // `[[items]] [items.s] [[items]] [items.s]` is legal and each
+          // `[items.s]` lands in the element above it. No inline-table
+          // fallback is needed for that case.
+          for (const auto& elem : *val->arr) {
+            emitHeader(fullKey, true);
+            tomlEmitVal(elem.get(), fullKey, false, out, true);
           }
         }
       }
@@ -1199,6 +1222,36 @@ inline void tomlObjSet(asvJSONValue* obj, const std::string& key, std::unique_pt
   obj->obj->emplace(key, std::move(val));
 }
 
+// Key identifying where a table header / dotted key actually lands in the tree.
+// Identical to the plain dotted path unless the path crosses an array of
+// tables: that segment is annotated with the index of its current last element,
+// so `[items.s]` after a second `[[items]]` is a DIFFERENT table than the first
+// one. TOML resolves every reference to an array of tables to the most recently
+// defined element, so re-opening `[items.s]` under a new element is legal and
+// only an unresolved repeat is a redefinition. Segments the tree does not have
+// (yet) keep their plain name, so a dotted key registers exactly the paths a
+// later header would compute.
+inline std::string tomlCanonicalPath(const asvJSONValue* root,
+                                    const std::vector<std::string>& path) {
+  std::string key;
+  const asvJSONValue* cur = root;
+  for (const std::string& seg : path) {
+    if (!key.empty()) key += '.';
+    key += seg;
+    if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) { cur = nullptr; continue; }
+    auto it = cur->obj->find(seg);
+    if (it == cur->obj->end()) { cur = nullptr; continue; }
+    cur = it->second.get();
+    if (cur->type == asvJSONValue::ARRAY && cur->arr && !cur->arr->empty()) {
+      char idx[24];
+      snprintf(idx, sizeof(idx), "[%zu]", cur->arr->size() - 1);
+      key += idx;
+      cur = cur->arr->back().get();
+    }
+  }
+  return key;
+}
+
 inline bool asvJSON::fromTOML(std::string_view input) {
   dirty_ = false;
   formatType = FormatType::Unknown;
@@ -1219,12 +1272,8 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     // whose implicit super-tables stay reopenable).
     auto markDottedSupers = [&](const std::vector<std::string>& pathParts) {
       for (size_t i = 0; i + 1 < pathParts.size(); i++) {
-        std::string acc;
-        for (size_t j = 0; j <= i; j++) {
-          if (j > 0) acc += '.';
-          acc += pathParts[j];
-        }
-        tableDefs.insert(acc);
+        std::vector<std::string> prefix(pathParts.begin(), pathParts.begin() + i + 1);
+        tableDefs.insert(tomlCanonicalPath(root.get(), prefix));
       }
     };
     bool stripInBasic = false, stripInLiteral = false; // persistent state for stripComment
@@ -1318,6 +1367,12 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           if (!parent || parent->type != asvJSONValue::OBJECT || !parent->obj)
             throw asvJSONError("cannot define table on non-object");
           auto it = parent->obj->find(last);
+          // Definition key of the table being (re)opened: the canonical path
+          // through the resolved tree, so a subtable header under a new array
+          // element does not collide with the same header under the previous one.
+          std::string defKey = tomlCanonicalPath(root.get(), parentPath);
+          if (!defKey.empty()) defKey += '.';
+          defKey += last;
           if (isArrayTable) {
             if (it != parent->obj->end() && it->second->type != asvJSONValue::ARRAY)
               throw asvJSONError("cannot redefine key '" + last + "' as array table");
@@ -1337,10 +1392,11 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               arrVal = it->second.get();
             }
             arrVal->arr->push_back(asvJSONValue::makeObject());
-            tableDefs.insert(fullPath);
+            // Each element is its own table, so the key carries the new index
+            tableDefs.insert(tomlCanonicalPath(root.get(), tablePath));
             arrayTablePaths.insert(fullPath);
           } else {
-            if (tableDefs.count(fullPath))
+            if (tableDefs.count(defKey))
               throw asvJSONError("table '" + fullPath + "' already defined");
             if (it != parent->obj->end() && it->second->type != asvJSONValue::OBJECT)
               throw asvJSONError("cannot redefine key '" + last + "' as table");
@@ -1348,7 +1404,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               auto newObj = asvJSONValue::makeObject();
               parent->obj->emplace(last, std::move(newObj));
             }
-            tableDefs.insert(fullPath);
+            tableDefs.insert(defKey);
           }
         }
         continue;

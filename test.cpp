@@ -12472,6 +12472,37 @@ TEST(testToTOML) {
     ASSERT(!j2.hasKey("empty"));
     ASSERT(j2.getDouble("pi") > 3.13 && j2.getDouble("pi") < 3.15);
   }
+  // An integral DOUBLE keeps a '.0': TOML separates int from float lexically,
+  // so emitting a bare "1" would re-read as INT and lose the type.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"one":1.0,"neg":-2.0,"zero":0.0,"big":1e20,"frac":2.5})")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    for (const char* k : {"one", "neg", "zero", "frac"})
+      ASSERT(j2.getRoot()->get(k)->type == asvJSONValue::DOUBLE);
+    ASSERT_EQ(j2.getRoot()->get("one")->dbl, 1.0);
+    ASSERT_EQ(j2.getRoot()->get("neg")->dbl, -2.0);
+    // an exponent already marks the token as a float
+    ASSERT(j2.getRoot()->get("big")->type == asvJSONValue::DOUBLE);
+    // an INT must stay an INT
+    asvJSON j3;
+    ASSERT(j3.parse(std::string_view(R"({"n":7})")));
+    asvJSON j4;
+    ASSERT(j4.fromTOML(std::string_view(j3.toTOML())));
+    ASSERT(j4.getRoot()->get("n")->type == asvJSONValue::INT);
+  }
+  // Mixed-type array: a documented lenient extension (the encoder emits mixed
+  // arrays, so the decoder has to accept them)
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"m":[1,"two",true]})")));
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(j.toTOML())));
+    ASSERT_EQ(j2.getRoot()->get("m")->size(), size_t(3));
+    ASSERT_EQ(j2.getRoot()->get("m")->get(static_cast<size_t>(1))->getString(), std::string("two"));
+  }
   // Empty object
   {
     asvJSON j;
@@ -13183,6 +13214,63 @@ key = "value" # inline comment)")));
     ASSERT_EQ(std::string(arr->get(static_cast<size_t>(0))->get("physical")->get("color")->getString()), "red");
     ASSERT_EQ(arr->get(static_cast<size_t>(0))->get("varieties")->size(), size_t(2));
     ASSERT_EQ(arr->get(static_cast<size_t>(1))->get("name")->getString(), std::string("banana"));
+  }
+  // A subtable header under a NEW array-of-tables element is not a redefinition:
+  // every reference to an array of tables resolves to the most recent element.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("[[items]]\n[items.s]\nx = 1\n[[items]]\n[items.s]\ny = 2")));
+    auto arr = j.getRoot()->get("items");
+    ASSERT_EQ(arr->size(), size_t(2));
+    ASSERT_EQ(arr->get(static_cast<size_t>(0))->get("s")->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(arr->get(static_cast<size_t>(1))->get("s")->get("y")->getInt(), int64_t(2));
+    ASSERT(arr->get(static_cast<size_t>(0))->get("s")->get("y") == nullptr);
+    // the same header twice inside ONE element is still a redefinition
+    asvJSON k;
+    ASSERT(!k.fromTOML(std::string_view("[a.b]\nx = 1\n[a.b]\ny = 2")));
+    asvJSON m;
+    ASSERT(!m.fromTOML(std::string_view("[[a]]\n[a.b]\nx = 1\n[a.b]\ny = 2")));
+  }
+  // A '#' inside a multi-line string is content, not a comment -- including on
+  // the opening line, where the quote run has an even length
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("key = \"\"\"abc\" # comment\ncontinues\"\"\"\n")));
+    ASSERT_EQ(std::string(j.getString("key")), std::string("abc\" # comment\ncontinues"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("key = '''a' # keep\nb'''\n")));
+    ASSERT_EQ(std::string(j.getString("key")), std::string("a' # keep\nb"));
+  }
+  // ... and inside a multi-line string nested in a one-line array
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("a = [\"\"\"x # y\"\"\", 2]")));
+    ASSERT_EQ(j.getRoot()->get("a")->size(), size_t(2));
+    ASSERT_EQ(std::string(j.getRoot()->get("a")->get(size_t(0))->getString()), std::string("x # y"));
+  }
+  // A real comment after a closed multi-line string is still stripped
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("key = \"\"\"a\"\"\" # dropped\n")));
+    ASSERT_EQ(std::string(j.getString("key")), std::string("a"));
+  }
+  // A '#' inside a one-line inline table is a comment that swallows the '}',
+  // leaving the table unterminated -- per spec that is an error, and the
+  // parser rejects it. A comment AFTER the closing brace is fine.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = {b = 1 # c}")));
+    asvJSON k;
+    ASSERT(k.fromTOML(std::string_view("a = {b = 1} # c")));
+    ASSERT_EQ(k.getRoot()->get("a")->get("b")->getInt(), int64_t(1));
+    // A comment inside a MULTI-line inline table is accepted (documented
+    // leniency: TOML 1.0 allows no newline in an inline table at all)
+    asvJSON m;
+    ASSERT(m.fromTOML(std::string_view("a = { b = 1, # c\n d = 2 }")));
+    ASSERT_EQ(m.getRoot()->get("a")->get("b")->getInt(), int64_t(1));
+    ASSERT_EQ(m.getRoot()->get("a")->get("d")->getInt(), int64_t(2));
   }
   // Appending to a statically-defined array is an error
   {
@@ -27012,8 +27100,9 @@ TEST(testReauditRegression) {
 		(void)j.fromProtobufText("{a:[;]}"); // must complete promptly
 		ASSERT(true);
 	}
-	// TOML pretty: array-of-objects with same-named subtables round-trips via
-	// the inline fallback instead of emitting duplicate [path.sub] headers.
+	// TOML pretty: array-of-objects with same-named subtables uses the repeated
+	// [path.sub] header form (legal: an AoT reference resolves to the latest
+	// element) and still round-trips.
 	{
 		asvJSON j;
 		ASSERT(j.parse(R"({"items":[{"s":{"x":1}},{"s":{"y":2}}]})"));
