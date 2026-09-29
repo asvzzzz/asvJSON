@@ -11508,6 +11508,318 @@ TEST(testProtobufAuditFixesRound2) {
 	}
 }
 
+TEST(testProtobufAuditFixesRound3) {
+	// 1. Schema-driven scalar typing: only lossless widenings are accepted.
+	// protoEncodeScalar used to read val->dbl for every non-INT value, so a
+	// STRING/OBJECT/NULL/BINARY node for an int32 field silently encoded 0 (and
+	// a NULL or STRING bool encoded false) -- data the caller never asked to
+	// drop. The same rejection the string/bytes/message fields already had now
+	// applies to the numeric ones.
+	{
+		auto expectThrow = [](const std::string& schema, std::unique_ptr<asvJSONValue> val) {
+			asvJSON j;
+			j.parse(std::string("{}"));
+			j.setValue("v", std::move(val));
+			try { (void)j.toProtobuf(schema); }
+			catch (const asvJSONError&) { return; }
+			throw std::runtime_error("expected asvJSONError for a scalar type mismatch");
+		};
+		const std::string i32 = R"({"v":{"id":1,"type":"int32"}})";
+		expectThrow(i32, asvJSONValue::makeString("abc"));
+		expectThrow(i32, asvJSONValue::makeNull());
+		expectThrow(i32, asvJSONValue::makeBinary(nullptr, 0));
+		expectThrow(i32, asvJSONValue::makeObject());
+		// A DOUBLE only converts when it really is an exact integer: the old
+		// static_cast wrote 1 for 1.5 and was undefined for NaN/inf/huge values.
+		expectThrow(i32, asvJSONValue::makeDouble(1.5));
+		expectThrow(i32, asvJSONValue::makeDouble(1e300));
+		expectThrow(i32, asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+		expectThrow(i32, asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+		expectThrow(R"({"v":{"id":1,"type":"float"}})", asvJSONValue::makeString("1.5"));
+		expectThrow(R"({"v":{"id":1,"type":"bool"}})", asvJSONValue::makeInt(2));
+		expectThrow(R"({"v":{"id":1,"type":"bool"}})", asvJSONValue::makeString("true"));
+		// "enum" keeps its own name in the schema so the error names it, and a
+		// symbolic name has no mapping (the schema carries no name table).
+		expectThrow(R"({"v":{"id":1,"type":"enum"}})", asvJSONValue::makeString("RED"));
+		// An unknown or missing field type is a schema error, not a varint guess.
+		expectThrow(R"({"v":{"id":1,"type":"sfixed128"}})", asvJSONValue::makeInt(1));
+		expectThrow(R"({"v":{"id":1}})", asvJSONValue::makeInt(1));
+	}
+	// The widenings that ARE lossless keep working.
+	{
+		const std::string schema = R"({"i":{"id":1,"type":"int64"},"f":{"id":2,"type":"float"},
+			"b":{"id":3,"type":"bool"},"bf":{"id":4,"type":"bool"},"d":{"id":5,"type":"double"}})";
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("i", asvJSONValue::makeDouble(7.0));
+		j.setValue("f", asvJSONValue::makeInt(3));
+		j.setValue("b", asvJSONValue::makeInt(0));
+		j.setValue("bf", asvJSONValue::makeInt(1));
+		j.setValue("d", asvJSONValue::makeInt(5));
+		auto buf = j.toProtobuf(schema);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size(), schema));
+		ASSERT(j2.isInt("i") && j2.getInt("i") == int64_t(7));
+		ASSERT(j2.getDouble("f") == 3.0);
+		ASSERT_EQ(j2.getBool("b"), false);
+		ASSERT_EQ(j2.getBool("bf"), true);
+		ASSERT(j2.getDouble("d") == 5.0);
+	}
+	// A BOOL in an integer field is the 0/1 it names.
+	{
+		const std::string schema = R"({"n":{"id":1,"type":"int32"}})";
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("n", asvJSONValue::makeBool(true));
+		auto buf = j.toProtobuf(schema);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size(), schema));
+		ASSERT(j2.isInt("n") && j2.getInt("n") == int64_t(1));
+	}
+	// 2. "enum" is carried as its integer ordinal and decodes back as an INT.
+	{
+		const std::string schema = R"({"e":{"id":1,"type":"enum"}})";
+		asvJSON j;
+		j.parse(std::string(R"({"e":2})"));
+		auto buf = j.toProtobuf(schema);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size(), schema));
+		ASSERT(j2.isInt("e"));
+		ASSERT_EQ(j2.getInt("e"), int64_t(2));
+	}
+	// 3. A nested array is not representable in the schema-less wire format and
+	// used to be dropped by the element switch's default branch, turning
+	// {"a":[[1,2]]} into {"a":[]}. It now throws instead.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":[[1,2]]})"));
+		bool threw = false;
+		try { (void)j.toProtobuf(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"m":{"a":[[1]]}})"));
+		bool threw = false;
+		try { (void)j.toProtobuf(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// A non-object element of a top-level ARRAY root is still skipped (the
+	// array-root wrapper holds submessages only), as documented.
+	{
+		asvJSON j;
+		j.parse(std::string("[[1,2]]"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT(j2.getRoot()->arr->empty());
+	}
+	// 4. An untyped length-delimited payload is a sub-message or BINARY, never a
+	// STRING (the file header used to promise a string outcome the code could
+	// not produce). A mixed array keeps that documented shape.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"k":[1,"ab"]})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* arr = j2.getRoot()->get("k");
+		ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(arr->arr->size(), size_t(2));
+		ASSERT(arr->arr->at(1)->type == asvJSONValue::BINARY);
+	}
+	// 5. EXTENSION keeps its type byte through the schema-less wire round-trip
+	// (the name map now records it), while a BINARY of the same bytes still
+	// decodes as BINARY.
+	{
+		const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("ext", asvJSONValue::makeExtension(7, payload, sizeof(payload)));
+		j.setValue("bin", asvJSONValue::makeBinary(payload, sizeof(payload)));
+		j.setValue("zero", asvJSONValue::makeExtension(0, payload, 2));
+		j.setValue("neg", asvJSONValue::makeExtension(-3, payload, 1));
+		j.setValue("empty", asvJSONValue::makeExtension(9, nullptr, 0));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* e = j2.getRoot()->get("ext");
+		ASSERT(e != nullptr && e->type == asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(e->ext_type), 7);
+		ASSERT(e->bin_data == std::vector<uint8_t>(payload, payload + sizeof(payload)));
+		auto* b = j2.getRoot()->get("bin");
+		ASSERT(b != nullptr && b->type == asvJSONValue::BINARY);
+		ASSERT(b->bin_data == e->bin_data);
+		auto* z = j2.getRoot()->get("zero");
+		ASSERT(z != nullptr && z->type == asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(z->ext_type), 0);
+		ASSERT_EQ(z->bin_data.size(), size_t(2));
+		auto* n = j2.getRoot()->get("neg");
+		ASSERT(n != nullptr && n->type == asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(n->ext_type), -3);
+		auto* em = j2.getRoot()->get("empty");
+		ASSERT(em != nullptr && em->type == asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(em->ext_type), 9);
+		ASSERT_EQ(em->bin_data.size(), size_t(0));
+	}
+	// A repeated EXTENSION array keeps the type on every element.
+	{
+		const uint8_t payload[] = {0x01, 0x02};
+		asvJSON j;
+		j.parse(std::string("{}"));
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeExtension(4, payload, 2));
+		arr->arr->push_back(asvJSONValue::makeExtension(4, payload, 1));
+		j.setValue("a", std::move(arr));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* a = j2.getRoot()->get("a");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->arr->size(), size_t(2));
+		for (size_t i = 0; i < a->arr->size(); i++) {
+			ASSERT(a->arr->at(i)->type == asvJSONValue::EXTENSION);
+			ASSERT_EQ(static_cast<int>(a->arr->at(i)->ext_type), 4);
+		}
+		ASSERT_EQ(a->arr->at(0)->bin_data.size(), size_t(2));
+		ASSERT_EQ(a->arr->at(1)->bin_data.size(), size_t(1));
+	}
+	// 6. Text format: an array of messages with a trailing unwritable element
+	// used to keep the comma it had already emitted, producing "},\n]".
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		auto arr = asvJSONValue::makeArray();
+		auto m = asvJSONValue::makeObject();
+		m->obj->emplace("x", asvJSONValue::makeInt(1));
+		arr->arr->push_back(std::move(m));
+		arr->arr->push_back(nullptr);
+		j.setValue("arr", std::move(arr));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find(",\n]") == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* a = j2.getRoot()->get("arr");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->arr->size(), size_t(1));
+		ASSERT(a->arr->at(0)->get("x") != nullptr && a->arr->at(0)->get("x")->num == 1);
+	}
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":[{"x":1},null,{"x":2}]})"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find(",\n]") == std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* a = j2.getRoot()->get("arr");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->arr->size(), size_t(2));
+		ASSERT(a->arr->at(1)->get("x") != nullptr && a->arr->at(1)->get("x")->num == 2);
+	}
+	// The normal bracketed message list is unchanged: separators only between
+	// written elements, still one sub-message per element.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"arr":[{"x":1},{"x":2},{"x":3}]})"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* a = j2.getRoot()->get("arr");
+		ASSERT(a != nullptr && a->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(a->arr->size(), size_t(3));
+		ASSERT(a->arr->at(2)->get("x") != nullptr && a->arr->at(2)->get("x")->num == 3);
+	}
+	// 7. A signed hex/octal literal at exactly INT64_MIN is the minimum, not an
+	// overflow literal: the magnitude check cannot compare 2^63 with INT64_MAX.
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("h: -0x8000000000000000\n"));
+		ASSERT(j.isInt("h"));
+		ASSERT_EQ(j.getInt("h"), std::numeric_limits<int64_t>::min());
+	}
+	{
+		// 0o1000000000000000000000 = 2^63, written with the leading-zero octal
+		// form the parser recognizes.
+		asvJSON j;
+		ASSERT(j.fromProtobufText("o: -01000000000000000000000\n"));
+		ASSERT(j.isInt("o"));
+		ASSERT_EQ(j.getInt("o"), std::numeric_limits<int64_t>::min());
+	}
+	// A magnitude beyond the minimum is still preserved as an exact literal.
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("h: -0x8000000000000001\n"));
+		auto* v = j.getRoot()->get("h");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+		ASSERT(v->str_data == "-0x8000000000000001");
+	}
+	// 8. A bracketed (extension-style) field name may contain ']' and '\':
+	// both are escaped by the writer and unescaped by the parser.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a]b":1,"c\\d":2})"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("[a\\]b]: 1") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.isInt("a]b") && j2.getInt("a]b") == int64_t(1));
+		ASSERT(j2.isInt("c\\d") && j2.getInt("c\\d") == int64_t(2));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("[a\\]b]: 7\n[plain]: 8\n"));
+		ASSERT(j.isInt("a]b") && j.getInt("a]b") == int64_t(7));
+		ASSERT(j.isInt("plain") && j.getInt("plain") == int64_t(8));
+	}
+	// 9. A NULL root has no text representation: toProtobufText() used to return
+	// a bare "\n", a document fromProtobufText() then rejects.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string("null")));
+		std::string text = j.toProtobufText();
+		ASSERT(text.empty());
+		asvJSON j2;
+		ASSERT(!j2.fromProtobufText(text));
+	}
+	// A null field inside a document is still skipped, and the rest survives.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":null,"b":1})"));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("a:") == std::string::npos);
+		ASSERT(text.find("b: 1") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->get("b") != nullptr);
+		ASSERT_EQ(j2.getInt("b"), int64_t(1));
+	}
+	// 10. A repeated schema field given a non-array value is encoded as one
+	// element and decodes as a one-element array (lossless both ways).
+	{
+		const std::string schema = R"({"v":{"id":1,"type":"int32","repeated":true}})";
+		asvJSON j;
+		j.parse(std::string(R"({"v":5})"));
+		auto buf = j.toProtobuf(schema);
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size(), schema));
+		auto* v = j2.getRoot()->get("v");
+		ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(v->arr->size(), size_t(1));
+		ASSERT_EQ(v->arr->at(0)->num, int64_t(5));
+		// The array form is unaffected.
+		asvJSON j3;
+		j3.parse(std::string(R"({"v":[5,6]})"));
+		auto buf3 = j3.toProtobuf(schema);
+		asvJSON j4;
+		ASSERT(j4.fromProtobuf(buf3.data(), buf3.size(), schema));
+		auto* v3 = j4.getRoot()->get("v");
+		ASSERT(v3 != nullptr && v3->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(v3->arr->size(), size_t(2));
+		ASSERT_EQ(v3->arr->at(1)->num, int64_t(6));
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
@@ -28190,6 +28502,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufExtras);
 	RUN(testProtobufAuditFixes);
 	RUN(testProtobufAuditFixesRound2);
+	RUN(testProtobufAuditFixesRound3);
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);

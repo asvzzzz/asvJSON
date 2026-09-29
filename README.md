@@ -798,6 +798,14 @@ Protobuf features:
 - **Static helpers**: `protobufFromString()` / `stringFromProtobuf()` for JSON string <-> binary conversion
 - **Text format**: human-readable `key: value` representation with nested messages and arrays
 
+Schema-driven typing is strict: a field accepts only the value type it names, plus the widenings that lose nothing. An `int32`/`int64`/`sint*` field takes an INT, a BOOL as 0/1, or a DOUBLE that is exactly an in-range integer (no fractional part, no NaN/inf, within bounds); a `float`/`double`/`fixed*` field takes any numeric value; a `bool` field takes a BOOL or a numeric 0/1. A STRING, NULL, BINARY, EXTENSION, OBJECT or ARRAY in a numeric field -- and the reverse -- throws `asvJSONError` naming the field, instead of silently encoding 0 or an empty field. `enum` is carried as its integer ordinal (symbolic names have no mapping, as the schema carries no name table) and decodes back as an INT.
+
+Documented limitations:
+- **Repeated scalar**: a repeated schema field given a scalar is encoded as a single element and decodes as a one-element array.
+- **Nested arrays**: not representable in the schema-less wire format (the name map records one type code per field, not per element). `toProtobuf()` throws rather than dropping the sub-array.
+- **Untyped LEN payloads**: a length-delimited value of unknown type decodes as a sub-message or a BINARY, never a STRING.
+- **`EXTENSION` type byte**: preserved through the schema-less round-trip via the name map, for a scalar field and for an array whose elements are all extensions of the same type. A mixed-type extension array decodes as BINARY.
+
 ### TOML
 
 TOML (Tom's Obvious Minimal Language) is a configuration file format designed for readability. The library supports full round-trip serialization and parsing.

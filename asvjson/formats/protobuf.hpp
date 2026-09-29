@@ -6,7 +6,12 @@
 // - NULL values are not serialized by the text format (protoTextSerializeVal
 //   skips them); a toProtobufText()/fromProtobufText() round-trip drops nulls.
 //   A null array element is skipped without leaving a separator behind, so
-//   [1, null, 2] is written as [1, 2] (valid text), never as [1, , 2].
+//   [1, null, 2] is written as [1, 2] (valid text), never as [1, , 2] -- the
+//   same holds for the bracketed array-of-messages form, whose trailing comma
+//   is placed between written elements only. A NULL root has no text
+//   representation at all: toProtobufText() returns an empty string for it (a
+//   bare newline would parse back as an empty document), which fromProtobufText()
+//   then rejects.
 // - A JSON-driven schema must give every field an integer "id"; a field without
 //   one throws asvJSONError instead of being dropped from the schema silently.
 // - Protobuf groups (wire types 3/4) are deprecated and not supported; a
@@ -14,20 +19,49 @@
 // - Arrays with mixed element types are not faithfully representable in the
 //   schema-less wire format: they are marked with the unknown type code "A",
 //   and each element is then decoded purely by its wire type (varint -> int,
-//   64/32-bit fixed -> int built from the raw bits, length-delimited -> string,
-//   bytes or a sub-message). Only the length-delimited case is a real
-//   heuristic, so a double element of a mixed array comes back as an integer
-//   carrying its IEEE-754 bits rather than as garbage: the type is not
-//   recovered, and no double/int guessing is attempted.
+//   64/32-bit fixed -> int built from the raw bits, length-delimited -> a
+//   sub-message when the payload parses as one, otherwise BINARY). Only the
+//   length-delimited case is a real heuristic, so a double element of a mixed
+//   array comes back as an integer carrying its IEEE-754 bits rather than as
+//   garbage: the type is not recovered, and no double/int guessing is
+//   attempted. (A length-delimited element of an UNKNOWN type never becomes a
+//   STRING -- an untyped LEN is a sub-message or BINARY, never text.)
+// - A nested array (an ARRAY element of an array) has no protobuf counterpart in
+//   the schema-less wire format: there is no per-element type tag to tell a
+//   length-delimited sub-array from a string or a sub-message. toProtobuf()
+//   throws asvJSONError for it rather than dropping the element silently; use a
+//   message (OBJECT) with repeated fields, or the text format, which supports
+//   nested arrays. Non-object elements of a top-level ARRAY root are skipped
+//   (see the array-root wrapper below).
 // - Text-format integer literals accept C-style forms (0x.. hex and leading-0
-//   octal); unpaired \u surrogate escapes are replaced with U+FFFD.
+//   octal), including the signed minimum (-0x8000000000000000 /
+//   -01000000000000000000000, which is INT64_MIN rather than an overflow
+//   literal); unpaired \u surrogate escapes are replaced with U+FFFD.
 // - Field numbers are limited to 2^29-1; malformed varints (unterminated or a
 //   10th byte carrying bits beyond the low bit) are rejected. A schema-less
 //   LEN payload that merely *starts* like a sub-message but then fails to
 //   parse falls back to the binary branch instead of aborting the decode.
+// - A key that is not a valid protobuf identifier is written in the text format
+//   in brackets, with ']' and '\' escaped inside the name, so a name containing
+//   a bracket round-trips.
 // - A schema-driven string/bytes/message field whose JSON value has a
 //   different type throws asvJSONError from toProtobuf() rather than silently
-//   encoding an empty field.
+//   encoding an empty field. The scalar fields (int*, uint*, sint*, fixed*,
+//   sfixed*, float, double, bool, enum) follow the same rule: only lossless
+//   widenings are accepted -- INT for any number, BOOL (0/1) for any number,
+//   BOOL for bool, INT/DOUBLE 0 or 1 for bool, and a DOUBLE for an integer
+//   field only when it is an exact in-range integer. Any other value (STRING,
+//   OBJECT, ARRAY, NULL, BINARY, ...) throws, and so does a DOUBLE that cannot
+//   be converted (fractional, NaN, infinite, out of int64 range) or an unknown
+//   /missing field type. A negative INT in an unsigned field keeps its
+//   two's-complement bits (protobuf has no unsigned JSON mapping, and the
+//   decoder reads the bits back as the same value).
+// - "enum" is carried as its integer ordinal (int32 on the wire) and decodes
+//   back as an INT. The JSON-driven schema has no name table, so a symbolic
+//   enum name ("RED") is not accepted: a STRING value for an enum field throws.
+// - A schema field marked "repeated" whose JSON value is not an ARRAY is
+//   encoded as a single element and decodes as a one-element array, which
+//   round-trips in both directions.
 // - A top-level JSON array is wrapped into a synthetic message (marker field
 //   19001 + repeated field 1) so the elements survive a schema-less round-trip
 //   intact; non-object array elements cannot be represented in the wrapper and
@@ -35,7 +69,12 @@
 //   map and the array-root marker) must not be used for user data.
 // - BINARY/EXTENSION values are serialized as quoted strings by the text
 //   format, so a toProtobufText()/fromProtobufText() round-trip turns them into
-//   STRING (the raw type is lost).
+//   STRING (the raw type is lost). The schema-less WIRE format keeps them apart:
+//   an EXTENSION records its type byte in the name map, so it decodes back as
+//   an EXTENSION with the same ext_type, while a BINARY decodes as BINARY. The
+//   name map holds one type byte per field, so an ARRAY of extensions qualifies
+//   only when every element is an EXTENSION of the same type; a mixed one
+//   decodes as BINARY.
 // - Surface JSON values composed only of the sign of a number ("-", "+") are
 //   rejected on parse instead of being coerced to 0.
 // - toProtobuf() only encodes OBJECT and ARRAY roots. A scalar root (STRING,
@@ -79,6 +118,11 @@ inline constexpr int protoArrayRootFieldNum = 19001;
 
 // Largest legal protobuf field number (2^29-1 per the spec).
 inline constexpr uint64_t protoMaxFieldNum = (1ULL << 29) - 1;
+
+// Sentinel for "this field carries no extension type byte". Chosen outside the
+// int8_t range of asvJSONValue::ext_type so that EXTENSION(0) -- a perfectly
+// valid node -- is still distinguishable from a BINARY of the same bytes.
+inline constexpr int protoNoExtType = 256;
 
 inline void protoWriteVarint(std::vector<uint8_t>& out, uint64_t val) {
   while (val >= 0x80) {
@@ -184,9 +228,7 @@ inline ProtoField protoParseOneField(const asvJSONValue* val) {
   if (r && r->type == asvJSONValue::BOOL_VAL) f.repeated = r->flag;
   auto* p = val->get("packed");
   if (p && p->type == asvJSONValue::BOOL_VAL) f.packed = p->flag;
-  if (f.type == "enum") {
-    f.type = "int32";
-  } else if (f.type == "message") {
+  if (f.type == "message") {
     auto* sub = val->get("fields");
     if (sub && sub->type == asvJSONValue::OBJECT) {
       f.schema = std::make_shared<ProtoSchema>();
@@ -200,6 +242,10 @@ inline ProtoField protoParseOneField(const asvJSONValue* val) {
       }
     }
   }
+  // "enum" is kept as its own type name (it encodes as a varint like int32) so
+  // that a type error on an enum field names "enum" instead of the int32 it is
+  // aliased to; the schema carries no name table, so a symbolic enum name is
+  // never accepted and the value always decodes back as an INT.
   return f;
 }
 
@@ -277,6 +323,25 @@ inline std::string protoSchemaLessTypeCode(const asvJSONValue* v) {
   }
 }
 
+// The EXTENSION type byte of a field for the name map, or protoNoExtType when
+// the field carries none. An array qualifies only if every element is an
+// EXTENSION with the same type byte: the map holds one "x" per field, and a
+// mixed array decodes to the same type for all of them.
+inline int protoFieldExtType(const asvJSONValue* v) {
+  if (!v) return protoNoExtType;
+  if (v->type == asvJSONValue::EXTENSION) return static_cast<int>(v->ext_type);
+  if (v->type != asvJSONValue::ARRAY || !v->arr) return protoNoExtType;
+  int t = protoNoExtType;
+  for (const auto& e : *v->arr) {
+    if (!e) continue;
+    if (e->type != asvJSONValue::EXTENSION) return protoNoExtType;
+    int et = static_cast<int>(e->ext_type);
+    if (t == protoNoExtType) t = et;
+    else if (t != et) return protoNoExtType;
+  }
+  return t;
+}
+
 // Map a name-map type code back to a protobuf wire type string and repeated flag.
 inline std::string protoLessCodeToType(const std::string& code, bool& repeated) {
   repeated = false;
@@ -294,38 +359,76 @@ inline std::string protoLessCodeToType(const std::string& code, bool& repeated) 
   }
 }
 
+// Scalar conversion for a schema-driven field. The declared type picks the wire
+// encoding, so a JSON value of a different type must be converted on purpose:
+// the encoder used to read val->dbl for every non-INT value, which silently
+// wrote 0 (or the bits of an unrelated union member) for a STRING, OBJECT,
+// NULL, BINARY or DATETIME node. Only lossless widenings are accepted now, and
+// anything else throws like the string/bytes/message fields already do.
+inline double protoScalarToDouble(const asvJSONValue* val, const std::string& type) {
+  switch (val->type) {
+    case asvJSONValue::DOUBLE: return val->dbl;
+    case asvJSONValue::INT: return static_cast<double>(val->num);
+    case asvJSONValue::BOOL_VAL: return val->flag ? 1.0 : 0.0;
+    default: throw asvJSONError("Protobuf encode: " + type + " field does not hold a number");
+  }
+}
+
+inline int64_t protoScalarToInt(const asvJSONValue* val, const std::string& type) {
+  switch (val->type) {
+    case asvJSONValue::INT: return val->num;
+    case asvJSONValue::BOOL_VAL: return val->flag ? 1 : 0;
+    case asvJSONValue::DOUBLE: {
+      double d = val->dbl;
+      // A fractional, non-finite or out-of-int64-range double has no integer
+      // reading: the old static_cast silently produced 1 for 1.5 and was
+      // undefined for NaN/inf/huge values.
+      if (!std::isfinite(d) || d != std::trunc(d) ||
+          d < -9223372036854775808.0 || d >= 9223372036854775808.0)
+        throw asvJSONError("Protobuf encode: " + type + " field requires an integer value");
+      return static_cast<int64_t>(d);
+    }
+    default: throw asvJSONError("Protobuf encode: " + type + " field does not hold a number");
+  }
+}
+
 inline void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val, const std::string& type) {
   if (!val) return;
-  if (type == "int32" || type == "int64") {
-    int64_t n = (val->type == asvJSONValue::INT) ? val->num : static_cast<int64_t>(val->dbl);
-    protoWriteVarint(out, static_cast<uint64_t>(n));
-  } else if (type == "uint32" || type == "uint64") {
-    uint64_t n = (val->type == asvJSONValue::INT) ? static_cast<uint64_t>(val->num) : static_cast<uint64_t>(val->dbl);
-    protoWriteVarint(out, n);
-  } else if (type == "sint32" || type == "sint64") {
-    int64_t n = (val->type == asvJSONValue::INT) ? val->num : static_cast<int64_t>(val->dbl);
-    protoWriteVarint(out, protoZigZagEncode(n));
+  if (type == "int32" || type == "int64" || type == "enum" ||
+      type == "uint32" || type == "uint64" || type == "sint32" || type == "sint64") {
+    int64_t n = protoScalarToInt(val, type);
+    if (type == "sint32" || type == "sint64") protoWriteVarint(out, protoZigZagEncode(n));
+    else protoWriteVarint(out, static_cast<uint64_t>(n));
   } else if (type == "fixed64" || type == "sfixed64") {
-    int64_t n = (val->type == asvJSONValue::INT) ? val->num : static_cast<int64_t>(val->dbl);
-    uint64_t bits = static_cast<uint64_t>(n);
+    uint64_t bits = static_cast<uint64_t>(protoScalarToInt(val, type));
     for (int i = 0; i < 8; i++) out.push_back(static_cast<uint8_t>(bits >> (i * 8)));
   } else if (type == "double") {
-    double d = (val->type == asvJSONValue::DOUBLE) ? val->dbl : static_cast<double>(val->num);
+    double d = protoScalarToDouble(val, type);
     uint64_t bits; std::memcpy(&bits, &d, sizeof(bits));
     for (int i = 0; i < 8; i++) out.push_back(static_cast<uint8_t>(bits >> (i * 8)));
   } else if (type == "fixed32" || type == "sfixed32") {
-    int32_t n = (val->type == asvJSONValue::INT) ? static_cast<int32_t>(val->num) : static_cast<int32_t>(val->dbl);
-    uint32_t bits = static_cast<uint32_t>(n);
+    // The int32 round-trip keeps the two's-complement bits of a value that does
+    // not fit, which is exactly what the decoder reads back for sfixed32.
+    uint32_t bits = static_cast<uint32_t>(static_cast<int32_t>(protoScalarToInt(val, type)));
     for (int i = 0; i < 4; i++) out.push_back(static_cast<uint8_t>(bits >> (i * 8)));
   } else if (type == "float") {
-    float f = (val->type == asvJSONValue::DOUBLE) ? static_cast<float>(val->dbl) : static_cast<float>(val->num);
+    float f = static_cast<float>(protoScalarToDouble(val, type));
     uint32_t bits; std::memcpy(&bits, &f, sizeof(bits));
     for (int i = 0; i < 4; i++) out.push_back(static_cast<uint8_t>(bits >> (i * 8)));
   } else if (type == "bool") {
-    out.push_back((val->type == asvJSONValue::BOOL_VAL && val->flag) ? 1 : 0);
+    bool b;
+    if (val->type == asvJSONValue::BOOL_VAL) b = val->flag;
+    else {
+      double d = protoScalarToDouble(val, type);
+      if (d != 0.0 && d != 1.0)
+        throw asvJSONError("Protobuf encode: bool field requires true, false, 0 or 1");
+      b = (d != 0.0);
+    }
+    out.push_back(b ? 1 : 0);
   } else {
-    int64_t n = (val->type == asvJSONValue::INT) ? val->num : 0;
-    protoWriteVarint(out, static_cast<uint64_t>(n));
+    // An unknown or missing field type is a schema error: guessing a varint
+    // wrote a value the caller never asked for (and 0 for a non-INT node).
+    throw asvJSONError("Protobuf encode: unsupported field type \"" + type + "\"");
   }
 }
 
@@ -412,7 +515,19 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         }
         nm += "\",\"t\":\"";
         nm += protoSchemaLessTypeCode(fields[i].val);
-        nm += "\"}";
+        nm += "\"";
+        // An EXTENSION stores its type byte in the name map ("x"), so the
+        // decoder rebuilds an EXTENSION instead of a bare BINARY of the same
+        // bytes. A BINARY gets no "x" and decodes as BINARY, as before. The
+        // same applies to an array of EXTENSIONs, which the element writer
+        // emits as repeated length-delimited fields under this one name.
+        // The "x" value is a number, so it goes after the type code is closed.
+        int fieldExt = protoFieldExtType(fields[i].val);
+        if (fieldExt != protoNoExtType) {
+          nm += ",\"x\":";
+          nm += std::to_string(fieldExt);
+        }
+        nm += "}";
       }
       nm += '}';
       protoWriteTag(out, protoNameMapFieldNum, 2);
@@ -483,6 +598,14 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
                 { auto bin = elem->getBinary();
                   protoWriteVarint(out, bin.size()); out.insert(out.end(), bin.begin(), bin.end()); }
                 break;
+              case asvJSONValue::ARRAY:
+                // A nested array has no wire counterpart: the name map records
+                // one type code per field, not per element, so a
+                // length-delimited sub-array could not be told from a string or
+                // a sub-message on the way back. The old default: break dropped
+                // the element without a word, turning {"a":[[1,2]]} into
+                // {"a":[]}; throw so the caller sees the data it cannot encode.
+                throw asvJSONError("Protobuf encode: nested arrays are not representable in the schema-less wire format");
               default: break;
             }
           }
@@ -551,12 +674,14 @@ inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
 
 inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
                                                            int wireType, const std::string& type,
-                                                           const ProtoSchema* schema, int depth = 0);
+                                                           const ProtoSchema* schema, int depth = 0,
+                                                           int extType = protoNoExtType);
 
 // Name/type map embedded at the reserved schema-less field number.
 struct ProtoLessMap {
   std::unordered_map<int, std::string> names; // fnum -> JSON key
   std::unordered_map<int, std::string> types; // fnum -> type code
+  std::unordered_map<int, int> extTypes;      // fnum -> EXTENSION type byte
   bool present = false;
 };
 
@@ -601,8 +726,10 @@ inline ProtoLessMap protoExtractLessMap(const uint8_t* data, size_t begin, size_
     } else if (nameVal->type == asvJSONValue::OBJECT && nameVal->obj) {
       auto* nv = nameVal->get("n");
       auto* tv = nameVal->get("t");
+      auto* xv = nameVal->get("x");
       if (nv && nv->type == asvJSONValue::STRING) m.names[fnum] = nv->str_data;
       if (tv && tv->type == asvJSONValue::STRING) m.types[fnum] = tv->str_data;
+      if (xv && xv->type == asvJSONValue::INT) m.extTypes[fnum] = static_cast<int>(xv->num);
     }
   }
   m.present = true;
@@ -635,6 +762,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
     std::string fname = std::to_string(fnum);
     std::string ftype;
     bool repeated = false;
+    int extType = protoNoExtType;
     const ProtoSchema* subSchema = nullptr;
     if (schema) {
       auto it = schema->numberToName.find(fnum);
@@ -653,9 +781,11 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
         auto nit = less.names.find(fnum);
         if (nit != less.names.end()) fname = nit->second;
       }
+      auto xit = less.extTypes.find(fnum);
+      if (xit != less.extTypes.end()) extType = xit->second;
     }
     size_t beforePos = pos;
-    auto val = protoDecodeWireValue(data, end, pos, wt, ftype, subSchema, depth + 1);
+    auto val = protoDecodeWireValue(data, end, pos, wt, ftype, subSchema, depth + 1, extType);
     if (!val) { if (pos == beforePos) pos++; continue; }
     if (repeated) {
       auto* existing = obj->get(fname);
@@ -701,7 +831,8 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
 
 inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
                                                            int wireType, const std::string& type,
-                                                           const ProtoSchema* schema, int depth) {
+                                                           const ProtoSchema* schema, int depth,
+                                                           int extType) {
   switch (wireType) {
     case 0: {
       uint64_t raw = protoReadVarint(data, size, pos);
@@ -759,8 +890,15 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
       } else if (type == "bytes" || type == "binary" || type.empty()) {
         if (static_cast<size_t>(len) > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("Protobuf binary field exceeds MAX_STRING_LEN");
         size_t start = end - static_cast<size_t>(len);
-        auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
         pos = end;
+        // The name map told us this LEN was written from an EXTENSION node, so
+        // rebuild one with its type byte instead of a bare BINARY.
+        if (extType != protoNoExtType) {
+          auto ev = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data + start, static_cast<size_t>(len));
+          if (!ev) throw asvJSONError("Protobuf extension field alloc failed");
+          return ev;
+        }
+        auto v = std::unique_ptr<asvJSONValue>(new(std::nothrow) asvJSONValue());
         if (!v) throw asvJSONError("Protobuf binary alloc failed");
         v->type = asvJSONValue::BINARY; v->bin_data.assign(data + start, data + end);
         return v;
@@ -1029,8 +1167,18 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
         if (v) v->raw_number = true;
         return v;
       }
-      if (ok && hv <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
-        return asvJSONValue::makeInt(neg ? -static_cast<int64_t>(hv) : static_cast<int64_t>(hv));
+      if (ok && (hv <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+                 (neg && hv == static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1)))
+        // -0x8000000000000000 is INT64_MIN, not an overflow: a magnitude check
+        // cannot compare 2^63 against INT64_MAX, so the one representable
+        // negative overflow is named explicitly instead of being kept as a
+        // raw-number literal (which encoded fine on the wire but came back as
+        // a STRING from the text parser).
+        return asvJSONValue::makeInt(neg
+          ? (hv == static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1
+               ? std::numeric_limits<int64_t>::min()
+               : -static_cast<int64_t>(hv))
+          : static_cast<int64_t>(hv));
       // Out-of-range integer: preserve the exact literal so the round-trip
       // is lossless (same convention as the decimal overflow below).
       auto v = asvJSONValue::makeString(std::move(hnum));
@@ -1093,8 +1241,13 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
         if (ov > (std::numeric_limits<uint64_t>::max() - d) / 8) { ok = false; break; }
         ov = ov * 8 + d;
       }
-      if (ok && ov <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
-        return asvJSONValue::makeInt(neg ? -static_cast<int64_t>(ov) : static_cast<int64_t>(ov));
+      if (ok && (ov <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+                 (neg && ov == static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1)))
+        return asvJSONValue::makeInt(neg
+          ? (ov == static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1
+               ? std::numeric_limits<int64_t>::min()
+               : -static_cast<int64_t>(ov))
+          : static_cast<int64_t>(ov));
       std::string onum; if (neg) onum = '-'; onum += mantissa;
       auto v = asvJSONValue::makeString(std::move(onum));
       if (v) v->raw_number = true;
@@ -1176,8 +1329,17 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
     std::string fname;
     if (c == '[') {
       pos++;
-      while (pos < text.size() && text[pos] != ']') { fname += text[pos++]; }
-      if (pos < text.size()) pos++;
+      // Bracketed (extension-style) name: the text format escapes a ']' inside
+      // the name with a backslash, so the scan must not stop at the first one
+      // it meets -- "[a]b]" used to parse as the name "a" and leave "b]" to be
+      // mistaken for a sibling field.
+      while (pos < text.size()) {
+        char nc = text[pos];
+        if (nc == '\\' && pos + 1 < text.size()) { fname += text[pos + 1]; pos += 2; continue; }
+        if (nc == ']') { pos++; break; }
+        fname += nc;
+        pos++;
+      }
     } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || (c >= '0' && c <= '9')) {
       fname = protoTextParseIdent(text, pos);
     } else break;
@@ -1256,7 +1418,17 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
     if (!protoTextSerializeVal(fv.get(), vs, indent + 1)) continue;
     for (int i = 0; i < indent + 1; i++) out += "  ";
     if (isValidProtoIdent(k)) out += k;
-    else { out += '['; out += k; out += ']'; }
+    else {
+      // Bracketed (extension-style) name: ']' ends the name for the parser, so
+      // a name containing one has to escape it, and the escape character itself
+      // with it -- "[a]b]" would otherwise be read back as the name "a".
+      out += '[';
+      for (char c : k) {
+        if (c == ']' || c == '\\') out += '\\';
+        out += c;
+      }
+      out += ']';
+    }
     if (fv->type == asvJSONValue::OBJECT) out += ' ';
     else out += ": ";
     out += vs;
@@ -1290,20 +1462,24 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
     case asvJSONValue::ARRAY: {
       if (!val->arr || val->arr->empty()) { out += "[]"; break; }
       bool allMsg = true;
-      for (const auto& e : *val->arr) if (e && e->type != asvJSONValue::OBJECT) { allMsg = false; break; }
+      for (const auto& e : *val->arr) if (!e || e->type != asvJSONValue::OBJECT) { allMsg = false; break; }
       if (allMsg) {
         // Array of messages serializes as a bracketed list so each element is a
         // distinct parsed sub-message (the bare repeated-block form was
-        // malformed and only the first element survived a round-trip).
-        out += "[\n";
-        for (size_t i = 0; i < val->arr->size(); i++) {
-          const auto& e = (*val->arr)[i];
+        // malformed and only the first element survived a round-trip). The
+        // elements are joined into a body buffer first: a separator belongs
+        // between two WRITTEN elements, so a trailing null cannot leave the
+        // invalid "},\n]" behind.
+        std::string body;
+        for (const auto& e : *val->arr) {
           if (!e) continue;
-          for (int j = 0; j < indent + 1; j++) out += "  ";
-          protoTextSerializeMsg(e.get(), out, indent + 1);
-          if (i + 1 < val->arr->size()) out += ',';
-          out += '\n';
+          if (!body.empty()) body += ",\n";
+          for (int j = 0; j < indent + 1; j++) body += "  ";
+          protoTextSerializeMsg(e.get(), body, indent + 1);
         }
+        out += "[\n";
+        out += body;
+        if (!body.empty()) out += '\n';
         for (int j = 0; j < indent; j++) out += "  ";
         out += ']';
       } else {
@@ -1360,8 +1536,30 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
 
 inline std::string asvJSON::toProtobufText() const {
   std::string out;
-  if (root) { protoTextSerializeVal(root.get(), out, 0); out += '\n'; }
+  // Only terminate the document when a value was actually written: a NULL root
+  // has no text representation, and a bare "\n" would be a document that
+  // fromProtobufText() then rejects.
+  if (root && protoTextSerializeVal(root.get(), out, 0)) out += '\n';
   return out;
+}
+
+// True when the '[' at `pos` opens a bracketed (extension-style) field name
+// rather than an array: the name's closing ']' is followed by ':'. The scan
+// honours the '\' escape the writer uses inside a name, so a ']' in the name
+// itself does not end it.
+inline bool protoTextIsBracketedName(const std::string& text, size_t pos) {
+  size_t i = pos + 1;
+  while (i < text.size()) {
+    if (text[i] == '\\' && i + 1 < text.size()) { i += 2; continue; }
+    if (text[i] == ']') {
+      i++;
+      while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) i++;
+      return i < text.size() && text[i] == ':';
+    }
+    if (text[i] == '\n') return false;
+    i++;
+  }
+  return false;
 }
 
 inline bool asvJSON::fromProtobufText(const std::string& text) {
@@ -1381,28 +1579,39 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       if (!obj) return false;
       protoTextParseBody(text, pos, obj.get(), 1);
       if (obj->obj && !obj->obj->empty()) root = std::move(obj);
-    } else if (text[pos] == '[') {
+    } else if (text[pos] == '[' && !protoTextIsBracketedName(text, pos)) {
       // Top-level array. protoTextSerializeVal writes a bare "[...]" for an
       // ARRAY root, so the parser has to accept that form; without this branch
       // toProtobufText() -> fromProtobufText() failed for every array root.
+      // A '[' that opens a bracketed field name falls through to the implicit
+      // object branch below: "[a\]]: 7" is a message, not a list.
       pos++;
       auto arr = asvJSONValue::makeArray();
       if (!arr) return false;
       protoTextParseArrayBody(text, pos, arr.get(), 1);
       if (arr->arr) root = std::move(arr);
     } else {
-      // Auto-detect implicit object: identifier followed by ':'
+      // Auto-detect implicit object: a bracketed field name, or an identifier
+      // followed by ':'
       size_t save = pos;
-      std::string maybeIdent = protoTextParseIdent(text, pos);
-      protoTextSkipWS(text, pos);
-      bool isObject = !maybeIdent.empty() && pos < text.size() && text[pos] == ':';
-      pos = save;
-      if (isObject) {
+      size_t probe = pos;
+      if (protoTextIsBracketedName(text, probe)) {
+        // The name itself is consumed by protoTextParseBody; the probe only
+        // has to land on the ':' that follows the closing ']'.
+        while (probe < text.size() && text[probe] != ']') { if (text[probe] == '\\' && probe + 1 < text.size()) probe++; probe++; }
+        if (probe < text.size()) probe++;
+        protoTextSkipWS(text, probe);
+      } else {
+        if (protoTextParseIdent(text, probe).empty()) probe = save;
+        else protoTextSkipWS(text, probe);
+      }
+      if (probe < text.size() && text[probe] == ':') {
         auto obj = asvJSONValue::makeObject();
         if (!obj) return false;
         protoTextParseBody(text, pos, obj.get(), 1);
         if (obj->obj && !obj->obj->empty()) root = std::move(obj);
       } else {
+        pos = save;
         auto val = protoTextParseScalar(text, pos);
         if (val) root = std::move(val);
       }
