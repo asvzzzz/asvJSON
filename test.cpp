@@ -23925,8 +23925,10 @@ TEST(testJSONPathExtras) {
 		ASSERT(!asvJSON::isValidPath("$[99999999999999999999999999]"));
 		ASSERT(!asvJSON::isValidPath("$[?(@.a == )]"));
 		ASSERT(!asvJSON::isValidPath("$[?(@.a.match())]"));
-		ASSERT(!asvJSON::isValidPath("$[?(match('x', 'y'))]"));
 		ASSERT(!asvJSON::isValidPath("$[?(match(@.a))]"));
+		// a string literal is a legal ValueType input for match/search
+		ASSERT(asvJSON::isValidPath("$[?(match('x', 'y'))]"));
+		ASSERT(asvJSON::isValidPath("$[?(search('x', 'y'))]"));
 	}
 	// -- descendant segment with bracket selectors --
 	{
@@ -23987,6 +23989,28 @@ TEST(testJSONPathExtras) {
 		ASSERT(doc.parse(std::string_view(R"([{"a":1}])")));
 		ASSERT_EQ(doc.query("$[?(search(@.a, 'x'))]").size(), size_t(0));
 		ASSERT_EQ(doc.query("$[?(match(@.a, 'x'))]").size(), size_t(0));
+	}
+	// -- match/search accept a string literal as the input (RFC 9535 ValueType) --
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"s":"abc"},{"s":"xyz"}])")));
+		// literal input is a constant filter: the same result for every child
+		ASSERT_EQ(doc.query("$[?(match('abc', 'abc'))]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?(match('abc', 'a'))]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?(match('abc', 'z'))]").size(), size_t(0));
+		// query-path input still works alongside it
+		ASSERT_EQ(doc.query("$[?(search(@.s, 'a'))]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?(match(@.s, 'abc'))]").size(), size_t(1));
+	}
+	// -- unknown characters never silently end a query --
+	{
+		ASSERT(!asvJSON::isValidPath("$[?@.a{ ]"));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1,2,3])")));
+		ASSERT_EQ(doc.query("+").size(), size_t(0));    // was the whole root
+		asvJSON d2;
+		ASSERT(d2.parse(std::string_view(R"({"x":1})")));
+		ASSERT_EQ(d2.query("$.x{").size(), size_t(0));  // was the x member
 	}
 	// -- length() on a scalar is Nothing (not 0), so the filter is false --
 	{
@@ -24101,10 +24125,33 @@ TEST(testJSONPathValidator) {
 	}
 	{
 		asvJSON doc;
-		ASSERT(doc.parse(std::string_view(R"([{"a":1},{"a":5},{"b":2}])")));
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":1},{"a":5},{"b":2}])")));
 		ASSERT_EQ(doc.query("$[?@.a == 5]").size(), size_t(1));
-		ASSERT_EQ(doc.query("$[?(@.a) && (@.b)]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?(@.a) && (@.b)]").size(), size_t(1));
 		ASSERT_EQ(doc.query("$[?@.a]").size(), size_t(2));
+	}
+	// -- [?(...) && (...)] compound filters evaluate BOTH terms --
+	{
+		// regression: the evaluator used to drop the leading '(' of a filter,
+		// so `?(@.a) && (@.b)` silently became just `(@.a)` and matched by the
+		// first term alone
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":5,"b":6},{"a":5,"b":1},{"a":1,"b":6}])")));
+		ASSERT_EQ(doc.query("$[?(@.a == 5) && (@.b == 6)]").size(), size_t(1)); // was 2
+		ASSERT_EQ(doc.query("$[?@.a == 5 && @.b == 6]").size(), size_t(1));     // paren-free form
+		ASSERT_EQ(doc.query("$[?(@.a == 5) || (@.b == 6)]").size(), size_t(3));
+	}
+	// -- a filter may precede other comma-separated selectors in a bracket list --
+	{
+		// regression: the filter branch consumed past the ']' with
+		// skipToEndBracket(), silently dropping every selector after the comma
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"v":2},{"v":5},{"v":8}])")));
+		auto r = doc.query("$[?@.v > 3, 0]");
+		ASSERT_EQ(r.size(), size_t(3)); // filter matches {5},{8}, then index 0 adds {2}
+		ASSERT(r[0]->obj->find("v")->second->num == 5);
+		ASSERT(r[1]->obj->find("v")->second->num == 8);
+		ASSERT(r[2]->obj->find("v")->second->num == 2);
 	}
 	// -- a function used as a path segment is zero-arg: a call with an argument is not a path --
 	{
@@ -24118,6 +24165,18 @@ TEST(testJSONPathValidator) {
 		ASSERT(!asvJSON::isValidPath("$.length(@.a)"));
 		ASSERT(!asvJSON::isValidPath("$[?(@.length(@))]"));
 		ASSERT(!asvJSON::isValidPath("$[?!@.length(@.a)]"));
+		// value() as a filter operand requires exactly one NodesType argument
+		// (RFC 9535 2.4.8); zero-arg is only the path-segment identity form
+		ASSERT(!asvJSON::isValidPath("$[?value()]"));
+		ASSERT(asvJSON::isValidPath("$[?(value(@.a))]"));
+		ASSERT(asvJSON::isValidPath("$[?(value(@.a) == 5)]"));
+	}
+	{
+		// value() with no argument yields Nothing -> selects nothing
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":5},{"a":7}])")));
+		ASSERT_EQ(doc.query("$[?value()]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?(value(@.a) == 5)]").size(), size_t(1));
 	}
 	{
 		// query() is lenient, but a function segment with an argument must not

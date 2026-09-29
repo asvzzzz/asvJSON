@@ -47,6 +47,11 @@
 //     $[?(@.items.length() > 2)] are supported, a segment call with an argument
 //     ($.length(@.a), $[?(@.length(@.a))]) is not a path and is reported
 //     invalid; query() yields no result for it.
+//   - value() as a filter operand formally requires exactly one NodesType
+//     argument (RFC 9535 2.4.8): `value()` with no argument is rejected by
+//     isValidPath() and yields nothing via query(); `value(@.a)` is the correct
+//     spelling. Only the path-segment form ($.x.value(), the local extension
+//     described in the previous bullet) is a valid zero-arg identity call.
 //   - String literals follow the RFC escape rules, including \uXXXX escapes
 //     and surrogate pairs.
 //   - Slice semantics follow the RFC Normalize()/Bounds() algorithm exactly.
@@ -58,8 +63,12 @@
 //     keep the filter evaluator simple and allocation-light, not an oversight;
 //     paths that genuinely need multi-node comparison should be split into
 //     separate query() calls combined by caller code.
-//   - match()/search() use std::regex (ECMAScript), which is a superset of the
-//     RFC 9485 I-Regexp subset; patterns relying on lookahead/lookbehind or
+//   - match()/search() take two ValueType arguments per RFC 9535 2.4.6/2.4.7:
+//     the input may be a string literal (match("literal", "pattern")) or a
+//     query path, and the pattern must be a string; a non-string input or
+//     pattern yields LogicalFalse. Patterns go through std::regex
+//     (ECMAScript), which is a superset of the RFC 9485 I-Regexp subset;
+//     patterns relying on lookahead/lookbehind or
 //     backreferences will compile here even though they are not valid I-Regexps.
 //     Untrusted, hand-crafted patterns carry ReDoS risk since std::regex has no
 //     timeout - validate/reject suspiciously nested quantifiers at your boundary
@@ -359,8 +368,13 @@ public:
       if (id == "null") return {TokType::NULL_LIT, id};
       return {TokType::IDENT, id};
     }
+    // Fall-through: a character the lexer does not recognize. Emit END with
+    // ok=false so callers can distinguish a real end of input (ok=true, the
+    // buffer ran out) from a stray byte (e.g. '+', '{') that was skipped. The
+    // path grammar checks rely on this to reject garbage instead of treating
+    // it as the end of a valid query path.
     pos_++;
-    return {TokType::END, ""};
+    return {TokType::END, "", false};
   }
 
   Tok peek() {
@@ -395,6 +409,38 @@ public:
         depth--; pos_++; continue;
       }
       pos_++;
+    }
+    return false;
+  }
+
+  // Advance the raw position from just past the '?' of a filter-selector to
+  // the split point at the end of the filter expression: the ']' that closes
+  // the bracket segment (returns true) or the ',' that introduces the next
+  // selector (returns false; the caller's COMMA branch continues the list).
+  // Token-aware, so a comma inside a quoted string is a STRING token and
+  // cannot end the scan, and depth-aware over the '('...')' and '['...']'
+  // pairs a filter can contain (`max(@.a, @.b) > 2`, `@.x[1] == 3`). Garbage
+  // and end-of-input both lex to END; the byte is left in place for the
+  // caller's RBRACKET check to reject. This must not depend on the filter
+  // evaluator having consumed the whole expression: parseAnd/parseOr
+  // short-circuit, so an unevaluated trailing `&& term` cannot leave the
+  // lexer stranded mid-filter.
+  bool skipToFilterEnd() {
+    int paren = 0, brack = 0;
+    while (pos_ < src.size()) {
+      size_t save = pos_;
+      Tok t = next();
+      if (t.type == TokType::LPAREN) { paren++; continue; }
+      if (t.type == TokType::RPAREN) { if (paren > 0) paren--; continue; }
+      if (t.type == TokType::LBRACKET) { brack++; continue; }
+      if (t.type == TokType::RBRACKET) {
+        if (brack == 0) { pos_ = save; return true; }
+        brack--; continue;
+      }
+      if (t.type == TokType::COMMA && paren == 0 && brack == 0) {
+        pos_ = save; return false;
+      }
+      if (t.type == TokType::END) { pos_ = save; return false; }
     }
     return false;
   }
@@ -855,16 +901,29 @@ class JPFilterEval {
       if (lex_.peek().type == TokType::LPAREN) lex_.next();
 
       if (fn == "match" || fn == "search") {
-        const asvJSONValue* strNode = resolvePath();
+        // RFC 9535 2.4.6/2.4.7: both arguments are ValueType. The input may
+        // be a string literal (match("literal", "pattern")) or a query path;
+        // per the RFC a non-string first argument yields LogicalFalse.
+        const asvJSONValue* strNode = nullptr;
+        Tok ft = lex_.peek();
+        if (ft.type == TokType::STRING) {
+          if (!ft.ok) return hold(asvJSONValue::makeBool(false));
+          lex_.next();
+          strNode = hold(asvJSONValue::makeString(ft.val.data(), ft.val.size()));
+        } else {
+          strNode = resolvePath();
+        }
         if (lex_.peek().type == TokType::COMMA) lex_.next();
         Tok patTok = lex_.next();
-        std::string pat = patTok.val;
+        if (patTok.type != TokType::STRING || !patTok.ok) {
+          return hold(asvJSONValue::makeBool(false));
+        }
         if (lex_.peek().type == TokType::RPAREN) lex_.next();
         if (!strNode || strNode->type != asvJSONValue::STRING) {
           return hold(asvJSONValue::makeBool(false));
         }
         try {
-          std::regex re(pat);
+          std::regex re(patTok.val);
           bool res = (fn == "search")
                        ? std::regex_search(strNode->str_data, re)
                        : std::regex_match(strNode->str_data, re);
@@ -1122,19 +1181,28 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
     }
 
     else if (inner.type == TokType::QUESTION) {
+      // The filter is one item of the comma-separated selector list (RFC 9535
+      // bracketed-selection), so the lexer must STOP at the closing ']' or at
+      // the ',' introducing the next selector -- not run past it (the old
+      // skipToEndBracket() consumed both, silently dropping every selector
+      // after a filter). The whole expression is then skipped with
+      // skipToFilterEnd(), which is a standalone token-depth scan: it must not
+      // rely on the filter evaluator's final position, because parseAnd and
+      // parseOr short-circuit and may leave a trailing `&& term` unconsumed.
+      // Do not skip an immediately following '(' either: that opening paren is
+      // the start of a paren-expr and JPFilterEval::parseComparison's '('
+      // branch consumes the whole balanced group, so `?(@.a) && (@.b)`
+      // evaluates both terms. A malformed filter (garbage byte, unterminated
+      // input) leaves the tail unskipped; the `!closed` rollback below then
+      // empties this selector, and jpExpand's unclean-up still runs.
       lex.next();
-      if (lex.peek().type == TokType::LPAREN) lex.next();
-
       auto children = jpAllChildren(node);
       for (const asvJSONValue* child : children) {
         PathLexer filterLex(lex);
         JPFilterEval filterEval(filterLex, child, res.root);
         if (filterEval.evaluate()) out.push_back(child);
       }
-
-      // query() is lenient by contract: an unterminated bracket segment must
-      // yield an empty result, not a partially-evaluated one (or an error).
-      closed = lex.skipToEndBracket();
+      closed = lex.skipToFilterEnd();
     }
 
     else {
@@ -1267,6 +1335,11 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
       current = std::move(next);
     }
     else {
+      // The only token that legally ends a path is a real END (ok=true: the
+      // input ran out). A character the lexer could not turn into a token
+      // lexes to END with ok=false; treat that as a malformed path that
+      // selects nothing instead of silently stopping here.
+      if (!t.ok) current.clear();
       break;
     }
   }
@@ -1282,7 +1355,12 @@ inline PathResult jpQuery(const asvJSONValue* root, std::string_view path) {
   Tok first = lex.next();
 
   if (first.type == TokType::END) {
-    res.values.push_back(root);
+    // A real end of input ("" or whitespace-only) is the empty query, which
+    // selects the root. A lexer fall-through also reports END but with
+    // ok=false; a path whose first character is not lexable ("+x") is an
+    // error here, not a request for the root.
+    if (first.ok) res.values.push_back(root);
+    else res.error = "path must start with $";
     return res;
   }
 
@@ -1344,6 +1422,10 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
       break;
     }
   }
+  // The token that ended the path loop must be a real boundary, not a
+  // lexer fall-through: a garbage byte next to a query path (`@.a{`) would
+  // otherwise be silently treated as end-of-path.
+  if (!lex.peek().ok) return false;
   return true;
 }
 
@@ -1380,7 +1462,15 @@ inline bool jpValidateOperand(PathLexer& lex) {
   lex.next();
   if (!jpIsFuncName(t.val)) return false;
   if (t.val == "match" || t.val == "search") {
-    if (!jpValidateQueryPath(lex)) return false;
+    // First argument is a ValueType: a string literal or a query path. The
+    // pattern argument must be a string. Mirrors the evaluator's parseFuncValue.
+    Tok a = lex.peek();
+    if (a.type == TokType::STRING) {
+      if (!a.ok) return false;
+      lex.next();
+    } else {
+      if (!jpValidateQueryPath(lex)) return false;
+    }
     if (lex.peek().type != TokType::COMMA) return false;
     lex.next();
     Tok s = lex.peek();
@@ -1388,7 +1478,11 @@ inline bool jpValidateOperand(PathLexer& lex) {
     lex.next();
   } else {
     if (jpIsZeroArgFunc(t.val) && lex.peek().type == TokType::RPAREN) {
-      // zero-arg function (length(), count(), ...): no argument
+      // RFC 9535 2.4.8 gives value() exactly one NodesType argument; its
+      // zero-arg identity form is a path-segment extension only ($.x.value()),
+      // never a filter operand, so value() here must keep its query argument.
+      if (t.val == "value") return false;
+      // other zero-arg functions (length(), count(), ...): no argument
     } else {
       if (!jpValidateQueryPath(lex)) return false;
     }
@@ -1478,10 +1572,10 @@ inline bool jpValidateBracketContent(PathLexer& lex) {
       // filter-selector = "?" S logical-expr -- RFC 9535 makes the parentheses
       // optional; they are merely the paren-expr form of logical-expr, so
       // `$[?@.a == 5]`, `$[?(@.a == 5)]` and `$[?(@.a) && (@.b)]` are the same
-      // grammar. Requiring them made isValidPath() disagree with query(), which
-      // has always accepted the bare form (jpExpandBracket only skips an
-      // immediately following '('). jpValidateNotExpr consumes the matching ')'
-      // of a paren-expr, so there is no wrapper to check for here.
+      // grammar. jpValidateNotExpr consumes the matching ')' of a paren-expr,
+      // so there is no wrapper to check for here; the query evaluator parses
+      // the optional paren-expr through JPFilterEval::parseComparison's '('
+      // branch, keeping both paths in agreement.
       lex.next();
       if (!jpValidateExpr(lex)) return false;
     } else if (inner.type == TokType::NUMBER) {
