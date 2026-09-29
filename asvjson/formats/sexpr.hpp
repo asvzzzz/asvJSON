@@ -10,6 +10,12 @@
 //   Booleans: #t / #f
 //   Null: nil
 //   Comments: ; to end of line
+//
+// Serialization contract: toSexpr() never throws. A value that cannot be
+// represented -- NaN/Infinity (no S-Expression token exists for them) or a
+// nesting depth past MAX_NESTING_DEPTH on a programmatically-built tree --
+// degrades to the sentinel `nil` rather than aborting the write; such a value
+// comes back as null on reparse.
 
 #include "../core.hpp"
 
@@ -256,8 +262,11 @@ inline std::string sexprKeyJson(const std::string& item, int type) {
     // but that is not what arrives here). A JSON object key must be a string,
     // so the value is quoted and escaped; the extra quotes make it a JSON
     // string, not the identity.
-    // Already-quoted input is returned as-is: quoting it again would embed the
-    // quotes in the key ("\"+5\"" instead of "+5").
+    // Defensive, NOT currently reachable: for the four types above `item` is a
+    // bare number or one of the unquoted literals true/false/null, so it can
+    // never start with '"'. The check guards a future refactor where a quoted
+    // string might arrive here -- quoting it again would embed the quotes in
+    // the key ("\"x\"" instead of "x").
     if (!item.empty() && item.front() == '"') return item;
     std::string esc;
     esc.reserve(item.size() + 2);
@@ -332,12 +341,13 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // JSON text for item i used as a VALUE: a marker-prefixed item used as data
   // must keep the marker byte (it was data, not a key).
   //
-  // KNOWN QUIRK (issue #4): for hand-written input, any marker-prefixed string
-  // that lands in a value position will have its \x01 marker byte preserved in
-  // the decoded value. The encoder always emits marked strings exclusively in
-  // key positions, so encoded data round-trips without the stray byte; this
-  // only affects hand-written (non-encoder) input where a marked string is
-  // used as a value rather than a key.
+  // KNOWN QUIRK (issue #4): only hand-written input with a LITERAL \x01 byte
+  // right after the opening quote (the key-marker spelling) is affected: if
+  // such a marker-prefixed string lands in a value position, the \x01 byte is
+  // preserved in the decoded value. Data that merely STARTS with byte 0x01 is
+  // never affected -- the encoder escapes it as \u0001, which tokenizes to a
+  // plain STRING with no marker. The encoder emits marked strings exclusively
+  // in key positions, so round-trips of encoded documents are clean.
   auto valueJson = [&](size_t i) -> std::string {
     if (marked[i]) {
       std::string r;
@@ -350,10 +360,13 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   };
   // Object-vs-list heuristic for a parenthesized group:
   // - Odd-length groups are always lists.
-  // - Even-length groups are objects only if all even-indexed items are
-  //   string/symbol keys. A 2-item group is an object ONLY when the first
-  //   item is a bare symbol (or a marked key). Quoted strings in position 0
-  //   are data -> array.
+  // - Even-length groups are objects when every even-indexed item is a key
+  //   type (SYMBOL/STRING/NUMBER/TRUE/FALSE/NIL). A 2-item group is an object
+  //   ONLY when the first item is a bare symbol (or a marked key): a quoted
+  //   string in position 0 is data, so ("a" "b") is an array. For groups of
+  //   4+ items a STRING on an even position IS treated as a key -- ("a" "b"
+  //   "c" "d") decodes to {"a":"b","c":"d"} -- only the 2-item case
+  //   distinguishes a SYMBOL key from a STRING value.
   // - When the group starts with a bare symbol key but the remaining items
   //   are not objects, the values are emitted as an array: {key: [v1, v2, ...]}.
   //   Quoted strings are data values, never keys, in this fallback.
@@ -496,6 +509,10 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
             }
           }
         }
+        // The marker is a literal byte right after the opening quote; the escaped
+        // text can never reproduce one, because appendJsonEscaped emits 0x01/
+        // 0x02 as \u0001/\u0002. Keep that escaping, or the decoder's
+        // marker-vs-data disambiguation silently breaks.
         if (needsQuote) { out += '"'; out += SEXPR_KEY_MARK; appendJsonEscaped(out, k); out += '"'; }
         else out += k;
         out += ' ';
@@ -508,6 +525,13 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
       // Even-length arrays whose even positions are all scalar key-type
       // tokens would decode as an object (key/value heuristic). Disambiguate
       // by emitting a leading literal ARRAY marker token ("\x02").
+      // This scalar set is the encoder counterpart of the decoder's
+      // sexprTypeIsKey set: STRING / INT / DOUBLE / BOOL / NULL / DATETIME
+      // emit exactly the tokens the object heuristic treats as key types on
+      // even positions (SEXPR_STRING / NUMBER / TRUE / FALSE / NIL; DATETIME
+      // and STRING both emit as SEXPR_STRING). Keep the two sets in sync when
+      // adding a JSON type, or an ambiguous array would decode back as an
+      // object instead of receiving the force-array marker.
       bool ambiguous = v->size() >= 4 && v->size() % 2 == 0;
       if (ambiguous) {
         for (size_t i = 0; i < v->size() && ambiguous; i += 2) {

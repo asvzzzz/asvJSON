@@ -26,6 +26,24 @@
 // objects/arrays are first-class. Special types degrade to their underlying
 // representation: REGEX -> <string>, TIMESTAMP -> <integer>, OBJECTID and
 // EXTENSION -> <data>, CUSTOM_TAG -> its payload value (tag name dropped).
+//
+// <data> decoding tolerates missing or stray '=' padding: the trailing '='
+// run is stripped and the significant part is re-padded to a multiple of four
+// (a single leftover significant character is genuinely ambiguous and is
+// rejected).
+//
+// <date> keeps the value's stored timezone offset when one is present. Apple's
+// plist spec wants UTC with a trailing Z, so documents destined for Apple
+// tooling should use offset-less datetimes; the offset form parses back, so
+// plist round-trips are lossless. NaN/Infinity write as <real>nan</real> /
+// <real>inf</real> and parse back through strtod -- a non-standard extension
+// Apple readers will not understand, mirroring the JSON layer's
+// allowNaNInfinity convention.
+//
+// parseValue recurses two depth steps per container level (<dict>/<array>
+// cost parseValue -> parseDict/parseArray -> parseValue), so
+// MAX_NESTING_DEPTH is effectively halved for plist documents. Conservative,
+// never exceeded.
 
 #include "../core.hpp"
 
@@ -72,7 +90,9 @@ inline std::string plistUnescape(std::string_view raw) {
         else if (hex && d >= 'a' && d <= 'f') v = static_cast<unsigned>(d - 'a' + 10);
         else if (hex && d >= 'A' && d <= 'F') v = static_cast<unsigned>(d - 'A' + 10);
         else { ok = false; break; }
-        if (v > 0x10FFFF || cp > 0x10FFFF) { ok = false; break; }
+        // `v` is a single digit (0-15), so only the accumulated cp can exceed
+        // the scalar range here.
+        if (cp > 0x10FFFF) { ok = false; break; }
         cp = cp * (hex ? 16u : 10u) + v;
       }
       if (!ok || cp == 0 || cp > 0x10FFFF) { out += c; i++; continue; }
@@ -139,10 +159,6 @@ inline bool plistLooksLike(std::string_view s) {
     }
     return isPlistWrapperAt(s, p);
   }
-}
-
-inline void plistIndent(std::string& out, int indent) {
-  for (int i = 0; i < indent; i++) { out += "  "; }
 }
 
 // Write a single value element (indent already applied except for the dict
@@ -266,12 +282,6 @@ struct PlistReader {
       }
       return;
     }
-  }
-
-  void expect(const char* literal, const std::string& what) {
-    size_t n = std::char_traits<char>::length(literal);
-    if (s.size() - pos < n || s.compare(pos, n, literal) != 0) fail(what);
-    pos += n;
   }
 
   // At '<': read the tag name and optional attributes, return {name,
@@ -406,13 +416,17 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     }
     // decodeBase64Fast needs a length that is a multiple of 4; hand-written
     // plists routinely omit the trailing '=', so re-pad the significant part
-    // instead of rejecting them.
+    // instead of rejecting them. Stray '=' already present in the input are
+    // stripped first, so the re-pad lands on the true significant length --
+    // piling new '=' on top of existing ones would corrupt the length (e.g.
+    // "ab=" -> "ab===") and wrongly reject over-padded manual plists.
     if (clean.size() % 4 != 0) {
       size_t sig = clean.size();
       while (sig > 0 && clean[sig - 1] == '=') sig--;
       size_t rem = sig % 4;
       if (rem == 1) fail("invalid <data> base64 length");
-      clean.append(4 - rem, '=');
+      clean.resize(sig);
+      clean.append((4 - rem) % 4, '=');
     }
     bool err = false;
     auto bytes = decodeBase64Fast(clean.data(), clean.size(), &err);
@@ -434,7 +448,12 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
     skipWs();
     if (atEnd()) fail("unterminated <dict>");
     if (acceptClose("dict")) break;
-    expect("<key>", "expected <key> in <dict>");
+    // openTag() tolerates valid-XML whitespace/attributes ("<key >", "<key x=1>")
+    // that the old exact-string expect("<key>", ...) rejected.
+    {
+      auto [ktag, ksc] = openTag();
+      if (ktag != "key" || ksc) fail("expected <key> in <dict>");
+    }
     std::string k = plistUnescape(textUntil("key"));
     if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE) fail("object too large");
     skipWs();

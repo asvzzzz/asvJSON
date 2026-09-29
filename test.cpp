@@ -19052,6 +19052,18 @@ TEST(testPlistAuditRegressions) {
     asvJSON n;
     ASSERT(!n.fromPlist(std::string("<plist><dict><key>a</key><integer>1</integer></dictx></plist>")));
   }
+  // Whitespace/attributes on an OPENING <key> tag are valid XML too; the old
+  // exact-string expect("<key>", ...) rejected "<key >" and "<key x=1>".
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key >a</key><integer>1</integer></dict></plist>")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    asvJSON k;
+    ASSERT(k.fromPlist(std::string("<plist><dict><key  ignored=\"1\">a</key><integer>2</integer></dict></plist>")));
+    ASSERT_EQ(k.getInt("a"), int64_t(2));
+    asvJSON m;
+    ASSERT(!m.fromPlist(std::string("<plist><dict><key/a></dict></plist>")));
+  }
   // A surrogate character reference is not a valid Unicode scalar value and
   // would encode as ill-formed UTF-8; it becomes U+FFFD (as in UDE).
   {
@@ -19062,7 +19074,10 @@ TEST(testPlistAuditRegressions) {
     ASSERT(k.fromPlist(std::string("<plist><dict><key>a</key><string>&#xDFFF;</string></dict></plist>")));
     ASSERT_EQ(std::string(k.getString("a")), std::string("\xEF\xBF\xBD"));
   }
-  // base64 without the trailing '=' decodes to the same bytes.
+  // base64 without the trailing '=' decodes to the same bytes, and stray '='
+  // padding is stripped then re-applied to the significant length instead of
+  // being piled on top of the existing '=' (over-padded hand-written plists
+  // decode instead of failing).
   {
     asvJSON j;
     ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ==</data></dict></plist>")));
@@ -19070,7 +19085,23 @@ TEST(testPlistAuditRegressions) {
     ASSERT(k.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ</data></dict></plist>")));
     ASSERT(j.get("a")->bin_data == k.get("a")->bin_data);
     asvJSON m;
-    ASSERT(!m.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ=</data></dict></plist>")));
+    ASSERT(m.fromPlist(std::string("<plist><dict><key>a</key><data>YWJjYQ=</data></dict></plist>")));
+    ASSERT(m.get("a")->bin_data == j.get("a")->bin_data);
+    // "ab=" must re-pad to "ab==" (not "ab==="), matching the canonical form.
+    asvJSON p;
+    ASSERT(p.fromPlist(std::string("<plist><dict><key>a</key><data>ab=</data></dict></plist>")));
+    asvJSON q;
+    ASSERT(q.fromPlist(std::string("<plist><dict><key>a</key><data>ab==</data></dict></plist>")));
+    ASSERT(p.get("a")->bin_data == q.get("a")->bin_data);
+    // "abcd=" (a full group plus a stray '=') must decode like "abcd".
+    asvJSON r;
+    ASSERT(r.fromPlist(std::string("<plist><dict><key>a</key><data>abcd=</data></dict></plist>")));
+    asvJSON s;
+    ASSERT(s.fromPlist(std::string("<plist><dict><key>a</key><data>abcd</data></dict></plist>")));
+    ASSERT(r.get("a")->bin_data == s.get("a")->bin_data);
+    // A single leftover significant character is genuinely ambiguous (rem == 1).
+    asvJSON t;
+    ASSERT(!t.fromPlist(std::string("<plist><dict><key>a</key><data>Y</data></dict></plist>")));
   }
   // A comment inside a text node is markup, not part of the value.
   {
