@@ -181,7 +181,7 @@ Disable with `#define ASVJSON_DISABLE_SAX`.
 - Regex (pattern + options) - serialized as MessagePack ext type 2
 - Timestamp (int64) - serialized as MessagePack ext type 3
 - Custom tags (name + annotated value) - serialized as MessagePack ext type 4 (`[name-string, value]`), mirroring the CBOR tag-258 convention
-- Extension types (MessagePack ext, configurable extType)
+- Extension types (MessagePack ext, configurable extType) - the type bytes `1`/`2`/`3`/`4`/`-1` are **reserved** for the special types above: the encoder writes an `EXTENSION` node verbatim, so a hand-built `EXTENSION(1, 12 bytes)` decodes back as ObjectId, and such a node has no round-trip guarantee (use any other type byte). A well-known ext body that cannot form its special value (ObjectId != 12 bytes, Timestamp != 8 bytes, an empty Regex body or empty pattern) decodes to a plain `EXTENSION` keeping the type byte and the raw body, never to null. A MessagePack `uint64` above `INT64_MAX` is rejected, not preserved (asvJSON `INT` is signed 64-bit, and a `raw_number` string would re-encode as a string). The parser enforces the [Limits](#limits) above on untrusted input; the encoder does not re-check them.
 
 ### C++17 Features
 - Move semantics

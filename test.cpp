@@ -3174,6 +3174,123 @@ TEST(testMsgpackExtras) {
 	}
 }
 
+TEST(testMsgpackReservedExtTypes) {
+	// The ext type bytes 1/2/3/4/-1 are RESERVED for the asvJSON special types
+	// (documented in the msgpack.hpp header). The encoder writes an EXTENSION
+	// node verbatim, so a hand-built EXTENSION that happens to use one of those
+	// bytes is read back as the special type -- there is no round-trip
+	// guarantee. This test pins that documented behavior (it is a known,
+	// intentional collision, not an accident) and confirms the non-reserved
+	// type bytes still round-trip as plain EXTENSION.
+	//
+	// EXTENSION(1, 12 bytes) -> decoded as OBJECTID.
+	{
+		uint8_t body[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+		asvJSON j;
+		j.putExtension("x", 1, body, 12);
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		ASSERT(j2.getRoot()->get("x")->type == asvJSONValue::OBJECTID);
+	}
+	// A non-reserved type byte round-trips as a plain EXTENSION.
+	{
+		uint8_t body[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+		asvJSON j;
+		j.putExtension("x", 1 + 10, body, 12); // type 11 -- not one of 1/2/3/4/-1
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = j2.getRoot()->get("x");
+		ASSERT(v && v->type == asvJSONValue::EXTENSION && v->ext_type == 11);
+		ASSERT_EQ(v->bin_data.size(), static_cast<size_t>(12));
+	}
+}
+
+TEST(testMsgpackEmptyRegexBody) {
+	// An ext type 2 body that cannot form a REGEX (empty body, or a body whose
+	// pattern is empty because it starts with the NUL separator) must fall back
+	// to a lossless EXTENSION(2) instead of a null REGEX / a phantom
+	// "regex alloc failed" error. makeRegex rejects an empty pattern, so the
+	// previous `len == 0 -> makeNull()` path both lost the node and reported a
+	// misleading allocation error.
+	auto check = [](const std::vector<uint8_t>& raw, size_t expectLen) {
+		asvJSON j;
+		if (!j.fromMessagePack(raw.data(), raw.size())) throw std::runtime_error("empty-regex decode failed");
+		auto* r = j.getRoot();
+		if (r == nullptr || r->type != asvJSONValue::EXTENSION || r->ext_type != 2)
+			throw std::runtime_error("expected EXTENSION(2) fallback, not a null REGEX");
+		if (r->bin_data.size() != expectLen) throw std::runtime_error("empty-regex body length mismatch");
+		// decode -> encode -> decode stays a stable EXTENSION(2) (no data loss).
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		if (!j2.fromMessagePack(mp.data(), mp.size())) throw std::runtime_error("empty-regex re-decode failed");
+		auto* r2 = j2.getRoot();
+		if (r2 == nullptr || r2->type != asvJSONValue::EXTENSION || r2->ext_type != 2)
+			throw std::runtime_error("round-trip lost EXTENSION(2)");
+	};
+	// Empty body: ext8 (0xC7) with length 0 and type 2 -> 0xC7 00 02.
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x00, 0x02};
+		check(raw, 0);
+	}
+	// Body is just the NUL separator (empty pattern, no options) -> len 1.
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x01, 0x02, 0x00};
+		check(raw, 1);
+	}
+	// Empty pattern with options: "\0im" -> len 3.
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x03, 0x02, 0x00, 'i', 'm'};
+		check(raw, 3);
+	}
+	// Positive control: a normal regex body still decodes to REGEX (the fallback
+	// does not swallow a well-formed value).
+	{
+		std::vector<uint8_t> raw = {0xC7, 0x03, 0x02, 'a', 0x00, 'i'}; // "a\0i"
+		asvJSON j;
+		ASSERT(j.fromMessagePack(raw.data(), raw.size()));
+		auto* r = j.getRoot();
+		ASSERT(r && r->type == asvJSONValue::REGEX);
+	}
+}
+
+TEST(testMsgpackDateTimeMsNormalize) {
+	// The encoder must not wrap a manually built out-of-range / negative
+	// datetime_ms into an arbitrary nanosecond count. A DATETIME with an
+	// out-of-contract datetime_ms is clamped into the documented [0, 999] range
+	// before the uint32 cast.
+	// Negative ms -> clamped to 0 -> fixext4 (seconds precision), so ms decodes back as 0.
+	{
+		asvJSON j;
+		j.setValue("t", asvJSONValue::makeDateTime(1700000000LL, 500));
+		// Sanity: a normal in-range value keeps its milliseconds.
+		ASSERT(j.getRoot()->get("t")->datetime_ms == 500);
+		// Now corrupt datetime_ms to a negative value behind the factory's back.
+		j.getRoot()->get("t")->datetime_ms = -1;
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = j2.getRoot()->get("t");
+		// datetime_ms was clamped to 0, so the round-tripped ms is 0 (not garbage).
+		ASSERT(v && v->type == asvJSONValue::DATETIME);
+		ASSERT(v->timestamp == 1700000000LL);
+		ASSERT_EQ(v->datetime_ms, 0);
+	}
+	// Over-large ms -> clamped to 999 (max valid ms), still no wrap.
+	{
+		asvJSON j;
+		j.setValue("t", asvJSONValue::makeDateTime(1700000000LL, 999));
+		j.getRoot()->get("t")->datetime_ms = 100000; // way out of the [0,999] contract
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+		auto* v = j2.getRoot()->get("t");
+		ASSERT(v && v->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(v->datetime_ms, 999); // clamped, not wrapped to some arbitrary ns
+	}
+}
+
 TEST(testCBOR) {
 	asvJSON json;
 	json.putString("str", "hello");
@@ -28008,6 +28125,9 @@ int main() {
 	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackExtWrongLengthKeepsBody);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);
 	RUN(testMsgPackRegexFidelity);
 	RUN(testMsgpackExtras);
+	RUN(testMsgpackReservedExtTypes);
+	RUN(testMsgpackEmptyRegexBody);
+	RUN(testMsgpackDateTimeMsNormalize);
 	
 	std::cout << "\n--- Object Key Escape Tests ---\n";
 	RUN(testObjectKeyEscapes);

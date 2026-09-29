@@ -15,14 +15,33 @@
 //                             32-bit seconds, fixext8 34-bit sec + 30-bit ns,
 //                             or the ext8 timestamp-96 12-byte form)
 //
+// Those type bytes are RESERVED. The encoder writes an EXTENSION node verbatim,
+// so a hand-built EXTENSION(1, 12 bytes) is read back as OBJECTID, EXTENSION(-1,
+// 4/8/12 bytes) as DATETIME, EXTENSION(2, ...) as REGEX, EXTENSION(3, 8 bytes)
+// as TIMESTAMP and EXTENSION(4, a name-string + value layout) as CUSTOM_TAG.
+// Such a node has NO round-trip guarantee -- use any other type byte for a user
+// extension. The decoder detects these types structurally, so it cannot tell a
+// "real" ObjectId from a coincidental EXTENSION body.
+//
 // Duplicate map keys are last-wins, matching the JSON and CBOR parsers.
 //
-// A well-known ext type carrying a body of the wrong length (ObjectId != 12
-// bytes, Timestamp != 8 bytes) decodes to a plain EXTENSION node keeping the
-// type byte and the raw body, not to null -- the same no-data-loss fallback
-// the custom-tag (ext 4) decoder uses. The encoder never emits those forms, so
-// this only affects hand-crafted or foreign input; a decode -> encode ->
-// decode round-trip of such a node is stable.
+// A well-known ext type carrying a body that cannot form its special value
+// (ObjectId != 12 bytes, Timestamp != 8 bytes, an empty Regex body or an empty
+// pattern) decodes to a plain EXTENSION node keeping the type byte and the raw
+// body, not to null -- the same no-data-loss fallback the custom-tag (ext 4)
+// decoder uses. The encoder never emits those forms, so this only affects
+// hand-crafted or foreign input; a decode -> encode -> decode round-trip of
+// such a node is stable.
+//
+// A MessagePack uint64 above INT64_MAX is rejected, not preserved: asvJSON INT
+// is signed 64-bit and there is no unsigned type to hold it, so it matches the
+// CBOR parser's behavior. It is not kept as a raw_number string either, because
+// the encoder would then re-emit it as a string, not as a uint64.
+//
+// The parser enforces MAX_NESTING_DEPTH / MAX_ARRAY_SIZE / MAX_OBJECT_SIZE /
+// MAX_STRING_LEN on untrusted input. The encoder does NOT re-check them, so a
+// programmatically built value above a limit serializes to a document this
+// parser would then reject -- the limits guard decoding, not encoding.
 
 #include "../core.hpp"
 
@@ -128,9 +147,14 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::DATETIME: {
-			uint32_t ns = static_cast<uint32_t>(datetime_ms) * 1000000;
-			// Defensive clamp; unreachable when datetime_ms is in its documented [0, 999] range.
-			if (ns > 999999999) ns = 999999999;
+			// Normalize to the documented [0, 999] millisecond range BEFORE the
+			// cast: a manually built DATETIME can hold any int here, and
+			// static_cast<uint32_t> of a negative (or a >999) value would wrap
+			// around into an arbitrary nanosecond count.
+			int ms = datetime_ms;
+			if (ms < 0) ms = 0;
+			if (ms > 999) ms = 999;
+			uint32_t ns = static_cast<uint32_t>(ms) * 1000000;
 			if (timestamp >= 0 && timestamp < 0x100000000LL && ns == 0) {
 				// fixext4: seconds precision
 				out.push_back(0xD6);
@@ -207,13 +231,20 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 
 // ext type 2 payload is a regex in makeRegex form: "pattern\0options"
 inline std::unique_ptr<asvJSONValue> msgpackDecodeRegex(const uint8_t* data, size_t len) {
-	if (len == 0) return asvJSONValue::makeNull();
+	// An empty body, or a body whose pattern is empty (first byte is the NUL
+	// separator), cannot form a REGEX -- makeRegex rejects an empty pattern. Keep
+	// the raw bytes as an EXTENSION(2) instead of returning null: that fallback
+	// is lossless and leaves a null return meaning only a genuine allocation
+	// failure, so the caller's "alloc failed" message stays truthful (an empty
+	// body used to report exactly that phantom error).
+	if (len == 0) return asvJSONValue::makeExtension(2, data, len);
 	std::string s(reinterpret_cast<const char*>(data), len);
 	size_t sep = s.rfind('\0');
 	std::string pattern = (sep != std::string::npos) ? s.substr(0, sep) : s;
+	if (pattern.empty()) return asvJSONValue::makeExtension(2, data, len);
 	std::string opts = (sep != std::string::npos) ? s.substr(sep + 1) : std::string();
 	auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-	if (!re) return asvJSONValue::makeNull();
+	if (!re) return asvJSONValue::makeExtension(2, data, len); // pattern too long, or alloc failed
 	return re;
 }
 
@@ -422,7 +453,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		case 0xCC: { if (pos >= dataLen) throw asvJSONError("MsgPack uint8"); return asvJSONValue::makeInt(data[pos++]); }
 		case 0xCD: { if (pos + 2 > dataLen) throw asvJSONError("MsgPack uint16"); uint32_t v = (static_cast<uint32_t>(data[pos]) << 8) | data[pos + 1]; pos += 2; return asvJSONValue::makeInt(v); }
 		case 0xCE: { if (pos + 4 > dataLen) throw asvJSONError("MsgPack uint32"); uint32_t v = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3]; pos += 4; return asvJSONValue::makeInt(v); }
-		case 0xCF: { if (pos + 8 > dataLen) throw asvJSONError("MsgPack uint64"); uint64_t v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | data[pos + i]; pos += 8; if (v > 0x7FFFFFFFFFFFFFFFULL) throw asvJSONError("MsgPack uint64 out of range"); return asvJSONValue::makeInt(static_cast<int64_t>(v)); }
+		case 0xCF: { if (pos + 8 > dataLen) throw asvJSONError("MsgPack uint64"); uint64_t v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | data[pos + i]; pos += 8; if (v > static_cast<uint64_t>(INT64_MAX)) throw asvJSONError("MsgPack uint64 out of range"); return asvJSONValue::makeInt(static_cast<int64_t>(v)); }
 		case 0xD0: { if (pos >= dataLen) throw asvJSONError("MsgPack int8"); return asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int8_t>(data[pos++]))); }
 		case 0xD1: { if (pos + 2 > dataLen) throw asvJSONError("MsgPack int16"); int16_t v = static_cast<int16_t>((static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1]); pos += 2; return asvJSONValue::makeInt(v); }
 		case 0xD2: { if (pos + 4 > dataLen) throw asvJSONError("MsgPack int32"); uint32_t v = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3]; pos += 4; return asvJSONValue::makeInt(static_cast<int32_t>(v)); }
