@@ -1,8 +1,7 @@
 #pragma once
 // CSV (RFC 4180) serialization/parsing for asvJSON++
 //
-// Deliberate behaviors worth knowing (all audited -- see the csv.hpp review in
-// err.txt, v1.26.1):
+// Deliberate behaviors worth knowing (each covered by a test in test.cpp):
 //
 // 1. Formula-injection guard is applied to BARE cells only. Text starting with
 //    '=', '+', '-', '@' gets a leading '\'' on output; a cell that must be
@@ -16,15 +15,40 @@
 //    re-adds the apostrophe -- but a silent loss for hand-authored input, so
 //    keep apostrophe-leading text quoted ("'=x") if it must survive verbatim.
 // 3. Roots do not always round-trip to the same JSON shape:
-//      - an OBJECT whose single key holds an ARRAY flattens that key as a
-//        regular column of JSON text, so {"items":[{...}]} decodes back as
-//        an ARRAY of {items: "..."} rows (see testCsvSingleKeyArrayOfObjects);
-//      - a scalar root is a lone headerless data line that fromCSV re-reads as
-//        a header, so it does not round-trip (a scalar export is data-only).
+//    - every OBJECT root becomes TWO lines (header + one data row), so fromCSV
+//      reads it back as an ARRAY holding that one object -- the root changes
+//      from OBJECT to ARRAY even for a flat {"a":1,"b":2}. A nested value is
+//      flattened to a dotted column on the way out and stays a flat dotted KEY
+//      on the way back: {"a":{"b":1}} -> "a.b\n1\n" -> [{"a.b":1}]. Only
+//      scalar leaves are flattened; an OBJECT leaf (an empty object stays a
+//      leaf) becomes its JSON text in a cell.
+//    - an OBJECT whose single key holds an ARRAY flattens that key as a
+//      regular column of JSON text, so {"items":[{...}]} decodes back as
+//      an ARRAY of {items: "..."} rows (see testCsvSingleKeyArrayOfObjects);
+//    - a scalar root is a lone headerless data line that fromCSV re-reads as
+//      a header, so it does not round-trip (a scalar export is data-only).
 // 4. Cell typing follows the JSON number grammar plus a leading '+' extension.
 //    ".5" is NOT a number (JSON forbids "." without a leading digit) and stays
 //    STRING; "0"/"+0"/"-0" are INT 0. A STRING whose text would re-detect as a
 //    different type is quoted on output so the round-trip preserves STRING.
+// 5. A TIMESTAMP has no CSV cell syntax of its own: it is written as its bare
+//    epoch number and comes back as an INT (the type is lost), exactly like
+//    the other non-native types REGEX/BINARY/EXTENSION/OBJECTID, which keep
+//    only their text form. DATETIME is the one exception -- it has a native
+//    bare ISO-8601 cell form that detects back as DATETIME. To keep a
+//    TIMESTAMP a TIMESTAMP, store its text in a STRING cell.
+// 6. A row wider than the header is rejected, with one exception: trailing
+//    BARE empty fields ("a,b" / "1,2,") are tolerated, since a trailing comma
+//    carries no data. A trailing QUOTED empty (a cell holding only "") is an
+//    explicit empty string -- a column the author wrote on purpose -- so it is
+//    rejected like any other extra value instead of being dropped silently.
+// 7. Quote handling is TOLERANT, not strict RFC 4180: a '"' opening quotes
+//    anywhere in a field starts quote mode and strips its own apostrophes, so
+//    hand-written foo"bar"baz decodes to the STRING "foobarbaz" (the interior
+//    quotes are consumed, not kept). The quoted flag is still set, which makes
+//    it an explicit text literal. toCSV is unaffected -- it quotes the whole
+//    cell and doubles interior quotes, so its own output always round-trips
+//    verbatim.
 
 #include "../core.hpp"
 
@@ -71,6 +95,10 @@ inline std::string csvStripInjection(std::string_view s) {
 // whether each field was quoted with "...". A quoted field is treated as an
 // explicit text literal on decode (used for both data rows and the header row),
 // which lets empty strings and numeric-looking strings round-trip as STRING.
+// Tolerant about WHERE a quote may open: a '"' met outside a quoted run always
+// starts quote mode, even mid-field (foo"bar"baz -> "foobarbaz"), and is
+// dropped along with its partner. toCSV only ever emits a quote at the field
+// start with interior quotes doubled, so its output parses back verbatim.
 inline std::vector<std::pair<std::string, bool>> csvSplitLineQ(std::string_view line) {
 	std::vector<std::pair<std::string, bool>> fields;
 	std::string cur;
@@ -256,11 +284,15 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 			if (lines[li].empty()) continue;
 			auto fields = csvSplitLineQ(lines[li]);
 			// A row with more fields than the header must not silently drop the
-			// extras. Trailing empty fields (from a trailing comma) are tolerated.
+			// extras. Trailing BARE empty fields (from a trailing comma) are
+			// tolerated: they carry no data, so the row is a prefix of the header.
+			// A QUOTED empty (a cell holding only "") is different -- it is an
+			// explicit empty string, a value the author wrote on purpose, and
+			// dropping it would lose a column. It counts as extra data.
 			if (fields.size() > headers.size()) {
 				bool extraData = false;
 				for (size_t k = headers.size(); k < fields.size(); k++)
-					if (!fields[k].first.empty()) { extraData = true; break; }
+					if (!fields[k].first.empty() || fields[k].second) { extraData = true; break; }
 				if (extraData)
 					throw asvJSONError("CSV: row " + std::to_string(li) + " has " + std::to_string(fields.size()) +
 					                   " fields, expected " + std::to_string(headers.size()));

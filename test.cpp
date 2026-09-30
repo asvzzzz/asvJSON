@@ -13038,6 +13038,109 @@ TEST(testCsvAuditCells) {
 	}
 }
 
+TEST(testCsvAuditReview) {
+	// A quoted empty past the header is an explicit empty string, not a trailing
+	// comma: the extra-field check only tested fields[k].first.empty(), so the
+	// third column of "a,b" / "1,2,\"\"" was dropped without a word. A quoted
+	// empty now counts as data and the row is rejected.
+	{
+		asvJSON j;
+		ASSERT(!j.fromCSV(std::string_view("a,b\n1,2,\"\"\n")));
+		ASSERT(j.getLastError().find("3 fields, expected 2") != std::string::npos);
+	}
+	// The bare trailing comma is still tolerated: a trailing comma carries no
+	// data, so the row is a legitimate prefix of the header.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a,b\n1,2,\n")));
+		ASSERT(j.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j.getRoot()->arr->size(), size_t(1));
+		auto* r = j.getRoot()->arr->at(0).get();
+		ASSERT(r->get("a") != nullptr && r->get("a")->type == asvJSONValue::INT);
+		ASSERT(r->get("b") != nullptr && r->get("b")->type == asvJSONValue::INT);
+	}
+	// A quoted empty WITHIN the header width is normal data and decodes as the
+	// explicit empty string it was written as.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("a,b\n1,\"\"\n")));
+		auto* r = j.getRoot()->arr->at(0).get();
+		auto* v = r->get("b");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "");
+	}
+	// Every OBJECT root changes shape: it is written as header + one data row, so
+	// fromCSV returns an ARRAY of one object. A nested value is flattened to a
+	// dotted COLUMN and comes back as a flat dotted KEY.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":{"b":1}})")));
+		std::string csv = j.toCSV();
+		ASSERT_EQ(csv, std::string("a.b\n1\n"));
+		asvJSON j2;
+		ASSERT(j2.fromCSV(std::string_view(csv)));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), size_t(1));
+		auto* r = j2.getRoot()->arr->at(0).get();
+		ASSERT(r->get("a.b") != nullptr && r->get("a.b")->type == asvJSONValue::INT);
+		ASSERT_EQ(r->get("a.b")->getInt(), int64_t(1));
+	}
+	// The same OBJECT -> ARRAY root change holds for a flat object; the values
+	// survive, only the container differs.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":1,"b":2})")));
+		asvJSON j2;
+		ASSERT(j2.fromCSV(std::string_view(j.toCSV())));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		auto* r = j2.getRoot()->arr->at(0).get();
+		ASSERT_EQ(r->get("a")->getInt(), int64_t(1));
+		ASSERT_EQ(r->get("b")->getInt(), int64_t(2));
+	}
+	// TIMESTAMP has no native cell form: it is written as a bare epoch number and
+	// decodes back as an INT (the type is lost), so it belongs with the other
+	// non-native types. DATETIME is the exception -- it keeps its type.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"t":1700000000,"d":"2023-11-14T22:13:20Z"})")));
+		auto* tv = j.getRoot()->get("t");
+		tv->type = asvJSONValue::TIMESTAMP;
+		auto* dv = j.getRoot()->get("d");
+		dv->type = asvJSONValue::DATETIME;
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("1700000000") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(std::string_view(csv)));
+		auto* r = j2.getRoot()->arr->at(0).get();
+		auto* t2 = r->get("t");
+		ASSERT(t2 != nullptr && t2->type == asvJSONValue::INT);
+		ASSERT_EQ(t2->getInt(), int64_t(1700000000));
+		auto* d2 = r->get("d");
+		ASSERT(d2 != nullptr && d2->type == asvJSONValue::DATETIME);
+	}
+	// Quote handling is tolerant, not strict RFC 4180: a '"' met mid-field opens
+	// quote mode and both it and its partner are dropped, so foo"bar"baz decodes
+	// to the explicit STRING "foobarbaz". Documented; toCSV output is unaffected
+	// because it quotes the whole cell and doubles interior quotes.
+	{
+		asvJSON j;
+		ASSERT(j.fromCSV(std::string_view("k\nfoo\"bar\"\n")));
+		auto* v = j.getRoot()->arr->at(0)->get("k");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), "foobar");
+	}
+	// ... while toCSV escapes the same text and round-trips it verbatim.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{\"k\":\"foo\\\"bar\\\"baz\"}")));
+		std::string csv = j.toCSV();
+		ASSERT(csv.find("\"foo\"\"bar\"\"baz\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromCSV(std::string_view(csv)));
+		ASSERT_EQ(std::string(j2.getRoot()->arr->at(0)->get("k")->getString()), "foo\"bar\"baz");
+	}
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -28878,6 +28981,7 @@ RUN(testCBORFloat16);
 	RUN(testCsvNanInfAsNull);
 	RUN(testCsvNoRawNumberDrift);
 	RUN(testCsvAuditCells);
+	RUN(testCsvAuditReview);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);

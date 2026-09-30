@@ -49,7 +49,7 @@ MIT license - see the `LICENSE` file for details.
 - CBOR - `toCBOR()` / `fromCBOR()` - RFC 8949 Concise Binary Object Representation with indefinite-length items, half-precision floats, datetime/extension/regex tags
 - YAML - `toYAML()` / `fromYAML()` with block-style sequences/mappings, YAML 1.2 `.nan`/`.inf` literals, automatic key quoting, literal block scalars, tags (`!!int`/`!!float`/`!!bool`/`!!null`/`!!str`/`!!set`/`!!omap`/`!!pairs`/`!!value`/`!!yaml`), block-style `!!set` (`- key` / `? key` items), explicit tags on block nodes (`!!map`/`!!seq`/`!!binary`/custom at root, mapping values, sequence items, explicit keys), complex (flow-collection) mapping keys stringified to JSON string keys, user-defined tags preserved as `CUSTOM_TAG` (with an optional `customTagTransform` hook to dispatch them to custom types at parse time), configurable serializer (`YamlWriteOptions`: flow/block/auto style, indent width, quoting control), anchors & aliases, multi-document streams, `%TAG`/`%YAML` directives, line-number-anchored errors
 - XML - `toXML()` / `fromXML()` - serialization and parsing with attributes (`@`-prefix), text content (`#text`), CDATA, comments, type detection (datetime/binary/objectid/regex/timestamp/extension); malformed input (unterminated comments/CDATAs/attribute values) and duplicate attributes are rejected, and attribute/`#content` types that cannot be represented throw instead of being silently altered
-- CSV - `toCSV()` with recursive flattening (`a.b.c`), two-pass union of keys for arrays of objects, `"` escaping per RFC 4180
+- CSV - `toCSV()` with recursive flattening (`a.b.c`) and first-appearance column order, two-pass union of keys for arrays of objects, `"` escaping per RFC 4180, formula-injection guard on bare cells
 - TOON - `toTOON()` / `fromTOON()` - token-oriented object notation with inline and tabular array formats, full round-trip serialization and parsing
 - TRON - `toTRON()` / `fromTRON()` - token-reduced object notation with class definitions for repeated structures, class instantiation, inheritance, named arguments, round-trip support
 - GOON - `toGOON()` / `fromGOON()` - greatly optimized object notation with YAML-like indentation, tabular arrays, inline/inference-based lists, single-char literals (T/F/_/~), dictionary references, round-trip support
@@ -648,21 +648,28 @@ Input:
 
 Output:
 ```
-age,meta.city,name
-30,NYC,John
+name,age,meta.city
+John,30,NYC
 ```
+
+Nested objects are flattened to dotted column names (`meta.city`). Column order is
+first-appearance order of each flattened key in document order, not alphabetical.
 
 Input (array of objects):
 ```json
 [{"x":1,"z":3},{"y":2}]
 ```
 
-Output (two-pass, union keys, sorted alphabetically):
+Output (two-pass, union keys, first-appearance order):
 ```
-x,y,z
-1,,3
+x,z,y
+1,3,
 ,2,
 ```
+
+Note that `fromCSV()` always returns an ARRAY of row objects, so an OBJECT root
+round-trips as a one-element array, and a nested object comes back as a flat
+dotted key (`{"a":{"b":1}}` -> `"a.b\n1\n"` -> `[{"a.b":1}]`).
 
 ### TOON
 
