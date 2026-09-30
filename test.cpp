@@ -1174,6 +1174,24 @@ TEST(testBSONDecimal128) {
 	bool ok = json.fromBSON(data, sizeof(data));
 	if (ok) throw std::runtime_error("decimal128 should fail");
 	ASSERT(!json.getLastError().empty());
+	// A TRUNCATED decimal128 payload reports the same rejection, not a crash:
+	// the parser deliberately never advanced the cursor over the 16 bytes, so
+	// there is nothing left to be read after the throw.
+	{
+		uint8_t trunc[] = {
+			0x0F, 0x00, 0x00, 0x00, // document length = 15
+			0x13, 'd', 0x00,        // type decimal128, key "d"
+			0x00, 0x00, 0x00,       // only 3 of 16 payload bytes present
+			0x00                    // document terminator
+		};
+		asvJSON j2;
+		bool threw = false;
+		bool ok2 = true;
+		try { ok2 = j2.fromBSON(trunc, sizeof(trunc)); } catch (...) { threw = true; }
+		ASSERT(!threw);
+		ASSERT(!ok2);
+		ASSERT(!j2.getLastError().empty());
+	}
 }
 
 TEST(testMessagePackCorruptedData) {
@@ -1990,6 +2008,145 @@ TEST(testBSONDateTimeOverflow) {
 		}
 		ASSERT(threw);
 	}
+}
+
+TEST(testBSONDateTimeMsClamp) {
+	// datetime_ms is a PUBLIC member, so a manually built DATETIME can hold any
+	// int. toBSON() must normalize it into the documented [0, 999] range -- the
+	// same rule the MessagePack encoder already applies -- instead of trusting it.
+	//
+	// Regression: the old overflow guard had a dedicated `m < 0` branch that
+	// reported "out of int64 milliseconds range" for values that actually
+	// encode fine. t = INT64_MIN/1000 with m = -1 is exactly such a case, and it
+	// threw. With the clamp the m >= 0 derivation becomes exact, so that branch
+	// is gone rather than merely unreachable.
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(1700000000LL, 0));
+		json.getRoot()->get("t")->datetime_ms = -1;
+		auto b = json.toBSON();
+		asvJSON j2;
+		ASSERT(j2.fromBSON(b.data(), b.size()));
+		auto* v = j2.getRoot()->get("t");
+		ASSERT(v && v->type == asvJSONValue::DATETIME);
+		ASSERT(v->timestamp == 1700000000LL);
+		ASSERT_EQ(v->datetime_ms, 0); // clamped up to 0
+	}
+	// Over-large ms -> clamped down to 999.
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(1700000000LL, 0));
+		json.getRoot()->get("t")->datetime_ms = 1000;
+		auto b = json.toBSON();
+		asvJSON j2;
+		ASSERT(j2.fromBSON(b.data(), b.size()));
+		auto* v = j2.getRoot()->get("t");
+		ASSERT(v && v->type == asvJSONValue::DATETIME);
+		ASSERT_EQ(v->datetime_ms, 999);
+	}
+	// The old false-positive overflow: must now encode, not throw.
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(0, 0));
+		auto* v = json.getRoot()->get("t");
+		v->timestamp = std::numeric_limits<int64_t>::min() / 1000;
+		v->datetime_ms = -1; // clamps to 0, and t*1000 is still >= INT64_MIN
+		auto b = json.toBSON();
+		asvJSON j2;
+		ASSERT(j2.fromBSON(b.data(), b.size()));
+		ASSERT(j2.getRoot()->get("t")->timestamp == std::numeric_limits<int64_t>::min() / 1000);
+	}
+	// Exact upper boundary: max/1000 with ms = 807 lands exactly on INT64_MAX and
+	// must encode; ms = 808 would exceed it and must still throw. This pins the
+	// guard itself, so the new clamp cannot mask a real overflow.
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(0, 0));
+		auto* v = json.getRoot()->get("t");
+		v->timestamp = std::numeric_limits<int64_t>::max() / 1000;
+		v->datetime_ms = 807;
+		auto b = json.toBSON();
+		asvJSON j2;
+		ASSERT(j2.fromBSON(b.data(), b.size()));
+		auto* d = j2.getRoot()->get("t");
+		ASSERT(d && d->type == asvJSONValue::DATETIME);
+		ASSERT(d->timestamp == std::numeric_limits<int64_t>::max() / 1000);
+		ASSERT_EQ(d->datetime_ms, 807);
+	}
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(0, 0));
+		auto* v = json.getRoot()->get("t");
+		v->timestamp = std::numeric_limits<int64_t>::max() / 1000;
+		v->datetime_ms = 808; // INT64_MAX + 1 milliseconds
+		bool threw = false;
+		try { json.toBSON(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// Lower boundary: min/1000 with ms = 0 is in range; one second lower is not.
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(0, 0));
+		auto* v = json.getRoot()->get("t");
+		v->timestamp = std::numeric_limits<int64_t>::min() / 1000;
+		v->datetime_ms = 0;
+		auto b = json.toBSON();
+		asvJSON j2;
+		ASSERT(j2.fromBSON(b.data(), b.size()));
+		ASSERT(j2.getRoot()->get("t")->timestamp == std::numeric_limits<int64_t>::min() / 1000);
+	}
+	{
+		asvJSON json;
+		json.setValue("t", asvJSONValue::makeDateTime(0, 0));
+		auto* v = json.getRoot()->get("t");
+		v->timestamp = std::numeric_limits<int64_t>::min() / 1000 - 1;
+		v->datetime_ms = 0;
+		bool threw = false;
+		try { json.toBSON(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+}
+
+TEST(testBSONObjectSizeLimit) {
+	// MAX_OBJECT_SIZE was the one core resource limit the BSON decoder did not
+	// enforce. makeObject() does not cap later insert_or_assign() calls, and a
+	// BSON element is only 4 bytes at its smallest (bool, 1-char key), so a
+	// hostile document could mint millions of members.
+	// The check is a hard `>=` at the top of the element loop, so
+	// MAX_OBJECT_SIZE + 1 elements is enough to trip it.
+	const size_t elems = asvJSONValue::MAX_OBJECT_SIZE + 1;
+	std::vector<uint8_t> data;
+	data.reserve(4 + elems * 10 + 1);
+	data.resize(4); // int32 document length, patched in below
+	for (size_t i = 0; i < elems; i++) {
+		data.push_back(0x08);            // bool element
+		size_t div = 1000000;            // fixed-width 7-digit unique key
+		for (int d = 0; d < 7; d++) {
+			data.push_back(static_cast<uint8_t>('0' + (i / div) % 10));
+			div /= 10;
+		}
+		data.push_back(0x00);            // key terminator
+		data.push_back(0x01);            // value
+	}
+	data.push_back(0x00);                // document terminator
+	uint32_t docSize = static_cast<uint32_t>(data.size());
+	std::memcpy(data.data(), &docSize, 4);
+
+	asvJSON json;
+	bool ok = json.fromBSON(data.data(), data.size());
+	if (ok) throw std::runtime_error("BSON object over MAX_OBJECT_SIZE should fail");
+	ASSERT(!json.getLastError().empty());
+}
+
+TEST(testBSONCustomTagUnsupported) {
+	// CUSTOM_TAG has no BSON mapping. toBSON() throws instead of silently
+	// emitting null, which would drop the tagged value without a word.
+	asvJSON json;
+	ASSERT(json.parse(R"({"t":{"$customTag":{"name":"!x","value":1}}})"));
+	ASSERT(json.getRoot()->get("t")->type == asvJSONValue::CUSTOM_TAG);
+	bool threw = false;
+	try { json.toBSON(); } catch (const asvJSONError&) { threw = true; }
+	ASSERT(threw);
 }
 
 TEST(testBSONStrictTerminator) {
@@ -28832,6 +28989,9 @@ int main() {
 	RUN(testBSONDateTimeRoundtrip);
 	RUN(testBSONDateTimeNegativeRoundtrip);
 	RUN(testBSONDateTimeOverflow);
+	RUN(testBSONDateTimeMsClamp);
+	RUN(testBSONObjectSizeLimit);
+	RUN(testBSONCustomTagUnsupported);
 	RUN(testBSONStrictTerminator);
 	RUN(testBSONMalformedRegex);
 	RUN(testBSONOversizedKey);

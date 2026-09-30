@@ -23,8 +23,25 @@
 //   32 bits (stored first) and the seconds in the high 32 bits.  asvJSONValue
 //   stores only the seconds, so the increment is always encoded as 0 and a
 //   non-zero increment from an external document is discarded on decode.
+// - MAX_OBJECT_SIZE/MAX_ARRAY_SIZE/MAX_STRING_LEN/MAX_NESTING_DEPTH: the
+//   decoder enforces MAX_NESTING_DEPTH, MAX_STRING_LEN (keys/pattern+options),
+//   MAX_ARRAY_SIZE (for sequential array documents), and MAX_OBJECT_SIZE (for
+//   all document objects and for non-sequential BSON arrays, which remain
+//   OBJECTs in the tree).  The encoder does NOT proactively cap by MAX_* on
+//   large out-of-contract trees (it will still generate bytes up to the
+//   platform and the 32-bit length cap), mirroring the library's general
+//   encoding policy.
+// - toBSON() throws "BSON: cannot serialize unsupported type..." for types that
+//   have no BSON mapping (e.g. CUSTOM_TAG), rather than silently emitting null.
+//   This is documented behavior.
 
+// Included explicitly rather than relied on transitively via core.hpp (same
+// rule as ubjson.hpp / cbor.hpp): this file uses memcpy, std::numeric_limits
+// and the fixed-width integer types directly.
 #include <charconv>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include "../core.hpp"
 
 namespace asvJSONInternal {
@@ -147,29 +164,33 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 		case T::DATETIME: {
 			out.push_back(0x09);
 			int64_t t = timestamp;
+			// Normalize to the documented [0, 999] millisecond range, exactly as
+			// the MessagePack encoder does. The members are public, so a manually
+			// built value really can hold any int here. This must happen BEFORE
+			// the overflow math below: it is what makes both thresholds exact,
+			// and it removes the old m<0 branch, which was reachable (public
+			// members, no normalization) and wrong -- it reported overflow for
+			// values that in fact encode fine, e.g. t = INT64_MIN/1000, m = -1.
 			int64_t m = datetime_ms;
+			if (m < 0) m = 0;
+			if (m > 999) m = 999;
 			// Guard t*1000+m against signed overflow without performing it.
-			// makeDateTime normalizes m into [0, 999], so only t>0 and t<0
-			// with m>=0 are reachable through the public API.
 			bool overflow = false;
 			if (t > 0)
-				overflow = m >= 0 ? t > (std::numeric_limits<int64_t>::max() - m) / 1000
-			                     : t > std::numeric_limits<int64_t>::max() / 1000;
+				// max/m here, so no wrap: overflow iff t > (max - m) / 1000.
+				overflow = t > (std::numeric_limits<int64_t>::max() - m) / 1000;
 			else if (t < 0) {
-				if (m >= 0) {
-					// overflow iff t*1000 + m < INT64_MIN. Derived without
-					// overflowing the subtraction: min = 1000*minQ + minR with
-					// minR in [-999,0]; then min - m = 1000*minQ + (minR - m)
-					// and the exact threshold for t is:
-					//   t <= minQ + (minR - m)/1000 - 1   (C++ trunc division).
-					int64_t d = (std::numeric_limits<int64_t>::min() % 1000) - m; // in [-1999, 0]
-					int64_t threshold = (std::numeric_limits<int64_t>::min() / 1000) + (d / 1000) - 1;
-					overflow = t <= threshold;
-				} else {
-					// m<0 is unreachable via the public API (makeDateTime
-					// normalizes into [0,999]); err on the side of throwing.
-					overflow = t <= std::numeric_limits<int64_t>::min() / 1000;
-				}
+				// overflow iff t*1000 + m < INT64_MIN. Derived without
+				// overflowing the subtraction: min = 1000*minQ + minR with
+				// minR in [-999,0]; then min - m = 1000*minQ + (minR - m)
+				// and the exact threshold for t is:
+				//   t <= minQ + (minR - m)/1000 - 1   (C++ trunc division).
+				// minR = INT64_MIN % 1000 = -808 and m <= 999, so (minR - m) is
+				// in [-1807, -808]: always negative, which is precisely what
+				// makes the truncating division below give the exact bound.
+				int64_t d = (std::numeric_limits<int64_t>::min() % 1000) - m; // in [-1807, -808]
+				int64_t threshold = (std::numeric_limits<int64_t>::min() / 1000) + (d / 1000) - 1;
+				overflow = t <= threshold;
 			}
 			if (overflow)
 				throw asvJSONError("BSON datetime out of int64 milliseconds range");
@@ -266,6 +287,14 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 	auto obj = asvJSONValue::makeObject();
 	if (!obj) throw asvJSONError("BSON alloc failed");
 	while (pos < docEnd) {
+		// Enforce MAX_OBJECT_SIZE on the way in. The factory makeObject() does
+		// not cap later insert_or_assign() calls, and a BSON element is only
+		// 3 bytes at its smallest (type + 1-byte key + NUL), so a 16 MB hostile
+		// document can mint millions of members -- well past the 1M cap the
+		// library enforces everywhere else. Note this also covers a 0x04 array
+		// whose keys are NOT sequential: that one stays an OBJECT, and so is
+		// governed by this check rather than the MAX_ARRAY_SIZE one below.
+		if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("BSON object too large");
 		uint8_t elemType = data[pos++];
 		size_t keyStart = pos;
 		while (pos < docEnd && data[pos] != 0) pos++;
@@ -340,23 +369,27 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				if (blen > docEnd - pos) throw asvJSONError("BSON binary overflow");
 				size_t blockEnd = pos + blen;
 				size_t dataStart = pos;
-				size_t dataLen = blen;
+				// Named payloadLen, not dataLen: the enclosing parseBSON
+				// parameter `dataLen` is the limit for the WHOLE buffer, while
+				// this is the payload length of this one binary field. The two
+				// used to share a name, and the local shadowed the parameter.
+				size_t payloadLen = blen;
 				if (subtype == 0x03 && blen >= 4) {
 					// UUID (old): the payload leads with a 4-byte length.
 					// The inner length is read but not trusted for sizing --
-					// dataLen is always blen - 4 so the cursor is always
+					// payloadLen is always blen - 4 so the cursor is always
 					// realigned to blockEnd regardless of the inner value.
 					uint32_t oldLen; readLE32(data, pos, oldLen);
 					(void)oldLen;
 					dataStart = pos;
-					dataLen = blen - 4;
+					payloadLen = blen - 4;
 				}
 				if (subtype == 0x00 || subtype == 0x03 || subtype == 0x05) {
-					auto val = asvJSONValue::makeBinary(data + dataStart, dataLen);
+					auto val = asvJSONValue::makeBinary(data + dataStart, payloadLen);
 					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->insert_or_assign(key, std::move(val));
 				} else {
-					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + dataStart, dataLen);
+					auto val = asvJSONValue::makeExtension(static_cast<int8_t>(subtype), data + dataStart, payloadLen);
 					if (!val) throw asvJSONError("BSON extension too large");
 					obj->obj->insert_or_assign(key, std::move(val));
 				}
@@ -449,11 +482,13 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				break;
 			}
 			case 0x13: {
-				if (pos + 16 > docEnd) throw asvJSONError("BSON decimal128: unexpected end");
-				pos += 16;
 				// Decimal128 is a 128-bit IEEE-754 decimal float that cannot be
 				// represented losslessly by this library; fail rather than silently
-				// replacing the value with null.
+				// replacing the value with null. This is unsupported whether the
+				// 16-byte payload is present or truncated, so there is no point
+				// reading it: the exception unwinds the whole parse and no caller
+				// ever observes `pos` again. (The former `pos += 16` was dead code
+				// -- it fed nobody.)
 				throw asvJSONError("BSON decimal128 is not supported");
 			}
 			default: throw asvJSONError(std::string("BSON unknown element type: ") + std::to_string(elemType));
