@@ -15921,6 +15921,158 @@ TEST(testRONReviewFixes) {
   }
 }
 
+TEST(testRONCommentOrderAndPendants) {
+  // 1. A same-line comment after a value at the very bottom of the document used
+  // to be dropped whenever an own-line comment followed it: ronToJson's
+  // `if (pendLead) ... else if (pendTrail)` took only the first branch, so
+  // `1 // trailing` + `// footing` lost the trailing comment.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("1 // trailing\n// footing")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("// trailing") != std::string::npos);
+    ASSERT(s.find("// footing") != std::string::npos);
+    // The same-line comment stays inline, the own-line one is the footer.
+    ASSERT(s.find("// trailing") < s.find("// footing"));
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.toRON(false), s);
+  }
+  // 2. An own-line comment above a field AND a same-line comment after ':' both
+  // have to survive. commitValueLead used to push two entries for one path, and
+  // ronAttachComments copies leading only from the first, so the own-line comment
+  // was lost (`{ /* own */ key: /* same */ 1 }`).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{\n  /* own */\n  key: /* same */ 1\n}")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("own") != std::string::npos);
+    ASSERT(s.find("same") != std::string::npos);
+    // Document order is preserved: own-line above, same-line below.
+    ASSERT(s.find("own") < s.find("same"));
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.toRON(false), s);
+  }
+  // 3. Leading comments on the first field must start their own line. A comment
+  // left on the '(' / '{' / '[' line is not "own-line" to the parser, so it was
+  // collected as a same-line comment and the group ordering flipped on the next
+  // round-trip (a, b -> b, a). The encoder now breaks the opener line whenever
+  // the container or its first child has leading comments.
+  {
+    const char* srcs[] = {
+      "(\n  /* a */\n  /* b */\n  key: 1\n)",  // struct form
+      "{\n  /* a */\n  \"k\": 1\n}",             // map form (quoted key)
+      "[\n  /* a */\n  /* b */\n  1\n]",       // array form
+    };
+    for (const char* src : srcs) {
+      asvJSON j;
+      ASSERT(j.fromRON(std::string_view(src)));
+      std::string s = j.toRON(false);
+      asvJSON j2;
+      ASSERT(j2.fromRON(std::string_view(s)));
+      ASSERT_EQ(j2.toRON(false), s);   // stable
+      asvJSON j3;
+      ASSERT(j3.fromRON(std::string_view(j2.toRON(false))));
+      ASSERT_EQ(j3.toRON(false), s);   // stable again
+    }
+  }
+  // 4. A comment inside `Some(...)` that wraps nothing (`Some(\n // C\n)`) used
+  // to become a "closing" comment, and closing comments are only emitted for
+  // containers, so it was dropped. It now leads the decoded null.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("Some(\n  // C\n)")));
+    std::string s = j.toRON(false);
+    ASSERT(s.find("// C") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.toRON(false), s);
+  }
+  // 5. A `//` comment whose text contains a newline cannot be emitted verbatim:
+  // the parser ends the comment at the newline and reads the rest as content, so
+  // the encoder produced RON that failed to parse. Comment.text is public, so a
+  // programmatically built comment has to survive: it is split into one line
+  // comment per line.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("1")));
+    asvJSONValue* root = j.getRoot();
+    if (!root->comments) root->comments = std::make_unique<Comments>();
+    Comment c;
+    c.text = "line1\nline2";
+    c.block = false;
+    root->comments->trailing.push_back(c);
+    std::string s = j.toRON(false);
+    ASSERT(s.find("//line1") != std::string::npos);
+    ASSERT(s.find("//line2") != std::string::npos);
+    // Both lines are line comments, so nothing after them is swallowed.
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->getInt(), int64_t(1));
+  }
+  // 6. A struct with its own leading comment must NOT be double-emitted when
+  // serialized: parent and container used to both output the comment, and each
+  // round-trip would multiply it. Neither ronSerializeObjFields, nor the struct
+  // form, nor the root entry points must emit a node's own leading comments.
+  {
+    const char* cases[] = {
+      "Some( // Z\n (a: 1, b: 2) )",
+      "[\n  // Z\n  (a: 1, b: 2)\n]",
+      "(f: [\n  // Z\n  (a: 1, b: 2)\n])",
+      "[\n  // Z\n  (a: 1)\n]",
+    };
+    for (const char* src : cases) {
+      asvJSON j;
+      ASSERT(j.fromRON(std::string_view(src)));
+      std::string s = j.toRON(false);
+      // Count marker occurrences
+      size_t n = 0, pos = 0;
+      while ((pos = s.find("Z", pos)) != std::string::npos) { ++n; ++pos; }
+      ASSERT_EQ(n, 1u);
+      asvJSON j2;
+      ASSERT(j2.fromRON(std::string_view(s)));
+      ASSERT_EQ(j2.toRON(false), s);
+      asvJSON j3;
+      ASSERT(j3.fromRON(std::string_view(s)));
+      ASSERT_EQ(j3.toRON(false), s);
+    }
+  }
+  // 7. A trailing list that contains a `//` comment but ENDS in a block comment
+  // still needs the end-of-line: the line comment swallows every following byte,
+  // so checking only the last comment lost the separating comma and broke the
+  // output (`[800 // c1 /* c2 */,600]`). The parser cannot build such a mixed
+  // list, but Comments is programmatically constructible.
+  {
+    Comment line;
+    line.text = " c1";
+    line.block = false;
+    Comment blk;
+    blk.text = " c2 ";
+    blk.block = true;
+    Comment blk2 = blk;
+    const std::vector<Comment> combos[] = {
+      {line, blk},    // line first, block last: the broken case
+      {blk, line},    // block first, line last: already worked
+      {blk, blk2},    // no line comment: no end-of-line wanted
+      {line, line},   // all line comments
+    };
+    for (const auto& combo : combos) {
+      asvJSON j;
+      ASSERT(j.parse(std::string_view("[800,600,400]")));
+      asvJSONValue* first = (*j.getRoot()->arr)[0].get();
+      if (!first->comments) first->comments = std::make_unique<Comments>();
+      for (const auto& c : combo) first->comments->trailing.push_back(c);
+      std::string s = j.toRON(false);
+      asvJSON j2;
+      ASSERT(j2.fromRON(std::string_view(s)));
+      ASSERT_EQ((*j2.getRoot()->arr)[0]->getInt(), int64_t(800));
+      ASSERT_EQ(j2.getRoot()->arr->size(), 3u);
+      ASSERT_EQ(j2.toRON(false), s);
+    }
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -28599,6 +28751,7 @@ RUN(testSexprNumberKeys);
 	RUN(testFromRON);
 	RUN(testRONComments);
 RUN(testRONReviewFixes);
+RUN(testRONCommentOrderAndPendants);
 RUN(testRootFootingComments);
   RUN(testToCpp);
 RUN(testFromCpp);

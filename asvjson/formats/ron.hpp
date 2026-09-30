@@ -25,6 +25,15 @@
 //   Limitations: br'c' raw byte chars are not supported (only b'c'); r#foo
 //   raw identifiers decode to their bare ident text and re-encode as quoted
 //   strings, so round-trip text differs though the value is preserved.
+//   A compound key (a range, array, tuple or qualified variant used as a map key,
+//   e.g. `{3..5: 1}`, `{[1,2]: 1}`) has no JSON key form: it is stringified to
+//   its intermediate JSON text and re-emitted as a quoted string, so the key
+//   round-trips as that string rather than as a collection. A comment inside such
+//   a compound key is rejected (the key is parsed without comment skipping), not
+//   silently dropped.
+//   Comments: a `//` comment is always emitted as one comment per line, so a
+//   `Comment.text` set programmatically with embedded newlines still produces
+//   parseable RON (the decoder itself can never produce one).
 //
 // JSON mapping:
 //   () empty tuple -> {} empty object; None -> null; Some(x) -> x; bare idents
@@ -265,14 +274,20 @@ struct RonParser {
   // Redirect a same-line comment collected right after ':' to leading of `path`
   // (it introduces the value, not trailing it), then any own-line lead. Used for
   // struct fields and map keys where a comment sits between ':' and its value.
+  // Both pendants must land in ONE entry: ronAttachComments only copies leading
+  // from the first entry for a path, so a second entry would drop the own-line
+  // comments (e.g. `/* own */` above `key: /* same */ 1`). Document order is
+  // preserved: own-line first, same-line-after-colon next.
   void commitValueLead(const std::string& path) {
+    if (pendLead.empty() && pendTrail.empty()) return;
+    RonCommentEntry e;
+    e.path = path;
+    e.leading.swap(pendLead);
     if (!pendTrail.empty()) {
-      RonCommentEntry e;
-      e.path = path;
-      e.leading.swap(pendTrail);
-      comments.push_back(std::move(e));
+      for (auto& c : pendTrail) e.leading.push_back(std::move(c));
+      pendTrail.clear();
     }
-    commitLead(path);
+    comments.push_back(std::move(e));
   }
 
   // Commit comments collected just before a container closer: they stay inside
@@ -722,7 +737,15 @@ struct RonParser {
       if (i < in.size() && in[i] == '(') {
         ++i;
         skipWs();
-        if (i < in.size() && in[i] == ')') { commitClosing(path); ++i; return "null"; } // Some() -> null (lenient)
+        if (i < in.size() && in[i] == ')') {
+          // Some() -> null (lenient). A comment here leads that null, exactly as
+          // in the Some(<value>) branch below: commitClosing turned an own-line
+          // comment into a "closing" comment, and closing comments are only
+          // emitted for containers, so `Some(\n // C\n)` dropped it entirely.
+          commitValueLead(path);
+          ++i;
+          return "null";
+        }
         // A comment right after '(' introduces the wrapped value, and the Some
         // wrapper is transparent (it decodes to that value), so it becomes the
         // value's leading comment. It has to be committed here: skipWs() above
@@ -929,18 +952,18 @@ inline std::string ronToJson(std::string_view input, std::vector<RonCommentEntry
   if (p.i >= input.size()) throw asvJSONError("RON: empty input");
   std::string json = p.parseValue(0, "", true);
   p.i = p.skipWsFrom(p.i, true);
-  if (!p.pendLead.empty()) {
+  if (!p.pendLead.empty() || !p.pendTrail.empty()) {
     // Unreferenced comments at the bottom of the document become the root's
-    // footing comments.
-    p.comments.push_back(RonCommentEntry{});
-    RonCommentEntry& e = p.comments.back();
+    // footing comments. Both pendants go into ONE footing entry: the `else if`
+    // used to drop the same-line comment when an own-line comment was also
+    // present (e.g. `1 // trailing` followed by `// footing`), because only the
+    // first branch swapped out. `leading` fills the footing group and `trailing`
+    // stays inline right after the root value, which is where it was written.
+    RonCommentEntry e;
     e.footing = true;
     e.leading.swap(p.pendLead);
-  } else if (!p.pendTrail.empty()) {
-    p.comments.push_back(RonCommentEntry{});
-    RonCommentEntry& e = p.comments.back();
     e.trailing.swap(p.pendTrail);
-    e.footing = true;
+    p.comments.push_back(std::move(e));
   }
   if (p.i != input.size()) throw asvJSONError("RON: trailing content after value");
   return json;
@@ -1048,23 +1071,52 @@ inline bool ronIsRangeObject(const asvJSONValue* v, const asvJSONValue*& rng) {
 inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, bool pretty);
 inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, bool pretty);
 
+// Append one comment. A `//` line comment ends at the first newline, so text that
+// contains one cannot be emitted verbatim -- the remainder would read back as
+// document content and the RON would no longer parse. The RON parser never
+// produces such a text (it stops at the newline) but Comment.text is public, so a
+// programmatically built comment is split into one line comment per line. Block
+// comments keep their text: newlines are legal there.
+inline void ronAppendComment(std::string& out, const Comment& c) {
+  if (c.block) { out += "/*"; out += c.text; out += "*/"; return; }
+  size_t start = 0;
+  while (start < c.text.size()) {
+    size_t nl = c.text.find('\n', start);
+    if (nl == std::string::npos) { out += "//"; out.append(c.text, start, std::string::npos); return; }
+    out += "//";
+    out.append(c.text, start, nl - start);
+    out += '\n';
+    start = nl + 1;
+  }
+  out += "//"; // text ended with a newline: keep the final (empty) line comment
+}
+
 // Serialize a value plus its same-line trailing comment. When `commaNeeded`
-// (this is not the last entry and a separator is due) and the trailing is a
-// `//` line comment which swallows everything to end-of-line, the separating
-// comma is emitted BEFORE the comment so the next entry starts fresh on its
-// own line with no leading comma: `[800, // note\n  600]`. Returns true when
-// the output ended with a newline (the caller must not emit a separator).
+// (this is not the last entry and a separator is due) and any trailing comment
+// is a `//` line comment, which swallows everything to end-of-line, the
+// separating comma is emitted BEFORE the comments so the next entry starts
+// fresh on its own line with no leading comma: `[800, // note\n  600]`. Returns
+// true when the output ended with a newline (the caller must not emit a
+// separator).
 inline bool ronEmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
   ronSerializeVal(v, out, depth, pretty);
   if (!v->comments || v->comments->trailing.empty()) return false;
-  const auto& last = v->comments->trailing.back();
-  if (commaNeeded && commentNeedsEol(last)) out += ',';
+  // ANY trailing line comment needs the end-of-line, not just the last one: a
+  // `//` comment swallows every following byte up to the newline, so a list
+  // ending in a block comment but containing a line comment earlier would lose
+  // the comma and the rest of the line (`[800 // c1 /* c2 */,600]`). The parser
+  // never builds such a mixed list (everything after `//c1` is part of that
+  // comment), but Comments is programmatically constructible.
+  bool needEol = false;
+  for (const auto& c : v->comments->trailing) {
+    if (commentNeedsEol(c)) { needEol = true; break; }
+  }
+  if (commaNeeded && needEol) out += ',';
   for (const auto& c : v->comments->trailing) {
     out += ' ';
-    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-    else { out += "//"; out += c.text; }
+    ronAppendComment(out, c);
   }
-  if (commentNeedsEol(last)) { out += '\n'; return true; }
+  if (needEol) { out += '\n'; return true; }
   return false;
 }
 
@@ -1088,8 +1140,7 @@ inline void ronSerializeObjFields(const asvJSONValue* v, std::string& out, int d
     if (child->comments) {
       for (const auto& c : child->comments->leading) {
         if (pretty) ronIndent(out, depth + 1);
-        if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-        else { out += "//"; out += c.text; }
+        ronAppendComment(out, c);
         out += '\n';
       }
     }
@@ -1109,6 +1160,29 @@ inline void ronSerializeObjFields(const asvJSONValue* v, std::string& out, int d
       prevNl = true;
     i++;
   }
+}
+
+// A container must break the line after its opening '(' / '{' / '[' when the
+// first thing emitted inside is a comment. A comment left on the opener's line is
+// not "own-line" to the parser (skipWsFrom checks the byte before it), so it is
+// collected as a same-line comment instead; on the next round-trip it sorted
+// ahead of the real own-line comments and their order flipped. Pretty mode
+// always breaks; compact mode only has to look at the FIRST CHILD, which is the
+// first thing the container emits inside: a node's own leading comments are
+// emitted by its parent (or by the asvJSON/asvJSONValue entry point), never by
+// the container itself, so emitting them here would duplicate them.
+inline bool ronNeedsLeadBreak(const asvJSONValue* v, bool pretty) {
+  if (pretty) return true;
+  if (!v) return false;
+  if (v->type == asvJSONValue::OBJECT && v->obj && !v->obj->empty()) {
+    const asvJSONValue* c = v->obj->begin()->second.get();
+    return c->comments && !c->comments->leading.empty();
+  }
+  if (v->type == asvJSONValue::ARRAY && v->arr && !v->arr->empty()) {
+    const asvJSONValue* c = (*v->arr)[0].get();
+    return c->comments && !c->comments->leading.empty();
+  }
+  return false;
 }
 
 // A trailing comment whose final line is a `//` line comment swallows anything
@@ -1175,18 +1249,28 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
                           (child->type == asvJSONValue::ARRAY && child->arr && !child->arr->empty());
         if (namedGroup && ronIsValidTypeName(nit->first)) {
           bool childEmpty = (child->type == asvJSONValue::OBJECT) && child->obj->empty();
+          // This branch DOES emit the group node's own leading comments: the
+          // wrapping `Name(...)` form is where the group node's comments are
+          // printed, instead of in whichever parent holds the `Name` key (that
+          // parent only prints its own leading). So the opener line has to break
+          // in compact mode too -- otherwise the first comment is not "own-line"
+          // to the parser and the group/field comment order flips on the next
+          // round-trip. ronNeedsLeadBreak covers the other case: the group's
+          // first field / element carrying leading comments.
+          bool groupLead = child->comments && !child->comments->leading.empty();
           out += nit->first;
           out += '(';
-          if (pretty && !childEmpty) out += '\n';
+          if (!childEmpty && (groupLead || ronNeedsLeadBreak(child, pretty))) out += '\n';
           // Emit the group's own leading comments before its fields/elements.
-          // No extra separator: the '(' already delimits the comment, and in
-          // pretty mode ronIndent() has already placed it at depth + 1.
           if (child->comments && !child->comments->leading.empty()) {
             for (const auto& c : child->comments->leading) {
               if (pretty) ronIndent(out, depth + 1);
-              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-              else { out += "//"; out += c.text; }
-              if (!c.block && commentNeedsEol(c)) out += '\n';
+              ronAppendComment(out, c);
+              // Always a newline, like the plain struct/map field path: a block
+              // comment left on the '(' line re-parses as NOT own-line (it lands
+              // in pendTrail), which reordered the group leading comments on the
+              // next round-trip and glued the first field onto the '(' line.
+              out += '\n';
             }
           }
           if (child->type == asvJSONValue::OBJECT) {
@@ -1207,8 +1291,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
               if (el->comments) {
                 for (const auto& c : el->comments->leading) {
                   if (pretty) ronIndent(out, depth + 1);
-                  if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-                  else { out += "//"; out += c.text; }
+                  ronAppendComment(out, c);
                   out += '\n';
                 }
               }
@@ -1234,8 +1317,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           if (child->comments && !child->comments->trailing.empty()) {
             for (const auto& c : child->comments->trailing) {
               out += ' ';
-              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-              else { out += "//"; out += c.text; }
+              ronAppendComment(out, c);
               if (commentNeedsEol(c)) out += '\n';
             }
           }
@@ -1246,7 +1328,13 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
       if (allIdents) {
         // Struct form: ( key: value, ... )
         out += '(';
-        if (pretty) out += '\n';
+        if (ronNeedsLeadBreak(v, pretty)) out += '\n';
+        // NOTE: the struct's own leading comments are deliberately NOT emitted
+        // here. They are emitted by whoever holds this node (ronSerializeObjFields
+        // for a field, the array loop for an element, the named-group branch, or
+        // the asvJSON/asvJSONValue entry point for a root). Emitting them here
+        // duplicated them: a struct reached through a parent came out with the
+        // comment twice and grew one more copy per round-trip.
         ronSerializeObjFields(v, out, depth, pretty);
         ronEmitClosing(out, v, depth, pretty);
         if (pretty) {
@@ -1257,7 +1345,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
       } else {
         // Map form (non-ident keys): { "key": value, ... }
         out += '{';
-        if (pretty) out += '\n';
+        if (ronNeedsLeadBreak(v, pretty)) out += '\n';
         ronSerializeObjFields(v, out, depth, pretty);
         ronEmitClosing(out, v, depth, pretty);
         if (pretty) {
@@ -1270,7 +1358,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
     }
     case asvJSONValue::ARRAY: {
       out += '[';
-      if (pretty && (v->arr && !v->arr->empty())) out += '\n';
+      if (v->arr && !v->arr->empty() && ronNeedsLeadBreak(v, pretty)) out += '\n';
       if (v->arr) {
         size_t i = 0;
         const size_t ne = v->arr->size();
@@ -1284,8 +1372,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           if (el->comments) {
             for (const auto& c : el->comments->leading) {
               if (pretty) ronIndent(out, depth + 1);
-              if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-              else { out += "//"; out += c.text; }
+              ronAppendComment(out, c);
               out += '\n';
             }
           }
@@ -1377,8 +1464,7 @@ inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, b
   if (!out.empty() && out.back() != '\n') out += '\n';
   for (const auto& c : v->comments->closing) {
     if (pretty) ronIndent(out, depth + 1);
-    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-    else { out += "//"; out += c.text; }
+    ronAppendComment(out, c);
     out += '\n';
   }
 }
@@ -1388,8 +1474,7 @@ inline std::string asvJSON::toRON(bool pretty) const {
   std::string out;
   if (root->comments) {
     for (const auto& c : root->comments->leading) {
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      ronAppendComment(out, c);
       out += '\n';
     }
   }
@@ -1397,26 +1482,33 @@ inline std::string asvJSON::toRON(bool pretty) const {
   if (root->comments) {
     for (const auto& c : root->comments->trailing) {
       out += ' ';
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      ronAppendComment(out, c);
       if (commentNeedsEol(c)) out += '\n';
     }
     for (const auto& c : root->comments->footing) {
       out += '\n';
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      ronAppendComment(out, c);
     }
   }
   return out;
 }
 
 inline void asvJSONValue::toRON(std::string& out, bool pretty) const {
+  // This is the entry point for a value that has no parent in the tree, so it
+  // takes over the role the parent would play: emit this node's own leading
+  // comments (ronSerializeVal never emits them, or every container reached
+  // through a parent would duplicate them).
+  if (comments) {
+    for (const auto& c : comments->leading) {
+      ronAppendComment(out, c);
+      out += '\n';
+    }
+  }
   ronSerializeVal(this, out, 0, pretty);
   if (comments && !comments->trailing.empty()) {
     for (const auto& c : comments->trailing) {
       out += ' ';
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      ronAppendComment(out, c);
       if (commentNeedsEol(c)) out += '\n';
     }
   }
