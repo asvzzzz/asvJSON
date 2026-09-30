@@ -9732,6 +9732,189 @@ TEST(testToGOON) {
 	}
 }
 
+TEST(testGOONCellSafety) {
+	// A rendered cell must be representable in the flat `val1,val2` row syntax.
+	// Every case below used to corrupt the document on a round-trip: a raw
+	// newline ended the row, an unbalanced bracket made the decoder's cell
+	// splitter run past the cell, and a depth-0 ':' turned a root marker into a
+	// mapping. Each asserts losslessness AND stability (re-encode == encode).
+	auto roundTrip = [](const std::string& jsonIn, const char* label) {
+		asvJSON src;
+		ASSERT(src.parse(std::string_view(jsonIn)));
+		std::string g1 = src.toGOON();
+		asvJSON b1;
+		ASSERT(b1.fromGOON(std::string_view(g1)));
+		ASSERT_MSG(b1.serialize() == src.serialize(), label);
+		std::string g2 = b1.toGOON();
+		asvJSON b2;
+		ASSERT(b2.fromGOON(std::string_view(g2)));
+		ASSERT_MSG(b2.serialize() == b1.serialize(), label);
+		ASSERT_MSG(g1 == g2, label);
+	};
+	// 1. A REGEX pattern containing a real newline: it must be escaped, never
+	//    emitted raw, or the pattern splits the row into two bogus rows.
+	roundTrip("[{\"a\":{\"$regex\":\"x\\ny\"},\"b\":1},{\"a\":{\"$regex\":\"x\\ny\"},\"b\":2}]", "regex-newline");
+	// 1b. Newline together with options (both payload halves are escaped).
+	roundTrip("[{\"a\":{\"$regex\":\"x\\ny\",\"$options\":\"ims\"},\"b\":1},{\"a\":{\"$regex\":\"x\\ny\",\"$options\":\"ims\"},\"b\":2}]", "regex-newline-opts");
+	// 1c. A literal backslash-n in the pattern stays a backslash + n; it must
+	//     not be confused with the escaped real newline above.
+	roundTrip("[{\"a\":{\"$regex\":\"x\\\\ny\"},\"b\":1},{\"a\":{\"$regex\":\"x\\\\ny\"},\"b\":2}]", "regex-literal-bs-n");
+	// 2. Unbalanced brackets/brace in a cell: the decoder's depth tracking would
+	//    merge cells ('a[b,1' became one cell with a null second column).
+	roundTrip("[{\"a\":\"x[y\",\"b\":1},{\"a\":\"x[y\",\"b\":2}]", "unbalanced-open");
+	roundTrip("[{\"a\":\"x]y\",\"b\":1},{\"a\":\"x]y\",\"b\":2}]", "unbalanced-close");
+	roundTrip("[{\"a\":\"x{y\",\"b\":1},{\"a\":\"x{y\",\"b\":2}]", "unbalanced-brace");
+	// 2b. A depth-0 '*' in a REGEX payload would start an RLE repeat count; the
+	//     decoder's row scan reads one at depth 0 outside quotes and fails the
+	//     whole document with "GOON: invalid RLE repeat". A STRING is immune
+	//     (goonNeedsQuotes quotes any text containing '*'), a bare marker is not.
+	roundTrip("[{\"a\":{\"$regex\":\"a*b\",\"$options\":\"g\"},\"b\":1},{\"a\":{\"$regex\":\"a*b\",\"$options\":\"g\"},\"b\":2}]", "regex-star");
+	roundTrip("[{\"a\":{\"$regex\":\"a*2\",\"$options\":\"g\"},\"b\":1},{\"a\":{\"$regex\":\"a*2\",\"$options\":\"g\"},\"b\":2}]", "regex-star-digits");
+	roundTrip("[{\"a\":{\"$regex\":\".*x\",\"$options\":\"g\"},\"b\":1},{\"a\":{\"$regex\":\".*x\",\"$options\":\"g\"},\"b\":2}]", "regex-star-dot");
+	// A '*' inside a balanced group stays tabular: the quantifier comma is
+	// protected by the braces.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[{\"a\":{\"$regex\":\"a{2,3}\",\"$options\":\"g\"},\"b\":1},{\"a\":{\"$regex\":\"a{2,3}\",\"$options\":\"g\"},\"b\":2}]")));
+		ASSERT(j.toGOON().find("[2]{a,b}:") != std::string::npos);
+	}
+	// A lone backslash outside quotes is where goonCellFit (escape only inside
+	// quotes) and the decoder's row splitter (escape everywhere) disagree. The
+	// disagreement must always resolve toward the safer list format.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[{\"a\":\"x\\\\{y\",\"b\":1},{\"a\":\"x\\\\{y\",\"b\":2}]")));
+		std::string goon = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view(goon)));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// goonCellFit() verdicts, pinned directly. It is the load-bearing gate for
+	// the tabular form, and the escape handling here is deliberately stricter
+	// than the decoder's row splitter (see the asymmetry note in goon.hpp), so the
+	// exact verdicts are worth locking in.
+	ASSERT_EQ(goonCellFit(""), GoonCellFit::Ok);
+	ASSERT_EQ(goonCellFit("plain"), GoonCellFit::Ok);
+	// A balanced group protects the separators inside it: a quantifier comma is
+	// fine, and a backslash before the brace does not unbalance it.
+	ASSERT_EQ(goonCellFit("__REGEX__a{2,3}|g"), GoonCellFit::Ok);
+	ASSERT_EQ(goonCellFit("a\\{b}"), GoonCellFit::Ok);
+	// Unsafe: bare comma, bare '*', raw newline, unbalanced brace, quote stuck open.
+	ASSERT_EQ(goonCellFit("__REGEX__a,b|c"), GoonCellFit::Unsafe);
+	ASSERT_EQ(goonCellFit("__REGEX__a*b|g"), GoonCellFit::Unsafe);
+	ASSERT_EQ(goonCellFit("a\\{b,c"), GoonCellFit::Unsafe);
+	ASSERT_EQ(goonCellFit("a\"b,c"), GoonCellFit::Unsafe);   // escaped quote outside quotes
+	ASSERT_EQ(goonCellFit("a[b"), GoonCellFit::Unsafe);
+	ASSERT_EQ(goonCellFit("a]b"), GoonCellFit::Unsafe);
+	ASSERT_EQ(goonCellFit("\"unterminated"), GoonCellFit::Unsafe);
+	// BareColon: a depth-0 colon keeps the table but indents the rows a level.
+	ASSERT_EQ(goonCellFit("__REGEX__a\\:b|g"), GoonCellFit::BareColon);
+	ASSERT_EQ(goonCellFit("__REGEX__a:b|c"), GoonCellFit::BareColon);
+	// A comma wins over a colon, as when only the comma was checked before.
+	ASSERT_EQ(goonCellFit("a:b,c"), GoonCellFit::Unsafe);
+	// 3. A depth-0 ':' inside a REGEX pattern, in a table and at the root.
+	roundTrip("[{\"a\":{\"$regex\":\"C:\\\\d+\"},\"b\":1},{\"a\":{\"$regex\":\"C:\\\\d+\"},\"b\":2}]", "regex-colon-table");
+	roundTrip("{\"$regex\":\"a:b\"}", "regex-colon-root");
+	roundTrip("{\"$regex\":\"a:b|c|d\"}", "regex-colon-pipe-root");
+	// 4. A single-line flow array at the root is a JSON-superset value.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("[1,2,3]")));
+		ASSERT_EQ(j.getRoot()->type, asvJSONValue::ARRAY);
+		ASSERT_EQ(j.getRoot()->size(), size_t(3));
+		ASSERT_EQ(j.getRoot()->get(2)->getInt(), int64_t(3));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("[[1],[2]]")));
+		ASSERT_EQ(j.getRoot()->get(0)->get(0)->getInt(), int64_t(1));
+		ASSERT_EQ(j.getRoot()->get(1)->get(0)->getInt(), int64_t(2));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("[\"a\",\"b\"]")));
+		ASSERT_EQ(std::string(j.getRoot()->get(0)->getString()), "a");
+	}
+	// A block sequence header must still win over the flow-array shortcut.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("[]:\n- 1\n- 2\n")));
+		ASSERT_EQ(j.getRoot()->size(), size_t(2));
+	}
+	// 5. Already-representable cells keep the tabular form (no needless
+	//    fallback to list format).
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("[{\"a\":\"x,y\",\"b\":1},{\"a\":\"x,y\",\"b\":2}]")));
+		std::string goon = j.toGOON();
+		ASSERT(goon.find("[2]{a,b}:") != std::string::npos);
+	}
+	// 6. A bare __TS__ carries no payload: splicing it produced the invalid JSON
+	//    {"$timestamp":{"t":}} and a foreign "Unexpected: }" error. It must fall
+	//    through to a plain string, and re-encode quoted.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __TS__")));
+		ASSERT_EQ(std::string(j.getString("a")), "__TS__");
+		ASSERT(j.toGOON().find("\"__TS__\"") != std::string::npos);
+	}
+	// A __TS__ with a real payload is still a TIMESTAMP.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __TS__123")));
+		ASSERT_EQ(j.getRoot()->getConst("a")->type, asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(j.getRoot()->getConst("a")->num, 123.0);
+	}
+	// Backward compatibility: hand-written docs with the OLD unescaped REGEX
+	// payload must still decode (only the encoder's output changed).
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __REGEX__abc|ims")));
+		// str_data holds "pattern\0options".
+		ASSERT_EQ(j.getRoot()->getConst("a")->str_data, std::string("abc\0ims", 7));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view(R"(a: __REGEX__a\|b|c)")));
+		// pattern "a|b" + NUL + options "c" = 5 bytes.
+		ASSERT_EQ(j.getRoot()->getConst("a")->str_data, std::string("a|b\0c", 5));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view(R"(a: __REGEX__a\\b|c)")));
+		// pattern "a\b" + NUL + options "c" = 5 bytes.
+		ASSERT_EQ(j.getRoot()->getConst("a")->str_data, std::string("a\\b\0c", 5));
+	}
+	// Other markers are untouched by the escaping change.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __BASE64__AAEC")));
+		ASSERT_EQ(j.getRoot()->getConst("a")->type, asvJSONValue::BINARY);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __OID__507f1f77bcf86cd799439011")));
+		ASSERT_EQ(j.getRoot()->getConst("a")->type, asvJSONValue::OBJECTID);
+	}
+	{
+		// __EXT__<type>_<payload> restores the EXTENSION type, not a plain BINARY.
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: __EXT__1_AAEC")));
+		const asvJSONValue* ev = j.getRoot()->getConst("a");
+		ASSERT_EQ(ev->type, asvJSONValue::EXTENSION);
+		ASSERT_EQ(ev->ext_type, 1);
+		ASSERT_EQ(ev->bin_data.size(), size_t(3));
+	}
+	// A string that merely LOOKS like a marker stays a string (goonNeedsQuotes).
+	roundTrip("[{\"a\":{\"$timestamp\":{\"t\":7}},\"b\":\"__TS__42\"},{\"a\":{\"$timestamp\":{\"t\":7}},\"b\":\"__TS__42\"}]", "ts-and-lookalike-string");
+	// Mixed row where one column is unsafe: the whole table must fall back to
+	// list format rather than corrupting the row.
+	roundTrip("[{\"a\":\"p,q\",\"b\":{\"$regex\":\"r:s\"},\"c\":1},{\"a\":\"p,q\",\"b\":{\"$regex\":\"r:s\"},\"c\":2}]", "mixed-unsafe-row");
+	// A marker cell carrying depth-0 commas (CUSTOM_TAG JSON text) must stay
+	// tabular: the braces protect the commas.
+	roundTrip("[{\"a\":{\"$customTag\":{\"name\":\"x,y\",\"value\":1}},\"b\":2},{\"a\":{\"$customTag\":{\"name\":\"x,y\",\"value\":1}},\"b\":2}]", "custom-tag-cell");
+}
+
 TEST(testGOONAudit) {
 	// Bug 3: Colon in key round-trip
 	{
@@ -28716,8 +28899,9 @@ RUN(testTOONReviewFixes);
 	RUN(testTRONRoundTripFidelity);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
-	RUN(testToGOON);
-	RUN(testGOONAudit);
+RUN(testToGOON);
+RUN(testGOONCellSafety);
+RUN(testGOONAudit);
 	RUN(testGOONExtras);
 RUN(testGOONSpecialValues);
 	

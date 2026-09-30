@@ -34,8 +34,32 @@
 // Tabular row cells: the flat `cell1,cell2` row syntax has no escape, so the
 // decoder splits rows with a quote- AND brace-aware scan (commas inside a
 // balanced marker group belong to that cell) and the encoder refuses the table
-// form for a cell carrying a depth-0 comma (e.g. `__REGEX__a,b|c`), falling
-// back to list format rather than splitting the cell.
+// form for any cell that goonCellFit() rejects, falling back to list format
+// rather than corrupting the row. A cell is rejected when it carries:
+//   - a depth-0 comma (e.g. `__REGEX__a,b|c`) -- it would split the cell;
+//   - a raw newline -- it would end the row;
+//   - unbalanced `{`/`[`/`}`/`]` or an unterminated quote (e.g. `a[b`) -- the
+//     decoder's depth tracking would run past the cell and merge the columns.
+// A depth-0 ':' (e.g. `__REGEX__a:b`) is NOT a rejection: the table stays
+// tabular and the rows are indented one level deeper, which keeps it
+// unambiguous. See goonCellFit().
+//
+// REGEX markers: the payload is a bare token (no quotes, no braces), so
+// goonEscapeRegPayload() backslash-escapes every byte that could otherwise end
+// the cell, the row, the line, or look like structure: '\' and '|' (the '|'
+// separates pattern from options), ':', '\n' and '\r'. A pattern may legally
+// contain a real newline, and a raw one used to split one cell into two bogus
+// rows. Because '\' is escaped first, a pattern holding a literal backslash-n
+// stays distinguishable from one holding a real newline. The decoder undoes
+// exactly this set, so hand-written documents using the older unescaped form
+// still decode unchanged.
+//
+// Root values: a complete single-line flow collection (`{"a":1}`, `[1,2,3]`), a
+// special-marker token, or a bare scalar is a VALUE, not a block mapping. The
+// marker case matters because a pattern may contain an unquoted ':'
+// (`__REGEX__a:b`), which used to split into {"__REGEX__a":"b"} and lose the
+// type. A block header (`[N]{...}:`, `[]:`, `key: value`) still wins over these
+// shortcuts.
 
 #include "../core.hpp"
 
@@ -61,7 +85,6 @@ inline std::string goonLiteral(const asvJSONValue* v) {
 // Forward declarations for mutual recursion
 inline std::string goonFormatSpecial(const asvJSONValue* v);
 inline bool goonNeedsQuotes(const std::string& s);
-inline size_t goonFindCellSeparator(std::string_view s, char target);
 inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict, const GoonWriteOptions& opts);
 
@@ -168,6 +191,23 @@ inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0)
     default: out += "null"; return;
   }
 }
+// Escape one half (pattern or options) of a REGEX marker payload. The set is
+// exactly what the decoder's unescapeRegPayload() undoes; keep the two in sync.
+inline std::string goonEscapeRegPayload(std::string_view x) {
+  std::string r;
+  r.reserve(x.size());
+  for (char c : x) {
+    switch (c) {
+      case '\\': r += "\\\\"; break;
+      case '|':  r += "\\|";  break;
+      case ':':  r += "\\:";  break;
+      case '\n': r += "\\n";  break;
+      case '\r': r += "\\r";  break;
+      default:   r += c;      break;
+    }
+  }
+  return r;
+}
 inline std::string goonFormatSpecial(const asvJSONValue* v) {
   if (!v) return "_";
   switch (v->type) {
@@ -188,25 +228,22 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
     }
     case asvJSONValue::REGEX: {
       // Emit __REGEX__<escaped-pattern>|<opts> so the decoder can restore the
-      // REGEX type. '|' and '\' inside the pattern and options are backslash-
-      // escaped so a pattern that itself contains '|' round-trips losslessly.
+      // REGEX type. The payload is a bare token -- no quotes, no braces -- so
+      // every byte that could terminate a cell, a row or a line is escaped:
+      //   '\' and '|'  structural (the '|' separates pattern from options)
+      //   ':'          a depth-0 colon makes a decoder mistake the cell for a
+      //                `key: value` sibling (and at the root, the whole
+      //                document for a mapping)
+      //   '\n' '\r'    a raw newline ends the ROW, splitting one cell into two
+      //                (and a REGEX pattern may legitimately contain one)
+      // The decoder unescapes exactly this set, and since '\' is itself escaped
+      // first, a pattern containing a literal backslash-n stays distinguishable
+      // from one containing a real newline.
       size_t sep = v->str_data.rfind('\0');
       std::string pat = (sep != std::string::npos) ? v->str_data.substr(0, sep) : v->str_data;
       std::string opts = (sep != std::string::npos && sep + 1 < v->str_data.size()) ? v->str_data.substr(sep + 1) : std::string();
-      std::string esc;
-      esc.reserve(pat.size());
-      for (char c : pat) {
-        if (c == '\\' || c == '|') esc += '\\';
-        esc += c;
-      }
-      std::string result = "__REGEX__" + esc;
-      if (!opts.empty()) {
-        result += '|';
-        for (char c : opts) {
-          if (c == '\\' || c == '|') result += '\\';
-          result += c;
-        }
-      }
+      std::string result = "__REGEX__" + goonEscapeRegPayload(pat);
+      if (!opts.empty()) result += '|' + goonEscapeRegPayload(opts);
       return result;
     }
     case asvJSONValue::TIMESTAMP:
@@ -333,6 +370,91 @@ inline void goonWriteDictHeader(const std::unordered_map<std::string, int>& dict
 
 
 
+// Why a rendered cell cannot appear in the flat `val1,val2` tabular row syntax.
+//   Ok        representable as-is
+//   BareColon a depth-0 ':' -- the table still works, but the rows must be
+//             indented one level deeper (see goonSerializeArray's bareColon path).
+//             Reason: the decoder's "is this a sibling mapping line" scan, which
+//             decides whether a row sitting at the header's own indentation ends
+//             the table, also honours '\' only inside quotes -- so a cell like
+//             `__REGEX__a\:b` still reads as `key: value` to that scan.
+//   Unsafe    not representable at all -- fall back to list format
+// Beyond the separator question, a cell must not contain a raw newline (it ends
+// the ROW, splitting one cell into two) and must leave the decoder's quote/depth
+// tracking balanced: a stray '[' or an unterminated quote makes the splitter run
+// past the cell, merging cells or splitting one -- `a[b,1` read back as a single
+// cell "a[b,1" with the second column null. A depth-0 '*' is rejected too, since
+// it would start an RLE repeat count. Empty cells are always fine.
+//
+// DELIBERATE ASYMMETRY with the decoder's row splitter (the depth/quote scan in
+// goonToJson that cuts a row into cells). The three relevant scans do not agree
+// on what '\' means, so each is described by what it suppresses:
+//
+//   this function    '\' escapes ONLY inside quotes.
+//   row splitter     '\' sets a flag anywhere; the next character then skips the
+//                    quote-delimiter branch ONLY. It is still brace-counted and
+//                    still tested as a ',' separator -- which is why `a\{b}` and
+//                    `a\,b` behave the way they do.
+//   RLE scan         '\' sets a flag anywhere and the next character is skipped
+//                    ENTIRELY (before quote, brace and '*' handling), and it
+//                    additionally requires ci > 0.
+//
+// The first two are what matters here, and they disagree only on hand-written
+// cells containing a lone backslash outside quotes. The direction is safe:
+//
+//   - This function is the stricter of the two, so the disagreement always
+//     resolves toward Unsafe -> list format, where every value is quoted and
+//     re-joined. `a\{b,c` is Unsafe here (unbalanced brace) although the row
+//     splitter would have kept it in one cell; the extra fallback is wasted
+//     work, never a corrupted row.
+//   - The reverse -- this function saying Ok while the row splitter still cut
+//     the cell -- cannot happen, which is the property that actually matters.
+//     Braces are counted identically in both: a backslash outside quotes sets no
+//     escape flag here, and the row splitter still increments depth for the
+//     brace it follows, so `a\{b}` balances in both. And an escaped '"' outside
+//     quotes leaves this function with inQ set, which the final
+//     `depth != 0 || inQ` check turns into Unsafe.
+//
+// So the two are deliberately NOT synchronized. Loosening this to match the row
+// splitter would let a lone `\{` emit a cell the splitter mangles; tightening the
+// row splitter to match would change how existing documents decode.
+enum class GoonCellFit { Ok, BareColon, Unsafe };
+inline GoonCellFit goonCellFit(std::string_view cell) {
+  if (cell.empty()) return GoonCellFit::Ok;
+  bool inQ = false, esc = false;
+  int depth = 0;
+  bool sawColon = false;
+  for (char c : cell) {
+    if (esc) { esc = false; continue; }
+    // Only meaningful inside quotes: see the asymmetry note above.
+    if (inQ && c == '\\') { esc = true; continue; }
+    if (c == '"') { inQ = !inQ; continue; }
+    if (inQ) continue;
+    if (c == '\n' || c == '\r') return GoonCellFit::Unsafe;
+    if (c == '{' || c == '[') { depth++; continue; }
+    if (c == '}' || c == ']') { if (depth == 0) return GoonCellFit::Unsafe; depth--; continue; }
+    if (depth != 0) continue;
+    // A bare comma has no escape in the row syntax, so the table is
+    // unrepresentable -- a comma wins over a colon, as before.
+    if (c == ',') return GoonCellFit::Unsafe;
+    // '*' starts an RLE repeat count (`row*N`), which the decoder's RLE scan
+    // looks for at depth 0 outside quotes; a non-numeric tail there is the error
+    // "GOON: invalid RLE repeat". A STRING is safe because goonNeedsQuotes()
+    // quotes any text containing '*', but a REGEX payload bypasses that check
+    // and is emitted bare, so `a*b` as a pattern needs this guard.
+    // Slightly over-strict: that scan requires ci > 0, so a '*' at row position 0
+    // is not treated as a marker. This function sees a cell, not its column, and
+    // a leading '*' is only at row position 0 in the FIRST column -- tracking the
+    // column to allow the other cases would complicate the API for a pattern
+    // (`*` first) that most regex engines reject anyway. Kept strict: the cost
+    // is a list-format fallback, never a mis-parsed row.
+    if (c == '*') return GoonCellFit::Unsafe;
+    if (c == ':') sawColon = true;
+  }
+  if (depth != 0 || inQ) return GoonCellFit::Unsafe;
+  return sawColon ? GoonCellFit::BareColon : GoonCellFit::Ok;
+}
+
 inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr, const GoonWriteOptions& opts = {}) {
   if (!arr || arr->size() == 0) {
     if (!key.empty() || depth > 0) {
@@ -405,7 +527,11 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
   std::string pad(static_cast<size_t>(indent) * static_cast<size_t>(iw), ' ');
   std::vector<std::vector<std::string>> grid;
   bool bareColon = false;
-  bool bareComma = false;
+  // Any goonCellFit() == Unsafe verdict, whatever its cause (comma, '*', raw
+  // newline, unbalanced brace, unterminated quote) -- not just a comma, hence
+  // the name. Set -> the table is unrepresentable in the flat row syntax and
+  // falls back to list format.
+  bool forceList = false;
   if (tabular && !cols.empty()) {
     auto buildCells = [&](const asvJSONValue* obj) {
       std::vector<std::string> cells;
@@ -440,24 +566,19 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
     grid.reserve(arr->size());
     for (size_t r = 0; r < arr->size(); r++) {
       grid.push_back(buildCells(arr->get(r)));
-      if (bareColon) continue;
+      // Keep scanning after a BareColon verdict: a later row may hold a cell
+      // that is Unsafe outright, and Unsafe wins over BareColon.
       for (const auto& cell : grid.back()) {
-        if (cell.empty()) continue;
-        // A depth-0 colon (not quoted, not inside a balanced group) would make
-        // the decoder read the cell as a `key: value` sibling.
-        if (goonFindCellSeparator(cell, ':') != std::string::npos) { bareColon = true; break; }
+        GoonCellFit fit = goonCellFit(cell);
+        if (fit == GoonCellFit::Unsafe) { forceList = true; break; }
+        if (fit == GoonCellFit::BareColon) bareColon = true;
       }
+      if (forceList) break;
     }
-    // A depth-0 comma cannot be escaped in the flat `val1,val2` row syntax --
-    // the decoder would split the cell in two and silently drop the rest (e.g.
-    // a REGEX pattern `__REGEX__a,b|c`, which emits no quotes/braces). Fall
-    // back to list format, which quotes such values robustly.
-    for (const auto& cells : grid) {
-      if (bareComma) break;
-      for (const auto& cell : cells)
-        if (!cell.empty() && goonFindCellSeparator(cell, ',') != std::string::npos) { bareComma = true; break; }
-    }
-    if (bareComma) tabular = false;
+    // A cell the flat `val1,val2` row syntax cannot carry makes the whole table
+    // unrepresentable, so fall back to list format, which quotes such values
+    // robustly. See goonCellFit() for the full list of causes.
+    if (forceList) tabular = false;
   }
   if (tabular && !cols.empty()) {
     // Spec minimalIndent: rows of llm/compact tables sit at the header's own
@@ -803,24 +924,32 @@ inline size_t goonFindUnquoted(std::string_view s, char target) {
   return std::string_view::npos;
 }
 
-// Same as goonFindUnquoted, but depth-aware for a tabular row CELL: a separator
-// inside a quoted string OR inside a balanced `{...}`/`[...]` group belongs to
-// that value and cannot act as a row separator. Used by the encoder to decide
-// whether a cell is safe in the flat `val1,val2` row syntax.
-inline size_t goonFindCellSeparator(std::string_view s, char target) {
-  bool inQ = false, esc = false;
-  int depth = 0;
-  for (size_t ci = 0; ci < s.size(); ci++) {
-    char c = s[ci];
-    if (esc) { esc = false; continue; }
-    if (inQ && c == '\\') { esc = true; continue; }
-    if (c == '"') { inQ = !inQ; continue; }
-    if (inQ) continue;
-    if (c == '{' || c == '[') { depth++; continue; }
-    if (c == '}' || c == ']') { if (depth > 0) depth--; continue; }
-    if (depth == 0 && c == target) return ci;
-  }
-  return std::string_view::npos;
+// True when `s` is an integer literal: at least one digit, optional '-' sign.
+// Used to validate the __TS__ payload before splicing it into JSON.
+inline bool goonAllIntDigits(std::string_view s) {
+  size_t i = (!s.empty() && s[0] == '-') ? 1 : 0;
+  if (i >= s.size()) return false;
+  for (; i < s.size(); i++) if (s[i] < '0' || s[i] > '9') return false;
+  return true;
+}
+
+// True when `s` begins with one of the GOON special-marker prefixes. Such a token
+// is a VALUE, never the left half of a `key: value` pair: its payload is opaque
+// and may contain an unquoted ':' (a REGEX pattern `a:b`) or ','. Splitting a
+// root `__REGEX__a:b` at that colon produced {"__REGEX__a":"b"} -- the REGEX type
+// destroyed and the document no longer re-encoded as a marker. Keys with such a
+// prefix are unambiguous in practice because goonNeedsQuotes() forces a key
+// starting with "__" to be quoted.
+inline bool goonIsSpecialMarker(std::string_view s) {
+  // Length is checked before each compare: string_view::compare() throws
+  // std::out_of_range when pos > size(), so a short token must be filtered out
+  // by an explicit size test rather than by letting compare() clip it.
+  if (s.size() >= 9 && s.compare(0, 9, "__REGEX__") == 0) return true;
+  if (s.size() >= 6 && s.compare(0, 6, "__TS__") == 0) return true;
+  if (s.size() >= 7 && s.compare(0, 7, "__OID__") == 0) return true;
+  if (s.size() >= 10 && s.compare(0, 10, "__BASE64__") == 0) return true;
+  if (s.size() >= 7 && s.compare(0, 7, "__EXT__") == 0) return true;
+  return false;
 }
 
 // True when `s` is a single self-contained flow collection: it opens with the
@@ -983,7 +1112,13 @@ inline std::string goonToJson(std::string_view input) {
     if (s.size() >= 1 && s.front() != '"') {
       std::string_view unquoted = s;
       if (unquoted.substr(0, 6) == "__TS__") {
-        return "{\"$timestamp\":{\"t\":" + std::string(unquoted.substr(6)) + "}}";
+        // Require a numeric payload. A bare `__TS__` has none, and interpolating
+        // nothing produced `{"$timestamp":{"t":}}` -- invalid JSON that the JSON
+        // layer then rejected with a foreign "Unexpected: }" message. Fall through
+        // to the string quoting below instead, so the token stays a plain string.
+        std::string_view tsd(unquoted.substr(6));
+        if (goonAllIntDigits(tsd))
+          return "{\"$timestamp\":{\"t\":" + std::string(tsd) + "}}";
       }
       if (unquoted.substr(0, 7) == "__OID__") {
         return "{\"$oid\":\"" + std::string(unquoted.substr(7)) + "\"}";
@@ -992,8 +1127,10 @@ inline std::string goonToJson(std::string_view input) {
         return "{\"$binary\":{\"base64\":\"" + std::string(unquoted.substr(10)) + "\",\"subType\":\"00\"}}";
       }
       if (unquoted.substr(0, 9) == "__REGEX__") {
-        // The encoder escapes '|' and '\' inside the pattern, so split at the
-        // LAST unescaped '|' and unescape the pattern/options sides.
+        // The encoder escapes '|', '\', ':', '\n' and '\r' inside the payload,
+        // so split at the LAST unescaped '|' and unescape both sides. Because
+        // '\' is escaped first, a payload holding a literal backslash-n stays
+        // distinguishable from one holding a real newline.
         std::string content(unquoted.substr(9));
         size_t sep = std::string::npos;
         size_t bs = 0;
@@ -1007,9 +1144,16 @@ inline std::string goonToJson(std::string_view input) {
         auto unescapeReg = [](const std::string& x) {
           std::string r;
           for (size_t i = 0; i < x.size(); i++) {
-            if (x[i] == '\\' && i + 1 < x.size() && (x[i + 1] == '\\' || x[i + 1] == '|')) {
-              r += x[i + 1]; i++;
-            } else r += x[i];
+            if (x[i] == '\\' && i + 1 < x.size()) {
+              char n = x[i + 1];
+              // Mirrors goonEscapeRegPayload()'s set exactly. An unrecognised
+              // escape is left as-is (backslash included) rather than silently
+              // dropping the backslash.
+              if (n == '\\' || n == '|' || n == ':') { r += n; i++; continue; }
+              if (n == 'n') { r += '\n'; i++; continue; }
+              if (n == 'r') { r += '\r'; i++; continue; }
+            }
+            r += x[i];
           }
           return r;
         };
@@ -1047,19 +1191,36 @@ inline std::string goonToJson(std::string_view input) {
   // toGOON()). Without this, a bare first line fell through every branch of
   // the object path and silently produced "{}". Expanded to JSON here so
   // scalar roots round-trip exactly like the JSON layer.
+  // Root value shortcuts. These run BEFORE the rootIsArr/rootIsObject split below
+  // because a complete single-line flow collection looks like the start of a block
+  // array (`[`) or block mapping, and must be recognized as a value instead.
+  auto noTrailingLines = [&]() {
+    for (size_t k = firstLine + 1; k < lines.size(); k++)
+      if (!lines[k].empty())
+        throw GoonDecodeError("GOON: unexpected trailing content after root value");
+  };
+  // A root marker object (CUSTOM_TAG, or any complete single-line flow object) is
+  // a value, not a block mapping: {"$customTag":{...}}. A multi-line flow object
+  // still falls through to the block path below.
+  if (!rootIsArr && goonIsCompleteFlow(firstContent, '{', '}')) {
+    noTrailingLines();
+    return expandCell(firstContent);
+  }
+  // A single-line flow ARRAY at the root is a value too: `[1,2,3]` previously fell
+  // through to the array path and failed with "unrecognized line 1 in object
+  // context". GOON is a JSON superset, so a root JSON array must decode.
+  if (goonIsCompleteFlow(firstContent, '[', ']')) {
+    noTrailingLines();
+    return expandCell(firstContent);
+  }
+  // A special-marker token at the root is a value, never `key: value`; see
+  // goonIsSpecialMarker(). Without this a root REGEX pattern containing ':' parsed
+  // as a mapping ({"__REGEX__a":"b"}), losing the type.
+  if (goonIsSpecialMarker(firstContent)) {
+    noTrailingLines();
+    return expandCell(firstContent);
+  }
   if (!rootIsArr) {
-    auto noTrailingLines = [&]() {
-      for (size_t k = firstLine + 1; k < lines.size(); k++)
-        if (!lines[k].empty())
-          throw GoonDecodeError("GOON: unexpected trailing content after root value");
-    };
-    // A root marker object (CUSTOM_TAG, or any complete single-line flow
-    // object) is a value, not a block mapping: {"$customTag":{...}}. A
-    // multi-line flow object still falls through to the block path below.
-    if (goonIsCompleteFlow(firstContent, '{', '}')) {
-      noTrailingLines();
-      return expandCell(firstContent);
-    }
     bool hasColon = goonFindUnquoted(firstContent, ':') != std::string_view::npos;
     bool looksScalar = !hasColon &&
       !firstContent.empty() && (firstContent[0] != '-' || minusScalar) &&
