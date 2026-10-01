@@ -925,9 +925,8 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
     // Emit EVERY trailing comment, not just the last one: multiple single-line
     // trailing comments each get an inline " ;" suffix (they merge into ONE
     // comment again on re-parse -- see iniWriteTrailingComments), and any
-    // block/multiline
-    // trailing comment opens a comment-block that carries the whole list (so
-    // nothing is silently dropped).
+    // block/multiline trailing comment opens a comment-block that carries the
+    // whole list (so nothing is silently dropped).
     iniWriteTrailingComments(out, v->comments->trailing);
   } else {
     out += '\n';
@@ -1276,12 +1275,12 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // it on: the bare path (after the last repeated line, inside
     // iniWriteRepeatedLines) and the empty path (`value = [] ;...`, which the
     // decoder reads as an inline comment on the "value" key). Both of those are
-//     the single-line case only -- iniWriteTrailingComments pushes a block or
+    // the single-line case only -- iniWriteTrailingComments pushes a block or
     // multiline trailing into ';' lines BELOW the value line, which re-parse as
     // the leading comments of whatever node comes next (see KNOWN LIMITATIONS).
     // The object-array path has NO line for the array itself -- only its
-    // elements do -- so its trailing comment is
-    // API-only state, exactly like a nested object that emits no header; writing
+    // elements do -- so its trailing comment is API-only state, exactly like a
+    // nested object that emits no header; writing
     // it after the last element line would move it to that ELEMENT on re-parse,
     // which is worse than dropping it.
     //
