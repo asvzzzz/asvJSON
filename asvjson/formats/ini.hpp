@@ -22,24 +22,39 @@
 //     comment text legitimately containing a backslash.
 //   - Leading comments on the root object are written above the first key and
 //     re-parse as leading comments on THAT key. INI has no notion of a comment
-//     that precedes the document itself.
+//     that precedes the document itself. A non-object root (scalar or array,
+//     which the decoder always rebuilds as an object) keeps its own comments:
+//     leading above the wrapped block, trailing after the wrapped value,
+//     footing after it.
 //   - footing is only emitted for the root, matching the decoder: trailing
 //     comments at EOF are always attributed to the root, so a nested object's
 //     footing is an API-only state that does not survive a round trip.
 //   - A repeated key inside one section decodes to an array, so writing
 //     {k:1, k:2} and reading it back yields {k:[1,2]}. Comments collected for
-//     both occurrences then attach to that array node and are emitted above
-//     its first element.
+//     both occurrences then attach to that array node: the leading ones are
+//     emitted above its first element, the trailing ones after its LAST. A
+//     trailing comment therefore cannot sit on an element line of its own --
+//     every occurrence of the repeated key would re-collect it -- which is why
+//     it goes after the final line, where the collector still resolves it to
+//     the array node.
 //   - An object holding only sub-objects emits no [prefix] header of its own,
 //     so its leading comments are written above the first section this level
 //     produces (the text is never dropped). On re-parse they bind to that
 //     section, not to the object they came from: INI cannot express a comment
-//     on a node that has no line of its own.
+//     on a node that has no line of its own. The same applies to a TRAILING
+//     comment on such an object: there is no line of its own to hang it on.
 //   - \xNN is understood on decode, so a value whose TEXT starts with "\x" +
 //     two hex digits is rewritten as "\\xNN" to survive a round trip. Escapes
 //     and unescapes are otherwise exact inverses (\n \t \r \0 \a \b \' \\ \; \#
-//     \= \:), and a value is quoted whenever it holds a character with an
-//     escape, so every escape the encoder writes is reachable.
+//     \= \: plus \xNN for every other control byte), and a value is quoted
+//     whenever it holds a character with an escape, so every escape the encoder
+//     writes is reachable. No control byte (C0 range or DEL) is ever written
+//     raw: it would round-trip, but it truncates the line in any external INI
+//     reader or editor.
+//   - Keys may hold ANY byte: iniEscapeKey hex-escapes everything outside
+//     [A-Za-z0-9_.-] and iniUnescapeSectionKey restores it, so a key can
+//     contain NUL, 0x1F or a high byte. The comment collector's path segments
+//     are length-prefixed for exactly that reason (see iniPathSeg).
 
 #include "../core.hpp"
 
@@ -113,15 +128,18 @@ inline std::string iniUnescape(std::string_view s) {
 }
 
 // Escape an INI value for output. The table is the exact inverse of
-// iniUnescape: NUL, \a and \b are escaped too (they already have escapes on the
-// decode side), so no control byte is ever written raw. A literal NUL in an INI
-// file survives string_view-based parsing here but truncates the line in any
-// external INI reader or editor, so escaping it is what makes the output
-// portable. The quote forms matter for symmetry with needsQuotes(): a value
-// holding a lone apostrophe is wrapped in double quotes, and a value holding a
-// double quote is wrapped or escaped accordingly, so an unescaped \' / \" in the
-// output would be a hole in the table.
+// iniUnescape, and every remaining control byte (C0 and DEL) is written as a
+// \xNN hex escape, which iniUnescape decodes back -- so no control byte is ever
+// written raw. That matters for portability, not round-tripping: an escaped NUL
+// or 0x01 survives this library's string_view-based parsing either way, but any
+// external INI reader or editor truncates the line at a raw control byte.
+// needsQuotes() forces the value through this function, so a bare value can
+// never carry one. The quote forms matter for symmetry with needsQuotes(): a
+// value holding a lone apostrophe is wrapped in double quotes, and a value
+// holding a double quote is wrapped or escaped accordingly, so an unescaped \'
+// / \" in the output would be a hole in the table.
 inline std::string iniEscape(std::string_view s) {
+  static const char* kHex = "0123456789ABCDEF";
   std::string out;
   for (auto c : s) {
     switch (c) {
@@ -138,10 +156,34 @@ inline std::string iniEscape(std::string_view s) {
       case '#': out += "\\#"; break;
       case '=': out += "\\="; break;
       case ':': out += "\\:"; break;
-      default: out += c;
+      default:
+        if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7F) {
+          out += "\\x";
+          out += kHex[(unsigned char)c >> 4];
+          out += kHex[(unsigned char)c & 0x0F];
+        } else {
+          out += c;
+        }
     }
   }
   return out;
+}
+
+// Characters that force a value to be quoted (and therefore run through
+// iniEscape). Kept in one place so the encoder and its comment stay in step:
+// needsQuotes() decides this, iniEscape() implements the escapes. A control
+// byte in the C0 range or DEL counts, because a bare one reaches the file
+// verbatim (this is the whole point of quoting it) and external readers truncate
+// the line there.
+inline bool iniNeedsQuotes(std::string_view sv) {
+  for (auto c : sv) {
+    if (c == ' ' || c == '\t' || c == ';' || c == '#' || c == '=' || c == ':' ||
+        c == '"' || c == '\'' || c == '\\' || c == '\n' || c == '\r' ||
+        c == '\0' || c == '\a' || c == '\b' ||
+        (unsigned char)c < 0x20 || (unsigned char)c == 0x7F)
+      return true;
+  }
+  return false;
 }
 
 // Escape one key for INI output. Only [A-Za-z0-9_-] pass through untouched.
@@ -290,20 +332,13 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
     case T::STRING:
       {
         std::string_view sv(v->str_data);
-        // \0, \a and \b are in this set because iniEscape only runs on a QUOTED
-        // value: a bare value is copied verbatim, so a value holding them
-        // escaped nowhere and the raw NUL landed in the file (which truncates
-        // the line in any external INI reader). Forcing quotes puts it through
-        // iniEscape, where \0 / \a / \b now have escapes.
-        bool needsQuotes = false;
-        for (auto c : sv) {
-          if (c == ' ' || c == '\t' || c == ';' || c == '#' || c == '=' || c == ':' ||
-              c == '"' || c == '\'' || c == '\\' || c == '\n' || c == '\r' ||
-              c == '\0' || c == '\a' || c == '\b') {
-            needsQuotes = true;
-            break;
-          }
-        }
+        // Every character in the iniNeedsQuotes() set forces the quoted form:
+        // iniEscape only runs on a QUOTED value, so a bare value is copied
+        // verbatim and any escape sequence in it would survive as literal text.
+        // That covers the delimiters, the comment markers and quotes, and
+        // every control byte -- a raw NUL/0x01 truncates the line in any
+        // external INI reader or editor.
+        bool needsQuotes = iniNeedsQuotes(sv);
         // A bare text that would decode as a different type (bool/int/double/null)
         // must be quoted so the round-trip preserves the STRING type. raw_number
         // literals (e.g. overflowed integers) stay bare so they re-decode via the
@@ -448,20 +483,42 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
 // ----------------------------------------------------------------------------
 
 struct IniCommentEntry {
-  std::string path;               // \x1F-joined path ("" = root)
+  std::string path;               // length-prefixed segment path ("" = root)
   std::vector<Comment> leading;   // comments before the annotated node
   std::vector<Comment> trailing;  // inline comment after its value
   bool footing = false;           // comments at EOF -> root footing
 };
 
+// Comment paths are built from DECODED key segments, and a decoded key may hold
+// ANY byte: iniEscapeKey hex-escapes everything outside [A-Za-z0-9_.-] and
+// iniUnescapeSectionKey restores it, so a key can contain NUL, 0x1F or a high
+// byte verbatim. Segments are therefore LENGTH-PREFIXED ("<len>:<bytes>") rather
+// than joined by a separator byte: with a raw \x1F separator a key like "a\x1Fb"
+// was split into the three segments "base", "a", "b", iniFindPath() then walked
+// root[base][a][b] and the comment was dropped silently. Length prefixes need no
+// reserved byte at all, so every key survives byte for byte.
+inline std::string iniPathSeg(std::string_view s) {
+  return std::to_string(s.size()) + ":" + std::string(s);
+}
+inline std::string iniPathJoin(const std::string& base, std::string_view seg) {
+  return base + iniPathSeg(seg);
+}
+
 inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
   if (path.empty()) return root;
   asvJSONValue* cur = root;
   size_t pos = 0;
-  while (pos <= path.size()) {
-    size_t sep = path.find_first_of("\x1F", pos);
-    std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
-    if (seg.empty()) return nullptr;
+  while (pos < path.size()) {
+    size_t colon = path.find(':', pos);
+    if (colon == std::string_view::npos) return nullptr;
+    size_t len = 0;
+    for (size_t k = pos; k < colon; k++) {
+      char d = path[k];
+      if (d < '0' || d > '9' || len > (SIZE_MAX - 9) / 10) return nullptr;
+      len = len * 10 + static_cast<size_t>(d - '0');
+    }
+    if (colon + 1 + len > path.size()) return nullptr;
+    std::string_view seg = path.substr(colon + 1, len);
     if (seg[0] == '[') {
       if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
       size_t idx = 0;
@@ -478,8 +535,7 @@ inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
     }
-    if (sep == std::string_view::npos) break;
-    pos = sep + 1;
+    pos = colon + 1 + len;
   }
   return cur;
 }
@@ -510,13 +566,12 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
   std::vector<IniCommentEntry> entries;
   std::vector<Comment> pending;
   std::vector<std::string> sectionPath;  // decoded segments of the current section
-  std::string curArrayElemPath;          // path of the current [[...]] element (e.g. "items\x1F[0]")
+  std::string curArrayElemPath;          // path of the current [[...]] element (e.g. items -> "[0]")
   bool inSection = false, inArrayElement = false, inMlValue = false;
   std::vector<std::pair<std::string, size_t>> arrayCounts;  // array key path -> next element index
 
-  auto join = [](std::string a, const std::string& b) {
-    if (a.empty()) return b;
-    return a + std::string("\x1F") + b;
+  auto join = [](const std::string& a, const std::string& b) {
+    return iniPathJoin(a, b);
   };
   auto joinSegs = [&](const std::vector<std::string>& segs) {
     std::string p;
@@ -616,8 +671,8 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
         // each enclosing segment): when an enclosing path node is itself a
         // tracked array, a "[[a.b]]" header binds INSIDE that array's CURRENT
         // (last) element. E.g. after `[[items]]`, a following `[[items.sub]]`
-        // belongs at items[0].sub[0] -- physical path "items\x1F[0]\x1Fsub\x1F[0]",
-        // NOT the flat "items\x1Fsub\x1F[0]` the old code produced (which made
+        // belongs at items[0].sub[0] -- physical path items -> "[0]" -> sub -> "[0]",
+        // NOT the flat items -> sub -> "[0]" the old code produced (which made
         // the collector's paths diverge from the decoder's tree). We therefore
         // build the physical base by walking the enclosing segments, appending a
         // "[<last element index>]" marker after every enclosing level that is
@@ -626,7 +681,7 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
         // arrayCounts is keyed by the PHYSICAL path (markers included). Repeated
         // headers then correctly restart the element counter per enclosing
         // element: after `[[items]]` re-opens items as items[1], a fresh
-        // "items\x1F[1]\x1Fsub" counter is created, matching the decoder's
+        // items -> "[1]" -> sub counter is created, matching the decoder's
         // fresh b array. With no enclosing array the markers never appear, so
         // this is byte-identical to the prior flat behavior.
         std::string arrKey = newPath.back();
@@ -636,7 +691,7 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
         for (const auto& seg : newPath) {
           prefixSegs.push_back(seg);
           std::string dottedPrefix = joinSegs(prefixSegs);
-          std::string segPath = physBase.empty() ? seg : physBase + "\x1F" + seg;
+          std::string segPath = join(physBase, seg);
           // Is this enclosing level a tracked array? Then descend into its
           // current (last) element, mirroring the decoder's descendArrays().
           bool isArray = false;
@@ -648,19 +703,19 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
             for (auto& ac : arrayCounts) {
               if (ac.first == segPath) { lastIdx = ac.second > 0 ? ac.second - 1 : 0; break; }
             }
-            physBase = segPath + "\x1F[" + std::to_string(lastIdx) + "]";
+            physBase = join(segPath, "[" + std::to_string(lastIdx) + "]");
           } else {
             physBase = segPath;
           }
         }
-        std::string arrP = physBase.empty() ? arrKey : physBase + "\x1F" + arrKey;
+        std::string arrP = join(physBase, arrKey);
         size_t idx = 0;
         bool found = false;
         for (auto& ac : arrayCounts) {
           if (ac.first == arrP) { idx = ac.second++; found = true; break; }
         }
         if (!found) arrayCounts.push_back(std::make_pair(arrP, size_t(1)));
-        curArrayElemPath = arrP + "\x1F[" + std::to_string(idx) + "]";
+        curArrayElemPath = join(arrP, "[" + std::to_string(idx) + "]");
         consumeLeading(curArrayElemPath);
         inArrayElement = true;
         inSection = false;
@@ -704,6 +759,22 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
         if (valView[qi] == '"') { closed = true; break; }
       }
       if (!closed) inMlValue = true;
+      else {
+        // A quoted value may carry an inline comment after the closing quote --
+        // the decoder accepts exactly that (whitespace, then ';' or '#') and
+        // strips it from the value, so the collector must record it as well.
+        // Scanning only the bare-value case (as before) meant the encoder's own
+        // trailing comment on any value that needs quotes was silently dropped
+        // on a toINI() -> fromINI() round-trip.
+        size_t t = qi + 1;
+        while (t < valView.size() && (valView[t] == ' ' || valView[t] == '\t')) t++;
+        if (t < valView.size() && (valView[t] == ';' || valView[t] == '#')) {
+          std::string_view rest = iniTrim(valView.substr(t + 1));
+          Comment c;
+          c.text.assign(rest.data(), rest.size());
+          trailing.push_back(std::move(c));
+        }
+      }
     } else {
       size_t cpos = iniFindComment(valView);
       if (cpos != std::string_view::npos) {
@@ -795,6 +866,26 @@ inline void iniWriteCommentLines(std::string& out, const std::vector<Comment>& l
   }
 }
 
+// Emit a trailing comment group for a single value: a run of single-line
+// comments is inlined as " ;..." suffixes, anything block/multiline opens a
+// comment block below the line so no text is dropped.
+inline void iniWriteTrailingComments(std::string& out, const std::vector<Comment>& trailing) {
+  if (trailing.empty()) return;
+  bool allSingle = true;
+  for (const auto& c : trailing)
+    if (c.block || c.text.find('\n') != std::string::npos) { allSingle = false; break; }
+  if (allSingle) {
+    for (const auto& c : trailing) {
+      out += " ;";
+      out += c.text;
+    }
+    out += '\n';
+  } else {
+    out += '\n';
+    iniWriteCommentLines(out, trailing);
+  }
+}
+
 // Emit a `key = value` line with the value's leading comments above it and a
 // single-line trailing comment inlined after the value.
 inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asvJSONValue* v) {
@@ -808,21 +899,28 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
     // trailing comments each get an inline " ;" suffix, and any block/multiline
     // trailing comment opens a comment-block that carries the whole list (so
     // nothing is silently dropped).
-    bool allSingle = true;
-    for (const auto& c : v->comments->trailing)
-      if (c.block || c.text.find('\n') != std::string::npos) { allSingle = false; break; }
-    if (allSingle) {
-      for (const auto& c : v->comments->trailing) {
-        out += " ;";
-        out += c.text;
-      }
-      out += '\n';
-    } else {
-      out += '\n';
-      iniWriteCommentLines(out, v->comments->trailing);
-    }
+    iniWriteTrailingComments(out, v->comments->trailing);
   } else {
     out += '\n';
+  }
+}
+
+// Emit a primitive array as repeated `key = value` lines. The array node's own
+// leading comments go above the first line and its trailing comments after the
+// LAST one: iniCollectComments records the inline comment of every occurrence
+// against the single merged array node, so a trailing comment written after the
+// final line comes back on that node, exactly as it does for a scalar. Leading
+// goes above (INI has no syntax to attach a comment to the array as a whole).
+inline void iniWriteRepeatedLines(std::string& out, const std::string& keyEq, const asvJSONValue* v) {
+  const std::vector<std::unique_ptr<asvJSONValue>>* arr = v->arr.get();
+  for (size_t i = 0; i < arr->size(); i++) {
+    out += keyEq;
+    out += " = ";
+    iniFormatVal((*arr)[i].get(), out);
+    if (i + 1 == arr->size() && v->comments && !v->comments->trailing.empty())
+      iniWriteTrailingComments(out, v->comments->trailing);
+    else
+      out += '\n';
   }
 }
 
@@ -897,12 +995,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         iniWriteKeyValue(out, (headerEmitted ? flatKey : dottedKey), val.get());
       } else if (iniIsBareChild(val.get())) {
         writeLeading();
-        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
-        for (const auto& elem : *val->arr) {
-          out += (headerEmitted ? flatKey : dottedKey) + " = ";
-          iniFormatVal(elem.get(), out);
-          out += '\n';
-        }
+        iniWriteRepeatedLines(out, (headerEmitted ? flatKey : dottedKey), val.get());
       }
     } else {
       writeLeading();
@@ -968,11 +1061,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
         iniWriteKeyValue(out, full, val.get());
       } else if (iniIsBareChild(val.get())) {
         if (val->comments) iniWriteCommentLines(out, val->comments->leading);
-        for (const auto& e : *val->arr) {
-          out += full + " = ";
-          iniFormatVal(e.get(), out);
-          out += '\n';
-        }
+        iniWriteRepeatedLines(out, full, val.get());
       }
     } else {
       iniWriteKeyValue(out, full, val.get());
@@ -1014,11 +1103,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
         iniWriteKeyValue(out, flatKey, val.get());
       } else if (iniIsBareChild(val.get())) {
         if (val->comments) iniWriteCommentLines(out, val->comments->leading);
-        for (const auto& e : *val->arr) {
-          out += flatKey + " = ";
-          iniFormatVal(e.get(), out);
-          out += '\n';
-        }
+        iniWriteRepeatedLines(out, flatKey, val.get());
       }
     } else {
       iniWriteKeyValue(out, flatKey, val.get());
@@ -1066,11 +1151,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
               if (val->comments) iniWriteCommentLines(out, val->comments->leading);
-              for (const auto& elem : *val->arr) {
-                out += flatKey + " = ";
-                iniFormatVal(elem.get(), out);
-                out += '\n';
-              }
+              iniWriteRepeatedLines(out, flatKey, val.get());
             }
           } else {
             iniWriteKeyValue(out, flatKey, val.get());
@@ -1109,11 +1190,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
               if (val->comments) iniWriteCommentLines(out, val->comments->leading);
-              for (const auto& elem : *val->arr) {
-                out += flatKey + " = ";
-                iniFormatVal(elem.get(), out);
-                out += '\n';
-              }
+              iniWriteRepeatedLines(out, flatKey, val.get());
             }
           } else {
             iniWriteKeyValue(out, flatKey, val.get());
@@ -1159,14 +1236,16 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // repeated keys build an array of primitives, [[...]] tables build an
     // array of objects. Both preserve the elements. iniIsBareChild throws for
     // nested and mixed arrays, which have no INI spelling at all.
+    //
+    // The root node's own comments are honoured like an OBJECT root's: leading
+    // above the block, footing after it. They bind to the ROOT on re-parse,
+    // which is where they came from -- the decoder's root footing is the only
+    // node the collector can attribute EOF comments to.
+    if (comments) iniWriteCommentLines(out, comments->leading);
     if (arr->empty()) {
       out += "value = []\n";
     } else if (iniIsBareChild(this)) {
-      for (const auto& elem : *arr) {
-        out += "value = ";
-        iniFormatVal(elem.get(), out);
-        out += '\n';
-      }
+      iniWriteRepeatedLines(out, "value", this);
     } else {
       for (const auto& elem : *arr) {
         if (!out.empty() && out.back() != '\n') out += '\n';
@@ -1175,13 +1254,19 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         if (elem->type == T::OBJECT) iniEmitElement(elem.get(), out, "value");
       }
     }
+    if (comments) iniWriteCommentLines(out, comments->footing);
   } else {
     // A scalar root likewise cannot be represented (the decoder always builds
     // an object), so it is wrapped under "value". The data is preserved; only
     // the document shape changes, which is inherent to INI.
+    if (comments) iniWriteCommentLines(out, comments->leading);
     out += "value = ";
     iniFormatVal(this, out);
-    out += '\n';
+    if (comments && !comments->trailing.empty())
+      iniWriteTrailingComments(out, comments->trailing);
+    else
+      out += '\n';
+    if (comments) iniWriteCommentLines(out, comments->footing);
   }
 }
 

@@ -19360,6 +19360,174 @@ TEST(testINIReviewFixes) {
     ASSERT(j.fromINI(std::string("k = \"\\x\"\n")));
     ASSERT_EQ(std::string(j.getString("k")), std::string("\\x"));
   }
+  // 7. A comment path segment holding 0x1F (the byte the collector used as its
+  //    segment separator) must survive. iniEscapeKey writes it as \x1F and
+  //    iniUnescapeSectionKey restores the raw byte, so joining segments with a
+  //    raw \x1F split the key "a\x1Fb" into three phantom segments -- the
+  //    lookup then walked root[x][a][b], found nothing and dropped the comment
+  //    silently. Paths are length-prefixed now, so any key bytes survive.
+  {
+    const std::string kx = std::string("x") + char(0x1F) + "y";
+    const std::string ik = std::string("a") + char(0x1F) + "b";
+    asvJSON a;
+    ASSERT(a.parse(std::string("{}")));
+    auto inner = asvJSONValue::makeObject();
+    inner->comments = std::make_unique<asvJSONInternal::Comments>();
+    Comment lead;
+    lead.text = "the key";
+    inner->comments->leading.push_back(lead);
+    inner->obj->emplace(ik, asvJSONValue::makeInt(1));
+    a.getRoot()->obj->emplace(kx, std::move(inner));
+    std::string ini = a.toINI();
+    // The key is hex-escaped in the file, never a raw control byte.
+    ASSERT(ini.find("x\\x1Fy") != std::string::npos);
+    ASSERT(ini.find(char(0x1F)) == std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* sec = b.getRoot()->get(kx);
+    ASSERT(sec != nullptr && sec->type == asvJSONValue::OBJECT);
+    ASSERT(sec->get(ik) != nullptr);
+    // The comment bound to the node and survives a second round-trip.
+    ASSERT(sec->comments && !sec->comments->leading.empty());
+    ASSERT_EQ(sec->comments->leading[0].text, std::string("the key"));
+    ASSERT_EQ(b.toINI(), ini);
+    // A NUL byte in a key has the same hazard and is likewise representable.
+    asvJSON c, d;
+    ASSERT(c.parse(std::string("{}")));
+    c.getRoot()->obj->emplace(std::string("n\0m", 3), asvJSONValue::makeInt(7));
+    std::string ini2 = c.toINI();
+    ASSERT(ini2.find("n\\x00m") != std::string::npos);
+    ASSERT(d.fromINI(ini2));
+    ASSERT(d.getRoot()->get(std::string("n\0m", 3)) != nullptr);
+  }
+  // 8. Every control byte is escaped, not written raw. iniEscape promises that
+  //    no control byte reaches the file verbatim, but only \n \t \r \0 \a \b
+  //    had escapes -- \x01..\x06, \x0B, \x0C, \x0E..\x1F and DEL went out bare
+  //    (and stayed bare only because needsQuotes() did not count them either).
+  //    Round-trip worked, but external INI readers truncate the line there.
+  {
+    const unsigned char ctrl[] = {0x01, 0x06, 0x0B, 0x0C, 0x0E, 0x1F, 0x7F};
+    for (unsigned char c : ctrl) {
+      std::string val = "x";
+      val += (char)c;
+      val += "y";
+      asvJSON a;
+      ASSERT(a.parse(std::string("{}")));
+      a.getRoot()->obj->emplace("k", asvJSONValue::makeString(val.data(), val.size()));
+      std::string ini = a.toINI();
+      ASSERT(ini.find((char)c) == std::string::npos);
+      ASSERT(ini.find("\\x") != std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      ASSERT(b.getRoot()->get("k") != nullptr);
+      ASSERT_EQ(b.getRoot()->get("k")->str_data, val);
+    }
+    // DEL and \x0E also escaped inside a longer value, and NUL still behaves.
+    std::string withNul = std::string("a\0b", 3);
+    asvJSON a;
+    ASSERT(a.parse(std::string("{}")));
+    a.getRoot()->obj->emplace("k", asvJSONValue::makeString(withNul.data(), withNul.size()));
+    asvJSON b;
+    ASSERT(b.fromINI(a.toINI()));
+    ASSERT_EQ(b.getRoot()->get("k")->str_data, withNul);
+  }
+  // 9. A trailing comment on a primitive array survives. The array is emitted
+  //    as repeated `key = value` lines, so the trailing comment goes after the
+  //    LAST one: the collector records the inline comment of every occurrence
+  //    against the single merged array node, which is where it lands again.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("{}")));
+    auto arr = asvJSONValue::makeArray();
+    arr->arr->push_back(asvJSONValue::makeInt(1));
+    arr->arr->push_back(asvJSONValue::makeInt(2));
+    arr->arr->push_back(asvJSONValue::makeInt(3));
+    arr->comments = std::make_unique<asvJSONInternal::Comments>();
+    Comment lead;
+    lead.text = "counts";
+    Comment trail;
+    trail.text = "three of them";
+    arr->comments->leading.push_back(lead);
+    arr->comments->trailing.push_back(trail);
+    a.getRoot()->obj->emplace("items", std::move(arr));
+    std::string ini = a.toINI();
+    ASSERT(ini.find("; counts") != std::string::npos);
+    ASSERT(ini.find("items = 3 ;three of them") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* items = b.getRoot()->get("items");
+    ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY);
+    ASSERT(items->comments && items->comments->leading.size() == 1);
+    ASSERT(items->comments && items->comments->trailing.size() == 1);
+    if (items->comments && !items->comments->trailing.empty())
+      ASSERT_EQ(items->comments->trailing[0].text, std::string("three of them"));
+    ASSERT_EQ(b.toINI(), ini);
+    // With a QUOTED last element the inline comment must survive too: the
+    // collector used to scan only bare values, so it lost the comment after
+    // the closing quote even though the decoder accepts one there.
+    asvJSON c;
+    ASSERT(c.parse(std::string("{}")));
+    auto arr2 = asvJSONValue::makeArray();
+    arr2->arr->push_back(asvJSONValue::makeInt(1));
+    arr2->arr->push_back(asvJSONValue::makeString("two words", 9));
+    arr2->comments = std::make_unique<asvJSONInternal::Comments>();
+    Comment qtrail;
+    qtrail.text = "quoted tail";
+    arr2->comments->trailing.push_back(qtrail);
+    c.getRoot()->obj->emplace("items", std::move(arr2));
+    std::string ini2 = c.toINI();
+    ASSERT(ini2.find("\"two words\" ;quoted tail") != std::string::npos);
+    asvJSON d;
+    ASSERT(d.fromINI(ini2));
+    auto* items2 = d.getRoot()->get("items");
+    ASSERT(items2 != nullptr && items2->type == asvJSONValue::ARRAY);
+    ASSERT(items2->comments && items2->comments->trailing.size() == 1);
+    if (items2->comments && !items2->comments->trailing.empty())
+      ASSERT_EQ(items2->comments->trailing[0].text, std::string("quoted tail"));
+    // A hand-written quoted value with an inline comment collects it as well.
+    asvJSON e;
+    ASSERT(e.fromINI(std::string("k = \"a b\" ; note\n")));
+    ASSERT(e.getRoot()->get("k") != nullptr);
+    ASSERT_EQ(std::string(e.getRoot()->get("k")->getString()), "a b");
+    ASSERT(e.getRoot()->get("k")->comments && e.getRoot()->get("k")->comments->trailing.size() == 1);
+    if (e.getRoot()->get("k")->comments && !e.getRoot()->get("k")->comments->trailing.empty())
+      ASSERT_EQ(e.getRoot()->get("k")->comments->trailing[0].text, std::string("note"));
+  }
+  // 10. A non-object ROOT keeps its own comments: leading above the block,
+  //     footing after it, trailing after the single wrapped value. Previously
+  //     only the OBJECT root emitted them.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("5")));
+    a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+    Comment l1; l1.text = "root lead";
+    Comment t1; t1.text = "root trail";
+    a.getRoot()->comments->leading.push_back(l1);
+    a.getRoot()->comments->trailing.push_back(t1);
+    std::string ini = a.toINI();
+    ASSERT(ini.find("; root lead") != std::string::npos);
+    ASSERT(ini.find("value = 5 ;root trail") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    ASSERT(b.getRoot() != nullptr && b.getRoot()->get("value") != nullptr);
+    ASSERT_EQ(b.getRoot()->get("value")->getInt(), int64_t(5));
+  }
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("[1,2]")));
+    a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+    Comment l2; l2.text = "arr lead";
+    Comment f2; f2.text = "arr foot";
+    a.getRoot()->comments->leading.push_back(l2);
+    a.getRoot()->comments->footing.push_back(f2);
+    std::string ini = a.toINI();
+    ASSERT(ini.find("; arr lead") != std::string::npos);
+    ASSERT(ini.find("; arr foot") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* v = b.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 2);
+  }
 }
 
 TEST(testFromDotenv) {
