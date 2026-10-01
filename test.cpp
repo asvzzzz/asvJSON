@@ -19616,28 +19616,63 @@ TEST(testINIRepeatedArrayComments) {
     auto* v = b.getRoot()->get("value");
     ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 2);
   }
-  // The empty and object-array root branches write their leading exactly once too.
+  // The empty and object-array root branches write their leading exactly once
+  // too. The empty branch also has a line of its own ("value = []"), so its
+  // trailing comment rides on it and round-trips; the object-array branch has
+  // none (only its [[value]] elements do), so its trailing comment is API-only
+  // state -- writing it after the last element line would move it onto that
+  // ELEMENT on re-parse.
   {
     asvJSON a;
     ASSERT(a.parse(std::string("[]")));
     a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
     asvJSONInternal::Comment el; el.text = "empty lead";
+    asvJSONInternal::Comment et; et.text = "empty trail";
+    asvJSONInternal::Comment ef; ef.text = "empty foot";
     a.getRoot()->comments->leading.push_back(el);
+    a.getRoot()->comments->trailing.push_back(et);
+    a.getRoot()->comments->footing.push_back(ef);
     std::string ini = a.toINI();
     size_t n = ini.find("; empty lead");
     ASSERT(n != std::string::npos);
     ASSERT(ini.find("; empty lead", n + 1) == std::string::npos);
+    ASSERT(ini.find(";empty trail") != std::string::npos);
+    ASSERT(ini.find("; empty foot") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* v = b.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->empty());
+    ASSERT(v->comments && v->comments->leading.size() == 1);
+    ASSERT(v->comments && v->comments->trailing.size() == 1);
+    if (v->comments && !v->comments->trailing.empty())
+      ASSERT_EQ(v->comments->trailing[0].text, std::string("empty trail"));
+    // EOF comments land on the ROOT footing, which is where they are written.
+    ASSERT(b.getRoot()->comments && b.getRoot()->comments->footing.size() == 1);
+    ASSERT_EQ(b.toINI(), ini);
   }
   {
     asvJSON a;
     ASSERT(a.parse(std::string(R"([{"k":1}])")));
     a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
     asvJSONInternal::Comment ol; ol.text = "objs lead";
+    asvJSONInternal::Comment ot; ot.text = "objs trail";
+    asvJSONInternal::Comment of; of.text = "objs foot";
     a.getRoot()->comments->leading.push_back(ol);
+    a.getRoot()->comments->trailing.push_back(ot);
+    a.getRoot()->comments->footing.push_back(of);
     std::string ini = a.toINI();
     size_t n = ini.find("; objs lead");
     ASSERT(n != std::string::npos);
     ASSERT(ini.find("; objs lead", n + 1) == std::string::npos);
+    ASSERT(ini.find("; objs foot") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* v = b.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 1);
+    ASSERT(v->arr && (*v->arr)[0] && (*v->arr)[0]->get("k") != nullptr);
+    if (v->arr && (*v->arr)[0] && (*v->arr)[0]->get("k"))
+      ASSERT((*v->arr)[0]->get("k")->getInt() == 1);
+    ASSERT(b.getRoot()->comments && b.getRoot()->comments->footing.size() == 1);
   }
   // An empty path segment ("a. = 1" decodes to {"a":{"":1}}) reaches iniFindPath
   // as a zero-length segment; reading seg[0] on that empty view was undefined

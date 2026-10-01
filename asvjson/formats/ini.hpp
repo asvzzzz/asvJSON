@@ -25,7 +25,9 @@
 //     that precedes the document itself. A non-object root (scalar or array,
 //     which the decoder always rebuilds as an object) keeps its own comments:
 //     leading above the wrapped block, trailing after the wrapped value,
-//     footing after it.
+//     footing after it -- except for an object-array root, which has no line
+//     of its own (only its [[value]] elements do), so its trailing comment is
+//     API-only state, mirroring a nested object that emits no header.
 //   - footing is only emitted for the root, matching the decoder: trailing
 //     comments at EOF are always attributed to the root, so a nested object's
 //     footing is an API-only state that does not survive a round trip.
@@ -575,12 +577,9 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
   bool inSection = false, inArrayElement = false, inMlValue = false;
   std::vector<std::pair<std::string, size_t>> arrayCounts;  // array key path -> next element index
 
-  auto join = [](const std::string& a, const std::string& b) {
-    return iniPathJoin(a, b);
-  };
   auto joinSegs = [&](const std::vector<std::string>& segs) {
     std::string p;
-    for (const auto& s : segs) p = join(p, s);
+    for (const auto& s : segs) p = iniPathJoin(p, s);
     return p;
   };
   auto consumeLeading = [&](std::string path) {
@@ -691,12 +690,9 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
         // this is byte-identical to the prior flat behavior.
         std::string arrKey = newPath.back();
         newPath.pop_back();
-        std::vector<std::string> prefixSegs;
         std::string physBase;   // physical base built so far (with [N] markers)
         for (const auto& seg : newPath) {
-          prefixSegs.push_back(seg);
-          std::string dottedPrefix = joinSegs(prefixSegs);
-          std::string segPath = join(physBase, seg);
+          std::string segPath = iniPathJoin(physBase, seg);
           // Is this enclosing level a tracked array? Then descend into its
           // current (last) element, mirroring the decoder's descendArrays().
           bool isArray = false;
@@ -708,19 +704,19 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
             for (auto& ac : arrayCounts) {
               if (ac.first == segPath) { lastIdx = ac.second > 0 ? ac.second - 1 : 0; break; }
             }
-            physBase = join(segPath, "[" + std::to_string(lastIdx) + "]");
+            physBase = iniPathJoin(segPath, "[" + std::to_string(lastIdx) + "]");
           } else {
             physBase = segPath;
           }
         }
-        std::string arrP = join(physBase, arrKey);
+        std::string arrP = iniPathJoin(physBase, arrKey);
         size_t idx = 0;
         bool found = false;
         for (auto& ac : arrayCounts) {
           if (ac.first == arrP) { idx = ac.second++; found = true; break; }
         }
         if (!found) arrayCounts.push_back(std::make_pair(arrP, size_t(1)));
-        curArrayElemPath = join(arrP, "[" + std::to_string(idx) + "]");
+        curArrayElemPath = iniPathJoin(arrP, "[" + std::to_string(idx) + "]");
         consumeLeading(curArrayElemPath);
         inArrayElement = true;
         inSection = false;
@@ -796,7 +792,7 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
                                       : (inSection ? joinSegs(sectionPath) : std::string());
     std::vector<std::string> keyPath = iniSplitDottedPath(keyView);
     std::string path = base;
-    for (const auto& s : keyPath) path = join(path, s);
+    for (const auto& s : keyPath) path = iniPathJoin(path, s);
 
     if (!pending.empty() || !trailing.empty()) {
       IniCommentEntry e;
@@ -919,8 +915,8 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
 // against the single merged array node, so a trailing comment written after the
 // final line comes back on that node, exactly as it does for a scalar. Leading
 // goes above too (INI has no syntax to attach a comment to the array as a
-// whole). Emitting BOTH here is what keeps the four call sites from each having
-// to remember the leading half -- one of them did not, and dropped the comment.
+// whole). Emitting BOTH here is what keeps every call site from having to
+// remember the leading half -- one of them did not, and dropped the comment.
 inline void iniWriteRepeatedLines(std::string& out, const std::string& keyEq, const asvJSONValue* v) {
   const std::vector<std::unique_ptr<asvJSONValue>>* arr = v->arr.get();
   if (!arr || arr->empty()) return;
@@ -1250,16 +1246,26 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // nested and mixed arrays, which have no INI spelling at all.
     //
     // The root node's own comments are honoured like an OBJECT root's: leading
-    // above the block, footing after it. They bind to the ROOT on re-parse,
-    // which is where they came from -- the decoder's root footing is the only
-    // node the collector can attribute EOF comments to.
+    // above the block, trailing after the wrapped value, footing after it. The
+    // trailing comment survives wherever a line of the root's own exists to hang
+    // it on: the bare path (after the last repeated line, inside
+    // iniWriteRepeatedLines) and the empty path (`value = [] ;...`, which the
+    // decoder reads as an inline comment on the "value" key). The object-array
+    // path has NO line for the array itself -- only its elements do -- so its
+    // trailing comment is API-only state, exactly like a nested object that
+    // emits no header; writing it after the last element line would move it to
+    // that ELEMENT on re-parse, which is worse than dropping it.
     //
     // The leading half is written once per branch, NOT above the whole if/else:
     // iniWriteRepeatedLines() emits the leading comments of the array it writes,
     // so the bare path would repeat them.
     if (arr->empty()) {
       if (comments) iniWriteCommentLines(out, comments->leading);
-      out += "value = []\n";
+      out += "value = []";
+      if (comments && !comments->trailing.empty())
+        iniWriteTrailingComments(out, comments->trailing);
+      else
+        out += '\n';
     } else if (iniIsBareChild(this)) {
       iniWriteRepeatedLines(out, "value", this);
     } else {
