@@ -519,6 +519,11 @@ inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
     }
     if (colon + 1 + len > path.size()) return nullptr;
     std::string_view seg = path.substr(colon + 1, len);
+    // A zero-length segment is reachable: iniSplitDottedPath("a.") yields
+    // ["a", ""], which the decoder turns into {"a": {"": ...}} -- the
+    // comment on that leaf is dropped, but reading seg[0] on an empty view
+    // would be undefined behaviour.
+    if (seg.empty()) return nullptr;
     if (seg[0] == '[') {
       if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
       size_t idx = 0;
@@ -827,8 +832,11 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
 // dotted section (non-empty object). Arrays that cannot be represented at all
 // (mixed object/scalar contents, or nested array elements) throw.
 inline bool iniIsBareChild(const asvJSONValue* v) {
-  if (v->type == asvJSONValue::ARRAY && v->arr) {
-    if (v->arr->empty()) return true;
+  if (v->type == asvJSONValue::ARRAY) {
+    // A null container (only reachable from a hand-built tree) is treated as
+    // empty: falling through to `return true` used to hand it to
+    // iniWriteRepeatedLines(), which dereferenced v->arr unconditionally.
+    if (!v->arr || v->arr->empty()) return true;
     bool hasObj = false, hasPrim = false;
     for (const auto& e : *v->arr) {
       if (e->type == asvJSONValue::ARRAY)
@@ -910,9 +918,13 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
 // LAST one: iniCollectComments records the inline comment of every occurrence
 // against the single merged array node, so a trailing comment written after the
 // final line comes back on that node, exactly as it does for a scalar. Leading
-// goes above (INI has no syntax to attach a comment to the array as a whole).
+// goes above too (INI has no syntax to attach a comment to the array as a
+// whole). Emitting BOTH here is what keeps the four call sites from each having
+// to remember the leading half -- one of them did not, and dropped the comment.
 inline void iniWriteRepeatedLines(std::string& out, const std::string& keyEq, const asvJSONValue* v) {
   const std::vector<std::unique_ptr<asvJSONValue>>* arr = v->arr.get();
+  if (!arr || arr->empty()) return;
+  if (v->comments) iniWriteCommentLines(out, v->comments->leading);
   for (size_t i = 0; i < arr->size(); i++) {
     out += keyEq;
     out += " = ";
@@ -1060,7 +1072,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
       if (val->arr->empty()) {
         iniWriteKeyValue(out, full, val.get());
       } else if (iniIsBareChild(val.get())) {
-        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
+        // The array's own leading comments are emitted by the helper.
         iniWriteRepeatedLines(out, full, val.get());
       }
     } else {
@@ -1102,7 +1114,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
       if (val->arr->empty()) {
         iniWriteKeyValue(out, flatKey, val.get());
       } else if (iniIsBareChild(val.get())) {
-        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
+        // The array's own leading comments are emitted by the helper.
         iniWriteRepeatedLines(out, flatKey, val.get());
       }
     } else {
@@ -1150,7 +1162,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             if (val->arr->empty()) {
               iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
-              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
+              // The array's own leading comments are emitted by the helper.
               iniWriteRepeatedLines(out, flatKey, val.get());
             }
           } else {
@@ -1189,7 +1201,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             if (val->arr->empty()) {
               iniWriteKeyValue(out, flatKey, val.get());
             } else if (iniIsBareChild(val.get())) {
-              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
+              // The array's own leading comments are emitted by the helper.
               iniWriteRepeatedLines(out, flatKey, val.get());
             }
           } else {
@@ -1241,12 +1253,17 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // above the block, footing after it. They bind to the ROOT on re-parse,
     // which is where they came from -- the decoder's root footing is the only
     // node the collector can attribute EOF comments to.
-    if (comments) iniWriteCommentLines(out, comments->leading);
+    //
+    // The leading half is written once per branch, NOT above the whole if/else:
+    // iniWriteRepeatedLines() emits the leading comments of the array it writes,
+    // so the bare path would repeat them.
     if (arr->empty()) {
+      if (comments) iniWriteCommentLines(out, comments->leading);
       out += "value = []\n";
     } else if (iniIsBareChild(this)) {
       iniWriteRepeatedLines(out, "value", this);
     } else {
+      if (comments) iniWriteCommentLines(out, comments->leading);
       for (const auto& elem : *arr) {
         if (!out.empty() && out.back() != '\n') out += '\n';
         if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);

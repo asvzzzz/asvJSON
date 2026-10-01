@@ -19530,6 +19530,149 @@ TEST(testINIReviewFixes) {
   }
 }
 
+TEST(testINIRepeatedArrayComments) {
+  // The leading comment of a primitive array must be emitted by EVERY encoder
+  // call site. Four of them wrote `if (val->comments) iniWriteCommentLines(...)`
+  // before the repeated-line loop; the one reached through a section header did
+  // not, so {s: {deep: [1,2]}} with a leading comment on `deep` emitted the
+  // lines and silently dropped the comment. Emitting it inside
+  // iniWriteRepeatedLines() (which owns the trailing half already) removes the
+  // duplication that let the call site drift.
+  auto buildTop = [](const asvJSONInternal::Comment& lead, const asvJSONInternal::Comment& trail) {
+    asvJSON a;
+    a.parse(std::string("{}"));
+    auto arr = asvJSONValue::makeArray();
+    for (int i = 1; i <= 3; i++) arr->arr->push_back(asvJSONValue::makeInt(i));
+    arr->comments = std::make_unique<asvJSONInternal::Comments>();
+    arr->comments->leading.push_back(lead);
+    arr->comments->trailing.push_back(trail);
+    a.getRoot()->obj->emplace("items", std::move(arr));
+    return a;
+  };
+  asvJSONInternal::Comment lead; lead.text = "lead";
+  asvJSONInternal::Comment trail; trail.text = "trail";
+  // Compact and pretty, at the document root.
+  for (bool pretty : {false, true}) {
+    asvJSON a = buildTop(lead, trail);
+    std::string ini = a.toINI(pretty);
+    size_t n = ini.find("; lead");
+    ASSERT(n != std::string::npos);
+    // Written once, not once per call site.
+    ASSERT(ini.find("; lead", n + 1) == std::string::npos);
+    ASSERT(ini.find(";trail") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* items = b.getRoot()->get("items");
+    ASSERT(items != nullptr && items->type == asvJSONValue::ARRAY && items->arr->size() == 3);
+    ASSERT(items->comments && items->comments->leading.size() == 1);
+    ASSERT(items->comments && items->comments->trailing.size() == 1);
+    if (items->comments && !items->comments->leading.empty())
+      ASSERT_EQ(items->comments->leading[0].text, std::string("lead"));
+    ASSERT_EQ(b.toINI(pretty), ini);
+  }
+  // The same array nested in a section -- the call site that lost it.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("{}")));
+    auto inner = asvJSONValue::makeObject();
+    auto arr = asvJSONValue::makeArray();
+    arr->arr->push_back(asvJSONValue::makeInt(1));
+    arr->arr->push_back(asvJSONValue::makeInt(2));
+    arr->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment l2; l2.text = "sec lead";
+    asvJSONInternal::Comment t2; t2.text = "sec trail";
+    arr->comments->leading.push_back(l2);
+    arr->comments->trailing.push_back(t2);
+    inner->obj->emplace("deep", std::move(arr));
+    a.getRoot()->obj->emplace("s", std::move(inner));
+    std::string ini = a.toINI();
+    ASSERT(ini.find("; sec lead") != std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* sec = b.getRoot()->get("s");
+    ASSERT(sec != nullptr && sec->type == asvJSONValue::OBJECT);
+    auto* deep = sec->get("deep");
+    ASSERT(deep != nullptr && deep->type == asvJSONValue::ARRAY && deep->arr->size() == 2);
+    ASSERT(deep->comments && deep->comments->leading.size() == 1);
+    ASSERT(deep->comments && deep->comments->trailing.size() == 1);
+    if (deep->comments && !deep->comments->leading.empty())
+      ASSERT_EQ(deep->comments->leading[0].text, std::string("sec lead"));
+    ASSERT_EQ(b.toINI(), ini);
+  }
+  // A root array's own leading comment is written ONCE, not once by the caller
+  // and once again by the helper.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("[1,2]")));
+    a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment rl; rl.text = "root lead";
+    a.getRoot()->comments->leading.push_back(rl);
+    std::string ini = a.toINI();
+    size_t n = ini.find("; root lead");
+    ASSERT(n != std::string::npos);
+    ASSERT(ini.find("; root lead", n + 1) == std::string::npos);
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    auto* v = b.getRoot()->get("value");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 2);
+  }
+  // The empty and object-array root branches write their leading exactly once too.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("[]")));
+    a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment el; el.text = "empty lead";
+    a.getRoot()->comments->leading.push_back(el);
+    std::string ini = a.toINI();
+    size_t n = ini.find("; empty lead");
+    ASSERT(n != std::string::npos);
+    ASSERT(ini.find("; empty lead", n + 1) == std::string::npos);
+  }
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string(R"([{"k":1}])")));
+    a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment ol; ol.text = "objs lead";
+    a.getRoot()->comments->leading.push_back(ol);
+    std::string ini = a.toINI();
+    size_t n = ini.find("; objs lead");
+    ASSERT(n != std::string::npos);
+    ASSERT(ini.find("; objs lead", n + 1) == std::string::npos);
+  }
+  // An empty path segment ("a. = 1" decodes to {"a":{"":1}}) reaches iniFindPath
+  // as a zero-length segment; reading seg[0] on that empty view was undefined
+  // behaviour. The comment on such a leaf is unresolvable and dropped, but the
+  // parse must stay in bounds.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("; lead\na. = 1\n")));
+    ASSERT(j.getRoot()->get("a") != nullptr);
+    ASSERT(j.getRoot()->get("a")->get("") != nullptr);
+    asvJSON k;
+    ASSERT(k.fromINI(std::string("; s\n[a.]\nk = 1\n")));
+    ASSERT(k.getRoot()->get("a") != nullptr);
+    ASSERT(k.getRoot()->get("a")->get("") != nullptr);
+  }
+  // An ARRAY node with a NULL container (only from a hand-built tree) is treated
+  // as empty instead of being handed to the repeated-line writer, which would
+  // dereference the null payload.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string("{}")));
+    auto arr = asvJSONValue::makeArray();
+    a.getRoot()->obj->emplace("items", std::move(arr));
+    a.getRoot()->get("items")->arr.reset();
+    ASSERT(asvJSONInternal::iniIsBareChild(a.getRoot()->get("items")));
+    std::string out;
+    asvJSONInternal::iniWriteRepeatedLines(out, "items", a.getRoot()->get("items"));
+    ASSERT_EQ(out, std::string(""));
+    std::string ini = a.toINI();
+    asvJSON b;
+    ASSERT(b.fromINI(ini));
+    ASSERT(b.getRoot()->get("items") != nullptr);
+  }
+}
+
 TEST(testFromDotenv) {
   {
     asvJSON j;
@@ -29647,7 +29790,8 @@ RUN(testFromCppArraySizeGuard);
 	RUN(testINIKeyLeadingBracket);
 	RUN(testINIReviewFidelity);
 	RUN(testINIDottedKeyRoundTrip);
-RUN(testINIReviewFixes);
+	RUN(testINIReviewFixes);
+	RUN(testINIRepeatedArrayComments);
 
 	std::cout << "\n--- Dotenv Serialization Tests ---\n";
 	RUN(testFromDotenv);
