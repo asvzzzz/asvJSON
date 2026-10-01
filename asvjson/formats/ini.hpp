@@ -21,12 +21,20 @@
 //     logical comment without inventing an escape that would collide with
 //     comment text legitimately containing a backslash.
 //   - Only a SINGLE-LINE trailing comment can stay on the value's line. A
-//     block or multiline one is written as ';' lines BELOW it, which re-parse
-//     as the enclosing scope's footing (at end of input, the root's) rather
-//     than as that node's trailing -- there is no INI syntax for a comment that
-//     both starts on the value's line and continues. The text is never dropped;
-//     only its position changes, so this applies to every value, not just
-//     roots.
+//     block or multiline one is written as ';' lines BELOW it, and ';' lines
+//     carry no marker saying which node they belong to: on re-parse they
+//     become the LEADING comments of the next node written (the next key or
+//     section header), or the root's footing if the value ends the document.
+//     There is no INI syntax for a comment that both starts on a value's line
+//     and continues past it, nor for one that ends that value's node. The text
+//     is never dropped, only its position and node change, so this applies to
+//     every value, not just roots.
+//   - Several single-line trailing comments on ONE value are written as
+//     " ;c1 ;c2 ;c3", but the decoder reads everything after the first ';' as
+//     a single comment, so they re-parse as ONE Comment whose text is
+//     "c1 ;c2 ;c3". Re-emitting that is byte-identical, so it is stable from
+//     then on, but the separate-comment structure does not survive. One line
+//     holds at most one inline comment.
 //   - Leading comments on the root object are written above the first key and
 //     re-parse as leading comments on THAT key. INI has no notion of a comment
 //     that precedes the document itself. A non-object root (scalar or array,
@@ -880,6 +888,14 @@ inline void iniWriteCommentLines(std::string& out, const std::vector<Comment>& l
 // Emit a trailing comment group for a single value: a run of single-line
 // comments is inlined as " ;..." suffixes, anything block/multiline opens a
 // comment block below the line so no text is dropped.
+//
+// Neither shape round-trips to this node, and the header says why; the two
+// failure modes, so the behaviour is not rediscovered by surprise:
+//   - The ';' lines below the value carry no node marker, so they become the
+//     leading comments of the next node written (root footing at EOF).
+//   - Several " ;c1 ;c2" suffixes re-parse as ONE comment with text
+//     "c1 ;c2", since everything after the first ';' is one comment. Stable
+//     afterwards (re-emitting is byte-identical) but the split is lost.
 inline void iniWriteTrailingComments(std::string& out, const std::vector<Comment>& trailing) {
   if (trailing.empty()) return;
   bool allSingle = true;
@@ -907,7 +923,9 @@ inline void iniWriteKeyValue(std::string& out, const std::string& keq, const asv
   iniFormatVal(v, out);
   if (v->comments && !v->comments->trailing.empty()) {
     // Emit EVERY trailing comment, not just the last one: multiple single-line
-    // trailing comments each get an inline " ;" suffix, and any block/multiline
+    // trailing comments each get an inline " ;" suffix (they merge into ONE
+    // comment again on re-parse -- see iniWriteTrailingComments), and any
+    // block/multiline
     // trailing comment opens a comment-block that carries the whole list (so
     // nothing is silently dropped).
     iniWriteTrailingComments(out, v->comments->trailing);
@@ -1258,10 +1276,11 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // it on: the bare path (after the last repeated line, inside
     // iniWriteRepeatedLines) and the empty path (`value = [] ;...`, which the
     // decoder reads as an inline comment on the "value" key). Both of those are
-    // the single-line case only -- iniWriteTrailingComments pushes a block or
-    // multiline trailing into ';' lines BELOW the value line, where it re-parses
-    // as footing (see KNOWN LIMITATIONS). The object-array path has NO line for
-    // the array itself -- only its elements do -- so its trailing comment is
+//     the single-line case only -- iniWriteTrailingComments pushes a block or
+    // multiline trailing into ';' lines BELOW the value line, which re-parse as
+    // the leading comments of whatever node comes next (see KNOWN LIMITATIONS).
+    // The object-array path has NO line for the array itself -- only its
+    // elements do -- so its trailing comment is
     // API-only state, exactly like a nested object that emits no header; writing
     // it after the last element line would move it to that ELEMENT on re-parse,
     // which is worse than dropping it.

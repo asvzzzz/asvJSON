@@ -19722,6 +19722,9 @@ TEST(testINIRepeatedArrayComments) {
       ASSERT(saw);
     }
     // Same for a nested scalar value -- this is not root-specific behaviour.
+    // The destination depends on what follows: the ';' lines become the
+    // LEADING comments of the next node written, and the root's footing only
+    // when the value ends the document.
     {
       std::vector<std::string> parts; parts.push_back("b1"); parts.push_back("b2");
       asvJSON b;
@@ -19734,6 +19737,79 @@ TEST(testINIRepeatedArrayComments) {
         for (const auto& c : b.getRoot()->comments->footing)
           if (c.text == "b1" || c.text == "b2") saw = true;
       ASSERT(saw);
+    }
+    // With a following section, the ';' lines become that section's LEADING.
+    // Note this is the section node, not its first key -- consumeLeading() runs
+    // on the "[s2]" header before any key below it is seen.
+    {
+      asvJSON a;
+      ASSERT(a.parse(std::string(R"({"s":{"k":1},"s2":{"x":2}})")));
+      auto* k = a.getRoot()->get("s")->get("k");
+      ASSERT(k != nullptr);
+      k->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = "b1\nb2";
+      k->comments->trailing.push_back(c);
+      std::string ini = a.toINI();
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      auto* s2 = b.getRoot()->get("s2");
+      ASSERT(s2 != nullptr && s2->get("x") != nullptr && s2->get("x")->getInt() == 2);
+      ASSERT(s2->comments && s2->comments->leading.size() == 2);
+      if (s2->comments && s2->comments->leading.size() == 2) {
+        ASSERT_EQ(s2->comments->leading[0].text, std::string("b1"));
+        ASSERT_EQ(s2->comments->leading[1].text, std::string("b2"));
+      }
+      // No footing anywhere: the pending comments were consumed by the header.
+      ASSERT(!(b.getRoot()->comments && !b.getRoot()->comments->footing.empty()));
+      auto* k2 = b.getRoot()->get("s") ? b.getRoot()->get("s")->get("k") : nullptr;
+      ASSERT(k2 != nullptr && k2->getInt() == 1);
+      ASSERT(!(k2->comments && !k2->comments->trailing.empty()));
+    }
+    // With a following key, they become that key's leading instead.
+    {
+      asvJSON a;
+      ASSERT(a.parse(std::string(R"({"s":{"k":1,"j":2}})")));
+      auto* k = a.getRoot()->get("s")->get("k");
+      ASSERT(k != nullptr);
+      k->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = "m1\nm2";
+      k->comments->trailing.push_back(c);
+      std::string ini = a.toINI();
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      auto* j = b.getRoot()->get("s") ? b.getRoot()->get("s")->get("j") : nullptr;
+      ASSERT(j != nullptr && j->getInt() == 2);
+      ASSERT(j->comments && j->comments->leading.size() == 2);
+      if (j->comments && j->comments->leading.size() == 2) {
+        ASSERT_EQ(j->comments->leading[0].text, std::string("m1"));
+        ASSERT_EQ(j->comments->leading[1].text, std::string("m2"));
+      }
+    }
+    // Several SINGLE-LINE trailing comments merge into one on re-parse: the
+    // decoder reads everything after the first ';' as a single comment. The
+    // result is stable (re-emitting is byte-identical), but the split is lost.
+    {
+      asvJSON a;
+      ASSERT(a.parse(std::string("[]")));
+      a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+      for (const char* t : {"c1", "c2", "c3"}) {
+        asvJSONInternal::Comment c;
+        c.text = t;
+        a.getRoot()->comments->trailing.push_back(c);
+      }
+      std::string ini = a.toINI();
+      ASSERT(ini.find("value = [] ;c1 ;c2 ;c3") != std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      auto* v = b.getRoot()->get("value");
+      ASSERT(v != nullptr && v->arr->empty());
+      ASSERT(v->comments && v->comments->trailing.size() == 1);
+      if (v->comments && v->comments->trailing.size() == 1)
+        ASSERT_EQ(v->comments->trailing[0].text, std::string("c1 ;c2 ;c3"));
+      // Stable from here on: no further drift.
+      ASSERT_EQ(b.toINI(), ini);
     }
     // A block-flagged trailing degrades the same way, even with single-line text.
     {
