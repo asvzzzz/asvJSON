@@ -5476,15 +5476,24 @@ TEST(testXMLEmptyContainerTypeMarkers) {
 		ASSERT(j3.fromXML("<z type=\"array\" other=\"1\"></z>"));
 		ASSERT(j3.getRoot()->get("z")->type == asvJSONValue::OBJECT);
 		ASSERT_EQ(std::string(j3.getRoot()->get("z")->get("@other")->getString()), "1");
-		// A nested object whose sole @-attr is type="array" keeps its shape
+		// A nested object carrying a USER @type keeps its shape. The value
+		// travels under the reserved asv:ut attribute, since a bare type="..."
+		// is the encoder's own annotation and used to swallow the user's value.
 		asvJSON j4;
 		j4.parse(std::string(R"({"w":{"@type":"array","k":1}})"));
 		std::string xml = j4.toXML();
-		ASSERT(xml.find("<w type=\"array\">") != std::string::npos);
+		ASSERT(xml.find("<w asv:ut=\"array\">") != std::string::npos);
+		ASSERT(xml.find("<w type=") == std::string::npos);
 		asvJSON j5;
 		ASSERT(j5.fromXML(xml));
 		ASSERT_EQ(std::string(j5.getRoot()->get("w")->get("@type")->getString()), "array");
 		ASSERT(j5.getRoot()->get("w")->get("k")->getInt() == 1);
+		// A bare type="..." written by hand still decodes as a plain @type when
+		// it is not an annotation word (documents written before the reserved
+		// name existed keep working).
+		asvJSON j6;
+		ASSERT(j6.fromXML("<w type=\"array\" k=\"1\"/>"));
+		ASSERT_EQ(std::string(j6.getRoot()->get("w")->get("@type")->getString()), "array");
 	}
 }
 
@@ -5977,6 +5986,126 @@ TEST(testXMLAuditFixes2) {
 			ASSERT((*c->arr)[1]->get("b")->getInt() == 1);
 			ASSERT(std::string((*c->arr)[2]->getString()) == "bar");
 		}
+	}
+	// AUDIT: xmlNameChar accepted only ASCII, so a NON-ASCII element name was
+	// cut off at its first UTF-8 byte when xmlSkipNilBody scanned for the
+	// matching </name>. A well-formed <ф xsi:nil="true">hi</ф> was rejected as
+	// an unterminated element because the close-tag scan produced an empty
+	// name. xmlNameChar now uses the same unsigned-byte class as
+	// xmlParseName (alnum, '-', '_', ':', '.' and anything >= 0x80).
+	{
+		asvJSON a;
+		ASSERT(a.fromXML(u8"<ф xsi:nil=\"true\">hi</ф>"));
+		ASSERT(a.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		// nested same-name content must still be skipped wholesale
+		asvJSON b;
+		ASSERT(b.fromXML(u8"<ф xsi:nil=\"true\"><ф/></ф>"));
+		ASSERT(b.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		asvJSON c;
+		ASSERT(c.fromXML(u8"<ф xsi:nil=\"true\"><x>1</x>text</ф>"));
+		ASSERT(c.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		// a genuinely unterminated non-ASCII element is still rejected
+		asvJSON d;
+		ASSERT(!d.fromXML(u8"<ф xsi:nil=\"true\">hi"));
+		asvJSON e;
+		ASSERT(!e.fromXML(u8"<ф xsi:nil=\"true\">hi</x>"));
+		// the pre-existing ASCII nesting behaviour is unchanged
+		asvJSON f;
+		ASSERT(f.fromXML("<x xsi:nil=\"true\"><x attr=\"1\"/></x>"));
+		ASSERT(f.getRoot()->get("x")->type == asvJSONValue::NULL_VAL);
+	}
+	// AUDIT: a user "@type" key collided with the encoder's own type="..."
+	// annotation. Written as a bare type="...", it was re-read as the
+	// annotation and consumed: {"@type":"string"} came back as an empty
+	// STRING. User @type data now travels under the reserved asv:ut attribute.
+	{
+		asvJSON a, a2;
+		ASSERT(a.parse(std::string("{}")));
+		auto o = asvJSONValue::makeObject();
+		o->obj->emplace("@type", asvJSONValue::makeString("string"));
+		a.getRoot()->obj->emplace("name", std::move(o));
+		std::string xml = a.toXML();
+		ASSERT(xml.find("asv:ut=\"string\"") != std::string::npos);
+		ASSERT(xml.find(" type=\"string\"") == std::string::npos);
+		ASSERT(a2.fromXML(xml));
+		ASSERT_EQ(a2.serialize(), std::string(R"({"name":{"@type":"string"}})"));
+	}
+	// Same, with sibling keys: the object must keep @type AND them.
+	{
+		asvJSON a, a2;
+		ASSERT(a.parse(std::string("{}")));
+		auto o = asvJSONValue::makeObject();
+		o->obj->emplace("@type", asvJSONValue::makeString("string"));
+		o->obj->emplace("other", asvJSONValue::makeInt(1));
+		a.getRoot()->obj->emplace("name", std::move(o));
+		ASSERT(a2.fromXML(a.toXML()));
+		ASSERT_EQ(a2.serialize(), std::string(R"({"name":{"@type":"string","other":1}})"));
+	}
+	// A user @type no longer suppresses the type="string" pin on a sibling
+	// #text, so {@type:"x", #text:"123"} keeps the STRING instead of
+	// re-detecting it as the number 123.
+	{
+		asvJSON a, a2;
+		ASSERT(a.parse(std::string("{}")));
+		auto o = asvJSONValue::makeObject();
+		o->obj->emplace("@type", asvJSONValue::makeString("x"));
+		o->obj->emplace("#text", asvJSONValue::makeString("123"));
+		o->obj->emplace("c", asvJSONValue::makeInt(1));
+		a.getRoot()->obj->emplace("name", std::move(o));
+		std::string xml = a.toXML();
+		ASSERT(xml.find("asv:ut=\"x\"") != std::string::npos);
+		ASSERT(xml.find("type=\"string\"") != std::string::npos);
+		ASSERT(a2.fromXML(xml));
+		auto* w = a2.getRoot()->get("name");
+		ASSERT(w != nullptr);
+		ASSERT_EQ(std::string(w->get("@type")->getString()), "x");
+		auto* t = w->get("#text");
+		ASSERT(t != nullptr && t->type == asvJSONValue::STRING);
+		ASSERT_EQ(t->str_data, std::string("123"));
+	}
+	// Backward compatibility: a hand-written bare type="..." that is not an
+	// annotation word still decodes to a plain @type (the element stays an
+	// attribute-only object, so every attribute is @-prefixed).
+	{
+		asvJSON a;
+		ASSERT(a.fromXML("<x type=\"widget\" k=\"1\"/>"));
+		auto* x = a.getRoot()->get("x");
+		ASSERT(x != nullptr && x->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(x->get("@type")->getString()), "widget");
+		ASSERT_EQ(std::string(x->get("@k")->getString()), "1");
+	}
+	// AUDIT: a multi-key object inside #content has no representable form --
+	// the parser restores every element segment as a {childName: value}
+	// wrapper, so the encoder's <item> wrap came back as {"item":{...}}, a
+	// level the input never had. Now rejected instead of silently reshaped.
+	{
+		asvJSON a;
+		ASSERT(a.parse(std::string("{}")));
+		auto o = asvJSONValue::makeObject();
+		auto arr = asvJSONValue::makeArray();
+		auto item = asvJSONValue::makeObject();
+		item->obj->emplace("a", asvJSONValue::makeInt(1));
+		item->obj->emplace("b", asvJSONValue::makeInt(2));
+		arr->arr->push_back(std::move(item));
+		o->obj->emplace("#content", std::move(arr));
+		a.getRoot()->obj->emplace("name", std::move(o));
+		bool threw = false;
+		try { a.toXML(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// The single-key #content object (the representable case) still round-trips.
+	{
+		asvJSON a, a2;
+		ASSERT(a.parse(std::string("{}")));
+		auto o = asvJSONValue::makeObject();
+		auto arr = asvJSONValue::makeArray();
+		auto item = asvJSONValue::makeObject();
+		item->obj->emplace("a", asvJSONValue::makeInt(1));
+		arr->arr->push_back(std::move(item));
+		o->obj->emplace("#content", std::move(arr));
+		a.getRoot()->obj->emplace("name", std::move(o));
+		ASSERT(a2.fromXML(a.toXML()));
+		ASSERT_EQ(a2.serialize(), std::string(R"({"name":{"#content":[{"a":1}]}})"));
 	}
 }
 

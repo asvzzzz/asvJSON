@@ -28,6 +28,17 @@
 //     single-element array pin). A user key equal to one of these is only
 //     affected inside a mixed #content (asv:xc/) array; elsewhere on the
 //     document the literal text round-trips as data.
+//   - A user "@type" key is written as the reserved attribute asv:ut, because
+//     a bare type="..." is the encoder's own annotation (empty-value pin and
+//     #text string pin) and would be consumed by the decoder, turning
+//     {@type: "string"} into an empty STRING. asv:ut is therefore reserved
+//     everywhere; the decoder maps it back to @type, and a hand-written bare
+//     type="..." with a non-annotation value still decodes to a plain @type.
+//   - A MULTI-KEY object inside a #content array cannot be represented: the
+//     parser restores every element segment as a {childName: value} wrapper,
+//     so wrapping it in <item> re-parsed as {"item": {...}} -- a level the
+//     input never had. toXML throws for that shape instead of reshaping it
+//     (single-key objects, which the parser does produce, round-trip fine).
 //   - KNOWN LIMITATION (pre-existing, not a regression): an empty string in a
 //     #content array is not round-tripped at either end. A LEADING one
 //     (["", "foo"]) has no XML text to serialize and no preceding adjacent-
@@ -38,7 +49,8 @@
 //     collision documented below, and no empty text node is representable in
 //     XML, so neither is fixable without changing the on-wire marker scheme.
 //   - RESERVED KEYS: inside a #content array the keys/attributes asv:s, asv:xc
-//     and asv:arr are reserved as internal round-trip markers. A user object
+//     and asv:arr are reserved as internal round-trip markers; asv:ut is
+//     reserved document-wide as the user @type attribute name. A user object
 //     that itself contains {asv:s: ...} / {asv:xc: ...} / {asv:arr: ...} as a
 //     DIRECT child is unpinned and its contents round-trip (use that form to
 //     keep a literal key); put them inside a normal (non-array-of-strings)
@@ -161,6 +173,32 @@ inline void fmtRegexXml(std::string_view s, std::string& out) {
 	out += '|';
 }
 
+// Wire name for a USER "@type" attribute. The encoder's own type="..."
+// annotation is a reserved attribute name, so a user key @type used to be
+// written as a bare type="..." and then be re-read as that annotation: the
+// annotation wins and the value is consumed ({"@type":"string"} came back as an
+// empty STRING, {@type:"string", other:1} as {#text:"", other:1}). It also
+// silently suppressed the type="string" pin on a sibling #text, so
+// {@type:"x", #text:"123"} came back with #text as the number 123.
+// User @type data now travels under this reserved name instead, leaving the
+// bare type=... attribute exclusively for encoder annotations. Reading stays
+// backward compatible: a bare type="..." that is not a known annotation word
+// still decodes to @type, so documents written before this change are
+// unaffected.
+inline constexpr std::string_view kXmlUserTypeAttr = "asv:ut";
+
+// Attribute name to write for a user "@"-prefixed object key.
+inline std::string_view xmlUserAttrName(const std::string& k) {
+	return k == "@type" ? kXmlUserTypeAttr : std::string_view(k).substr(1);
+}
+
+// Object key a parsed attribute maps back to. Every attribute becomes an
+// @-prefixed key except the reserved asv:ut, which is the user's own @type.
+inline std::string xmlAttrToKey(const std::string& name) {
+	if (name == kXmlUserTypeAttr) return "@type";
+	return "@" + name;
+}
+
 // Stringify any scalar attribute value (parser attributes are always STRING,
 // but user data can hold INT/DOUBLE/BOOL/NULL @-prefixed keys). Stringifying
 // keeps the attribute data instead of emitting an empty value.
@@ -271,7 +309,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				for (const auto& [k, v] : *obj) {
 					if (k == "#content") continue;
 					if (!k.empty() && k[0] == '@') {
-						out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"";
+						out += " " + xmlSanitizeElementName(xmlUserAttrName(k)) + "=\"";
 						xmlAppendAttrValue(out, v.get());
 						out += "\"";
 					}
@@ -316,9 +354,16 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 							childVal->toXML(out, childName, 0);
 							if (!out.empty() && out.back() == '\n') out.pop_back();
 						}
-					} else if (item->type == asvJSONValue::OBJECT) {
-						item->toXML(out, "item", 0);
-						if (!out.empty() && out.back() == '\n') out.pop_back();
+} else if (item->type == asvJSONValue::OBJECT) {
+						// A multi-key object in #content has no #content item form
+						// that decodes back to a bare object: the parser restores every
+						// element segment as a {childName: value} wrapper, so wrapping it
+						// in <item> came back as {"item":{...}} -- an extra level the input
+						// never had. The decoder never produces a multi-key item (only
+						// {name: value} wrappers), so this shape is reachable from a
+						// programmatically built tree only. Reject it rather than silently
+						// re-shaping the data.
+						throw asvJSONError("XML: multi-key object in mixed #content is not representable");
 					} else if (item->type == asvJSONValue::ARRAY) {
 						item->toXML(out, "item", 0);
 						if (!out.empty() && out.back() == '\n') out.pop_back();
@@ -348,21 +393,21 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			     textIt->second->type == DOUBLE || textIt->second->type == BOOL_VAL ||
 			     textIt->second->type == NULL_VAL)) {
 				out += pad + "<" + xmlSanitizeElementName(name);
-				bool hasTypeAttr = false;
 				for (const auto& [k, v] : *obj) {
 					if (k == "#text") continue;
 					if (!k.empty() && k[0] == '@') {
-						if (k == "@type") hasTypeAttr = true;
-						out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"";
+						out += " " + xmlSanitizeElementName(xmlUserAttrName(k)) + "=\"";
 						xmlAppendAttrValue(out, v.get());
 						out += "\"";
 					}
 				}
 				// A #text STRING that looks like a number/bool/null needs a
-				// type="string" annotation or a re-parse re-detects its type
-				// (unless the object already carries an explicit @type attr).
+				// type="string" annotation or a re-parse re-detects its type.
+				// A user @type used to suppress this (the annotation would have
+				// collided on the same attribute name); it no longer does,
+				// since user @type is written as asv:ut.
 				if (textIt->second->type == asvJSONValue::STRING &&
-				    xmlNeedsStringType(textIt->second->str_data) && !hasTypeAttr)
+				    xmlNeedsStringType(textIt->second->str_data))
 					out += " type=\"string\"";
 				out += ">";
 				auto& tv = textIt->second;
@@ -385,7 +430,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			out += pad + "<" + xmlSanitizeElementName(name);
 			for (const auto& [k, v] : *obj) {
 				if (!k.empty() && k[0] == '@') {
-					out += " " + xmlSanitizeElementName(k.substr(1)) + "=\"";
+					out += " " + xmlSanitizeElementName(xmlUserAttrName(k)) + "=\"";
 					xmlAppendAttrValue(out, v.get());
 					out += "\"";
 				}
@@ -578,7 +623,7 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 		auto xobj = asvJSONValue::makeObject();
 		auto xarr = asvJSONValue::makeArray();
 		xobj->obj->emplace("#content", std::move(xarr));
-		for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+		for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 		return xobj;
 	}
 	auto tit = attrs.find("type");
@@ -608,7 +653,7 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 	}
 	if (attrs.empty()) return asvJSONValue::makeString("", 0);
 	auto obj = asvJSONValue::makeObject();
-	for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+	for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 	return obj;
 }
 
@@ -622,9 +667,15 @@ inline std::string xmlStripWs(std::string_view s) {
 	return out;
 }
 
+// Same character class as xmlParseName: ASCII alnum plus '-', '_', ':', '.'
+// and any byte >= 0x80 (UTF-8). The bytes are compared as unsigned, so a
+// non-ASCII name character (e.g. a Cyrillic element name) does not terminate
+// the scan early -- with a plain char the >= 0x80 test cannot even be written,
+// and every range comparison misses.
 inline bool xmlNameChar(char c) {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-	       c == ':' || c == '-' || c == '_' || c == '.';
+	unsigned char u = static_cast<unsigned char>(c);
+	return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') ||
+	       u == ':' || u == '-' || u == '_' || u == '.' || u >= 0x80;
 }
 
 // Advance pos past an xsi:nil element's body to the matching closing tag.
@@ -864,14 +915,20 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 	}
 
+	// asv:xc marker (from toXML) pins an object as a #content array so pure
+	// text round-trips back to {"#content":[raw strings]} instead of being
+	// collapsed into a typed scalar. Extracted ONCE here, before the
+	// self-closing split, since both an empty and a populated element can carry
+	// it. Consumed here; never becomes an @attr.
+	bool forceMixed = false;
+	auto xcIt = attrs.find("asv:xc");
+	if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
+
 	// Self-closing tag
 	if (pos < s.size() && s[pos] == '/') {
 		pos++;
 		if (pos < s.size() && s[pos] == '>') pos++;
 		else throw asvJSONError("XML: malformed self-closing tag in <" + elemName + ">");
-		bool forceMixed = false;
-		auto xcIt = attrs.find("asv:xc");
-		if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
 		return xmlEmptyElement(attrs, forceMixed);
 	}
 
@@ -882,13 +939,6 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
 	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs);
-
-	// asv:xc marker (from toXML) pins an object as a #content array so pure
-	// text round-trips back to {"#content":[raw strings]} instead of being
-	// collapsed into a typed scalar. Consumed here; never becomes a @attr.
-	bool forceMixed = false;
-	auto xcIt = attrs.find("asv:xc");
-	if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
 
 	// asv:arr marker (from toXML) pins a SINGLE-element array so it re-parses
 	// as an array rather than a plain {item: value} object. Consumed here;
@@ -975,7 +1025,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				if (!segments[i].isElement && !segments[i].text.empty())
 					xarr->arr->push_back(asvJSONValue::makeString(segments[i].text.data(), segments[i].text.size()));
 			xobj->obj->emplace("#content", std::move(xarr));
-			for (const auto& [k, v] : attrs) xobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+			for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 			return xobj;
 		}
 		if (attrs.empty()) {
@@ -996,7 +1046,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				// is what toXML emits for #text-bearing objects).
 				if (attrs.size() == 1) return asvJSONValue::makeString(combinedText.data(), combinedText.size());
 				auto sobj = asvJSONValue::makeObject();
-				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 				sobj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
 				return sobj;
 			}
@@ -1061,7 +1111,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 		// Has attributes - object with #text + @attr
 		auto obj = asvJSONValue::makeObject();
-		for (const auto& [k, v] : attrs) obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+		for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
 		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
 		return obj;
@@ -1078,16 +1128,23 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Mirrors the type="string" handling of the text-only branch above. The
 	// annotation is consumed (never becomes an @-key) so it is not re-emitted
 	// on a second round trip.
+	//
+	// The two branches cannot simply share one flag: here the annotation is
+	// dropped from attrs regardless of what else the element carries (an
+	// element with children plus other @attrs still must not grow a phantom
+	// @type), whereas the text-only branch only returns a typed value when the
+	// attribute set is otherwise empty. Same detection, different bookkeeping.
 	bool pinTextString = false;
 	{
 		auto tit = attrs.find("type");
 		if (tit != attrs.end() && tit->second == "string") pinTextString = true;
 	}
 
-	// Add attributes
+	// Add attributes. The type="string" annotation is consumed here; a user
+	// @type arrives as the reserved asv:ut attribute and maps back to @type.
 	for (const auto& [k, v] : attrs) {
 		if (pinTextString && k == "type") continue;
-		obj->obj->emplace("@" + k, asvJSONValue::makeString(v.data(), v.size()));
+		obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 	}
 
 	if (hasInterleaving || forceMixed) {
