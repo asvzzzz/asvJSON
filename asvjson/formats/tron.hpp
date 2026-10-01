@@ -7,7 +7,11 @@
 //   A(name=Alice,age=30)         -- named instantiation
 //   class B(A): z                -- inheritance (B = A's props + z)
 // Comments use `#` to end of line; trailing commas allowed. Full round-trip
-// via toTRON()/fromTRON().
+// via toTRON()/fromTRON(). A literal STRING whose text starts with a special-type
+// marker prefix (__TS__, __OID__, __REGEX__, __BASE64__, __EXT__) or has the
+// ISO-8601 shape the decoder auto-detects as a date has its leading character
+// escaped as \uXXXX, so it stays a STRING; DATETIME itself is written unescaped
+// in plain ISO form and decodes back as a DATETIME.
 //
 // The encoder emits FLAT class definitions: inheritance (`class B(A):`) is fully
 // supported by the decoder, but re-serialized as an equivalent flat class (the
@@ -21,6 +25,8 @@
 // default case), as TRON has no marker form for them.
 
 #include "../core.hpp"
+
+#include <algorithm>
 
 // -- TRON Encoder --
 
@@ -91,6 +97,27 @@ inline bool tronLooksLikeMarker(std::string_view s) {
     if (s.size() >= p.size() && s.compare(0, p.size(), p) == 0) return true;
   }
   return false;
+}
+
+// True when the decoder would turn this string token into a DATETIME (the
+// ISO-8601 auto-detection in parseValue). Kept as a named predicate so the
+// encoder and the decoder gate on the exact same shape test.
+inline bool tronLooksLikeDateTime(std::string_view s) {
+  return s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T';
+}
+
+// Write `s` as a TRON quoted token whose FIRST character is emitted as a \uXXXX
+// escape, so the raw token text no longer matches tronLooksLikeMarker() or
+// tronLooksLikeDateTime() and the decoder returns a plain STRING. Used for
+// literal strings the decoder would otherwise reinterpret as a special type.
+inline void tronEmitEscapedLeading(std::string& out, std::string_view s) {
+  static constexpr char HEX[] = "0123456789abcdef";
+  unsigned char c = static_cast<unsigned char>(s[0]);
+  out += '"';
+  char buf[6] = {'\\', 'u', '0', '0', HEX[c >> 4], HEX[c & 0xF]};
+  out.append(buf, 6);
+  appendJsonEscaped(out, s.substr(1));
+  out += '"';
 }
 
 // JSON-escape a string for embedding inside a TRON quoted value, additionally
@@ -218,15 +245,12 @@ inline void tronSerializeVal(const asvJSONValue* v,
       appendJsonToken(out, v, allowNaNInfinity);
       break;
     case asvJSONValue::STRING:
-      // A literal string starting with a special-type marker prefix (__TS__,
-      // __OID__, ...) must not be re-interpreted by the decoder as that type.
-      // The decoder only recognizes markers in raw (unescaped-by-tokenizer)
-      // form, so escape the leading '_' as \u005F to keep the value a string.
-      if (tronLooksLikeMarker(v->str_data)) {
-        out += '"';
-        out += "\\u005F";
-        appendJsonEscaped(out, std::string_view(v->str_data.data() + 1, v->str_data.size() - 1));
-        out += '"';
+      // A literal string that the decoder would re-interpret as a special type
+      // must keep its STRING type on round-trip. The decoder only recognizes
+      // markers (and the ISO-8601 date shape) in RAW token text, so escaping the
+      // first character as \uXXXX keeps the value a string.
+      if (tronLooksLikeMarker(v->str_data) || tronLooksLikeDateTime(v->str_data)) {
+        tronEmitEscapedLeading(out, v->str_data);
         break;
       }
       appendJsonToken(out, v, allowNaNInfinity);
@@ -632,6 +656,10 @@ struct TronParseState {
         if (nit != namedArgs.end()) valPtr = std::move(nit->second);
       }
       if (!valPtr) {
+        // Defensive: unreachable given the checks above. posArgs.size() +
+        // namedArgs.size() >= props.size() with every named arg validated as a
+        // known property and never colliding with a positional one, so each
+        // props[i] is covered by posArgs or namedArgs.
         obj->obj->emplace(props[i], asvJSONValue::makeNull());
       } else {
         obj->obj->emplace(props[i], std::move(valPtr));
@@ -738,8 +766,11 @@ asvJSONValue* TronParseState::parseValue(int depth) {
           }
         }
       }
-      // Check ISO 8601 date
-      if (s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T') {
+      // Check ISO 8601 date. Skipped when the raw token starts with a backslash:
+      // the encoder escapes the leading character of an ISO-shaped literal
+      // STRING (\u0032...), which is how such a string keeps its type; an
+      // unescaped DATETIME is emitted in plain ISO form and still detects here.
+      if (!raw.empty() && raw[0] != '\\' && tronLooksLikeDateTime(s)) {
         time_t ts;
         int ms = 0;
         int tz = 0;

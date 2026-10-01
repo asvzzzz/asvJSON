@@ -15452,6 +15452,123 @@ TEST(testTRONAudit) {
   }
 }
 
+TEST(testTRONStringDateTimeRoundTrip) {
+  // A literal STRING whose text has the ISO-8601 shape the decoder auto-detects
+  // as a date used to come back as a DATETIME (the encoder escaped only the
+  // __TS__/__OID__/__REGEX__/__BASE64__/__EXT__ marker prefixes). The leading
+  // character is now escaped so the raw token no longer matches the date shape.
+  const char* isoStrings[] = {
+    "2020-01-01T00:00:00Z",
+    "2020-01-01T00:00:00.000Z",
+    "2020-01-01T00:00:00+05:00",
+    "2020-01-01T12:34:56.789Z",
+    "2020-01-01T00:00:00.123456Z",
+    "9999-12-31T23:59:59.999Z"
+  };
+  for (const char* text : isoStrings) {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("when", asvJSONValue::makeString(text));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* v = j2.getRoot()->get("when");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) ASSERT_EQ(std::string(v->str_data), std::string(text));
+  }
+  // Date-shaped strings that the detector never matched stay unescaped, and
+  // short ISO-looking text is untouched (still a STRING, byte-identical).
+  const char* plainStrings[] = {
+    "2020-01-01",
+    "2020-01-01T00:00:00",
+    "2020-01-01 00:00:00Zxx",
+    "not-a-date"
+  };
+  for (const char* text : plainStrings) {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("when", asvJSONValue::makeString(text));
+    std::string s = j.toTRON();
+    ASSERT(s.find("\\u00") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* v = j2.getRoot()->get("when");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) ASSERT_EQ(std::string(v->str_data), std::string(text));
+  }
+  // A real DATETIME is still written as plain ISO text (never escaped) and comes
+  // back as a DATETIME -- the escape must not leak the other way.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("when", asvJSONValue::makeDateTime(1577836800, 0, 0));
+    std::string s = j.toTRON();
+    ASSERT(s.find("\\u00") == std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("when")->type == asvJSONValue::DATETIME);
+  }
+  // DATETIME with milliseconds and a non-zero UTC offset round-trips as a
+  // DATETIME too (its text is ISO-shaped as well).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    j.getRoot()->obj->emplace("when", asvJSONValue::makeDateTime(1577836800, 123, 330));
+    std::string s = j.toTRON();
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* v = j2.getRoot()->get("when");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+    if (v) {
+      ASSERT_EQ(v->timestamp, static_cast<time_t>(1577836800));
+      ASSERT_EQ(v->datetime_ms, 123);
+      ASSERT_EQ(v->tz_offset_min, 330);
+    }
+  }
+  // The escape works for hoisted class instances too, not just plain objects
+  // (a class is only hoisted for a repeated multi-property shape). The values
+  // are built with makeString: the JSON parser itself turns an ISO-shaped
+  // string literal into a DATETIME, so parse() cannot produce this input.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[]")));
+    for (int i = 0; i < 2; i++) {
+      auto row = asvJSONValue::makeObject();
+      row->obj->emplace("a", asvJSONValue::makeString("2020-01-01T00:00:00Z"));
+      row->obj->emplace("b", asvJSONValue::makeInt(i + 1));
+      j.getRoot()->arr->push_back(std::move(row));
+    }
+    std::string s = j.toTRON();
+    ASSERT(s.find("class") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->size() == 2);
+    for (size_t i = 0; i < 2; i++) {
+      auto* v = j2.getRoot()->get(i)->getConst("a");
+      ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+      if (v) ASSERT_EQ(std::string(v->str_data), std::string("2020-01-01T00:00:00Z"));
+    }
+  }
+  // Marker-prefixed strings keep working (existing leading-'_' escape), and a
+  // hand-written escaped-leading-character token is left as a STRING too.
+  {
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("{\"a\":\"\\u00322020-01-01T00:00:00Z\"}")));
+    auto* v = j.getRoot()->get("a");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    // \u0032 is the escaped leading '2', so the value is "2" + "020-...".
+    if (v) ASSERT_EQ(std::string(v->str_data), std::string("22020-01-01T00:00:00Z"));
+  }
+  // A marker-prefixed string still decodes as a STRING through the same path.
+  {
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("{\"a\":\"\\u005F_TS__123\"}")));
+    auto* v = j.getRoot()->get("a");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) ASSERT_EQ(std::string(v->str_data), std::string("__TS__123"));
+  }
+}
+
 TEST(testTRONRoundTripFidelity) {
   // 1. An integral DOUBLE must round-trip as a DOUBLE, not become an INT.
   //    fmtDoubleVal emits "1" for 1.0 and "-0" for -0.0, and the decoder only
@@ -29065,6 +29182,7 @@ RUN(testCBORFloat16);
 	RUN(testCBORIndefiniteArrayTruncated);
 	RUN(testCBORIndefiniteMapTruncated);
 	RUN(testCBORIndefiniteStringTruncated);
+	RUN(testCBORIndefiniteStringWithIndefiniteChunk);
 	RUN(testCBORTimestampRoundTrip);
 	RUN(testCBORObjectIdRoundTrip);
 	RUN(testCBORDatetimeVsTimestamp);
@@ -29161,6 +29279,7 @@ RUN(testTOONReviewFixes);
 	RUN(testTRONSpecialTypes);
 	RUN(testTRONAudit);
 	RUN(testTRONRoundTripFidelity);
+	RUN(testTRONStringDateTimeRoundTrip);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
 RUN(testToGOON);
