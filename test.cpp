@@ -19674,6 +19674,105 @@ TEST(testINIRepeatedArrayComments) {
       ASSERT((*v->arr)[0]->get("k")->getInt() == 1);
     ASSERT(b.getRoot()->comments && b.getRoot()->comments->footing.size() == 1);
   }
+  // Only a SINGLE-LINE trailing comment can stay on the value's line.
+  // iniWriteTrailingComments pushes a block or multiline one into ';' lines
+  // BELOW it, and at EOF those re-parse as the root's footing, not as that
+  // node's trailing -- documented in the header's KNOWN LIMITATIONS. The text is
+  // preserved, only its position changes, so the round-trip is one-directional.
+  {
+    auto rtDegraded = [](const std::string& src, const std::string& key,
+                         const std::vector<std::string>& parts, asvJSON& b) {
+      asvJSON a;
+      ASSERT(a.parse(src));
+      asvJSONInternal::Comment c;
+      c.text = parts[0];
+      for (size_t i = 1; i < parts.size(); i++) c.text += "\n" + parts[i];
+      if (key.empty()) {
+        a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+        a.getRoot()->comments->trailing.push_back(c);
+      } else {
+        asvJSONValue* n = nullptr;
+        if (size_t dot = key.find('.'); dot != std::string::npos) {
+          asvJSONValue* parent = a.getRoot()->get(key.substr(0, dot));
+          n = parent ? parent->get(key.substr(dot + 1)) : nullptr;
+        } else {
+          n = a.getRoot()->get(key);
+        }
+        ASSERT(n != nullptr);
+        n->comments = std::make_unique<asvJSONInternal::Comments>();
+        n->comments->trailing.push_back(c);
+      }
+      std::string ini = a.toINI();
+      // Not inlined: the ';' lines sit below the value line.
+      ASSERT(ini.find("] ;") == std::string::npos);
+      ASSERT(b.fromINI(ini));
+    };
+    // Multiline trailing on an empty array root -> root footing, text kept.
+    {
+      std::vector<std::string> parts; parts.push_back("l1"); parts.push_back("l2");
+      asvJSON b;
+      rtDegraded(std::string("[]"), "", parts, b);
+      auto* v = b.getRoot()->get("value");
+      ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->empty());
+      ASSERT(!(v->comments && !v->comments->trailing.empty()));
+      bool saw = false;
+      if (b.getRoot()->comments)
+        for (const auto& c : b.getRoot()->comments->footing)
+          if (c.text == "l1" || c.text == "l2") saw = true;
+      ASSERT(saw);
+    }
+    // Same for a nested scalar value -- this is not root-specific behaviour.
+    {
+      std::vector<std::string> parts; parts.push_back("b1"); parts.push_back("b2");
+      asvJSON b;
+      rtDegraded(std::string(R"({"s":{"k":1}})"), "s.k", parts, b);
+      auto* k = b.getRoot()->get("s") ? b.getRoot()->get("s")->get("k") : nullptr;
+      ASSERT(k != nullptr && k->getInt() == 1);
+      ASSERT(!(k->comments && !k->comments->trailing.empty()));
+      bool saw = false;
+      if (b.getRoot()->comments)
+        for (const auto& c : b.getRoot()->comments->footing)
+          if (c.text == "b1" || c.text == "b2") saw = true;
+      ASSERT(saw);
+    }
+    // A block-flagged trailing degrades the same way, even with single-line text.
+    {
+      asvJSON a;
+      ASSERT(a.parse(std::string("[]")));
+      a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = "blk";
+      c.block = true;
+      a.getRoot()->comments->trailing.push_back(c);
+      std::string ini = a.toINI();
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      auto* v = b.getRoot()->get("value");
+      ASSERT(v != nullptr && v->arr->empty());
+      ASSERT(!(v->comments && !v->comments->trailing.empty()));
+      ASSERT(b.getRoot()->comments && b.getRoot()->comments->footing.size() == 1);
+    }
+    // Control: a single-line trailing on the same empty array root DOES stay
+    // inline and round-trips as trailing.
+    {
+      asvJSON a;
+      ASSERT(a.parse(std::string("[]")));
+      a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = "one";
+      a.getRoot()->comments->trailing.push_back(c);
+      std::string ini = a.toINI();
+      ASSERT(ini.find("value = [] ;one") != std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromINI(ini));
+      auto* v = b.getRoot()->get("value");
+      ASSERT(v != nullptr && v->arr->empty());
+      ASSERT(v->comments && v->comments->trailing.size() == 1);
+      if (v->comments && !v->comments->trailing.empty())
+        ASSERT_EQ(v->comments->trailing[0].text, std::string("one"));
+      ASSERT_EQ(b.toINI(), ini);
+    }
+  }
   // An empty path segment ("a. = 1" decodes to {"a":{"":1}}) reaches iniFindPath
   // as a zero-length segment; reading seg[0] on that empty view was undefined
   // behaviour. The comment on such a leaf is unresolvable and dropped, but the

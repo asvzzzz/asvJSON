@@ -20,6 +20,13 @@
 //     than one. INI has no block comment and no way to mark the lines as one
 //     logical comment without inventing an escape that would collide with
 //     comment text legitimately containing a backslash.
+//   - Only a SINGLE-LINE trailing comment can stay on the value's line. A
+//     block or multiline one is written as ';' lines BELOW it, which re-parse
+//     as the enclosing scope's footing (at end of input, the root's) rather
+//     than as that node's trailing -- there is no INI syntax for a comment that
+//     both starts on the value's line and continues. The text is never dropped;
+//     only its position changes, so this applies to every value, not just
+//     roots.
 //   - Leading comments on the root object are written above the first key and
 //     re-parse as leading comments on THAT key. INI has no notion of a comment
 //     that precedes the document itself. A non-object root (scalar or array,
@@ -262,7 +269,7 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
 }
 
 // Escape a flat (key = value side) key. Two keys have no INI spelling as a flat
-// key, both rejected here rather than at each of the four call sites: an empty
+// key, both rejected here rather than at each of the call sites: an empty
 // key (" = v" is skipped by the decoder and "[...]" would need a nameless
 // section) and a key starting with '[' (the decoder would read it as the start
 // of a section header). Section-header keys have no such restriction -- there
@@ -1250,11 +1257,14 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
     // trailing comment survives wherever a line of the root's own exists to hang
     // it on: the bare path (after the last repeated line, inside
     // iniWriteRepeatedLines) and the empty path (`value = [] ;...`, which the
-    // decoder reads as an inline comment on the "value" key). The object-array
-    // path has NO line for the array itself -- only its elements do -- so its
-    // trailing comment is API-only state, exactly like a nested object that
-    // emits no header; writing it after the last element line would move it to
-    // that ELEMENT on re-parse, which is worse than dropping it.
+    // decoder reads as an inline comment on the "value" key). Both of those are
+    // the single-line case only -- iniWriteTrailingComments pushes a block or
+    // multiline trailing into ';' lines BELOW the value line, where it re-parses
+    // as footing (see KNOWN LIMITATIONS). The object-array path has NO line for
+    // the array itself -- only its elements do -- so its trailing comment is
+    // API-only state, exactly like a nested object that emits no header; writing
+    // it after the last element line would move it to that ELEMENT on re-parse,
+    // which is worse than dropping it.
     //
     // The leading half is written once per branch, NOT above the whole if/else:
     // iniWriteRepeatedLines() emits the leading comments of the array it writes,
