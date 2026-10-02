@@ -19,13 +19,18 @@
 // string "{}". Single-quoted values are always literal strings; double-quoted
 // values process C-style escapes and may span multiple lines; a control byte
 // with no short escape form (0x01-0x06, 0x0E-0x1F, 0x7F) is written as \xHH so
-// no control byte ever lands raw in the file. Unknown escape sequences (e.g.
-// \q) are preserved verbatim rather than decoded. Inline comments are stripped
-// from bare values only when the '#' is preceded by space or tab
-// (`KEY=v # note`); a '#' at the start of the value
-// (`KEY=#text`) is data, so `KEY=#text` parses to the string "#text" and
-// `KEY=#` to "#" instead of silently collapsing to an empty value plus a
-// comment. Duplicate keys follow last-wins. Comment text is stored without
+// no control byte ever lands raw in the file -- keys included: a key is written
+// verbatim (dotenv has no quoted-key form), so a key holding a control byte is
+// rejected as unencodable by both the parser and the encoder rather than
+// emitted with the byte in it. Unknown escape sequences (e.g. \q) are preserved
+// verbatim rather than decoded; \' is the one exception, decoded to ' as an
+// input-compat alias inside double quotes (it is not "unknown"). Inline comments
+// are stripped from bare values only when the '#' is preceded by space or tab
+// WITHIN THE VALUE (`KEY=v # note`). The whitespace immediately after '=' is
+// trimmed first, so a '#' at the start of that trimmed value is data whether or
+// not the source line had a space before it: `KEY=#text` and `KEY= #text` both
+// parse to the string "#text", and `KEY=#` to "#", instead of silently
+// collapsing to an empty value plus a comment. Duplicate keys follow last-wins. Comment text is stored without
 // the leading '#' but with its following space, so `# hello` parses to
 // " hello" and re-emits as "# hello" (the writer is symmetric -- no
 // progressive space drift on round-trip).
@@ -48,6 +53,17 @@
 //   emitted joined on the value's line ("K=1 # a # b") and re-parse as ONE
 //   comment whose text is the whole joined string. Nothing is lost, only the
 //   comment count folds (the joined text re-emits verbatim).
+// - A comment whose text ends with '\n' does not survive as one comment: it is
+//   written one '#'-prefixed line per text line, so "foo\n" becomes "#foo\n#\n"
+//   and re-parses as TWO comments ("foo" and ""). Splitting on re-read is
+//   unavoidable given the one-line-per-text-line mapping; the text is preserved,
+//   the comment count changes. Round-tripping such a comment exactly would need
+//   a marker that distinguishes a blank comment line from a real one.
+// - The root's own trailing and closing comments have no place to go: dotenv is a
+//   flat key/value list with no closing delimiter, and an inline trailing comment
+//   has no final line to sit on. toDotenv() writes the root's leading and footing
+//   comments and silently drops these two. Per-key leading/trailing and the root
+//   footing are all preserved.
 
 #include "../core.hpp"
 
@@ -200,9 +216,23 @@ inline std::string dotenvEscape(std::string_view s) {
   return out;
 }
 
+// Keys are written VERBATIM -- there is no quoting form for a key in dotenv, so
+// every key byte must be safe to emit raw. The original test excluded only the
+// handful of characters the parser itself treats as structure (' ', '\t', '\r',
+// '\n', '=', '#', the two quotes), which let every OTHER control byte through:
+// dotenvKeyCharOk('\0') and dotenvKeyCharOk('\x01') were both true, so a key read
+// from {"a\u0000b":1} put a raw NUL in the file. That contradicts the header's
+// promise that "no control byte ever lands raw in the file" -- true of VALUES,
+// which are \xHH-escaped, false of keys.
+//
+// Reject the whole C0 range plus space, and DEL. That subsumes the old ' ', '\t',
+// '\r', '\n' cases; the quoting/structure cases stay. The parser rejects such a
+// key the same way, so an unencodable key is a parse error rather than an
+// encoder that cannot round-trip its own output.
 inline bool dotenvKeyCharOk(char c) {
-  return c != ' ' && c != '\t' && c != '\r' && c != '\n' &&
-         c != '=' && c != '#' && c != '"' && c != '\'';
+  unsigned char uc = static_cast<unsigned char>(c);
+  if (uc <= 0x20 || uc == 0x7F) return false;   // C0 controls + space + DEL
+  return c != '=' && c != '#' && c != '"' && c != '\'';
 }
 
 inline void dotenvWriteCommentLines(std::string& out, const std::vector<Comment>& list) {
@@ -511,6 +541,15 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
     formatType = FormatType::Dotenv;
     return true;
   } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromMessagePack).
+    // Not theoretical here: `new Comments()` and the vector growth in splitLines
+    // / pending.push_back are throwing operations, unlike the value factories,
+    // which use new(std::nothrow) and so never throw.
     lastError = e.what();
     root = nullptr;
     return false;

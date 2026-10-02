@@ -20579,6 +20579,89 @@ TEST(testDotenvAuditFixes) {
     ASSERT(b2.fromDotenv(denv));
     ASSERT_EQ(std::string(b2.getString("D")), delOnly);
   }
+  // 8. A key is written VERBATIM -- dotenv has no quoted-key form -- so a key
+  // holding a control byte cannot be encoded safely. dotenvKeyCharOk used to
+  // test only the handful of structural characters, so it accepted every other
+  // control byte: a key read from {"a\u0000b":1} put a raw NUL in the file,
+  // breaking the header's "no control byte ever lands raw" promise (which held
+  // for values, escaped as \xHH, but not for keys). Both the encoder and the
+  // parser now reject such a key, so an unencodable key is an error rather than
+  // an output the encoder cannot round-trip.
+  {
+    // Written as JSON \u escapes: JSON forbids raw control bytes inside a
+    // string literal, so {"a\x01b":1} is not valid JSON source in the first place.
+    const char* escs[] = {"\\u0000", "\\u0001", "\\u0007", "\\u0008",
+                          "\\u000b", "\\u001f", "\\u007f"};
+    const char bytes[] = {0x00, 0x01, 0x07, 0x08, 0x0b, 0x1f, 0x7f};
+    for (size_t i = 0; i < sizeof(bytes); i++) {
+      asvJSON j;
+      ASSERT(j.parse(std::string("{\"a") + escs[i] + "b\":1}"));
+      bool threw = false;
+      std::string env;
+      try {
+        env = j.toDotenv();
+      } catch (const std::exception&) {
+        threw = true;
+      }
+      ASSERT(threw);
+      // And if an encoder ever stops throwing, no raw control byte may appear.
+      for (unsigned char c : env) ASSERT(c >= 0x20 && c != 0x7f);
+      // The parser rejects the same key, so parse/serialize agree.
+      asvJSON p;
+      ASSERT(!p.fromDotenv(std::string("a") + bytes[i] + "b=1\n"));
+    }
+    // Ordinary keys are unaffected: space, tab, CR, LF, '#', both quotes
+    // stay rejected, everything else (including '.', ':', '-', high bytes)
+    // is accepted. A second '=' is NOT a key character problem -- it opens the
+    // value, so "a=b=1" is a valid assignment of "b=1" to "a".
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"APP_NAME\":\"x\",\"a-b\":\"1\",\"ns:k\":\"2\"}")));
+    ASSERT_EQ(j.toDotenv(), std::string("APP_NAME=x\na-b=\"1\"\nns:k=\"2\"\n"));
+    asvJSON j2;
+    ASSERT(j2.fromDotenv(j.toDotenv()));
+    ASSERT_EQ(std::string(j2.getString("APP_NAME")), std::string("x"));
+    ASSERT_EQ(j2.toJSON5(), std::string("{APP_NAME:\"x\",\"a-b\":\"1\",\"ns:k\":\"2\"}"));
+    for (const char* bad : {"a b", "a\tb", "a\rb", "a\nb", "a#b", "a\"b", "a'b"}) {
+      asvJSON bad2;
+      ASSERT(!bad2.fromDotenv(std::string(bad) + "=1\n"));
+    }
+    asvJSON two;
+    ASSERT(two.fromDotenv(std::string("a=b=1\n")));
+    ASSERT_EQ(std::string(two.getString("a")), std::string("b=1"));
+  }
+  // 9. The inline-comment rule is stated in terms of the TRIMMED value, not the
+  // source line: the whitespace right after '=' is trimmed before the '#' scan,
+  // so KEY= #text is data exactly like KEY=#text (the old header wording
+  // promised otherwise, since the source line does have a space before '#').
+  {
+    asvJSON a, b, c;
+    ASSERT(a.fromDotenv(std::string("K=#text\n")));
+    ASSERT(b.fromDotenv(std::string("K= #text\n")));
+    ASSERT_EQ(std::string(a.getString("K")), std::string("#text"));
+    ASSERT_EQ(std::string(b.getString("K")), std::string("#text"));
+    ASSERT(c.fromDotenv(std::string("K=#\n")));
+    ASSERT_EQ(std::string(c.getString("K")), std::string("#"));
+    // Still a comment when the '#' follows content inside the value.
+    asvJSON d;
+    ASSERT(d.fromDotenv(std::string("K=1 # note\n")));
+    ASSERT(d.get("K")->type == asvJSONValue::INT && d.get("K")->getInt() == 1);
+    ASSERT(d.get("K")->comments && d.get("K")->comments->trailing.size() == 1);
+    // No leading whitespace at all -> the '#' is the value, not a comment.
+    asvJSON e;
+    ASSERT(e.fromDotenv(std::string("K=1# note\n")));
+    ASSERT_EQ(std::string(e.getString("K")), std::string("1# note"));
+  }
+  // 10. \' is not an "unknown" escape: inside double quotes it decodes to '
+  // as an input-compat alias (the writer never emits it). Now stated in the
+  // header, which previously listed only the verbatim-preserved ones.
+  {
+    asvJSON j;
+    ASSERT(j.fromDotenv(std::string("K=\"a\\'b\"\n")));
+    ASSERT_EQ(std::string(j.getString("K")), std::string("a'b"));
+    asvJSON k;
+    ASSERT(k.fromDotenv(std::string("K=\"a\\qb\"\n")));
+    ASSERT_EQ(std::string(k.getString("K")), std::string("a\\qb"));
+  }
 }
 
 TEST(testFromJavaProp) {
