@@ -9631,10 +9631,55 @@ TEST(testTOONReviewFollowups) {
 			ASSERT_EQ(d2.get("d")->str_data, std::string("null"));
 		}
 	}
-	// 5. A bare "- " is NOT the empty string. content is trimmed first, so it
-	// arrives as "-" and takes the bare-dash branch, which opens an OBJECT item.
-	// The empty string must be written with quotes. Asserted because this is the
-	// one place where a plausible reading is wrong.
+	// 5. A bare "- " decodes to ONE EMPTY-STRING element, not an object item.
+	// The subtlety is that content comes from stripIndent, which LTRIMS ONLY:
+	// the trailing whitespace of the source line survives, so "- " is still two
+	// characters and matches the size-2 / content[1] == ' ' guard, taking the
+	// list-item branch with val = content.substr(2) == "". The bare-dash branch
+	// that opens an object item never runs. Documented as-is (an earlier comment
+	// here claimed content was trimmed before the test, which it is not); the
+	// encoder never writes this form, so only hand-written input reaches it.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("- \n"));
+		ASSERT(j.getRoot() != nullptr);
+		if (j.getRoot()) {
+			ASSERT_EQ(j.getRoot()->type, asvJSONValue::ARRAY);
+			ASSERT_EQ(j.getRoot()->size(), size_t(1));
+			if (j.getRoot()->size() == 1) {
+				ASSERT_EQ(j.getRoot()->get(0)->type, asvJSONValue::STRING);
+				ASSERT_EQ(j.getRoot()->get(0)->str_data, std::string(""));
+			}
+		}
+		// "-" with NO trailing space is a different form: the bare-dash branch,
+		// which opens an OBJECT item. The two differ by that one space.
+		asvJSON bare;
+		ASSERT(bare.fromTOON("-\n"));
+		if (bare.getRoot()) {
+			ASSERT_EQ(bare.getRoot()->type, asvJSONValue::ARRAY);
+			ASSERT_EQ(bare.getRoot()->size(), size_t(1));
+			if (bare.getRoot()->size() == 1)
+				ASSERT_EQ(bare.getRoot()->get(0)->type, asvJSONValue::OBJECT);
+		}
+		// The element is whatever follows the hyphen-space, not the empty string
+		// by accident: two trailing spaces is a one-space string.
+		asvJSON two;
+		ASSERT(two.fromTOON("-  \n"));
+		if (two.getRoot() && two.getRoot()->size() == 1) {
+			ASSERT_EQ(two.getRoot()->get(0)->type, asvJSONValue::STRING);
+			ASSERT_EQ(two.getRoot()->get(0)->str_data, std::string(" "));
+		}
+		// A tab after the hyphen is neither: content[1] is a tab, so it misses
+		// both the hyphen-space guard and the bare-dash comparison and falls
+		// through to the root-scalar branch.
+		asvJSON tab;
+		ASSERT(tab.fromTOON("-\t\n"));
+		if (tab.getRoot()) {
+			ASSERT_EQ(tab.getRoot()->type, asvJSONValue::STRING);
+			ASSERT_EQ(tab.getRoot()->str_data, std::string("-\t"));
+		}
+	}
+	// The empty string's own spelling is quoted, and the encoder emits that.
 	{
 		asvJSON j;
 		ASSERT(j.fromTOON("a[1]: \"\"\n"));

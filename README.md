@@ -688,6 +688,15 @@ address:
   city: NYC
 ```
 
+Decoder note, for hand-written input only (the encoder emits none of these): a list
+item's value is `content.substr(2)`, and `content` comes from `stripIndent`, which
+ltrims **only** -  the trailing whitespace of the line survives. So a bare `- ` is
+two characters, matches the `- ` guard, and yields one **empty-string** element
+(`[""]`), not the object item that a bare `-` with no trailing space opens (`[{}]`).
+What follows the hyphen-space is the element: `-  ` (two spaces) is a one-space
+string, and `-<TAB>` is neither form -  it misses both guards and is read as the
+root scalar string `"-<TAB>"`.
+
 ### TRON
 
 TRON (Token Reduced Object Notation) is a JSON superset that reduces token count by defining reusable class schemas for repeated object structures.

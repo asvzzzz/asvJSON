@@ -732,13 +732,25 @@ inline std::string toonToJson(std::string_view input) {
 
     // list item: - value
     //
-    // Note on a bare "- ": it does NOT decode to the empty string. content is
-    // trimmed before this test, so "- " arrives as "-", fails the size-2 check,
-    // and falls through to the bare-dash branch below, which opens an OBJECT
-    // list item. The empty string has to be written - "" (quoted), which is also
-    // what the encoder emits for it. Rejected earlier as a possible reading of
-    // "- " being an empty string: the hyphen is the list-item marker, and a
-    // marker with no value is the documented object-item form, not a scalar.
+    // Note on a trailing space after the hyphen: content comes from
+    // stripIndent, which LTRIMS ONLY -- the trailing whitespace of the source
+    // line survives, so "- " stays two characters long and matches the
+    // size-2 / content[1] == ' ' guard below, taking the list-item branch with
+    // val = content.substr(2) == "". toonJsonQuoteBare("") then emits '""', so
+    // a bare "- " decodes to ["", ...] -- ONE EMPTY-STRING element, not the
+    // object item that the bare "-" below opens.
+    //
+    // The element is whatever follows the hyphen-space, not the empty string by
+    // accident: "-  " (two trailing spaces) is [" "], one space. And "-<TAB>" is
+    // neither, because content[1] is a tab: it misses this guard, misses the
+    // bare-dash comparison, and falls through to the root-scalar branch as the
+    // string "-<TAB>".
+    //
+    // The encoder never writes any of these: an object item is "-" with no
+    // trailing space, and an empty string is '- ""' (quoted). So this is only
+    // reachable from hand-written input, and the behavior is left as-is rather
+    // than rejected or re-spelled. An earlier comment here claimed content is
+    // trimmed before this test; it is not, and the claim was wrong.
     if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
       addComma(stack, out);
       curFrame.first = false;
