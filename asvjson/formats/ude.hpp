@@ -71,6 +71,18 @@ inline bool udeIsTagChar(char c) {
   return udeIsIdentCont(c) || c == ':' || c == '.';
 }
 
+// True if `name` is one of the built-in tags that applyTag dispatches on.
+// These must never be emitted in the simple !name form when the value was a
+// CUSTOM_TAG, because the parser dispatches on the name alone and would
+// re-interpret it as that built-in instead of preserving the custom tag. Must
+// list exactly the names applyTag handles. Encoder-side only.
+inline bool udeIsBuiltinTagName(std::string_view name) {
+  return name == "int" || name == "float" || name == "string" || name == "bool" ||
+         name == "null" || name == "schema" || name == "base64" || name == "bin" ||
+         name == "datetime" || name == "regex" || name == "objectid" ||
+         name == "timestamp" || name == "ext" || name == "extension";
+}
+
 // True when `name` matches TAG's non-verbatim form: identifier components
 // joined by ':' or '.'. Used both to validate a parsed tag and to decide
 // whether the encoder may emit !name or must fall back to !<name>.
@@ -958,12 +970,25 @@ private:
     // followed by "next"), so |0 is legal, not an error.
     if (!eof() && text_[pos_] >= '0' && text_[pos_] <= '9') { explicitIndent = text_[pos_] - '0'; pos_++; }
     if (!eof() && (text_[pos_] == '+' || text_[pos_] == '-')) { chomp = text_[pos_]; pos_++; }
-    // Only whitespace, a comment (# or //), or end-of-line may follow the indicators.
+    // Only whitespace, a comment, or end-of-line may follow the indicators. All
+    // three comment forms the rest of the parser accepts are honoured here too
+    // (skipWsAndComments, atLineEndSkipping): '#', '//' and '/* */'. Accepting
+    // only two of them made "key: | /* c */" the one place in the grammar where
+    // a block comment was a syntax error, which reads as an oversight rather than
+    // a rule. The block form is scanned to its '*/' WITHOUT crossing a line
+    // break: a comment opened here but closed on a later line must not swallow
+    // the scalar's body.
     while (!eof() && (text_[pos_] == ' ' || text_[pos_] == '\t')) pos_++;
     if (!eof() && text_[pos_] == '#') {
       while (!eof() && text_[pos_] != '\n') pos_++;
     } else if (!eof() && text_[pos_] == '/' && pos_ + 1 < text_.size() && text_[pos_ + 1] == '/') {
       while (!eof() && text_[pos_] != '\n') pos_++;
+    } else if (!eof() && text_[pos_] == '/' && pos_ + 1 < text_.size() && text_[pos_ + 1] == '*') {
+      size_t cend = text_.find("*/", pos_ + 2);
+      size_t nl = text_.find('\n', pos_);
+      if (cend == std::string::npos || (nl != std::string::npos && nl < cend))
+        throw asvJSONError("UDE: unterminated comment after block scalar header at line " + std::to_string(lineNum_));
+      pos_ = cend + 2;
     } else if (!eof() && text_[pos_] != '\n' && text_[pos_] != '\r') {
       throw asvJSONError("UDE: unexpected content after block scalar header at line " + std::to_string(lineNum_));
     }
@@ -983,6 +1008,12 @@ private:
       size_t indent = 0;
       while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t')) indent++;
       bool blank = (indent == line.size());
+      // Section 6 forbids tabs in the indentation margin. The check is skipped
+      // for a whitespace-only line because indent counts spaces AND tabs there,
+      // so " \t" would otherwise be rejected for a tab that is not acting as
+      // indentation -- it is a blank line, and a blank line is content (a
+      // paragraph break) whose whitespace is discarded anyway. There is nothing
+      // for the margin rule to protect on such a line.
       // YAML rule (Section 6): tabs may not be used for indentation. The
       // indentation margin of a block scalar must consist of spaces only;
       // tabs after the margin are part of the content.
@@ -1167,6 +1198,17 @@ private:
         auto n = udeTryParseNumber(val->str_data);
         if (!n) throw asvJSONError("UDE: !float requires a numeric literal");
         if (n->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(n->num));
+        // udeTryParseNumber returns a raw_number STRING for a literal no double
+        // holds exactly (int64 overflow, or more significant digits than
+        // MAX_DOUBLE_SIG_DIGITS). Returning it produced a node carrying the
+        // !float tag but of type STRING -- a !float that is not a float, and one
+        // that re-encodes with no tag at all. !int rejects the same case outright
+        // ("!int requires an integer literal"); !float must not be laxer than the
+        // integer path, so an unrepresentable literal is an error. The exact
+        // text is still preserved by writing it unquoted, where the same
+        // raw_number STRING is the documented representation.
+        if (n->type != asvJSONValue::DOUBLE)
+          throw asvJSONError("UDE: !float requires a literal representable as a double");
         return n;
       }
       throw asvJSONError("UDE: !float requires a numeric value");
@@ -1367,7 +1409,9 @@ private:
   std::unique_ptr<asvJSONValue> parseTagged(int depth) {
     pos_++; // consume '!'
     std::string tag;
+    bool verbatim = false;
     if (!eof() && peek() == '<') {
+      verbatim = true;
       // Verbatim URI tag: !<tag:example.com,2026:type> -- any content up to '>'.
       pos_++;
       size_t start = pos_;
@@ -1376,6 +1420,16 @@ private:
       // An empty body is accepted on purpose: a CUSTOM_TAG may carry an empty
       // name, and the encoder writes such a name as "!<>" so the round-trip
       // stays total. "!<" is unambiguous -- the '<' cannot open a simple name.
+      //
+      // The brackets mean "this name is a literal CUSTOM_TAG name", NOT "a
+      // synonym for the simple form". That is what lets the form express a
+      // custom tag whose name collides with a built-in: !<regex> "a|b" is a
+      // CUSTOM_TAG named "regex", while !regex "a|b" is a REGEX. Matching on the
+      // name after stripping the brackets made the two spellings identical, so a
+      // custom tag named after any built-in was unreachable -- and the encoder
+      // hit exactly that, writing "!regex abc" for a CUSTOM_TAG named "regex"
+      // and reading it back as a REGEX (see CUSTOM_TAG in udeWriteValue).
+      // verbatim suppresses built-in dispatch below.
       tag.assign(text_.substr(start, pos_ - start));
       pos_++; // consume '>'
     } else {
@@ -1398,8 +1452,10 @@ private:
     // "invalid key at line 2". Appendix A agrees: WS is [ \t]* and does not
     // include a line break, so a tag's value may not live on a later line.
     if (atTagValueEnd()) {
-      // Only !null is meaningful without a value.
-      if (tag == "null") return asvJSONValue::makeNull();
+      // Only !null is meaningful without a value, and only in the SIMPLE form:
+      // the verbatim !<null> is a custom tag, so it keeps the standard
+      // "requires a value" rule.
+      if (!verbatim && tag == "null") return asvJSONValue::makeNull();
       throw asvJSONError("UDE: !" + tag + " requires a value");
     }
     skipWsAndComments();
@@ -1407,8 +1463,14 @@ private:
     if (!eof() && peek() == '&') {
       anchor = parseAnchorName();
       // Same rule after the anchor: "!null &a" on its own line is a bare null.
+      // A deliberate extension beyond Appendix A, whose VALUE is mandatory
+      // ("TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE"). A bare "!null" already
+      // carries no VALUE, so accepting the anchored spelling is the consistent
+      // reading rather than a new capability -- and an anchor with nothing to
+      // point at would otherwise be unrepresentable. Every other tag still
+      // requires its value. Documented in UDE.md beside the !null rule.
       if (atTagValueEnd()) {
-        if (tag == "null") {
+        if (!verbatim && tag == "null") {
           auto n = asvJSONValue::makeNull();
           registerAnchor(anchor, n.get());
           return n;
@@ -1423,7 +1485,7 @@ private:
     // scanned so that the canonical __REGEX__ marker is honoured in either one;
     // any other value form uses the decoded-text fallback in applyTag.
     regexRaw_.clear();
-    if (tag == "regex" && !eof() && (peek() == '"' || peek() == '\'')) {
+    if (!verbatim && tag == "regex" && !eof() && (peek() == '"' || peek() == '\'')) {
       char q = peek();
       std::string_view raw = scanRawQuotedString(q);
       regexRaw_.assign(raw.data(), raw.size());
@@ -1442,7 +1504,18 @@ private:
       return val;
     }
     auto val = parseValue(depth);
-    // Apply the tag first so the anchor references the final tagged value.
+    // Apply the tag first so the anchor references the final tagged value. A
+    // verbatim name skips applyTag and builds the CUSTOM_TAG directly: the
+    // brackets already said the name is literal, so no built-in may claim it.
+    if (verbatim) {
+      auto custom = std::make_unique<asvJSONValue>();
+      custom->type = asvJSONValue::CUSTOM_TAG;
+      custom->str_data = tag;
+      custom->custom_value = std::move(val);
+      regexRaw_.clear();
+      if (!anchor.empty()) registerAnchor(anchor, custom.get());
+      return custom;
+    }
     val = applyTag(tag, std::move(val));
     regexRaw_.clear();
     if (!anchor.empty()) registerAnchor(anchor, val.get());
@@ -1630,7 +1703,9 @@ inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& tex
 // Versioning of the "# UDE vX.Y" header (Section 6 of the spec): the major
 // digit X is a breaking change, the minor digit Y is backward compatible.
 // The current implementation supports major version 1. Documents declaring a
-// newer major version are rejected; older minor versions are accepted.
+// newer major version are rejected; older minor versions are accepted. The
+// value below is the version this build emits; the parser accepts any 1.x
+// (see udeStripAndCheckHeader).
 inline std::string udeHeaderVersion() {
   return "1.1";
 }
@@ -1739,6 +1814,8 @@ inline bool udeKeySafe(const std::string& key) {
 }
 
 inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
+  // UPPERCASE hex digits, matching udeEscPipe and the canonical bodies in
+  // UDE.md, so one character is never spelled two ways across the two writers.
   os << '"';
   for (unsigned char c : s) {
     switch (c) {
@@ -1752,7 +1829,7 @@ inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
       default:
         if (c < 0x20) {
           char buf[8];
-          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+          snprintf(buf, sizeof(buf), "\\u%04X", static_cast<unsigned>(c));
           os << buf;
         } else {
           os << static_cast<char>(c);
@@ -1763,7 +1840,10 @@ inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
 }
 
 // Write `s` as UDE string-body content, additionally turning any literal '|'
-// into \u007C. Used by the !regex encoder so that raw '|' characters appear
+// into \u007C. The escape is UPPERCASE to match this file's own udeWriteQuoted
+// and the bodies spelled out in UDE.md ("__REGEX__a\u007C||"); one spelling per
+// character keeps a diff between two documents that differ only in that escape
+// meaningful. The decoder accepts either case. Used by the !regex encoder so that raw '|' characters appear
 // ONLY as the pattern/options separator and the trailing terminator, never as
 // pattern or option content. The decoder splits the raw token text before
 // unescaping, so the escape is what keeps the two apart. A plain backslash
@@ -2187,8 +2267,13 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       // tags are emitted in the canonical "!<name> <value>" form so that a
       // name the parser would not accept back still round-trips exactly.
       // udeIsSimpleTagName mirrors the parser's TAG validation exactly, so a
-      // name accepted here is guaranteed to be accepted on the way back.
-      bool verbatim = !udeIsSimpleTagName(v->str_data);
+      // name accepted here is guaranteed to be accepted on the way back. That is
+      // necessary but not sufficient: a name that IS a simple tag name can still
+      // collide with a built-in, and the parser dispatches on the name alone, so
+      // "!regex abc" came back as a REGEX and the custom tag was lost. The
+      // verbatim !<name> form suppresses that dispatch, so a built-in name is
+      // written verbatim too.
+      bool verbatim = !udeIsSimpleTagName(v->str_data) || udeIsBuiltinTagName(v->str_data);
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
       if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
@@ -2230,10 +2315,19 @@ inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, 
       std::ostringstream vbuf;
       udeWriteValue(vbuf, sub.get(), 1, true, strict);
       std::string vs = vbuf.str();
-      prevEndsNl = !vs.empty() && vs.back() == '\n';
       os << vs;
+      // Ask the writer whether the stream now ends on a fresh line, rather than
+      // deriving it from the value text alone. A BLOCK trailing comment is
+      // deliberately left unterminated (it must be, or a following '//' comment
+      // would be swallowed), so the line is still open even when the value was a
+      // block scalar that ended with a newline. The old `if (tNl) prevEndsNl =
+      // true` could only raise the flag, never lower it, which produced
+      // " /* note */b: 2" -- the next key glued onto the comment. hasTrailing
+      // separates "no trailing comment" (fall back to the value text) from
+      // "block trailing" (mid-line), which the return value alone cannot.
       bool tNl = udeWriteTrailing(os, sub.get());
-      if (tNl) prevEndsNl = true;
+      bool hasTrailing = sub->comments && !sub->comments->trailing.empty();
+      prevEndsNl = hasTrailing ? tNl : (!vs.empty() && vs.back() == '\n');
     }
     if (val.comments) {
       if (!val.comments->closing.empty()) {

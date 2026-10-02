@@ -9441,6 +9441,218 @@ TEST(testTOONReviewFixes) {
 	}
 }
 
+TEST(testTOONReviewFollowups) {
+	// 1. JSON's int production is "zero / (digit1-9 *DIGIT)". toonIsJsonValue
+	// consumed the digit run greedily, so "01" / "00" / "00.5" / "-01" passed as
+	// bare JSON values. The encoder never emitted such text (an INT has no
+	// leading zero), but the decoder shares the predicate, and a hand-written
+	// "a: 01" was copied unquoted into the intermediate JSON, where the JSON
+	// parser then rejected the leading zero. Quoted instead, it decodes as the
+	// STRING it looks like -- which is the only sane reading.
+	{
+		const char* in[] = {"a: 01\n", "a: 00.5\n", "a: -01\n", "a: 00\n", "a: -00.5\n"};
+		const char* want[] = {"01", "00.5", "-01", "00", "-00.5"};
+		for (size_t i = 0; i < sizeof(in) / sizeof(in[0]); i++) {
+			asvJSON j;
+			ASSERT(j.fromTOON(in[i]));
+			ASSERT(j.get("a") != nullptr);
+			if (!j.get("a")) continue;
+			ASSERT_EQ(j.get("a")->type, asvJSONValue::STRING);
+			ASSERT_EQ(j.get("a")->str_data, std::string(want[i]));
+		}
+		// The valid zero forms are still numbers.
+		const char* okIn[] = {"a: 0\n", "a: -0\n", "a: 0.5\n", "a: -0.5\n", "a: 10\n", "a: 0.0e1\n"};
+		for (const char* in : okIn) {
+			asvJSON j;
+			ASSERT(j.fromTOON(in));
+			ASSERT(j.get("a") != nullptr);
+			if (j.get("a")) {
+				ASSERT(j.get("a")->type == asvJSONValue::INT ||
+				       j.get("a")->type == asvJSONValue::DOUBLE);
+			}
+		}
+	}
+	// The encoder quotes a numeric-LOOKING STRING on its own looser test, so a
+	// leading zero in a string value survives the round-trip. Sharing the strict
+	// predicate between the two sides had broken exactly this: "007" was emitted
+	// bare and the intermediate JSON was invalid.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":"007","b":"00.5","c":"-01","d":"0","e":"-0.5"})")));
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("\"007\"") != std::string::npos);
+		ASSERT(toon.find("\"00.5\"") != std::string::npos);
+		ASSERT(toon.find("\"-01\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.getString("a"), std::string("007"));
+		ASSERT_EQ(j2.getString("b"), std::string("00.5"));
+		ASSERT_EQ(j2.getString("c"), std::string("-01"));
+	}
+	// 2. The cell splitter now tracks {} / [] as well as quotes. A hand-written
+	// "key[1]: {a: 1, b: 2}" is an array of ONE object; the inner comma used to
+	// cut it in two, and neither half is valid JSON, so both became strings and
+	// the array silently grew an element.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("key[1]: {\"a\": 1, \"b\": 2}\n"));
+		ASSERT(j.get("key") != nullptr);
+		if (j.get("key")) {
+			ASSERT_EQ(j.get("key")->size(), size_t(1));
+			ASSERT_EQ(j.get("key")->get(0)->type, asvJSONValue::OBJECT);
+			if (j.get("key")->get(0)->type == asvJSONValue::OBJECT) {
+				ASSERT_EQ(j.get("key")->get(0)->get("a")->getInt(), int64_t(1));
+				ASSERT_EQ(j.get("key")->get(0)->get("b")->getInt(), int64_t(2));
+			}
+		}
+		// A nested array as the single element.
+		asvJSON n;
+		ASSERT(n.fromTOON("key[1]: [1,2,3]\n"));
+		ASSERT(n.get("key") != nullptr);
+		if (n.get("key")) {
+			ASSERT_EQ(n.get("key")->size(), size_t(1));
+			ASSERT_EQ(n.get("key")->get(0)->type, asvJSONValue::ARRAY);
+		}
+		// A brace group the JSON parser rejects (unquoted keys) is still one cell
+		// rather than two mangled ones.
+		asvJSON u;
+		ASSERT(u.fromTOON("key[1]: {a: 1, b: 2}\n"));
+		if (u.get("key")) ASSERT_EQ(u.get("key")->size(), size_t(1));
+	}
+	// Encoder output is unaffected: primitives split on depth-0 commas, quotes
+	// still shield an embedded comma, and the whole document round-trips.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":[1,2,3],"b":["x,y","z"],"c":[[1,2],[3,4]]})")));
+		std::string toon = j.toTOON();
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+		ASSERT_EQ(j2.get("b")->size(), size_t(2));
+		ASSERT_EQ(j2.get("c")->size(), size_t(2));
+	}
+	// 3. Depth symmetry with the core parser. The core counts the root container
+	// as level 1 (it does ++parseDepth in parseObject/parseArray) and never
+	// increments for a scalar, so 48 nested objects must serialize. Counting
+	// scalars too rejected that tree -- toTOON() failing on data parse() had
+	// just accepted.
+	{
+		for (int lv = 46; lv <= 48; lv++) {
+			std::string deep = "{\"a\":";
+			for (int i = 0; i < lv - 1; i++) deep += "{\"a\":";
+			deep += "1";
+			for (int i = 0; i < lv - 1; i++) deep += "}";
+			deep += "}";
+			asvJSON j;
+			ASSERT(j.parse(deep));
+			std::string toon;
+			bool threw = false;
+			try {
+				toon = j.toTOON();
+			} catch (const std::exception&) {
+				threw = true;
+			}
+			ASSERT(!threw);
+			if (threw) continue;
+			asvJSON j2;
+			ASSERT(j2.fromTOON(std::string_view(toon)));
+			// The other recursive path.
+			std::string deepArr = "[";
+			for (int i = 0; i < lv - 1; i++) deepArr += "[";
+			deepArr += "1";
+			for (int i = 0; i < lv - 1; i++) deepArr += "]";
+			deepArr += "]";
+			asvJSON ja;
+			ASSERT(ja.parse(deepArr));
+			threw = false;
+			try {
+				ja.toTOON();
+			} catch (const std::exception&) {
+				threw = true;
+			}
+			ASSERT(!threw);
+		}
+		// 49 levels is past the limit. The core parser already refuses to build
+		// it, so construct the tree programmatically to reach the encoder's own
+		// guard.
+		{
+			asvJSON j;
+			ASSERT(j.parse("{}"));
+			std::unique_ptr<asvJSONValue> outer = asvJSONValue::makeObject();
+			outer->obj->emplace("a", asvJSONValue::makeInt(1));
+			for (int i = 0; i < 48; i++) {
+				std::unique_ptr<asvJSONValue> up = asvJSONValue::makeObject();
+				up->obj->emplace("a", std::move(outer));
+				outer = std::move(up);
+			}
+			j.getRoot()->obj->emplace("deep", std::move(outer));
+			bool threw = false;
+			try {
+				j.toTOON();
+			} catch (const std::exception&) {
+				threw = true;
+			}
+			ASSERT(threw);
+		}
+	}
+	// 4. Documented, not fixed: JSON has no NaN/Inf, and a DATETIME cell is
+	// always a quoted string. Pinned so the type change on re-read is intentional.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view("{\"a\":1}")));
+		j.get("a")->type = asvJSONValue::DOUBLE;   // setting dbl alone leaves an INT
+		j.get("a")->dbl = std::nan("");
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("a: null") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(std::string_view(toon)));
+		ASSERT(j2.get("a") != nullptr);
+		if (j2.get("a")) ASSERT_EQ(j2.get("a")->type, asvJSONValue::NULL_VAL);
+		// Infinity, same path.
+		asvJSON k;
+		ASSERT(k.parse(std::string_view("{\"a\":1}")));
+		k.get("a")->type = asvJSONValue::DOUBLE;
+		k.get("a")->dbl = HUGE_VAL;
+		ASSERT(k.toTOON().find("a: null") != std::string::npos);
+		// A DATETIME the platform cannot convert renders as the quoted STRING
+		// "null" -- a string cell cannot express null, and a bare `null` would
+		// have read back as NULL_VAL.
+		asvJSON d;
+		ASSERT(d.parse(std::string_view("{\"d\":1}")));
+		d.get("d")->type = asvJSONValue::DATETIME;
+		d.get("d")->timestamp = (int64_t)-62135596800LL * 1000000LL;   // year 1
+		d.get("d")->datetime_ms = 0;
+		std::string dtoon = d.toTOON();
+		ASSERT(dtoon.find("\"null\"") != std::string::npos);
+		asvJSON d2;
+		ASSERT(d2.fromTOON(std::string_view(dtoon)));
+		if (d2.get("d")) {
+			ASSERT_EQ(d2.get("d")->type, asvJSONValue::STRING);
+			ASSERT_EQ(d2.get("d")->str_data, std::string("null"));
+		}
+	}
+	// 5. A bare "- " is NOT the empty string. content is trimmed first, so it
+	// arrives as "-" and takes the bare-dash branch, which opens an OBJECT item.
+	// The empty string must be written with quotes. Asserted because this is the
+	// one place where a plausible reading is wrong.
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("a[1]: \"\"\n"));
+		ASSERT(j.get("a") != nullptr);
+		if (j.get("a")) {
+			ASSERT_EQ(j.get("a")->size(), size_t(1));
+			ASSERT_EQ(j.get("a")->get(0)->type, asvJSONValue::STRING);
+			ASSERT_EQ(j.get("a")->get(0)->str_data, std::string(""));
+		}
+		// The encoder's own spelling round-trips.
+		asvJSON m;
+		ASSERT(m.parse(std::string_view(R"({"a":[""]})")));
+		asvJSON m2;
+		ASSERT(m2.fromTOON(std::string_view(m.toTOON())));
+		ASSERT_EQ(m2.serialize(), m.serialize());
+	}
+}
+
 TEST(testToTRON) {
 	// Basic object (no repeated schema -> JSON fallback)
 	{
@@ -24255,6 +24467,257 @@ TEST(testUDETagNameValidation) {
     ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
     ASSERT_EQ(v->str_data, std::string(n));
   }
+  // A name that IS spellable as !name but COLLIDES with a built-in. The parser
+  // dispatches on the name alone, so "regex" used to come back as a REGEX and the
+  // custom tag was silently lost -- the encoder produced exactly that, writing
+  // "!regex v" for a CUSTOM_TAG named "regex". The verbatim !<name> form means
+  // "this name is literal", so it suppresses the dispatch, and the encoder emits
+  // it for any built-in name.
+  {
+    const char* builtins[] = {"regex", "int", "float", "string", "bool", "null", "schema",
+                              "base64", "bin", "datetime", "objectid", "timestamp",
+                              "ext", "extension"};
+    for (const char* n : builtins) {
+      asvJSON j;
+      j.parse(std::string("{\"t\":{\"$customTag\":{\"name\":\"") + n + "\",\"value\":\"v\"}}}");
+      std::string ude = j.toUDE();
+      ASSERT(ude.find("!<") != std::string::npos);
+      asvJSON j2;
+      ASSERT(j2.fromUDE(ude));
+      const asvJSONValue* v = j2.get("t");
+      ASSERT(v != nullptr && v->type == asvJSONValue::CUSTOM_TAG);
+      ASSERT_EQ(v->str_data, std::string(n));
+      ASSERT(v->custom_value != nullptr && v->custom_value->type == asvJSONValue::STRING);
+      if (v->custom_value) ASSERT_EQ(v->custom_value->str_data, std::string("v"));
+    }
+  }
+  // The two spellings are genuinely different: the same body through !name is
+  // the built-in, through !<name> is the custom tag.
+  {
+    asvJSON a;
+    ASSERT(a.fromUDE("r: !regex \"__REGEX__a|b||\"\n"));
+    ASSERT(a.get("r") != nullptr && a.get("r")->type == asvJSONValue::REGEX);
+    asvJSON b;
+    ASSERT(b.fromUDE("r: !<regex> \"__REGEX__a|b||\"\n"));
+    ASSERT(b.get("r") != nullptr && b.get("r")->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(b.get("r")->str_data, std::string("regex"));
+  }
+  // The verbatim form is also exempt from !null's "no value needed" rule: it is
+  // a custom tag, so it takes the standard "requires a value" path.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("k: !<null>\n"));
+    ASSERT(std::string(j.lastError).find("requires a value") != std::string::npos);
+  }
+  // A non-colliding simple name still uses the compact form.
+  {
+    asvJSON j;
+    j.parse(std::string("{\"t\":{\"$customTag\":{\"name\":\"mine\",\"value\":1}}}"));
+    ASSERT(j.toUDE().find("!mine ") != std::string::npos);
+    ASSERT(j.toUDE().find("!<mine>") == std::string::npos);
+  }
+}
+
+TEST(testUDEReviewFixes) {
+  // 1. A BLOCK trailing comment left the stream mid-line, but the top-level
+  // separator test only ever raised prevEndsNl, never lowered it. After a block
+  // scalar (which ends with a newline) the flag stayed true, so the next key was
+  // written onto the still-open comment line: " /* note */b: 2". Values survived
+  // -- UDE does not collect comments when parsing -- but the output was not valid
+  // UDE and the document could not be read back at all.
+  {
+    auto build = [](const char* val, bool block, const char* trailText) {
+      asvJSON a;
+      a.parse(std::string("{}"));
+      auto s = asvJSONValue::makeString(val);
+      s->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = trailText;
+      c.block = block;
+      s->comments->trailing.push_back(c);
+      a.getRoot()->obj->emplace("a", std::move(s));
+      a.getRoot()->obj->emplace("b", asvJSONValue::makeInt(2));
+      return a;
+    };
+    // Block scalar value + block trailing: the reported case.
+    {
+      asvJSON a = build("line1\nline2\n", true, "note");
+      std::string ude = a.toUDE();
+      ASSERT(ude.find("*/b:") == std::string::npos);
+      ASSERT(ude.find("/* note */\nb: 2") != std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromUDE(ude));
+      ASSERT(b.get("b") != nullptr && b.get("b")->getInt() == 2);
+      ASSERT(b.get("a") != nullptr);
+    }
+    // Plain scalar value + block trailing: the value does not end with a newline,
+    // so this worked before; kept as a control.
+    {
+      asvJSON a = build("x", true, "n2");
+      std::string ude = a.toUDE();
+      ASSERT(ude.find("*/b:") == std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromUDE(ude));
+      ASSERT(b.get("b") != nullptr);
+    }
+    // Block scalar + LINE trailing: already correct, kept as a control.
+    {
+      asvJSON a = build("l1\nl2\n", false, "n3");
+      std::string ude = a.toUDE();
+      asvJSON b;
+      ASSERT(b.fromUDE(ude));
+      ASSERT(b.get("b") != nullptr && b.get("b")->getInt() == 2);
+      ASSERT(b.get("a") != nullptr);
+    }
+    // Block trailing on the LAST key, followed by the root footing: the comment
+    // has to be newline-terminated or the footing lands inside it.
+    {
+      asvJSON a;
+      a.parse(std::string("{}"));
+      auto s = asvJSONValue::makeString("z\n");
+      s->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment c;
+      c.text = "last";
+      c.block = true;
+      s->comments->trailing.push_back(c);
+      a.getRoot()->obj->emplace("a", std::move(s));
+      a.getRoot()->comments = std::make_unique<asvJSONInternal::Comments>();
+      asvJSONInternal::Comment f;
+      f.text = "foot";
+      a.getRoot()->comments->footing.push_back(f);
+      std::string ude = a.toUDE();
+      ASSERT(ude.find("*///") == std::string::npos);
+      asvJSON b;
+      ASSERT(b.fromUDE(ude));
+      ASSERT(b.get("a") != nullptr);
+    }
+  }
+  // 3. A block comment after a block scalar header. '#' and '//' were accepted
+  // there, "/* */" was not, even though every other comment position in the
+  // parser accepts all three -- so "key: | /* c */" was the single place where a
+  // block comment was a syntax error.
+  {
+    const char* ok[] = {"k: | /* c */\n  v\n", "k: > /* c */\n  v\n", "k: |# c\n  v\n",
+                        "k: | /* c */   \n  v\n"};
+    for (const char* in : ok) {
+      asvJSON j;
+      ASSERT(j.fromUDE(in));
+      ASSERT(j.get("k") != nullptr);
+      // Clip chomping keeps the body's final newline, so "v\n" -- not "v".
+      if (j.get("k")) ASSERT_EQ(j.get("k")->getString(), std::string("v\n"));
+    }
+    // Header comment on an otherwise bodyless scalar: still an empty string.
+    {
+      asvJSON j;
+      ASSERT(j.fromUDE("k: | /* c */\n"));
+      ASSERT(j.get("k") != nullptr);
+      if (j.get("k")) ASSERT_EQ(j.get("k")->getString(), std::string(""));
+    }
+    // A block comment that would have to cross the line break must not be
+    // allowed to swallow the scalar's body.
+    {
+      asvJSON j;
+      ASSERT(!j.fromUDE("k: | /* c\n  v\n"));
+      ASSERT(std::string(j.lastError).find("unterminated comment") != std::string::npos);
+    }
+    // Genuine junk after the indicators is still an error.
+    {
+      asvJSON j;
+      ASSERT(!j.fromUDE("k: | junk\n  v\n"));
+      ASSERT(std::string(j.lastError).find("unexpected content") != std::string::npos);
+    }
+  }
+  // 4. "!null &a" with no value is accepted as a bare null. Appendix A makes
+  // VALUE mandatory, but a bare "!null" already carries none, so this is the
+  // consistent reading rather than a new capability -- and an anchor with
+  // nothing to point at would otherwise be unrepresentable. Asserted so the
+  // behaviour is pinned rather than incidental.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("k: !null &a\n"));
+    ASSERT(j.get("k") != nullptr && j.get("k")->type == asvJSONValue::NULL_VAL);
+    // A value after the anchor still wins, and the anchor binds the value.
+    asvJSON j2;
+    ASSERT(j2.fromUDE("k: !null &a 1\n"));
+    ASSERT(j2.get("k") != nullptr && j2.get("k")->type == asvJSONValue::NULL_VAL);
+    // Every other tag still requires one.
+    asvJSON j3;
+    ASSERT(!j3.fromUDE("k: !int &a\n"));
+    ASSERT(std::string(j3.lastError).find("requires a value") != std::string::npos);
+  }
+  // 5. !float on a literal no double can hold exactly returned the raw_number
+  // STRING, producing a node tagged !float whose type was STRING -- and one that
+  // re-encoded with no tag at all. !int already rejected that case; !float now
+  // matches it instead of being laxer.
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("k: !float 123456789012345678901234567890\n"));
+    ASSERT(std::string(j.lastError).find("representable as a double") != std::string::npos);
+    // Same for a float literal with more significant digits than a double holds.
+    asvJSON j2;
+    ASSERT(!j2.fromUDE("k: !float 1.2345678901234567890123456789\n"));
+    ASSERT(std::string(j2.lastError).find("representable as a double") != std::string::npos);
+    // Overflow to infinity was already rejected; ordinary values still convert.
+    asvJSON j3;
+    ASSERT(!j3.fromUDE("k: !float 1e999\n"));
+    asvJSON j4;
+    ASSERT(j4.fromUDE("k: !float 1.5\n"));
+    ASSERT(j4.get("k") != nullptr && j4.get("k")->type == asvJSONValue::DOUBLE);
+    if (j4.get("k")) ASSERT_EQ(j4.get("k")->getDouble(), 1.5);
+    // An int literal widens to a double.
+    asvJSON j5;
+    ASSERT(j5.fromUDE("k: !float 7\n"));
+    ASSERT(j5.get("k") != nullptr && j5.get("k")->type == asvJSONValue::DOUBLE);
+    if (j5.get("k")) ASSERT_EQ(j5.get("k")->getDouble(), 7.0);
+  }
+  // udeHeaderVersion() had no caller; it is the documented version constant, so
+  // it stays with a note pointing at the parser that has to agree with it. This
+  // assertion pins the two together.
+  ASSERT_EQ(asvJSONInternal::udeHeaderVersion(), std::string("1.1"));
+  {
+    // A document declaring this exact version parses; a newer major does not.
+    asvJSON j;
+    ASSERT(j.fromUDE(std::string("# UDE v") + asvJSONInternal::udeHeaderVersion() + "\na: 1\n"));
+    ASSERT(j.get("a") != nullptr && j.get("a")->getInt() == 1);
+    asvJSON k;
+    ASSERT(!k.fromUDE("# UDE v2.0\na: 1\n"));
+  }
+  // Hex case consistency: udeEscPipe writes \u007C and udeWriteQuoted wrote
+  // \u00xx lowercase, so one character had two spellings. UDE.md documents the
+  // uppercase form; both writers now use it.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"r\":{\"$regex\":\"__REGEX__a|b||\"}}")));
+    ASSERT(j.get("r") != nullptr && j.get("r")->type == asvJSONValue::REGEX);
+    ASSERT(j.toUDE().find("\\u007C") != std::string::npos);
+    ASSERT(j.toUDE().find("\\u007c") == std::string::npos);
+    // A control character in an ordinary string uses the same spelling. U+001B is
+    // used because its hex digits contain a letter, so the case is visible at
+    // all (a code point below U+0010 would spell the same either way).
+    asvJSON k;
+    ASSERT(k.parse(std::string("{\"s\":\"a\\u001Bb\"}")));
+    ASSERT(k.toUDE().find("\\u001B") != std::string::npos);
+    ASSERT(k.toUDE().find("\\u001b") == std::string::npos);
+    // Round-trip still works: the decoder accepts either case.
+    asvJSON k2;
+    ASSERT(k2.fromUDE(k.toUDE()));
+    ASSERT(k2.get("s") != nullptr);
+    if (k2.get("s")) ASSERT(k2.get("s")->getStringLen() == 3);
+  }
+  // A whitespace-only body line may contain a tab: indent counts spaces and tabs
+  // there, so enforcing the margin rule on it would reject a tab that is not
+  // acting as indentation. Blank lines are content (a paragraph break) and their
+  // whitespace is discarded, so there is nothing for the rule to protect.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("k: |\n  a\n \t \n  b\n"));
+    ASSERT(j.get("k") != nullptr);
+    if (j.get("k")) ASSERT_EQ(j.get("k")->getString(), std::string("a\n\nb\n"));
+    // A tab used as real indentation is still rejected.
+    asvJSON k;
+    ASSERT(!k.fromUDE("k: |\n\ta\n"));
+    ASSERT(std::string(k.lastError).find("tab used as indentation") != std::string::npos);
+  }
 }
 
 TEST(testUDEExtTypeRange) {
@@ -29918,6 +30381,7 @@ RUN(testCBORFloat16);
 	RUN(testTOONAuditFixes);
 	RUN(testToTOONHeadersStrict);
 RUN(testTOONReviewFixes);
+	RUN(testTOONReviewFollowups);
 	RUN(testTOONSpecialTypes);
 	RUN(testToonExtras);
 	
@@ -30074,10 +30538,10 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEUnterminatedBlockCommentAfterTag);
 	RUN(testUDEUnpairedSurrogatesToReplacementChar);
 	RUN(testUDETagNameValidation);
+  RUN(testUDEReviewFixes);
 	RUN(testUDEExtTypeRange);
 	RUN(testUDEStringLengthLimit);
 	RUN(testUDEMultiDocumentStreamRoundTrip);
-	RUN(testUDEAuditFixes);
 	std::cout << "\n--- FromAny & FormatType Tests ---\n";
 	RUN(testFromAnyAndFormatType);
 

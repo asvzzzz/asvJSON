@@ -30,6 +30,36 @@ inline std::string toonJsonEscape(const std::string& s) {
 // whether a STRING must be quoted, and "{a: 1}" / "[1,2" have to be quoted as
 // strings. The decoder cannot rely on it -- it re-checks those three shapes with
 // the JSON parser in toonJsonQuoteBare before passing them through.
+// Loose "is this token shaped like a JSON number" test: no leading-zero rule.
+// This is the ENCODER's test. It has to be looser than the real grammar, because
+// a STRING whose text merely looks numeric still has to be quoted -- "007",
+// "00.5" and "-01" are not JSON numbers, but emitting them bare would hand the
+// JSON parser a leading zero to choke on, so they must be quoted like any other
+// number-shaped string. Using the strict grammar here (as this function used to)
+// quoted nothing for "007" and the round-trip broke.
+//
+// Kept separate from toonIsJsonValue on purpose: the two want opposite answers
+// for a leading-zero token, so they cannot be one function.
+inline bool toonLooksNumeric(std::string_view s) {
+  if (s.empty()) return false;
+  size_t i = (s.front() == '-') ? 1 : 0;
+  if (i >= s.size()) return s.front() == '-';   // bare '-' is number-shaped too
+  bool hasDigit = false;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') { i++; hasDigit = true; }
+  if (i < s.size() && s[i] == '.') {
+    i++;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { i++; hasDigit = true; }
+  }
+  if (hasDigit && i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    i++;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++;
+  }
+  if (!hasDigit) return false;
+  // Anything left over (a second '.', letters) means it is not a number at all.
+  return i == s.size();
+}
+
 inline bool toonIsJsonValue(std::string_view s) {
   if (s.empty()) return false;
   if (s.front() == '"' || s.front() == '{' || s.front() == '[') return true;
@@ -39,6 +69,16 @@ inline bool toonIsJsonValue(std::string_view s) {
     // bare "-", "1.", "1e", "-.5") that the JSON parser would reject.
     size_t i = (s.front() == '-') ? 1 : 0;
     if (i >= s.size()) return false;               // bare '-'
+    if (s[i] < '0' || s[i] > '9') return false;    // must start with a digit
+    // JSON's int production is "zero / (digit1-9 *DIGIT)": exactly one '0', or a
+    // non-zero lead. The digit run used to be consumed greedily, so "01", "00",
+    // "-01" and "00.5" all passed here. On the encode side that was harmless --
+    // toonValNeedsQuotes then quotes the STRING "01" and INT/DOUBLE never carry
+    // a leading zero -- but the decoder shares this function, and a hand-written
+    // "k: 01" would be copied through unquoted, leaving the intermediate JSON with
+    // a leading zero that the JSON parser then rejects. Rejecting here keeps the
+    // two sides on one grammar.
+    if (s[i] == '0' && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '9') return false;
     bool hasIntDigit = false;
     while (i < s.size() && s[i] >= '0' && s[i] <= '9') { i++; hasIntDigit = true; }
     if (i < s.size() && s[i] == '.') {
@@ -60,7 +100,8 @@ inline bool toonIsJsonValue(std::string_view s) {
 
 inline bool toonValNeedsQuotes(const std::string& s, bool forKey) {
   if (s.empty()) return true;
-  if (toonIsJsonValue(s)) return true;             // number-shaped / true / false / null / "{...}" / "[...]"
+  if (toonLooksNumeric(s)) return true;           // number-shaped, incl. leading-zero text like "007"
+  if (toonIsJsonValue(s)) return true;             // true / false / null / "{...}" / "[...]"
   if (s.front() == '-') return true;               // leading '-' could be misread as a list item / root array
   for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
@@ -83,6 +124,11 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
     case asvJSONValue::BOOL_VAL: return v->flag ? "true" : "false";
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
+      // NaN/Inf are not JSON numbers, so they render as the bare literal `null`
+      // (unquoted). This matches the core JSON serializer. The consequence on a
+      // round-trip: the DOUBLE comes back as a NULL_VAL, not as a NaN/Inf DOUBLE.
+      // Unavoidable -- JSON has no encoding for either -- and it is the same
+      // asymmetry every other text format here has.
       if (std::isnan(d) || std::isinf(d)) return "null";
       std::string r; fmtDoubleVal(d, r);
       // A DOUBLE must round-trip as a float literal even when its value is
@@ -146,6 +192,14 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
       return r;
     }
     case asvJSONValue::DATETIME: {
+      // QUOTED, so a DATETIME is always a TOON string cell and never collides
+      // with a bare literal. Note the fallback: fmtDateTimeVal writes the text
+      // "null" for a time_t it cannot convert (out of range for the platform's
+      // localtime/gmtime), which lands here as the 4-character STRING "null",
+      // not as a null value -- a string cell cannot express null without
+      // ambiguity, and a bare `null` would have read back as NULL_VAL, silently
+      // changing the type. Matches the core JSON serializer; the DATETIME does
+      // not survive such a round-trip as a DATETIME.
       std::string r = "\"";
       fmtDateTimeVal(v->timestamp, v->datetime_ms, r, v->tz_offset_min);
       r += '"';
@@ -168,7 +222,10 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
   // Self-recursion happens only through the ARRAY branch below (never through a
   // valToToon round-trip), so the depth guard must live here -- and it throws
   // rather than silently truncating, matching valToToon.
-  if (!asvJSONValue::checkNestingDepth(depth))
+  // depth+1, matching valToToon: the root container is level 1 here too, and
+  // this function always receives an ARRAY, so the container-only condition is
+  // already implied. See the long note in valToToon.
+  if (!asvJSONValue::checkNestingDepth(depth + 1))
     throw asvJSONError("TOON: maximum nesting depth exceeded");
   if (!v || v->type != asvJSONValue::ARRAY || v->size() == 0) {
     out += std::string(static_cast<size_t>(indent) * 2, ' ') + "- [0]:\n";
@@ -220,7 +277,19 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
   // A tree parsed or built past MAX_NESTING_DEPTH must not silently vanish
   // from the output (the old behavior returned and left a truncated document):
   // throw, so toTOON() reports data loss instead of hiding it.
-  if (!asvJSONValue::checkNestingDepth(depth))
+  //
+  // The guard counts CONTAINERS, and the root container is level 1.
+  //
+  // Two corrections over the old `checkNestingDepth(depth)`. depth+1 because the
+  // core JSON parser does ++parseDepth before checking in parseObject, so its
+  // root object is level 1 and `depth` raw made TOON accept one level more than
+  // the core -- toTOON() could emit a document fromTOON() would reject. And the
+  // check is now restricted to containers, because valToToon also visits scalar
+  // leaves: counting them would put the leaf of a 48-level object tree at level
+  // 49 and reject a tree the core parses fine (the core never increments for a
+  // scalar, so a scalar's "level" is just its parent's).
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1))
     throw asvJSONError("TOON: maximum nesting depth exceeded");
   // An EMPTY key is only the document root when nothing wraps it; an object
   // member whose key is the empty string ("" ) must still be emitted as a
@@ -341,18 +410,42 @@ inline std::string toonJsonQuoteBare(std::string_view s) {
   return '"' + toonJsonEscape(std::string(s)) + '"';
 }
 
-// TOON value splitter - splits by comma respecting quoted strings and escapes
+// TOON value splitter - splits by comma respecting quoted strings, escapes and
+// nested {} / [] groups.
+//
+// The brace awareness is required, not defensive. Brackets can legitimately hold
+// a comma even in input the encoder never produces: a hand-written
+// "key[1]: {a: 1, b: 2}" is an array of one object, and with a quote-only splitter
+// the inner comma cut it into "{a: 1" / " b: 2}". Neither shard is valid JSON, so
+// both became strings and the array silently grew to two elements with mangled
+// text. Tracking depth keeps the group in one cell; toonJsonQuoteBare then hands
+// the whole thing to the JSON parser, which accepts the quoted-key object and
+// rejects the TOON-style unquoted-key one (so "{a: 1}" degrades to a string, as
+// it already did, but as ONE cell rather than two).
+//
+// Depth also matters for the types the encoder DOES put in a cell only when it
+// cannot avoid it: toonLeafVal renders BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP
+// as JSON objects whose text has depth-0 commas. The allPrim checks in valToToon
+// and toonNestedArrayItem keep them out of inline rows, so this is not what
+// protects them -- the encoder must not emit the form at all, because a brace-
+// aware splitter would keep the object intact and the decoder would then have to
+// decide whether the cell is a primitive or a container.
 inline std::vector<std::string> toonSplitCommas(std::string_view s) {
   std::vector<std::string> result;
   std::string cur;
   bool inQuotes = false;
   bool escape = false;
+  int brace = 0;
   for (size_t i = 0; i < s.size(); i++) {
     char c = s[i];
     if (escape) { cur += c; escape = false; continue; }
     if (c == '\\' && inQuotes) { cur += c; escape = true; continue; }
     if (c == '"') { cur += c; inQuotes = !inQuotes; continue; }
-    if (c == ',' && !inQuotes) {
+    if (!inQuotes) {
+      if (c == '{' || c == '[') brace++;
+      else if (c == '}' || c == ']') { if (brace > 0) brace--; }
+    }
+    if (c == ',' && !inQuotes && brace == 0) {
       result.push_back(std::move(cur));
       cur.clear();
       continue;
@@ -638,6 +731,14 @@ inline std::string toonToJson(std::string_view input) {
     }
 
     // list item: - value
+    //
+    // Note on a bare "- ": it does NOT decode to the empty string. content is
+    // trimmed before this test, so "- " arrives as "-", fails the size-2 check,
+    // and falls through to the bare-dash branch below, which opens an OBJECT
+    // list item. The empty string has to be written - "" (quoted), which is also
+    // what the encoder emits for it. Rejected earlier as a possible reading of
+    // "- " being an empty string: the hyphen is the list-item marker, and a
+    // marker with no value is the documented object-item form, not a scalar.
     if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
       addComma(stack, out);
       curFrame.first = false;

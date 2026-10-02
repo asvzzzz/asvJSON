@@ -183,6 +183,8 @@ between UDE and YAML.
 
 `|` and `>` fold identically as far as chomping is concerned, so for the same body text they yield the same trailing breaks; they differ only in how the body's interior line breaks are treated (`>` turns a lone break between two non-empty lines into a space and keeps a run of k blank lines as k breaks).
 
+Only whitespace, a comment, or the end of the line may follow the indicators, and all three comment forms are accepted there -  `key: | # note`, `key: > // note` and `key: | /* note */` are all valid. Accepting only two of them made `/* */` the single place in the grammar where a block comment was a syntax error. A block comment opened on the header line must close on that same line: one that would need to cross the line break is rejected with `UDE: unterminated comment after block scalar header at line N` rather than being allowed to swallow the body. Anything else after the indicators is `UDE: unexpected content after block scalar header at line N`.
+
 Block scalar termination: the base indentation is the number of leading spaces
 on the first non-empty line of the block. Every subsequent line must have at
 least that many leading spaces; extra spaces are part of the value. A line with
@@ -211,7 +213,13 @@ which is checked separately and does reject a tab there
 
 Tabs (Section 12): a tab is not allowed in the indentation margin of a block
 scalar  -  the margin must consist of spaces only (YAML rule). A tab after the
-margin is ordinary content.
+margin is ordinary content. A **whitespace-only** body line is the one exception:
+the margin is measured with spaces and tabs together on such a line, so enforcing
+the spaces-only rule would reject a tab that is not acting as indentation at all.
+A whitespace-only line is a blank line -  a paragraph break whose whitespace is
+discarded anyway  -  and there is nothing for the margin rule to protect, so
+`key: |` over a body containing `" \t "` is accepted. A tab used as real
+indentation is still rejected.
 
 ---
 
@@ -258,7 +266,9 @@ a: !null          # end of line
 {y: !null}        # before '}'
 ```
 
-Every other tag still requires a value; a bare `!int` is rejected with `UDE: !int requires a value`.
+Every other tag still requires a value; a bare `!int` is rejected with `UDE: !int requires a value`. The anchored spelling `!null &a` is accepted the same way, as a deliberate extension beyond Appendix A, whose `VALUE` is mandatory: a bare `!null` already carries no value, so this is the consistent reading, and an anchor with nothing to point at would otherwise be unrepresentable. Every other tag still requires one after an anchor (`!int &a` is rejected).
+
+`!float` additionally rejects a numeric literal that no `double` can hold exactly (an out-of-`int64` integer, or more significant digits than a double preserves) with `UDE: !float requires a literal representable as a double`. `!int` rejects the same input with `!int requires an integer literal`, so `!float` is not laxer than the integer path. A DOUBLE that is NaN or Inf, and a `DATETIME` the platform cannot convert, both serialize as `null` (see [Non-JSON types](#non-json-types)) and come back as a null value / the string `"null"` rather than as a DOUBLE / DATETIME -  unavoidable, since UDE has no encoding for either.
 
 #### `!regex` body forms
 
@@ -307,6 +317,14 @@ An unknown tag stores its **name separately from its value**:
 * The name is a plain identifier, an optional namespace form `!ns:tag` / `!a.b`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
 * Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `UDE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name.
 * The value is any UDE value (string, number, object, array, ...), not flattened text  -  `!point {x: 1, y: 2}` keeps the object intact.
+* **The angle brackets mean "this name is a literal custom-tag name", not "a synonym for the simple form".** That is what lets a custom tag whose name collides with a built-in be expressed at all:
+
+```text
+!regex "^(a|b)$"      # the built-in REGEX
+!<regex> "^(a|b)$"    # a CUSTOM_TAG whose name happens to be "regex"
+```
+
+The decoder dispatches on the tag name, so a custom tag named after a built-in is unreachable through `!name`; the encoder therefore emits the verbatim form for such a name, and the verbatim form suppresses the dispatch. `!<null>` with no value is consequently rejected like any other tag (`UDE: !<null> requires a value`)  -  only the simple `!null` is value-less. `CUSTOM_TAG` is a type in the JSON convention, so a document that wants a genuine `null` there uses `{"name":"null","value":null}`.
 * In JSON (Extended JSON convention) a custom tag is represented as:
 
 ```json
@@ -375,7 +393,7 @@ The parser enforces documented resource limits:
 |-------|-------|-------|
 | Anchor resolution | single deep copy | An alias is resolved by copying the anchored value (bounded by the clone node budget); it never recurses into further alias resolution, so there is no alias-chain depth limit (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
-| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser. |
+| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser, including the counting convention: the root container is level 1 and scalars do not count, so the same tree the JSON parser accepts is one `toUDE()` serializes. A tree built past the limit by hand makes `toUDE()` throw `UDE: maximum nesting depth exceeded` rather than emit a truncated document. |
 | String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
 | Object/array size | 1,000,000 entries | Shared core limit. |
 
