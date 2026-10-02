@@ -1065,6 +1065,10 @@ Object-like `#define NAME replacement` macros are expanded across the declaratio
 | EXTENSION | `{"$binary":{"base64":"3q0=","subType":"2a"}}` |
 | DATETIME | `"2026-07-20T00:21:57Z"` (ISO 8601) |
 
+All six types survive a JSON5 round-trip, DATETIME included: the core parser's date detection restores the type from the ISO-8601 string, milliseconds and UTC offset included (`1712345678` ms `123` at `+05:30` re-reads identically). BINARY and EXTENSION are told apart by `subType` (`00` vs. the extension type), and OBJECTID stores its 12 raw bytes as 24 hex digits.
+
+`//`, `/* */` and `#` comments round-trip: `fromJSON5()` binds each comment to the node it documents and `toJSON5()` re-emits it in place -- leading above a key/item, same-line trailing after a value, closings before the `}`/`]`. Nodes are addressed by length-prefixed path segments, so a key containing any byte (U+001F, NUL, high bytes) keeps its comments. Two placement rules worth knowing: a second `//`-trailing comment on one value cannot share the value's line, so it is written below it and re-reads as a leading comment of the next member (or the container's closing comment) -- the text survives, the placement normalizes; and a raw control byte inside a string is rejected, so a NUL key must be written with the escape `"a\u0000b"`.
+
 ### INI  -  Classic initialization file format
 
 `toINI()` / `fromINI()`  -  the classic initialization file format with dot-notation section nesting for hierarchical data.

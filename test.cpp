@@ -18487,6 +18487,155 @@ TEST(testJSON5Extras) {
   }
 }
 
+TEST(testJSON5CommentPaths) {
+  // A key containing U+001F collided with the old 0x1F path separator: the
+  // collector built "a\x1Fb", json5FindPath split it into "a" and "b", found
+  // neither, and dropped the comment silently. Paths are length-prefixed now,
+  // so every key byte survives.
+  {
+    const std::string src = std::string("{\n  \"a\x1F") + "b\": 1 // trail\n}\n";
+    asvJSON j;
+    ASSERT(j.fromJSON5(src));
+    const asvJSONValue* v = j.get("a\x1F" "b");
+    ASSERT(v != nullptr && v->type == asvJSONValue::INT && v->getInt() == 1);
+    ASSERT(v->comments && v->comments->trailing.size() == 1);
+    ASSERT_EQ(v->comments->trailing[0].text, std::string(" trail"));
+    // And the comment survives the round-trip, keyed on the odd byte.
+    std::string out = j.toJSON5(false);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(out));
+    const asvJSONValue* v2 = j2.get("a\x1F" "b");
+    ASSERT(v2 && v2->comments && v2->comments->trailing.size() == 1);
+    // A NUL and a high byte in a key too: same class of problem, same fix. The
+    // NUL must be written \u0000 -- a raw control byte inside a JSON5 string
+    // is rejected ("unclosed string in JSON5"), and std::string("...\0") would
+    // truncate at it besides.
+    const std::string src2 = "{\"a\\u0000\xC3\xA9\": 1 /* blk */}\n";
+    asvJSON k;
+    ASSERT(k.fromJSON5(src2));
+    const asvJSONValue* v3 = k.get(std::string("a\x00\xC3\xA9", 4));
+    ASSERT(v3 != nullptr && v3->comments && v3->comments->trailing.size() == 1);
+    ASSERT(v3->comments->trailing[0].block);
+  }
+  // A second //-trailing comment on one value cannot share the value's line, so
+  // it is emitted below it. It used to be dropped outright.
+  {
+    asvJSON j;
+    j.parse(std::string("{\"K\":1}"));
+    j.get("K")->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment a, b;
+    a.text = " first";
+    b.text = " second";
+    j.get("K")->comments->trailing.push_back(a);
+    j.get("K")->comments->trailing.push_back(b);
+    std::string out = j.toJSON5(true);
+    ASSERT(out.find("// first") != std::string::npos);
+    ASSERT(out.find("// second") != std::string::npos);
+    // Both texts survive the round-trip; the second rebinds as the container's
+    // closing comment (placement is normalized, nothing is lost).
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(out));
+    const asvJSONValue* k = j2.get("K");
+    ASSERT(k && k->comments && k->comments->trailing.size() == 1);
+    ASSERT_EQ(k->comments->trailing[0].text, std::string(" first"));
+    const asvJSONValue* root = j2.getRoot();
+    ASSERT(root->comments && root->comments->closing.size() == 1);
+    ASSERT_EQ(root->comments->closing[0].text, std::string(" second"));
+    // A second trailing comment that is NOT last: it rebinds as the next
+    // member's leading comment, still with its text intact.
+    asvJSON m;
+    m.parse(std::string("{\"K\":1,\"Z\":2}"));
+    m.get("K")->comments = std::make_unique<asvJSONInternal::Comments>();
+    asvJSONInternal::Comment c, d;
+    c.text = " one";
+    d.text = " two";
+    m.get("K")->comments->trailing.push_back(c);
+    m.get("K")->comments->trailing.push_back(d);
+    std::string mout = m.toJSON5(true);
+    asvJSON m2;
+    ASSERT(m2.fromJSON5(mout));
+    const asvJSONValue* z = m2.get("Z");
+    ASSERT(z && z->comments && z->comments->leading.size() == 1);
+    ASSERT_EQ(z->comments->leading[0].text, std::string(" two"));
+  }
+  // A block comment as the last thing on a line used to swallow the closing
+  // brace: json5ToJson advanced two bytes past the '/' of "*/" and the loop's
+  // own i++ then skipped the '}' as well, so {"a": 1 /* c */} converted to
+  // {"a": 1 and failed with "Expected ',' or '}'". A space after the comment
+  // hid it, which is why it survived.
+  {
+    for (const char* src : {"{\"a\": 1 /* c */}", "[1, 2 /* c */]", "{\"a\": 1 /* c */ , \"b\": 2}",
+                            "{\"a\": [1 /* c */ ]}", "{\"a\": 1 /* c */\n}"}) {
+      asvJSON j;
+      bool ok = j.fromJSON5(src);
+      ASSERT(ok);
+      if (!ok) std::cout << "    src=" << src << " err=" << j.getLastError() << "\n";
+    }
+    // An unterminated block comment stays malformed (nothing to close it).
+    asvJSON bad;
+    ASSERT(!bad.fromJSON5("{\"a\": 1 /* c"));
+    asvJSON j;
+    ASSERT(j.fromJSON5("{\"a\": 1 /* c */}"));
+    ASSERT_EQ(j.getInt("a"), 1);
+    ASSERT(j.get("a")->comments && j.get("a")->comments->trailing.size() == 1);
+    ASSERT(j.get("a")->comments->trailing[0].block);
+    // The comment text round-trips verbatim.
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(j.toJSON5(false)));
+    ASSERT(j2.get("a") && j2.get("a")->comments &&
+           j2.get("a")->comments->trailing.size() == 1);
+  }
+  // \v and \f are whitespace for the lexer, so a //-comment after one at the
+  // start of a line is an own-line comment (leading), not a trailing one.
+  {
+    for (const char* src : {"{\n\x0b// c\nK: 1\n}", "{\n\x0c// c\nK: 1\n}", "{\n  // c\nK: 1\n}"}) {
+      asvJSON j;
+      ASSERT(j.fromJSON5(src));
+      const asvJSONValue* v = j.get("K");
+      ASSERT(v && v->comments && v->comments->leading.size() == 1);
+      ASSERT(v->comments->trailing.empty());
+    }
+  }
+  // Special types are lossless in both directions -- DATETIME included, with
+  // milliseconds and the UTC offset surviving the ISO-8601 string.
+  {
+    asvJSONValue* dt = nullptr;
+    {
+      asvJSON j;
+      dt = j.putDateTime("D", 1712345678, 123);
+      dt->tz_offset_min = 330;  // +05:30
+      asvJSON j2;
+      ASSERT(j2.fromJSON5(j.toJSON5(false)));
+      const asvJSONValue* r = j2.get("D");
+      ASSERT(r && r->type == asvJSONValue::DATETIME);
+      ASSERT_EQ(r->timestamp, 1712345678);
+      ASSERT_EQ(r->getDateTimeMs(), 123);
+      ASSERT_EQ(r->tz_offset_min, 330);
+    }
+    const uint8_t bytes[] = {1, 2, 3};
+    {
+      asvJSON j;
+      j.putBinary("B", bytes, 3);
+      j.putExtension("E", 0x2a, bytes, 3);
+      const char oid[] = "\x50\x7f\x1f\x77\xbc\xf8\x6c\xd7\x99\x43\x90\x11";
+      j.putObjectId("O", std::string_view(oid, 12));
+      j.putRegex("R", "^test$", "gi");
+      j.putTimestamp("T", 1712345678);
+      asvJSON j2;
+      ASSERT(j2.fromJSON5(j.toJSON5(false)));
+      ASSERT(j2.get("B") && j2.get("B")->type == asvJSONValue::BINARY);
+      ASSERT(j2.get("E") && j2.get("E")->type == asvJSONValue::EXTENSION);
+      ASSERT_EQ(j2.get("E")->ext_type, 0x2a);
+      ASSERT(j2.get("O") && j2.get("O")->type == asvJSONValue::OBJECTID);
+      ASSERT(j2.get("R") && j2.get("R")->type == asvJSONValue::REGEX);
+      ASSERT_EQ(j2.getRegexPattern("R"), "^test$");
+      ASSERT_EQ(j2.getRegexOptions("R"), "gi");
+      ASSERT(j2.get("T") && j2.get("T")->type == asvJSONValue::TIMESTAMP);
+      ASSERT_EQ(j2.get("T")->timestamp, 1712345678);
+    }
+  }
+}
+
 TEST(testToINI) {
   // Simple object
   {
@@ -30574,6 +30723,7 @@ RUN(testFromCppArraySizeGuard);
     RUN(testFromJSON5Conformance);
     RUN(testJSON5Audit);
     RUN(testJSON5Extras);
+  RUN(testJSON5CommentPaths);
 
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);

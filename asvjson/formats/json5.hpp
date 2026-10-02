@@ -14,6 +14,28 @@
 // NOTE: unescaped U+000A/U+000D inside strings is accepted (lenient, per json5ToJson)
 // and escaped to \n / \r via escapeControl; spec sec 5.2 forbids them -- use line-continuation
 // with backslash for actual multi-line strings.
+//
+// Comments (`//`, `/* */`, `#`) round-trip: json5CollectComments walks the
+// ORIGINAL input text, binds each comment to a node by path, and toJSON5()
+// re-emits it in place (leading above a key/item, same-line trailing after a
+// value, closings before the `}`/`]`). The paths are length-prefixed
+// ("<len>:<bytes>" segments, json5PathSeg) so a key containing ANY byte -- 0x1F
+// included -- is addressed exactly; the old 0x1F separator collided with such
+// keys and dropped their comments.
+//
+// Known limitations:
+// - A second `//`-trailing comment on one value cannot share the value's line
+//   (a `//` ends its line), so it is emitted on its own line below and re-reads
+//   as a LEADING comment of the next member, or as the container's closing
+//   comment when the value was last. Only reachable from a programmatically
+//   built tree: the collector never binds two `//`-comments to one value. The
+//   text of every comment survives; only its placement is normalized.
+// - Special types are lossless in both directions. DATETIME is written as an
+//   ISO-8601 string and restored by the core parser's date detection, including
+//   milliseconds and the UTC offset; BINARY and EXTENSION use MongoDB Extended
+//   JSON (`{"$binary":{...,"subType":...}}`, subType 00 vs. the extension type),
+//   OBJECTID `{"$oid":"<24 hex>"}` over the 12 raw bytes, REGEX
+//   `{"$regex":...,"$options":...}`, TIMESTAMP `{"$timestamp":{"t":...}}`.
 
 #include "../core.hpp"
 
@@ -204,7 +226,12 @@ inline std::string json5ToJson(std::string_view input) {
       radixJustEnded = false;
       i += 2;
       while (i + 1 < input.size() && !(input[i] == '*' && input[i + 1] == '/')) i++;
-      if (i < input.size()) i += 2;
+      // Leave i ON the closing '/' so the loop's own i++ steps past it. Advancing
+      // by 2 here skipped the character after the comment as well, which ate the
+      // closing '}' or ']' whenever a block comment was the last thing on the
+      // line: {"a": 1 /* c */} converted to {"a": 1  and then failed with
+      // "Expected ',' or '}'". A space after the comment hid it.
+      if (i + 1 < input.size()) i += 1;
       continue;
     }
 
@@ -474,13 +501,38 @@ struct Json5CommentEntry {
   bool footing = false;
 };
 
+// Comment addresses are "<len>:<bytes>" segments joined with no separator (see
+// json5PathSeg). They used to be joined with a 0x1F separator byte, which
+// collided with itself: the JSON5 spec puts no restriction on quoted keys, so
+// {"a\u001fb":1} is legal, and the collector builds the path "a\x1Fb" -- which
+// json5FindPath then split into "a" and "b", looked both up, found neither, and
+// dropped the comment silently. The encoder never produces such a key (it
+// escapes 0x1F as \u001f), but the collector reads the ORIGINAL input, not the
+// re-escaped text, so hand-written input reaches it. Length prefixes need no
+// reserved byte at all, so every key survives byte for byte -- the same fix
+// INI already made (iniPathSeg).
+inline std::string json5PathSeg(std::string_view s) {
+  return std::to_string(s.size()) + ":" + std::string(s);
+}
+inline std::string json5PathJoin(const std::string& base, std::string_view seg) {
+  return base + json5PathSeg(seg);
+}
+
 inline asvJSONValue* json5FindPath(asvJSONValue* root, std::string_view path) {
   if (path.empty()) return root;
   asvJSONValue* cur = root;
   size_t pos = 0;
-  while (pos <= path.size()) {
-    size_t sep = path.find_first_of("\x1F", pos);
-    std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
+  while (pos < path.size()) {
+    size_t colon = path.find(':', pos);
+    if (colon == std::string_view::npos) return nullptr;
+    size_t len = 0;
+    for (size_t k = pos; k < colon; k++) {
+      char d = path[k];
+      if (d < '0' || d > '9' || len > (SIZE_MAX - 9) / 10) return nullptr;
+      len = len * 10 + static_cast<size_t>(d - '0');
+    }
+    if (colon + 1 + len > path.size()) return nullptr;
+    std::string_view seg = path.substr(colon + 1, len);
     if (seg.empty()) return nullptr;
     if (seg[0] == '[') {
       if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
@@ -498,8 +550,7 @@ inline asvJSONValue* json5FindPath(asvJSONValue* root, std::string_view path) {
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
     }
-    if (sep == std::string_view::npos) break;
-    pos = sep + 1;
+    pos = colon + 1 + len;
   }
   return cur;
 }
@@ -630,11 +681,14 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
   const auto isWs = [](char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
   };
+  // Is this comment the first thing on its line? Uses the same whitespace set
+  // as isWs() below, so \v and \f (which the lexer already treats as
+  // whitespace) do not make an own-line comment look like a trailing one.
   const auto ownLineStart = [&](size_t start) {
     for (size_t j = start; j-- > 0;) {
       char c = input[j];
       if (c == '\n') return true;
-      if (c != ' ' && c != '\t' && c != '\r') return false;
+      if (c != ' ' && c != '\t' && c != '\r' && c != '\v' && c != '\f') return false;
     }
     return true;
   };
@@ -674,7 +728,7 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       } else {
         size_t j = i + 2;
         while (j + 1 < n && !(input[j] == '*' && input[j + 1] == '/')) j++;
-        size_t end = (j + 1 < n) ? j : j;  // if unterminated, consume to EOF
+        size_t end = j;  // if unterminated, consume to EOF
         t.block = true;
         auto v = input.substr(i + 2, end - (i + 2));
         t.text.assign(v.data(), v.size());
@@ -732,8 +786,7 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
   } p{toks};
 
   auto joinPath = [](const std::string& path, const std::string& seg) {
-    if (path.empty()) return seg;
-    return path + std::string("\x1F") + seg;
+    return json5PathJoin(path, seg);
   };
   auto skipComments = [&]() {
     while (p.k < toks.size() && toks[p.k].kind == 'C') {
@@ -791,9 +844,10 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       if (toks[p.k].kind == '}') { commitClosing(path); p.k++; return; }
       if (toks[p.k].kind == '{' || toks[p.k].kind == '[' || toks[p.k].kind == ':' ||
           toks[p.k].kind == ',') { p.k++; continue; }   // should not happen in valid JSON5
-      std::string key;
-      if (toks[p.k].kind == 'S') key = toks[p.k].text;
-      else key = toks[p.k].text;
+      // The token text is already the decoded key for 'S' (json5DecodeString ran in
+      // the lexer) and the raw identifier for a bare key, so both cases read the
+      // same field -- there is no quoted/bare distinction to make here.
+      std::string key = toks[p.k].text;
       p.k++;
       skipComments();
       if (p.k < toks.size() && toks[p.k].kind == ':') p.k++;
@@ -860,12 +914,36 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
 inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
   json5SerializeVal(v, out, depth, pretty);
   if (!v->comments || v->comments->trailing.empty()) return false;
-  for (const auto& c : v->comments->trailing) {
-    if (!c.block && commaNeeded) { out += ','; commaNeeded = false; }
-    if (c.block) { out += " /*"; out += c.text; out += "*/"; }
-    else { out += " //"; out += c.text; out += '\n'; return true; }
+  const std::vector<Comment>& list = v->comments->trailing;
+  bool sawLine = false;
+  for (size_t i = 0; i < list.size(); i++) {
+    const Comment& c = list[i];
+    if (c.block) {
+      out += " /*";
+      out += c.text;
+      out += "*/";
+      continue;
+    }
+    // The separating comma belongs on the value's line, before the FIRST
+    // trailing comment -- the caller skips its own comma once we report that a
+    // //-comment ended the line.
+    if (commaNeeded) { out += ','; commaNeeded = false; }
+    // A //-comment ends its line, so only the first can share the value's line;
+    // further line comments go on their own lines below it. They used to be
+    // dropped by the `return true` here (reachable only from a programmatically
+    // built tree -- the collector never binds two //-comments to one value).
+    // Nothing is lost now: on re-read an own-line //-comment binds as a leading
+    // comment of the next member (or as the container's closing comment when
+    // there is no next member), so the text survives and only its placement is
+    // normalized.
+    out += sawLine ? "//" : " //";
+    out += c.text;
+    out += '\n';
+    sawLine = true;
+    if (i + 1 < list.size() && pretty)
+      out += std::string(static_cast<size_t>(depth) * 2, ' ');
   }
-  return false;
+  return sawLine;
 }
 
 inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth, bool pretty) {
@@ -1102,6 +1180,18 @@ inline bool asvJSON::fromJSON5(std::string_view input) {
     }
     return ok;
   } catch (const asvJSONError& e) {
+    allowNaNInfinity = prevNaN;
+    lastError = e.what();
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromDotenv). Not
+    // theoretical here: json5CollectComments pushes into toks and p.out,
+    // json5AttachComments pushes into the node's comment vectors, and
+    // json5ToJson grows `out` -- all throwing operations, unlike the value
+    // factories, which use new(std::nothrow) and never throw. allowNaNInfinity
+    // must be restored here too, or the object keeps the permissive flag after
+    // a failed parse.
     allowNaNInfinity = prevNaN;
     lastError = e.what();
     return false;
