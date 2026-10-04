@@ -154,18 +154,23 @@ Disable with `#define ASVJSON_DISABLE_JSONPATH`.
 ```cpp
 // Full-input SAX parsing
 struct Handler : public JsonSaxHandler {
-  void onKeyValue(const std::string& key, const asvJSONValue* val) override { ... }
-  void onArrayBegin() override { ... }
+  std::string error;  // handlers keep the message they care about
+  void onKey(std::string_view key) override { ... }
+  void onStringValue(std::string_view value) override { ... }
+  void onStartArray() override { ... }
+  void onError(std::string_view message) override { error = message; }
   // ... other callbacks
 };
 
 asvJSON doc;
 Handler h;
-doc.parseSax(jsonString, h);
+JsonSaxParser parser;
+if (!parser.parse(jsonString, h)) {
+  std::cerr << parser.getLastError();  // same text the handler received
+}
 
 // Chunked streaming (for large files)
-JsonStreamParser stream;
-stream.setHandler(h);
+JsonStreamParser stream(h);       // the handler is bound in the constructor
 while (auto chunk = readNextChunk()) {
   if (!stream.feed(chunk)) break;
 }
@@ -173,6 +178,12 @@ stream.finish();
 ```
 
 Disable with `#define ASVJSON_DISABLE_SAX`.
+
+**Error reporting.** `JsonSaxParser::parse()` and `JsonStreamParser::feed()`/`finish()` never throw for malformed input; they report through `onError` and return `false`. `onError` must not throw -- it is a notification point, not control flow. The stream parser routes every error through a helper that catches anything the callback throws, so a misbehaving handler still gets `false` back; the single-pass parser delivers errors at one catch point plus a few unwrapped early-return paths, where a throwing handler escapes `parse()`.
+
+`-NaN` keeps its sign in both SAX parsers and in the DOM parser, so a handler that re-serializes the value (or inspects `std::signbit`) sees what the input said. It makes no difference to comparisons -- `NaN != NaN` either way.
+
+An input with no value in it -- empty, whitespace-only, comment-only, or nothing but a UTF-8 BOM -- is rejected as `empty input` rather than as an unexpected character. Inside a container, an input that ends where a value was expected is `Unexpected end of input`.
 
 ### Special Data Types
 - Binary data (automatic Base64 in JSON, raw in BSON/MessagePack)

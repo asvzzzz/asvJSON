@@ -27641,6 +27641,209 @@ TEST(testJsonStream) {
 	}
 }
 
+TEST(testSaxStreamAuditFixes) {
+	// 1. -NaN keeps its sign in every parser. NaN != NaN either way, so this is
+	// invisible to comparisons, but a handler that re-serializes the value would
+	// otherwise get NaN back for a -NaN input (the DOM serializer writes
+	// "-NaN" for a negative NaN, so the drift is observable in a round-trip).
+	{
+		std::vector<double> got;
+		struct : JsonSaxHandler {
+			std::vector<double>* d;
+			void onDoubleValue(double v) override { d->push_back(v); }
+		} hs;
+		hs.d = &got;
+
+		JsonSaxParser sp1;
+		sp1.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp1.parse("-NaN", hs));
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(std::isnan(got[0]));
+		ASSERT(std::signbit(got[0]));
+
+		// Whole input in one chunk, and split so the sign and the literal
+		// arrive in different chunks (the -NaN branch has its own chunk-boundary
+		// checks, so both paths must agree).
+		JsonStreamParser sp2(hs);
+		sp2.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp2.feed("-NaN"));
+		ASSERT(sp2.finish());
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(std::isnan(got[0]));
+		ASSERT(std::signbit(got[0]));
+
+		JsonStreamParser sp3(hs);
+		sp3.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp3.feed("-Na"));
+		ASSERT(sp3.feed("N"));
+		ASSERT(sp3.finish());
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(std::isnan(got[0]));
+		ASSERT(std::signbit(got[0]));
+
+		// Bare NaN must stay positive, and the -Infinity sign must be untouched
+		// by this change.
+		JsonStreamParser sp4(hs);
+		sp4.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp4.feed("NaN"));
+		ASSERT(sp4.finish());
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(!std::signbit(got[0]));
+
+		JsonStreamParser sp5(hs);
+		sp5.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp5.feed("-Infinity"));
+		ASSERT(sp5.finish());
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(std::isinf(got[0]));
+		ASSERT(got[0] < 0);
+
+		// DOM parity: the DOM parser keeps the sign and serializes it, so a
+		// DOM -> stream round-trip now preserves it too.
+		asvJSON j;
+		j.allowNaNInfinity = true;
+		ASSERT(j.parse("-NaN"));
+		ASSERT(std::signbit(j.getRoot()->getDouble()));
+		ASSERT_EQ(j.serialize(), std::string("-NaN"));
+		JsonStreamParser sp6(hs);
+		sp6.allowNaNInfinity = true;
+		got.clear();
+		ASSERT(sp6.feed(j.serialize()));
+		ASSERT(sp6.finish());
+		ASSERT_EQ(got.size(), size_t(1));
+		ASSERT(std::signbit(got[0]));
+	}
+
+	// 2. "No character to name" must not be reported as "Unexpected: ''". At EOF
+	// cur() returns '\0', and building the message from it embeds a NUL that
+	// truncates the text for any consumer taking a C string. Every input that
+	// ends without a value used to hit that: BOM-only, whitespace-only,
+	// comment-only -- and a container cut short after a comma.
+	{
+		std::string msg;
+		struct : JsonSaxHandler {
+			std::string* m;
+			void onError(std::string_view s) override { m->assign(s); }
+		} h;
+		h.m = &msg;
+
+		// Top level: no value in the input at all -> "empty input", the same
+		// verdict the stream parser reaches through its hadValue_ check.
+		const char* emptyInputs[] = {
+			"\xEF\xBB\xBF",       // BOM only, empty again after the strip
+			"\xEF\xBB\xBF   \n",  // BOM plus blanks
+			"",                   // handled by the early return, same message
+			"   \n\t ",           // whitespace only
+			"// c\n",             // comment only (allowComments defaults to true)
+			"/* c */",            // block comment only
+			"\xEF\xBB\xBF// c",   // BOM plus a comment
+		};
+		for (const char* src : emptyInputs) {
+			JsonSaxParser p;
+			ASSERT_MSG(!p.parse(src, h), src);
+			ASSERT_MSG(msg == "empty input", std::string(src) + " -> [" + msg + "]");
+			ASSERT_MSG(msg.find('\0') == std::string::npos, src);
+		}
+
+		// Inside a container a value was expected and never arrived -- that must
+		// not be reported as "empty input" (the input is not empty). Still NUL-free.
+		// Reached only right after a separator: after a complete element the
+		// container frame reports its own message first.
+		const char* cutInputs[] = {"[1,", "{\"a\":", "[[1,", "[1,   ", "{\"a\":   "};
+		for (const char* src : cutInputs) {
+			JsonSaxParser p;
+			ASSERT_MSG(!p.parse(src, h), src);
+			ASSERT_MSG(msg == "Unexpected end of input", std::string(src) + " -> [" + msg + "]");
+			ASSERT_MSG(msg.find('\0') == std::string::npos, src);
+		}
+
+		// EOF after a complete element keeps the container frame's own message.
+		JsonSaxParser p2;
+		ASSERT(!p2.parse("[1, 2", h));
+		ASSERT_EQ(msg, std::string("Expected ',' or ']'"));
+		ASSERT(!p2.parse("{\"a\": 1", h));
+		ASSERT_EQ(msg, std::string("Expected ',' or '}'"));
+
+		// A real error character is still named as before.
+		JsonSaxParser p3;
+		ASSERT(!p3.parse("  @  ", h));
+		ASSERT_EQ(msg, std::string("Unexpected: '@'"));
+
+		// A BOM in front of a real document is still fine.
+		struct : JsonSaxHandler {} ok;
+		JsonSaxParser p4;
+		ASSERT(p4.parse("\xEF\xBB\xBF{\"a\":1}", ok));
+	}
+
+	// 3. finish() reports every error through setError(), which swallows a
+	// throwing onError. The contract says onError must not throw; these paths
+	// used to call it directly, so a misbehaving handler escaped finish()
+	// instead of getting a plain false.
+	{
+		struct : JsonSaxHandler {
+			int calls = 0;
+			void onError(std::string_view) override { calls++; throw std::runtime_error("onError must not throw"); }
+		} h;
+
+		// One case per finish() error path: unterminated string (value and key),
+		// truncated literal, unterminated block comment, incomplete input,
+		// empty input, and trailing data after a complete value.
+		const char* inputs[] = {
+			"\"unterminated",       // STR_VALUE -> Unterminated string
+			"{\"a",                 // STR_KEY   -> Unterminated string
+			"{\"a\": tru",          // LIT_TRUE  -> Invalid literal
+			"[nul",                 // LIT_NULL  -> Invalid literal
+			"/* unterminated",      // BLOCK_COMMENT
+			"{\"a\": 1",            // Incomplete input
+			"[1, 2",                // Incomplete input
+			"",                     // Empty input
+			"{\"a\":1} junk",       // Data after complete value
+			"1 /*",                 // Data after complete value (pending '/')
+		};
+		for (const char* src : inputs) {
+			JsonStreamParser sp(h);
+			sp.allowComments = true;
+			int before = h.calls;
+			bool ok = true;
+			bool escaped = false;
+			try {
+				ok = sp.feed(src) && sp.finish();
+			} catch (const std::exception&) {
+				escaped = true;
+			}
+			ASSERT_MSG(!escaped, src);
+			ASSERT_MSG(!ok, src);
+			// Reported exactly once, through setError().
+			ASSERT_MSG(h.calls == before + 1, src);
+		}
+
+		// The same guarantee for the paths that already used setError(): a truncated
+		// UTF-8 sequence and a pending '/' legitimately pass feed() and are
+		// rejected by finish(), but no exception may escape either call.
+		const char* feedInputs[] = {"\xC3", "{\"a\":1} /", "\"\\uZZZZ\"", "[1,"};
+		for (const char* src : feedInputs) {
+			JsonStreamParser sp(h);
+			sp.validateUTF8 = true;
+			int before = h.calls;
+			bool ok = true;
+			bool escaped = false;
+			try {
+				ok = sp.feed(src) && sp.finish();
+			} catch (const std::exception&) {
+				escaped = true;
+			}
+			ASSERT_MSG(!escaped, src);
+			ASSERT_MSG(!ok, src);
+			ASSERT_MSG(h.calls == before + 1, src);
+		}
+	}
+}
+
 TEST(testJsonSaxStrict) {
 	// Malformed non-JSON that used to be silently accepted must now fail, in
 	// parity with the DOM parser.
@@ -30837,6 +31040,7 @@ RUN(testSchemaJsonPointerRefs);
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);
 	RUN(testJsonStream);
+	RUN(testSaxStreamAuditFixes);
 	RUN(testJsonSaxStrict);
 	RUN(testJsonStreamStrict);
 	RUN(testSaxToDom);

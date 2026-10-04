@@ -28,11 +28,17 @@ namespace asvJSONInternal {
 // it should throw an exception (which will be caught and reported as an error).
 // The string_view parameters point into data valid only during the callback;
 // the handler must copy if it needs the data beyond the callback scope.
-// onError, in particular, MUST NOT throw: it is invoked both inside the
-// parsers' internal try/catch (where a throw is "delivered" a second time by
-// the same path) and on early-return validation paths that bypass it (where a
-// throw would escape parse()/feed() entirely). Handlers must treat onError as
-// a nothrow notification point.
+// onError, in particular, MUST NOT throw -- it is a notification point, not a
+// control-flow mechanism. How badly a throwing handler misbehaves differs per
+// parser, which is why the contract exists:
+//   - JsonStreamParser routes EVERY error through setError(), which wraps the
+//     callback in try/catch. A throwing onError cannot escape feed()/finish();
+//     they just return false. Report errors by calling setError(), never by
+//     assigning lastError_/error_ and calling handler_.onError() by hand.
+//   - JsonSaxParser delivers errors at one catch point plus a few early-return
+//     validation paths (empty input, UTF-8) that are not wrapped. A throw from
+//     inside the try is caught and delivered a SECOND time by the same catch; a
+//     throw from an early-return path escapes parse() to the caller.
 
 struct JsonSaxHandler {
   virtual ~JsonSaxHandler() = default;
@@ -166,6 +172,14 @@ private:
     if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'N')
       return parseNaN(true);
     if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
+    // End of input: there is no character to name, so the generic branch below
+    // would report "Unexpected: ''" -- a NUL inside the message that truncates
+    // it for any consumer taking a C string, leaving a dangling quote.
+    // At the top level the input held no value at all (empty, whitespace-only
+    // or comment-only, possibly behind a BOM); the stream parser calls that
+    // "Empty input". Inside a container a value was expected but never came.
+    if (pos_ >= input_.size())
+      throw std::runtime_error(depth_ == 0 ? "empty input" : "Unexpected end of input");
     throw std::runtime_error(std::string("Unexpected: '") + c + "'");
   }
 
@@ -498,7 +512,7 @@ public:
         break;
       case State::STR_VALUE:
       case State::STR_KEY:
-        lastError_ = "Unterminated string"; error_ = true; handler_.onError(lastError_); return false;
+        setError("Unterminated string"); return false;
       case State::NUM:
         // emitPendingNumber already calls afterValue() internally on success,
         // so a second call here would double-advance the container counter.
@@ -509,14 +523,14 @@ public:
       case State::LIT_NULL:
         // A LIT_* state at EOF always means the literal was truncated; there is
         // no further input, so the token is invalid.
-        lastError_ = "Invalid literal"; error_ = true; handler_.onError(lastError_); return false;
+        setError("Invalid literal"); return false;
       case State::LINE_COMMENT:
         // Resume the state the comment interrupted (e.g. waiting for a value)
         // so incomplete input such as `{"a": //` is still detected.
         state_ = commentRetState_;
         break;
       case State::BLOCK_COMMENT:
-        lastError_ = "Unterminated block comment"; error_ = true; handler_.onError(lastError_); return false;
+        setError("Unterminated block comment"); return false;
       default:
         break;
     }
@@ -534,7 +548,7 @@ public:
     // input on entry; here it is rejected at the end of input.
     if (validateUTF8 && utf8Need_ != 0) {
       // A multibyte sequence was cut off at end of input.
-      lastError_ = "Invalid UTF-8 in input"; error_ = true; handler_.onError(lastError_); return false;
+      setError("Invalid UTF-8 in input"); return false;
     }
 
     if (state_ == State::TAIL) {
@@ -542,7 +556,7 @@ public:
       // it is trailing data after the completed value ("Trailing chars" in the
       // DOM/JSON parsers), not harmless whitespace.
       if (pendingComment()) {
-        lastError_ = "Data after complete value"; error_ = true; handler_.onError(lastError_); return false;
+        setError("Data after complete value"); return false;
       }
       done_ = true;
       return true;
@@ -553,14 +567,15 @@ public:
       // previous nested check was dead code -- it demanded state_ == TOP &&
       // depth_ == 0, the exact opposite of this branch's precondition; reaching
       // the end means the input never produced a complete document.
-      lastError_ = "Incomplete input"; error_ = true; handler_.onError(lastError_); return false;
+      setError("Incomplete input"); return false;
     }
 
     // state_ == State::TOP && depth_ == 0 now. A real value must have been
-    // produced; empty input and comment-only input are rejected, matching the
-    // DOM parser and JsonSaxParser.
+    // produced; empty input and comment-only input are rejected. The DOM
+    // parser rejects them too, but names the offending (nonexistent) character
+    // as "Unexpected: " + NUL, so this parser's own wording is kept.
     if (!hadValue_) {
-      lastError_ = "Empty input"; error_ = true; handler_.onError(lastError_); return false;
+      setError("Empty input"); return false;
     }
 
     state_ = State::DONE;
@@ -877,7 +892,12 @@ private:
         if (buffer_.compare(pos_ + 1, 3, "NaN") == 0) {
           pos_ += 4;
           if (pos_ < buffer_.size() && isIdentChar(buffer_[pos_])) { setError("Invalid -NaN literal"); return false; }
-          handler_.onDoubleValue(std::numeric_limits<double>::quiet_NaN());
+          // Keep the sign, like the stateless parser (parseNaN) and the DOM
+          // parser (makeDouble(-NAN)) do. It does not affect comparisons -- NaN
+          // != NaN either way -- but a handler that re-serializes the value
+          // would otherwise see -NaN come back as NaN, and std::signbit() would
+          // answer the wrong thing.
+          handler_.onDoubleValue(-std::numeric_limits<double>::quiet_NaN());
           return afterValue();
         }
         if (buffer_.size() - pos_ < 4) { needMore_ = true; return true; }
