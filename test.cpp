@@ -28325,6 +28325,337 @@ TEST(testSchemaValidate) {
 	}
 }
 
+TEST(testSchemaAuditRegressions) {
+	// A helper for "does this schema reject the given instance, and does it say
+	// why it is a schema problem rather than an instance one?"
+	auto rejectsWithSchemaError = [](const std::string& valueJson, const std::string& schemaJson) {
+		asvJSON v, s;
+		ASSERT(v.parse(valueJson));
+		ASSERT(s.parse(schemaJson));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Invalid schema") != std::string::npos);
+	};
+
+	// ---------------------------------------------------------------------
+	// A malformed subschema must be reported even when it sits behind a
+	// keyword that forks a sub-validator. anyOf/oneOf/not/if/contains treat a
+	// branch failure as "the instance did not match that branch", so before the
+	// shapeFailed_ fix the schema error was discarded and the verdict flipped:
+	//   - `if` read as a false condition, steering the instance into `else`;
+	//   - `not` read as a failed match, so the negation *succeeded*;
+	//   - `anyOf`/`oneOf` skipped the broken branch and matched another;
+	//   - `contains` blamed the array for a subschema that never compiled.
+	// ---------------------------------------------------------------------
+	// if: the broken condition must not silently choose a branch.
+	rejectsWithSchemaError("1", R"({"if":{"enum":5},"else":{"type":"string"}})");
+	rejectsWithSchemaError("1", R"({"if":{"enum":5}})");
+	// ...including when the broken condition would have been true.
+	rejectsWithSchemaError("1", R"({"if":{"const":1},"then":{"enum":5}})");
+	// not: a failing branch is its success condition, so it accepted everything.
+	rejectsWithSchemaError("1", R"({"not":{"enum":5}})");
+	rejectsWithSchemaError(R"("x")", R"({"not":{"enum":5}})");
+	// anyOf / oneOf: no "did not match" verdict over a branch that never compiled.
+	rejectsWithSchemaError("1", R"({"anyOf":[{"enum":5},{"type":"integer"}]})");
+	rejectsWithSchemaError("1", R"({"anyOf":[{"enum":5}]})");
+	rejectsWithSchemaError("1", R"({"oneOf":[{"enum":5},{"type":"integer"}]})");
+	// contains: the message must name the schema, not the array.
+	rejectsWithSchemaError("[1]", R"({"contains":{"enum":5}})");
+	// A non-string $ref is a malformed schema too, in the same positions.
+	rejectsWithSchemaError("1", R"({"not":{"$ref":5}})");
+	rejectsWithSchemaError("[1]", R"({"contains":{"$ref":5}})");
+	// The instance-level wording is gone: it was the tell that the schema error
+	// had been swallowed and re-labelled as a verdict about the instance.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("[1]"));
+		ASSERT(s.parse(R"({"contains":{"enum":5}})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("does not contain a matching item") == std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"anyOf":[{"enum":5}]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Does not match any schema in anyOf") == std::string::npos);
+	}
+
+	// The keywords themselves still work when their subschemas are well formed:
+	// aborting early on a broken branch must not disturb normal matching.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"anyOf":[{"type":"string"},{"type":"integer"}]})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		// oneOf still counts matches: an INT satisfies both "integer" and
+		// "number", so this is a "more than one match" failure, not a shape one.
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"oneOf":[{"type":"integer"},{"type":"number"}]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("more than one schema in oneOf") != std::string::npos);
+	}
+	{
+		// `not` negates a matching instance and passes a non-matching one.
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"not":{"type":"string"}})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("x")"));
+		ASSERT(s.parse(R"({"not":{"type":"string"}})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Matches the 'not' schema") != std::string::npos);
+	}
+	{
+		// if/then/else takes the right branch for a well-formed condition.
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"if":{"type":"integer"},"then":{"minimum":0},"else":{"type":"string"}})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+
+	// Documented limit: only subschemas the instance actually reaches are
+	// structurally checked. An unused `properties` entry stays unchecked, so it
+	// must not be reported here -- pinning this so a future eager pass is a
+	// deliberate change rather than an accident.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("{}"));
+		ASSERT(s.parse(R"({"properties":{"unused":{"enum":5}}})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+
+	// ---------------------------------------------------------------------
+	// `type` must accept the JSON shape each custom type actually serializes to.
+	// OBJECTID/REGEX/CUSTOM_TAG/TIMESTAMP/EXTENSION all emit an extended-JSON
+	// object, but only OBJECTID-as-string / TIMESTAMP-as-integer were accepted,
+	// and EXTENSION matched no type at all -- so `{"type":"object"}` rejected
+	// every one of them. Plain JSON parses those forms back as ordinary objects,
+	// which is why the mismatch only showed up on decoded or hand-built nodes.
+	// ---------------------------------------------------------------------
+	auto acceptsUnderType = [](std::unique_ptr<asvJSONValue> node, const char* typeName) {
+		asvJSON v, s;
+		ASSERT(v.parse("{}"));
+		// A factory that rejects its argument returns null; emplacing that
+		// would crash the validator instead of failing the assertion.
+		ASSERT(node);
+		v.getRoot()->obj->emplace("v", std::move(node));
+		ASSERT(s.parse(std::string(R"({"properties":{"v":{"type":")") + typeName + R"("}}})"));
+		std::string err;
+		return v.validate(s, err);
+	};
+	{
+		const unsigned char bin[] = {0x01, 0x02, 0x03, 0x04};
+		// The serialized form is {"$oid":...}: an object.
+		ASSERT(acceptsUnderType(asvJSONValue::makeObjectId("0123456789ab"), "object"));
+		// The pre-existing "string" spelling still passes, as does the numeric
+		// spelling of a Timestamp -- widening only ever admits more instances.
+		ASSERT(acceptsUnderType(asvJSONValue::makeObjectId("0123456789ab"), "string"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeRegex("^x$", "gi"), "object"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeRegex("^x$", "gi"), "string"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeTimestamp(1712345678), "object"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeTimestamp(1712345678), "integer"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeTimestamp(1712345678), "number"));
+		// EXTENSION had no accepted spelling at all; its form is a $binary
+		// object carrying ext_type in subType.
+		ASSERT(acceptsUnderType(asvJSONValue::makeExtension(42, bin, sizeof bin), "object"));
+		// BINARY already accepted both spellings; both must keep working.
+		ASSERT(acceptsUnderType(asvJSONValue::makeBinary(bin, sizeof bin), "object"));
+		ASSERT(acceptsUnderType(asvJSONValue::makeBinary(bin, sizeof bin), "string"));
+		// DATETIME serializes to a plain JSON string, so "string" is its only
+		// shape -- "object" must still be rejected for it.
+		ASSERT(acceptsUnderType(asvJSONValue::makeDateTime(1712345678, 123, 330), "string"));
+		ASSERT(!acceptsUnderType(asvJSONValue::makeDateTime(1712345678, 123, 330), "object"));
+		// A custom tag serializes as {"$customTag":{"name":...,"value":...}}.
+		{
+			auto ct = std::make_unique<asvJSONValue>();
+			ct->type = asvJSONValue::CUSTOM_TAG;
+			ct->str_data = "mytag";
+			ct->custom_value = asvJSONValue::makeString("v");
+			ASSERT(acceptsUnderType(std::move(ct), "object"));
+		}
+		// The widening must not become "any type goes": an ObjectId is still not
+		// an array or a boolean.
+		ASSERT(!acceptsUnderType(asvJSONValue::makeObjectId("0123456789ab"), "array"));
+		ASSERT(!acceptsUnderType(asvJSONValue::makeExtension(42, bin, sizeof bin), "string"));
+	}
+
+	// ---------------------------------------------------------------------
+	// validate() must not let a std::exception escape. getCompiled() guards
+	// std::regex *construction* only; the match itself can still fail, and
+	// MSVC reports an exhausted backtracking stack as std::regex_error
+	// (error_stack) thrown from regex_search -- which reached the caller of
+	// asvJSON::validate() as a hard throw. The verdict is implementation-defined
+	// (a lenient stdlib may match, or fail the pattern) but it must be a bool.
+	// ---------------------------------------------------------------------
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("\"" + std::string(20000, 'a') + "\""));
+		ASSERT(s.parse(R"({"type":"string","pattern":"(a{100}){100}"})"));
+		std::string err;
+		bool ok = true, threw = false;
+		try {
+			ok = v.validate(s, err);
+		} catch (...) {
+			threw = true;
+		}
+		ASSERT(!threw);
+		// When the fence catches, it reports through the one documented prefix.
+		if (!ok) ASSERT(err.find("Schema validation failed") != std::string::npos);
+	}
+	// The same for the no-error overload and for SchemaValidator used directly.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("\"" + std::string(20000, 'a') + "\""));
+		ASSERT(s.parse(R"({"type":"string","pattern":"(a{100}){100}"})"));
+		bool threw = false;
+		try {
+			(void)v.validate(s);
+		} catch (...) {
+			threw = true;
+		}
+		ASSERT(!threw);
+		SchemaValidator direct;
+		try {
+			(void)direct.validate(v.getRoot(), s.getRoot());
+		} catch (...) {
+			threw = true;
+		}
+		ASSERT(!threw);
+	}
+	// The fence must not leave a stale verdict behind: a well-formed schema
+	// right after a failed one still validates.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"type":"integer"})"));
+		std::string err;
+		SchemaValidator sv;
+		(void)sv.validate(v.getRoot(), s.getRoot(), err);
+		ASSERT(err.empty());
+	}
+
+	// ---------------------------------------------------------------------
+	// Numbers in error messages use the JSON double formatter. std::to_string
+	// printed six fixed decimals ("3.140000") and expanded a large magnitude
+	// into every digit it has -- a 1e300 bound produced a 300-digit message.
+	// ---------------------------------------------------------------------
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3.14"));
+		ASSERT(s.parse(R"({"minimum":5})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Value 3.14 is less than minimum 5") != std::string::npos);
+		ASSERT(err.find("3.140000") == std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3.14"));
+		ASSERT(s.parse(R"({"multipleOf":2})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Value 3.14 is not a multiple of 2") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"minimum":1e300})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("1e+300") != std::string::npos);
+		ASSERT(err.size() < 120);
+	}
+	{
+		// An int64 bound is still printed exactly (never via double).
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"minimum":9223372036854775807})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("9223372036854775807") != std::string::npos);
+	}
+
+	// ---------------------------------------------------------------------
+	// Degenerate keyword shapes, in the spirit of the existing empty-`enum` rule.
+	// ---------------------------------------------------------------------
+	// `type: []` matches nothing and produced the useless "Expected type []";
+	rejectsWithSchemaError(R"("x")", R"({"type":[]})");
+	// draft-07: a `type` array SHOULD be unique.
+	rejectsWithSchemaError(R"("x")", R"({"type":["string","string"]})");
+	// draft-07: a `required` array SHOULD be unique.
+	rejectsWithSchemaError(R"({"a":1})", R"({"required":["a","a"]})");
+	// ...but an empty `required` is a legal no-op, unlike an empty `enum`.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"({"a":1})"));
+		ASSERT(s.parse(R"({"required":[]})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	// The draft-04 boolean form only tightens the bound it is named after, so
+	// on its own it silently did nothing while looking strict.
+	rejectsWithSchemaError("1", R"({"exclusiveMinimum":true})");
+	rejectsWithSchemaError("1", R"({"exclusiveMaximum":true})");
+	rejectsWithSchemaError("1", R"({"exclusiveMinimum":false})");
+	// With its partner it keeps working, in both directions.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"minimum":0,"exclusiveMinimum":true})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("0"));
+		ASSERT(s.parse(R"({"minimum":0,"exclusiveMinimum":true})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("exclusiveMinimum 0") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"minimum":5,"exclusiveMinimum":false})"));
+		std::string err;
+		ASSERT(v.validate(s, err)); // non-strict: the bound itself is enough
+	}
+	// The draft-07 numeric form needs no partner and still overrides it.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"minimum":5,"exclusiveMinimum":5})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+
+	// `format` stays a pure annotation: accepted anywhere, asserted about
+	// nothing. Only the keyword's own shape is checked.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("not-an-email")"));
+		ASSERT(s.parse(R"({"type":"string","format":"email"})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	rejectsWithSchemaError(R"("x")", R"({"format":5})");
+}
+
 TEST(testReadWriteFileAny) {
 	// Helper: write a temp file, read it back, verify, clean up
 	auto tmpFile = [](const std::string& ext) -> std::string {
@@ -31047,6 +31378,7 @@ RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSON Schema Validation Tests ---\n";
 	RUN(testSchemaValidate);
+	RUN(testSchemaAuditRegressions);
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
 	RUN(testReadWriteFileAny);

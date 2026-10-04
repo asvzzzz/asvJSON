@@ -9,14 +9,25 @@
 //   object: required, properties, patternProperties, additionalProperties,
 //           minProperties, maxProperties, propertyNames, dependentRequired, dependencies.
 //
-// NOT enforced: "format" is a pure annotation in draft-07 (it carries no
-// assertion), so it is accepted anywhere and never checked -- there is no
-// format validation behind the scenes. "contentMediaType"/"contentEncoding"
-// and the "definitions"/"$schema"/"$id" metadata keywords are likewise
-// unasserted. $ref is local only: it resolves against the root schema through
+// "format" is a pure annotation in draft-07: it carries no assertion, so it is
+// accepted anywhere and never checked against the instance -- there is no format
+// validation behind the scenes. Only the keyword's own shape is asserted (it
+// must be a string). "contentMediaType"/"contentEncoding" and the
+// "definitions"/"$schema"/"$id" metadata keywords are likewise unasserted.
+// $ref is local only: it resolves against the root schema through
 // RFC 6901 JSON Pointer, so "#", "#/defs/x" and array tokens such as
 // "#/allOf/0" all work, but remote/relative references (other documents,
 // external files) are not resolved.
+//
+// validate() never throws: an escaping std::exception (std::bad_alloc from the
+// caches, std::regex_error from a pattern whose *match* runs out of stack) is
+// converted into a false return with a "Schema validation failed: ..." message.
+// A malformed subschema is likewise reported rather than swallowed, including
+// inside anyOf/oneOf/not/if/contains -- those keywords abort on the first broken
+// branch instead of counting it as a branch the instance failed to match. A
+// malformed subschema that the instance never reaches (an unused `properties`
+// entry, a `then` that never fires) is not detected, since only schemas actually
+// visited are structurally checked.
 
 #include "../core.hpp"
 #include <cstring>
@@ -32,17 +43,22 @@ namespace asvJSONInternal {
 
 class SchemaValidator {
 public:
+  // Never throws. Everything below runs inside a fence because a schema (or an
+  // instance) can drive the validator into a std::exception that no local guard
+  // covers -- the sharpest case is std::regex_search: getCompiled() only
+  // guards std::regex *construction*, while the search itself can still fail,
+  // and MSVC reports a stack/memory exhaustion during the match as
+  // std::regex_error(error_stack) from regex_search. Any such escape would
+  // break the bool-returning contract of validate() and of asvJSON::validate().
   bool validate(const asvJSONValue* value, const asvJSONValue* schema) {
     error_.clear();
     path_ = "";
-    if (!schema) return true;
-    static const asvJSONValue kNull; // default-constructed node is NULL_VAL
-    rootSchema_ = schema;
-    refStack_ = std::make_shared<RefStack>();
-    patternCache_ = std::make_shared<PatternCache>();
-    shapeCache_ = std::make_shared<ShapeCache>();
-    refCache_ = std::make_shared<RefCache>();
-    return validateNode(value ? value : &kNull, schema);
+    shapeFailed_ = false; // a validator may be reused for a second document
+    try {
+      return validateImpl(value, schema);
+    } catch (const std::exception& e) {
+      return failInternal(std::string("Schema validation failed: ") + e.what());
+    }
   }
 
   bool validate(const asvJSONValue* value, const asvJSONValue* schema, std::string& errorOut) {
@@ -57,6 +73,22 @@ private:
   const asvJSONValue* rootSchema_ = nullptr;
   std::string error_;
   std::string path_;
+  // Set when this validator rejected the INSTANCE only because a schema object
+  // it walked is malformed (validateKeywordShapes or a non-string $ref). The
+  // boolean answers "failed?" only; the message lives in error_.
+  //
+  // It exists because anyOf/oneOf/not/if/contains fork a sub-validator, and a
+  // forked sub-validator's error is thrown away by design: those keywords treat
+  // a branch failure as "this instance does not match that branch" and move on.
+  // That reading is wrong for a malformed subschema, which is not a property of
+  // the instance at all. Without this flag a schema error inside a branch is
+  // silently swallowed and the parent reports a nonsense outcome for the
+  // instance instead: `{"if":{"enum":5}}` makes every instance take the `else`
+  // path (the broken `if` reads as "condition did not hold"), `{"not":{"enum":5}}`
+  // accepts every instance (a failing `not` reads as "did not match", so the
+  // negation succeeds), and `{"contains":{"enum":5}}` blames the array for a
+  // schema that never compiled.
+  bool shapeFailed_ = false;
   // The set of (value, schema) pairs currently being resolved through a $ref.
   // Shared by every sub-validator forked by anyOf/oneOf/not/if/contains (and
   // copied into them), so cycle detection is exact across the WHOLE
@@ -114,6 +146,45 @@ private:
   // validator's lifetime (rather than as a stack-local in the loop) avoids a
   // dangling pointer if an early-return or refactor ever changes erase timing.
   asvJSONValue propertyNameVal_;
+
+  // The body of validate(), called from inside its exception fence.
+  bool validateImpl(const asvJSONValue* value, const asvJSONValue* schema) {
+    if (!schema) return true;
+    static const asvJSONValue kNull; // default-constructed node is NULL_VAL
+    rootSchema_ = schema;
+    refStack_ = std::make_shared<RefStack>();
+    patternCache_ = std::make_shared<PatternCache>();
+    shapeCache_ = std::make_shared<ShapeCache>();
+    refCache_ = std::make_shared<RefCache>();
+    return validateNode(value ? value : &kNull, schema);
+  }
+
+  // Records the error of a fork that failed on a malformed subschema rather than
+  // on the instance. Returns true when the caller must abort with this error.
+  //
+  // The sub-validator's message already carries the instance path (its setError
+  // prefixed it and it was seeded with our path_), so it is adopted verbatim;
+  // routing it through our own setError would print the path twice.
+  bool adoptShapeError(const SchemaValidator& sub) {
+    if (!sub.shapeFailed_) return false;
+    error_ = sub.error_;
+    shapeFailed_ = true;
+    return true;
+  }
+
+  // Stores the message for an escaping std::exception and reports failure. The
+  // nested guard covers the handler itself: building the message allocates, so a
+  // bad_alloc caught by validate() could otherwise escape again from in here and
+  // break the very contract the fence exists to keep.
+  bool failInternal(const std::string& msg) noexcept {
+    try {
+      error_ = msg;
+    } catch (...) {
+      // Leave whatever error_ holds rather than propagating a second throw.
+    }
+    shapeFailed_ = true;
+    return false;
+  }
 
   // A schema value is either a boolean (true/false schema) or an object.
   static bool isSchema(const asvJSONValue* v) {
@@ -325,10 +396,6 @@ private:
     }
   }
 
-  static bool isIntegerType(const asvJSONValue* v) {
-    return v && v->type == asvJSONValue::INT;
-  }
-
   static bool isNumberType(const asvJSONValue* v) {
     return v && (v->type == asvJSONValue::INT || v->type == asvJSONValue::DOUBLE);
   }
@@ -342,11 +409,16 @@ private:
 
   // Error-message rendering of a number: int64 is printed exactly (the double
   // conversion above would corrupt values like 9223372036854775807 in the
-  // diagnostic); doubles keep the compact to_string spelling.
+  // diagnostic); doubles go through the same formatter as JSON serialization so
+  // the message reads like the document does. std::to_string(double) would print
+  // six fixed decimals ("3.140000") and, worse, expand a large magnitude into
+  // every digit it has -- a 1e300 bound produces a 300-digit error message.
   static std::string numberToStr(const asvJSONValue* v) {
     if (!v) return "0";
     if (v->type == asvJSONValue::INT) return std::to_string(v->num);
-    return std::to_string(getNumberValue(v));
+    std::string out;
+    fmtDoubleVal(getNumberValue(v), out);
+    return out;
   }
 
   // Exact cross-type int64/double ordering. Avoids the precision loss of
@@ -363,8 +435,6 @@ private:
     if (static_cast<double>(ib) == b) return 0;  // b is exactly a
     return b < 0 ? 1 : -1;                          // a is trunc(b), fractional b is strictly larger/smaller
   }
-
-  static bool intEqualsDouble(int64_t a, double b) { return compareIntDouble(a, b) == 0; }
 
   // Exact numeric ordering for two JSON numbers; INT/INT pairs never go
   // through double.
@@ -435,18 +505,33 @@ private:
       case asvJSONValue::STRING: return t == "string";
       case asvJSONValue::ARRAY: return t == "array";
       case asvJSONValue::OBJECT: return t == "object";
-      // Custom types that serialize to strings.
-      case asvJSONValue::DATETIME:
+      // Every custom type below emits its own JSON shape, so a schema written
+      // against the serialized form has to accept that shape. DATETIME is the
+      // one type that serializes to a plain JSON string; the rest serialize to
+      // the extended-JSON conventions ({$oid}, {$regex}, {$customTag},
+      // {$binary}, {$timestamp}) and therefore look like objects to anything
+      // reading the text -- including a user reading their own output and
+      // writing {"type":"object"} for it.
+      //
+      // Both spellings are accepted rather than only the serialized one. Picking
+      // just the serialized shape would retroactively reject schemas that pass
+      // today ({"type":"string"} for an ObjectId, {"type":"integer"} for a
+      // Timestamp, and the pure-JSON mirror form {"type":["string","object"]}
+      // that a shared schema already has to write to cover BINARY); accepting
+      // both only widens the set of instances a schema admits.
+      case asvJSONValue::DATETIME: return t == "string";
       case asvJSONValue::OBJECTID:
       case asvJSONValue::REGEX:
-      case asvJSONValue::CUSTOM_TAG: return t == "string";
-      // Timestamp stores epoch seconds as int64 -- maps to integer.
-      case asvJSONValue::TIMESTAMP: return t == "integer" || t == "number";
+      case asvJSONValue::CUSTOM_TAG: return t == "string" || t == "object";
+      // Timestamp stores epoch seconds as int64 ({"$timestamp":{"t":N}} in its
+      // serialized form).
+      case asvJSONValue::TIMESTAMP: return t == "integer" || t == "number" || t == "object";
       // Binary data can appear as a base64 string or (when decoded) an object;
       // accept both for schema compatibility.
       case asvJSONValue::BINARY: return t == "string" || t == "object";
-      // Extension payload has no single canonical JSON Schema type.
-      case asvJSONValue::EXTENSION: return false;
+      // Extension payload has no single canonical JSON Schema type; it
+      // serializes as a $binary object carrying its ext_type in subType.
+      case asvJSONValue::EXTENSION: return t == "object";
       default: return false;
     }
   }
@@ -498,6 +583,23 @@ private:
         setError("Invalid schema: 'type' must be a string or an array of strings");
         return false;
       }
+      // draft-07: the array "SHOULD be unique" and, as with `enum`, an empty
+      // list matches nothing at all -- it also produces the useless diagnostic
+      // "Expected type [], got 'string'". Same deliberate strictness as the
+      // empty `enum` above: a schema that can never validate anything is a
+      // mistake worth reporting instead of silently rejecting every instance.
+      if (t->type == asvJSONValue::ARRAY && t->arr) {
+        if (t->arr->empty()) {
+          setError("Invalid schema: 'type' should have at least one element");
+          return false;
+        }
+        for (size_t i = 0; i < t->arr->size(); i++)
+          for (size_t j = i + 1; j < t->arr->size(); j++)
+            if ((*t->arr)[i]->str_data == (*t->arr)[j]->str_data) {
+              setError("Invalid schema: 'type' entries must be unique");
+              return false;
+            }
+      }
     }
     if (auto e = schemaGet(schema, "enum")) {
       if (e->type != asvJSONValue::ARRAY || !e->arr) {
@@ -525,6 +627,16 @@ private:
           setError("Invalid schema: 'required' entries must be strings");
           return false;
         }
+      // draft-07: the array "SHOULD be unique". Repeating a name is harmless
+      // (the requirement it states is still checked once), but it is never
+      // written on purpose and hides a copy-paste error in the schema.
+      // An empty array stays legal -- it is a no-op, unlike an empty `enum`.
+      for (size_t i = 0; i < r->arr->size(); i++)
+        for (size_t j = i + 1; j < r->arr->size(); j++)
+          if ((*r->arr)[i]->str_data == (*r->arr)[j]->str_data) {
+            setError("Invalid schema: 'required' entries must be unique");
+            return false;
+          }
     }
     if (auto u = schemaGet(schema, "uniqueItems")) {
       if (u->type != asvJSONValue::BOOL_VAL) {
@@ -551,12 +663,24 @@ private:
       }
     }
     // exclusiveMinimum/exclusiveMaximum take the draft-07 numeric form or the
-    // draft-04 boolean (legacy) form.
-    static const char* const exclusives[] = {"exclusiveMinimum", "exclusiveMaximum"};
-    for (const char* k : exclusives) {
-      if (auto n = schemaGet(schema, k)) {
+    // draft-04 boolean (legacy) form, which is a modifier of the plain bound it
+    // is named after.
+    struct ExclusiveForm { const char* keyword; const char* partner; };
+    static const ExclusiveForm exclusives[] = {
+      {"exclusiveMinimum", "minimum"}, {"exclusiveMaximum", "maximum"}};
+    for (const auto& ex : exclusives) {
+      if (auto n = schemaGet(schema, ex.keyword)) {
         if (n->type != asvJSONValue::BOOL_VAL && !isNumberType(n)) {
-          setError(std::string("Invalid schema: '") + k + "' must be a number or boolean");
+          setError(std::string("Invalid schema: '") + ex.keyword + "' must be a number or boolean");
+          return false;
+        }
+        // The boolean form needs its bound beside it: `exclusiveMinimum: true`
+        // tightens `minimum`, so on its own there is nothing to tighten and the
+        // strictness the author asked for would pass unnoticed. Same reason an
+        // empty `enum` is rejected.
+        if (n->type == asvJSONValue::BOOL_VAL && !schemaGet(schema, ex.partner)) {
+          setError(std::string("Invalid schema: '") + ex.keyword + "' requires '" +
+                   ex.partner + "'");
           return false;
         }
       }
@@ -698,17 +822,23 @@ private:
   // schema costs no revalidation. A cached failure is re-run only to
   // regenerate this validator's own error message (failures abort validation
   // and execute once, so the repetition is negligible).
+  //
+  // A false result also raises shapeFailed_, so a caller that treats the return
+  // value as merely "the instance did not match" (anyOf/oneOf/not/if/contains)
+  // can tell a malformed schema apart from a genuine mismatch.
   bool shapesOk(const asvJSONValue* schema) {
     if (shapeCache_) {
       auto it = shapeCache_->find(schema);
       if (it != shapeCache_->end()) {
         if (it->second) return true;
         (void)validateKeywordShapes(schema); // rebuild error_ for this validator
+        shapeFailed_ = true;
         return false;
       }
     }
     bool ok = validateKeywordShapes(schema);
     if (shapeCache_) (*shapeCache_)[schema] = ok;
+    if (!ok) shapeFailed_ = true;
     return ok;
   }
 
@@ -720,6 +850,7 @@ private:
     if (auto refNode = schemaGet(schema, "$ref")) {
       if (refNode->type != asvJSONValue::STRING) {
         setError("Invalid schema: '$ref' must be a string");
+        shapeFailed_ = true; // malformed schema, not an instance mismatch
         return false;
       }
       auto resolved = resolveRef(refNode->str_data);
@@ -805,6 +936,9 @@ private:
           subVal.shapeCache_ = shapeCache_;
           subVal.refCache_ = refCache_;
           if (subVal.validateNode(value, sub.get())) return true;
+          // A malformed branch is not "this branch did not match" -- abort,
+          // otherwise the schema error disappears behind the anyOf verdict.
+          if (adoptShapeError(subVal)) return false;
         }
         setError("Does not match any schema in anyOf");
         return false;
@@ -824,6 +958,7 @@ private:
           subVal.shapeCache_ = shapeCache_;
           subVal.refCache_ = refCache_;
           if (subVal.validateNode(value, sub.get())) matches++;
+          if (adoptShapeError(subVal)) return false;
         }
         if (matches != 1) {
           setError(matches == 0 ? "Does not match any schema in oneOf" : "Matches more than one schema in oneOf");
@@ -846,6 +981,9 @@ private:
           setError("Matches the 'not' schema");
           return false;
         }
+        // The branch failing is the success condition here, so a malformed
+        // subschema would otherwise negate into "accepts everything".
+        if (adoptShapeError(subVal)) return false;
       }
     }
 
@@ -860,6 +998,9 @@ private:
         ifVal.shapeCache_ = shapeCache_;
         ifVal.refCache_ = refCache_;
         bool cond = ifVal.validateNode(value, ifNode);
+        // A malformed condition reads as a false one and would steer the
+        // instance into the else branch as if the author had asked for that.
+        if (adoptShapeError(ifVal)) return false;
         if (cond && schemaHas(schema, "then")) {
           return validateNode(value, schemaGet(schema, "then"));
         }
@@ -1088,6 +1229,9 @@ private:
           subVal.path_ = path_ + "/" + std::to_string(i);
           subVal.error_.clear();
           if (subVal.validateNode((*items)[i].get(), node)) { found = true; break; }
+          // Blaming the array for a subschema that never compiled is worse
+          // than saying so, so stop at the first malformed item.
+          if (adoptShapeError(subVal)) return false;
         }
         if (!found) {
           setError("Array does not contain a matching item for 'contains' schema");

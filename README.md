@@ -126,6 +126,15 @@ bool valid = doc.validate(schema, error); // true
 
 Supports: `type`, `const`, `enum`, `allOf`/`anyOf`/`oneOf`/`not`, `if`/`then`/`else`, `$ref` (local), `minLength`/`maxLength`/`pattern`, `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`, `minItems`/`maxItems`/`uniqueItems`/`items`/`contains`, `required`/`properties`/`patternProperties`/`additionalProperties`/`minProperties`/`maxProperties`/`propertyNames`/`dependentRequired`/`dependencies`.
 
+`format` is accepted but never asserted -- draft-07 makes it a pure annotation. `$ref` is local only (RFC 6901 JSON Pointer into the root schema).
+
+Behavior worth knowing:
+
+- **Custom types and `type`.** Each custom type is matched by the JSON shape it serializes to, so `{"type":"string"}` accepts a `DATETIME` and `{"type":"object"}` accepts an `OBJECTID`, `REGEX`, `CUSTOM_TAG`, `EXTENSION` or `TIMESTAMP` (all of which emit extended-JSON objects). Both spellings are accepted where both are plausible -- `OBJECTID`/`REGEX`/`CUSTOM_TAG` pass as `string` or `object`, `TIMESTAMP` as `integer`/`number`/`object`, `BINARY` as `string` or `object` -- so no schema that passed before stops passing. Plain JSON parses those extended forms back as ordinary objects, which is why the distinction only shows on decoded or programmatically built nodes.
+- **Malformed schemas fail loudly.** A keyword value of the wrong shape is rejected (`enum` not an array, a non-numeric `minimum`, a non-string `pattern`/`format`, a `type`/`required` entry that is not a string). This includes inside `anyOf`/`oneOf`/`not`/`if`/`contains`: those keywords read a branch failure as "the instance did not match", so a broken branch is now reported instead of being counted as a mismatch that flips the verdict. Only subschemas the instance actually reaches are checked -- an unused `properties` entry is not.
+- **Degenerate keyword shapes are rejected**, in the spirit of the empty-`enum` rule: `enum: []` and `type: []` (both match nothing), duplicate `type`/`required` entries (draft-07 says these arrays SHOULD be unique), and the draft-04 boolean `exclusiveMinimum`/`exclusiveMaximum` without the `minimum`/`maximum` it modifies. An empty `required` stays a legal no-op.
+- **Never throws.** `validate()` converts an escaping `std::exception` -- an allocation failure, or `std::regex_error` from a `pattern` whose *match* runs out of stack (the pattern itself compiled fine) -- into `false` with a `Schema validation failed: ...` message.
+
 Disable with `#define ASVJSON_DISABLE_SCHEMA`.
 
 ### JSONPath (RFC 9535)
