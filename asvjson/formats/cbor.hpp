@@ -33,13 +33,23 @@
 //     every other serializer in the library emits it as-is. Use BINARY (major
 //     type 2, deliberately unchecked) for arbitrary byte payloads.
 //
-// The parser's depth guard is `depth > MAX_NESTING_DEPTH` with the root item at
-// depth 0. That lands on the same effective limit as the core JSON parser --
-// 48 nested containers accepted, 49 rejected -- for both the scalar-leaf and the
-// empty-array-leaf shapes. The single exception is a document whose innermost
-// node is an OBJECT: the JSON parser counts that leaf one level lower and
-// rejects 48, where CBOR accepts it. Both limits are hard caps, so this is a
-// one-level cosmetic difference, not a hole.
+// The depth guard is `depth > MAX_NESTING_DEPTH` with the root item at depth 0,
+// and it is checked for EVERY item -- containers and scalars alike. The core JSON
+// parser instead increments before checking and checks only containers, so the
+// two do not have the same limit in container terms:
+//
+//   document shape                    JSON    CBOR
+//   N containers, innermost empty      48      49
+//   N containers, innermost holds x    48      48
+//
+// CBOR admits a 49th level only when the innermost container is empty: with no
+// children, the deepest item parsed sits at depth N-1 and passes `> 48`; add any
+// child and that child lands at depth N, which fails. So the one-level
+// difference is real but narrow -- it needs a document whose deepest node is an
+// empty container, and it makes CBOR the more permissive of the two. Both limits
+// are hard caps, and tightening this to match JSON (`>=`, or starting the root at
+// depth 1) would reject documents this parser already accepts today, so the
+// asymmetry is deliberate and left in place.
 //
 // A definite-length array/map header is validated against the bytes actually
 // left before anything is parsed or reserved: every element costs at least one

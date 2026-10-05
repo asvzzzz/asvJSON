@@ -681,9 +681,12 @@ Documented round-trip limitations:
   name, whose factories copy bytes verbatim and do not validate - other
   serializers in the library emit such values as-is, CBOR does not. Use `BINARY`
   (byte string, deliberately unchecked) for arbitrary byte payloads.
-- **Nesting** is capped at `MAX_NESTING_DEPTH` (48) levels, matching the JSON
-  parser; a document claiming a longer depth is rejected rather than risking the
-  stack.
+- **Nesting** is capped at `MAX_NESTING_DEPTH` (48) levels and a document claiming
+  a deeper structure is rejected rather than risking the stack. Counting nested
+  *containers*, CBOR allows 49 where the JSON parser allows 48: the CBOR guard
+  (`depth > 48`, root at depth 0) applies to every item including scalars, so one
+  extra level fits only when the innermost container is empty. CBOR is the more
+  permissive of the two; both limits are hard caps.
 
 ### CSV
 

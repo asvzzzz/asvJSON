@@ -4473,31 +4473,72 @@ TEST(testCBORBreakByteOutsideIndefinite) {
 	}
 }
 
-TEST(testCBORNestingDepthMatchesJSONParser) {
-	// The guard is `depth > MAX_NESTING_DEPTH` with the root item at depth 0, which
-	// lands on the same effective limit as the core JSON parser: 48 nested
-	// containers accepted, 49 rejected. Pinned here so the two cannot drift.
-	auto nest = [](size_t n, bool scalarLeaf) {
-		std::vector<uint8_t> cbor(n, 0x81); // array(1) x n
-		cbor.push_back(scalarLeaf ? 0xF6 : 0x80); // null | empty array as the leaf
-		return cbor;
+TEST(testCBORNestingDepthBoundary) {
+	// The guard is `depth > MAX_NESTING_DEPTH` with the root at depth 0 and is
+	// applied to EVERY item, whereas the JSON parser increments before checking
+	// and checks containers only. Counted in nested CONTAINERS, that makes CBOR
+	// one level more permissive than JSON -- but only when the innermost
+	// container is empty, because with no children the deepest parsed item sits
+	// at depth N-1 while any child would land at depth N. Pinned per shape so the
+	// header's table cannot drift.
+	auto cborChain = [](size_t wrappers, std::vector<uint8_t> leaf) {
+		std::vector<uint8_t> d(wrappers, 0x81); // array(1) x wrappers
+		d.insert(d.end(), leaf.begin(), leaf.end());
+		return d;
 	};
-	for (int n = 46; n <= 48; n++) {
-		for (int leaf = 0; leaf < 2; leaf++) {
-			std::vector<uint8_t> cbor = nest(static_cast<size_t>(n), leaf != 0);
-			asvJSON json;
-			if (!json.fromCBOR(cbor.data(), cbor.size()))
-				throw std::runtime_error("fromCBOR rejected depth " + std::to_string(n));
-		}
+	auto accepts = [](const std::vector<uint8_t>& d) {
+		asvJSON json;
+		return json.fromCBOR(d.data(), d.size());
+	};
+	// 49 containers ending in an empty array: CBOR accepts, JSON does not.
+	{
+		std::vector<uint8_t> d = cborChain(48, { 0x80 }); // 48 wrappers + empty array = 49 containers
+		asvJSON json;
+		if (!accepts(d))
+			throw std::runtime_error("fromCBOR rejected 49 containers ending in an empty array");
+		// The isomorphic JSON text is 49 nested arrays (each wrapper holds the
+		// next, the innermost empty) -- 49 '[' and 49 ']'.
+		std::string jsonText(49, '[');
+		jsonText += std::string(49, ']');
+		asvJSON j2;
+		if (j2.parse(jsonText))
+			throw std::runtime_error("JSON accepted the same 49-container shape as CBOR");
 	}
-	for (int n = 49; n <= 50; n++) {
-		for (int leaf = 0; leaf < 2; leaf++) {
-			std::vector<uint8_t> cbor = nest(static_cast<size_t>(n), leaf != 0);
-			asvJSON json;
-			bool ok = json.fromCBOR(cbor.data(), cbor.size());
-			if (ok) throw std::runtime_error("fromCBOR accepted depth " + std::to_string(n));
-			ASSERT(json.getLastError().find("nesting too deep") != std::string::npos);
-		}
+	// 49 containers ending in an empty object: same one-level difference.
+	{
+		std::vector<uint8_t> d = cborChain(48, { 0xA0 }); // 48 wrappers + empty object = 49 containers
+		asvJSON json;
+		if (!accepts(d))
+			throw std::runtime_error("fromCBOR rejected 49 containers ending in an empty object");
+		std::string jsonText(48, '[');
+		jsonText += "{}";
+		jsonText += std::string(48, ']');
+		asvJSON j2;
+		if (j2.parse(jsonText))
+			throw std::runtime_error("JSON accepted the same 49-container shape as CBOR");
+	}
+	// A non-empty innermost container closes the gap: 48 containers accepted by
+	// both, 49 rejected by both.
+	{
+		std::vector<uint8_t> scalarLeaf = cborChain(48, { 0xF6 });    // 48 containers total
+		std::vector<uint8_t> nonEmptyLeaf = cborChain(47, { 0xA1, 0x61, 0x6B, 0x01 }); // 48 total
+		asvJSON a, b;
+		if (!a.fromCBOR(scalarLeaf.data(), scalarLeaf.size()))
+			throw std::runtime_error("fromCBOR rejected 48 containers ending in a scalar");
+		if (!b.fromCBOR(nonEmptyLeaf.data(), nonEmptyLeaf.size()))
+			throw std::runtime_error("fromCBOR rejected 48 containers ending in a non-empty object");
+	}
+	// One past the cap is rejected by both parsers, whatever the leaf.
+	{
+		std::vector<uint8_t> d1 = cborChain(49, { 0x80 }); // 50 containers
+		std::vector<uint8_t> d2 = cborChain(49, { 0xF6 }); // 50 containers
+		asvJSON j1, j2;
+		bool ok1 = j1.fromCBOR(d1.data(), d1.size());
+		if (ok1) throw std::runtime_error("fromCBOR accepted 50 containers ending in an empty array");
+		ASSERT(j1.getLastError().find("nesting too deep") != std::string::npos);
+		bool ok2 = j2.fromCBOR(d2.data(), d2.size());
+		if (ok2) throw std::runtime_error("fromCBOR accepted 50 containers ending in a scalar");
+		ASSERT(j2.getLastError().find("nesting too deep") != std::string::npos);
 	}
 }
 
@@ -31329,7 +31370,7 @@ RUN(testCBORFloat16);
 	RUN(testCBORFromContainsNonAsvJSONExceptions);
 	RUN(testCBORDeclaredLengthVsInput);
 	RUN(testCBORBreakByteOutsideIndefinite);
-	RUN(testCBORNestingDepthMatchesJSONParser);
+	RUN(testCBORNestingDepthBoundary);
 	RUN(testCBORDatetimeFloat64PrecisionLimit);
 	RUN(testCBORRawNumberBecomesString);
 
