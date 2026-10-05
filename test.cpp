@@ -18121,6 +18121,132 @@ TEST(testFromCppAudit2) {
   }
 }
 
+TEST(testFromCppAudit3) {
+  // --- A. a comment in a #define body is REMOVED, not treated as the end ---
+  // Truncating at the first comment start emptied the body of
+  // `#define MAX /* default */ 100`, and `#define U /* c */ "http://x"` lost
+  // the string literal as well.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define MAX /* default */ 100\n"
+      "struct Document { int x = MAX; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":100})"));
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "#define MAX 100 /* cap */\n"
+      "struct Document { int x = MAX; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"x":100})"));
+    // Across a real line continuation.
+    asvJSON b3;
+    ASSERT(b3.fromCpp(std::string_view(
+      "#define MAX /* note */ \\\n"
+      "  100\n"
+      "struct Document { int x = MAX; };\n")));
+    ASSERT_EQ(b3.serialize(), std::string_view(R"({"x":100})"));
+    // `//` inside a literal is data, and a char literal survives too.
+    asvJSON b4;
+    ASSERT(b4.fromCpp(std::string_view(
+      "#define U /*c*/ \"http://x\" // tail\n"
+      "#define C /*c*/ 'z' // t\n"
+      "struct Document { std::string s = U; char c = C; };\n")));
+    ASSERT_EQ(b4.serialize(), std::string_view(R"({"s":"http://x","c":"z"})"));
+  }
+  // --- B. `final` closes a class head ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Foo final { int x = 7; };\n"
+      "struct Document { Foo f; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"f":{"x":7}})"));
+    // A `final` root is unwrapped like any other.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view("struct Document final { int x = 3; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"x":3})"));
+    // With a base list: `final` and the base specifier are both consumed and the
+    // body parses. A base is not a field reference, so Base is not referenced
+    // and stays an unreferenced root alongside Document (roots.size() == 2, so
+    // the root is wrapped rather than unwrapped).
+    asvJSON b3;
+    ASSERT(b3.fromCpp(std::string_view(
+      "struct Base { int b; };\n"
+      "struct Foo final : Base { int x; };\n"
+      "struct Document { Foo f; };\n")));
+    ASSERT_EQ(b3.serialize(),
+              std::string_view(R"({"Base":{"b":0},"Document":{"f":{"x":0}}})"));
+  }
+  // --- C. a post-name attribute is not the declarator name ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int x [[deprecated]]; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":0})"));
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "struct Document { [[nodiscard]] int y = 5; int x [[deprecated(\"use y\")]]; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"y":5,"x":0})"));
+    // Attribute on either side of the initializer; the value must survive and
+    // `[[` must not be read as an array suffix.
+    asvJSON b3;
+    ASSERT(b3.fromCpp(std::string_view(
+      "struct Document { int a [[deprecated]] = 5; int b = 6 [[deprecated]]; };\n")));
+    ASSERT_EQ(b3.serialize(), std::string_view(R"({"a":5,"b":6})"));
+  }
+  // --- D. \\UXXXXXXXX escape ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { std::string s = \"\\U0001F600\"; };\n")));
+    ASSERT_EQ(b.getString("s"), std::string("\xF0\x9F\x98\x80"));
+    // Identical to the surrogate-pair spelling.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "struct Document { std::string s = \"\\uD83D\\uDE00\"; };\n")));
+    ASSERT_EQ(b2.getString("s"), std::string("\xF0\x9F\x98\x80"));
+    // Out of range and surrogate code points have no UTF-8 form.
+    asvJSON b3;
+    ASSERT(!b3.fromCpp(std::string_view(
+      "struct Document { std::string s = \"\\U00110000\"; };\n")));
+    asvJSON b4;
+    ASSERT(!b4.fromCpp(std::string_view(
+      "struct Document { std::string s = \"\\UD800\\uDC00\"; };\n")));
+  }
+  // --- E. octal escapes ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { std::string s = \"\\0\\1\\12\\101\\377\"; };\n")));
+    std::string want;
+    want += '\0';
+    want += '\x01';
+    want += '\n';       // \12 octal
+    want += 'A';        // \101 octal
+    want += static_cast<char>(0xFF);
+    ASSERT_EQ(b.getString("s"), want);
+    // \\8 is not an octal digit and stays verbatim.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view("struct Document { std::string s = \"\\8\"; };\n")));
+    ASSERT_EQ(b2.getString("s"), std::string("8"));
+  }
+  // --- F. std::pair keeps both members ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { std::pair<int, std::string> p{1,\"a\"}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"p":[1,"a"]})"));
+    // Uninitialized, the arity survives.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "struct Document { std::pair<int, std::string> p; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"p":[0,0]})"));
+  }
+  // --- G. a file-scope instance of the root type is merged ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int x = 1; } extra;\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":1,"extra":{"x":1}})"));
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -31633,6 +31759,7 @@ RUN(testFromCppAudit);
 RUN(testFromCppArraySizeGuard);
   RUN(testFromCppDefineMacros);
 RUN(testFromCppAudit2);
+RUN(testFromCppAudit3);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

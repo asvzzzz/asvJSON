@@ -870,6 +870,22 @@ inline uint32_t cppRdHex4(std::string_view s) {
   return v;
 }
 
+inline uint32_t cppRdHex8(std::string_view s) {
+  if (s.size() < 8) return 0xFFFFFFFFu;
+  uint32_t v = 0;
+  for (size_t k = 0; k < 8; k++) {
+    char c = s[k];
+    v <<= 4;
+    if (c >= '0' && c <= '9') v |= static_cast<uint32_t>(c - '0');
+    else if (c >= 'a' && c <= 'f') v |= static_cast<uint32_t>(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v |= static_cast<uint32_t>(c - 'A' + 10);
+    else return 0xFFFFFFFFu;
+  }
+  // Beyond U+10FFFF, or a surrogate written as \U -- both have no UTF-8 form.
+  if (v > 0x10FFFFu || (v >= 0xD800u && v <= 0xDFFFu)) return 0xFFFFFFFFu;
+  return v;
+}
+
 // Append a Unicode code point as UTF-8 (for decoded \uXXXX escapes).
 inline void cppRdUtf8(std::string& out, uint32_t cp) {
   if (cp <= 0x7F) {
@@ -889,23 +905,44 @@ inline void cppRdUtf8(std::string& out, uint32_t cp) {
   }
 }
 
-// Cut a string at the first comment start that is not inside a string/char
-// literal. Comments are removed before a #define replacement list is formed, so
-// the body is everything before them -- and cutting before lexing means a
-// truncated `/*` cannot abort the whole parse with "unterminated block comment".
-inline std::string cppRdCutAtComment(std::string_view s) {
+// Remove comments, keeping string/char literals byte for byte. A #define
+// replacement list is formed AFTER comments are deleted, so the macro body is
+// its text minus every comment -- truncating at the first `/*`/`//` instead
+// would throw away everything after it (`#define MAX /* cap */ 100` became an
+// EMPTY body, and `#define U /* c */ "http://x"` lost the string too). Cutting
+// also cannot report an unterminated `/*`: it is simply dropped, which is what
+// translation phase 3 does. Each comment leaves one space so tokens it
+// separated do not merge; a `//` keeps its terminating newline, because a
+// multi-line `\` continuation lives inside the same logical line.
+inline std::string cppRdStripComments(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
   char quote = 0;
-  for (size_t i = 0; i + 1 < s.size(); i++) {
+  for (size_t i = 0; i < s.size(); i++) {
     const char c = s[i];
     if (quote) {
-      if (c == '\\') { i++; continue; }
+      out += c;
+      if (c == '\\' && i + 1 < s.size()) { out += s[++i]; continue; }
       if (c == quote) quote = 0;
       continue;
     }
-    if (c == '"' || c == '\'') { quote = c; continue; }
-    if (c == '/' && (s[i + 1] == '/' || s[i + 1] == '*')) return std::string(s.substr(0, i));
+    if (c == '"' || c == '\'') { quote = c; out += c; continue; }
+    if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+      while (i < s.size() && s[i] != '\n') i++;
+      out += ' ';
+      if (i < s.size()) out += s[i]; // the '\n' itself
+      continue;
+    }
+    if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) i++;
+      if (i + 1 < s.size()) i++; // consume the '/', the for-step takes the rest
+      out += ' ';
+      continue;
+    }
+    out += c;
   }
-  return std::string(s);
+  return out;
 }
 
 inline std::vector<Tok> cppRdLex(std::string_view in,
@@ -1099,10 +1136,11 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                    (repl.back() == ' ' || repl.back() == '\t' || repl.back() == '\r'))
               repl.pop_back();
             if (!repl.empty()) {
-              // Strip comments from the replacement list: a `// note` after the
-              // value is not a macro-body token and must not be re-emitted at
-              // every expansion site (where it could attach to a field).
-              rtoks = cppRdLex(cppRdCutAtComment(repl), nullptr);
+              // Strip comments from the replacement list: a `// note` or `/* doc */` around
+              // the value is not part of the macro body and must not be
+              // re-emitted at every expansion site (where it could attach to a
+              // field). Removal, not truncation -- the value may follow it.
+              rtoks = cppRdLex(cppRdStripComments(repl), nullptr);
               if (!rtoks.empty() && rtoks.back().kind == Tok::End) rtoks.pop_back();
             }
             (*macros)[name] = std::move(rtoks);
@@ -1165,7 +1203,18 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             case 'n': val += '\n'; break;
             case 't': val += '\t'; break;
             case 'r': val += '\r'; break;
-            case '0': val += '\0'; break;
+            case '0': case '1': case '2': case '3':
+            case '4': case '5': case '6': case '7': {
+              // Octal escape: up to three digits (\0 is NUL, \012 is LF, \101
+              // is 'A'). Only a bare `case '0'` existed, so \012 decoded as NUL
+              // followed by the literal "12" and \101 as "\1" + "01".
+              int oct = e - '0', ocnt = 1;
+              while (ocnt < 3 && i < n && in[i] >= '0' && in[i] <= '7') {
+                oct = oct * 8 + (in[i] - '0'); i++; ocnt++;
+              }
+              val += static_cast<char>(oct);
+              break;
+            }
             case '\\': val += '\\'; break;
             case '\'': val += '\''; break;
             case '"': val += '"'; break;
@@ -1181,6 +1230,14 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                 hv = hv * 16 + d; i++; cnt++;
               }
               val += static_cast<char>(hv);
+              break;
+            }
+            case 'U': {
+              uint32_t u8 = (i + 8 <= n) ? cppRdHex8(std::string_view(in.data() + i, 8)) : 0xFFFFFFFFu;
+              if (u8 == 0xFFFFFFFFu)
+                throw asvJSONError("cpp: invalid \\U escape at line " + std::to_string(sl));
+              i += 8;
+              cppRdUtf8(val, u8);
               break;
             }
             case 'u': {
@@ -1552,8 +1609,26 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
       if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
       if (groups.size() >= 2) ty.value = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[1].first, groups[1].second));
     } else if (tn == "pair") {
+      // A pair is a fixed 2-element aggregate, not a homogeneous sequence, and
+      // keeping only T1 as the element type dropped the second member of
+      // `std::pair<int, std::string>`. Use BOTH as alternatives instead, so an
+      // initializer still resolves group by group (`p{1,"a"}` -> [1,"a"]), and
+      // pin the length at 2 so an uninitialized pair keeps its arity.
+      // NOT a Variant node: that decodes `p{1,"a"}` to the first alternative
+      // alone (1), losing "a" and the pair shape.
       ty.kind = TypeRef::Array;
-      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (groups.size() == 2) {
+        ty.arrayLen = 2;
+        ty.hasLen = true;
+        TypeRef pv;
+        pv.kind = TypeRef::Variant;
+        for (size_t gi = 0; gi < 2; gi++)
+          pv.alts.push_back(std::make_shared<TypeRef>(
+            cppRdParseTypeV(v, groups[gi].first, groups[gi].second)));
+        ty.elem = std::make_shared<TypeRef>(pv);
+      } else if (!groups.empty()) {
+        ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      }
     } else {
       ty.kind = TypeRef::Unknown;
       ty.name = "std::" + tn;
@@ -1856,6 +1931,11 @@ struct Reader {
     std::string name;
     if (cur().kind == Tok::Ident) { name = cur().text; adv(); }
     skipTrivia();
+    // `final` closes a class head (C++11). It is an ordinary identifier token,
+    // so without this the `{` check below missed and skipToSemi() ate the whole
+    // body -- `struct Foo final { int x; };` decoded to a null member, and a
+    // `struct Document final { ... }` root vanished with "no type declarations".
+    if (isKw("final")) { adv(); skipTrivia(); }
     if (isP(":")) { skipBases(); skipTrivia(); }
     if (isP(";")) { adv(); return {}; } // forward declaration
     if (!isP("{")) { skipToSemi(); return {}; }
@@ -2075,9 +2155,39 @@ struct Reader {
       size_t lim = se;
       if (seq != npos) lim = seq;
       else if (biPos != npos) lim = biPos;
+      // A post-name attribute (`int x [[deprecated]];`) is lexed as ordinary
+      // identifiers, so the "last identifier is the declarator name" rule below
+      // picked `deprecated` and the field lost its real name. Mark every
+      // `[[...]]` region in this segment first: those tokens can neither supply
+      // the name nor be read as an array suffix by the suffix loop.
+      std::vector<std::pair<size_t, size_t>> attrs;
+      {
+        size_t k = sb;
+        while (k + 1 < se) {
+          if (!(t[k].kind == Tok::Punct && t[k].text == "[" &&
+                t[k + 1].kind == Tok::Punct && t[k + 1].text == "[")) { k++; continue; }
+          const size_t start = k;
+          int ad = 0;
+          while (k < se) {
+            if (t[k].kind == Tok::Punct && t[k].text == "[") ad++;
+            else if (t[k].kind == Tok::Punct && t[k].text == "]") {
+              ad--;
+              if (ad == 0) { k++; break; }
+            }
+            k++;
+          }
+          attrs.emplace_back(start, k);
+        }
+      }
       size_t nameI = npos;
-      for (size_t k = lim; k > sb; k--)
-        if (t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+      for (size_t k = lim; k > sb; k--) {
+        const bool inAttr = [&] {
+          for (const auto& a : attrs)
+            if (k - 1 >= a.first && k - 1 < a.second) return true;
+          return false;
+        }();
+        if (!inAttr && t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+      }
       if (nameI == npos) {
         if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
         continue;
@@ -2098,12 +2208,28 @@ struct Reader {
         base = f.type;
         baseSet = true;
       }
+      // Attributes are not part of the declarator, so cap the suffix scan at the
+      // first one that follows the name (`[[` must not be read as an array
+      // suffix). Note `lim` is where the initializer STARTS (`=` or the brace
+      // group), so it bounds the suffix scan only -- never the initializer. An
+      // attribute may sit on either side of the initializer
+      // (`int x [[deprecated]] = 5;` and `int x = 5 [[deprecated]];` both work),
+      // so the initializer range is capped by the first attribute after ITS
+      // start, not after the name.
+      const size_t initStart = (seq != npos) ? seq : biPos;
+      size_t lim2 = lim;
+      size_t seInit = se;
+      for (const auto& a : attrs) {
+        if (a.first > nameI && lim2 == lim) lim2 = std::min(lim, a.first);
+        if (initStart != npos && a.first > initStart && seInit == se)
+          seInit = std::min(se, a.first);
+      }
       size_t suf = nameI + 1;
-      while (suf < lim) {
+      while (suf < lim2) {
         if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
           size_t j = suf + 1;
           std::string num;
-          while (j < lim && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
+          while (j < lim2 && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
             if (t[j].kind == Tok::Number) num = t[j].text;
             j++;
           }
@@ -2114,20 +2240,20 @@ struct Reader {
             try { a.arrayLen = static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num))); a.hasLen = true; } catch (...) {}
           }
           f.type = a;
-          suf = (j < lim) ? j + 1 : lim;
+          suf = (j < lim2) ? j + 1 : lim2;
         } else {
           suf++;
         }
       }
       if (seq != npos) {
         f.hasInit = true;
-        for (size_t k = seq + 1; k < se; k++) f.init.push_back(t[k]);
+        for (size_t k = seq + 1; k < seInit; k++) f.init.push_back(t[k]);
       } else if (biPos != npos) {
         // Brace-init (`Foo bar{5};`, `Point p{1,2};`, `int arr[3]{1,2,3};`).
         // The braces ARE part of f.init: materialize() locates the group with
         // cppRdBraceGroup(), exactly as for `= {1,2,3}`.
         f.hasInit = true;
-        for (size_t k = biPos; k < se; k++) f.init.push_back(t[k]);
+        for (size_t k = biPos; k < seInit; k++) f.init.push_back(t[k]);
       }
       def.fields.push_back(std::move(f));
       parsedAny = true;
@@ -2522,12 +2648,11 @@ struct Reader {
     if (roots.size() == 1) {
       const StructDef* s = roots[0];
       if (opts.unwrapRootStruct && s->name == opts.rootName) {
-        // Unwrap to the root struct's own fields. addFileScopeInst() is
-        // deliberately NOT called here, and that is not a lost case: this path
-        // only runs when `roots` holds exactly one struct, so every other
-        // struct is referenced by the root -- which means every fileScope
-        // declarator's type is in `live` and addFileScopeInst() would skip all
-        // of them anyway (see its `live.count()` guard).
+        // Unwrap to the root struct's own fields, then merge any file-scope
+        // instance (`struct Document { int x; } doc;`). This is needed even
+        // though unwrapping runs only when `roots` holds a single struct: `live`
+        // collects the types of the root's FIELDS, not the root's own name, so a
+        // declarator of the root type itself is not in it and would be dropped.
         TypeRef st;
         st.kind = TypeRef::Struct;
         st.name = s->name;
@@ -2537,6 +2662,8 @@ struct Reader {
           val->comments->leading = s->leading;
           val->comments->closing = s->closing;
         }
+        std::vector<const StructDef*> list = {s};
+        addFileScopeInst(val, list);
         return val;
       }
       std::vector<const StructDef*> list = {s};
