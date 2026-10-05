@@ -30,6 +30,22 @@
 //   has already closed requires the parser's frame-closing logic (closeFrames)
 //   to run; the nested-mapping-same-indent case is covered by the round-trip
 //   tests in test.cpp (testYaml...NestedIndent*).
+// * At most ONE trailing comment is re-emitted, inline, and only when it is a
+//   single-line one (a multi-line block comment has no inline form). Several
+//   trailing comments on one node can only arrive from another format -- YAML's
+//   own decoder binds at most one per value line -- and the extras are dropped.
+//   Emitting them on following lines would not help: a `#` line there carries no
+//   marker of which node it belongs to, so it would re-read as the LEADING
+//   comment of the next node (or the root's footing).
+// * Error messages report the line number RELATIVE to the sub-document being
+//   parsed, not to the input: the recursive entry points (block anchors,
+//   `!!yaml` embeds, explicit-key and block-set gathers) hand yamlParseDocImpl a
+//   freshly gathered line vector, and `li + 1` counts from there. A top-level
+//   error is the true line; an error inside an anchored or embedded block
+//   reports its position within that block. This is not fixable with a base
+//   offset alone, because yamlNormalizeSeqItems INSERTS and rewrites lines
+//   (`- a: 1` becomes `-` + `  a: 1`), so an index no longer maps back to the
+//   original document.
 // * See also the "YAML Format Notes" section in AGENTS.md.
 
 #include "../core.hpp"
@@ -61,9 +77,20 @@ inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
 // -- leading comments are gated by wc but the trailing suffix was leaking).
 inline std::string yamlTrail(const asvJSONValue* v, bool wc) {
 	if (!wc || !v->comments || v->comments->trailing.empty()) return std::string();
-	const auto& t = v->comments->trailing.back();
-	if (t.block) return std::string(); // multi-line block cannot go inline
-	return " #" + t.text;
+	// One value line holds one comment. Emit the LAST SINGLE-LINE trailing
+	// comment; a multi-line block comment cannot go inline at all, so a node
+	// whose only trailing comment is a block one gets nothing (that is a
+	// documented loss, see the KNOWN LIMITATIONS block in the header -- YAML's
+	// own decoder cannot produce several trailing comments for one node, so it
+	// only bites a tree bridged in from another format).
+	// Taking the last LINE comment rather than only ever looking at the final
+	// entry matters when a block comment precedes it: previously the block one
+	// suppressed the whole line and the line comment was dropped too.
+	for (auto it = v->comments->trailing.rbegin(); it != v->comments->trailing.rend(); ++it) {
+		if (it->block) continue;
+		return " #" + it->text;
+	}
+	return std::string();
 }
 
 inline bool yamlNeedQuoteOpt(std::string_view s, const YamlWriteOptions& o) {
@@ -309,10 +336,16 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					std::string_view frag(v->str_data.data() + i, eol - i);
 					size_t j = 0;
 					while (j < frag.size() && (frag[j] == ' ' || frag[j] == '\t')) j++;
-					if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
-					if (j > 0 && j == frag.size()) needQuote = true;          // space-only line
-					if (j > 0 && frag[0] == '\t') needQuote = true;           // tab in indent margin
-					if (j < frag.size() && frag[j] == '#') needQuote = true;  // '#...' line: decoder treats it as a comment
+if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
+				if (j > 0 && j == frag.size()) needQuote = true;          // space-only line
+				if (j > 0 && frag[0] == '\t') needQuote = true;           // tab in indent margin
+				// A '#'-leading line needs NO quoting: the decoder only treats
+				// '#' as a comment when the line sits BELOW the block scalar's
+				// content indent, and these lines are written at exactly
+				// (indent + 1) * iw, which IS the content indent (YAML 1.2.2
+				// Ex 8.5). Before the content indent is known the first line
+				// establishes it and is data too. Quoting them anyway only made
+				// valid multi-line strings ("#a\nb") unreadable.
 					i = eol + 1;
 				}
 				if (!needQuote && hasLeadSpace) {
@@ -523,13 +556,23 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 						return -1;
 					};
 					unsigned int cp = 0;
-					for (int j = 0; j < 4; j++) { int h = hex(1 + j); if (h < 0) break; cp = (cp << 4) | static_cast<unsigned int>(h); }
+					bool cpHexOk = true;
+					for (int j = 0; j < 4; j++) { int h = hex(1 + j); if (h < 0) { cpHexOk = false; break; } cp = (cp << 4) | static_cast<unsigned int>(h); }
+					// `\uZZZZ` is not a code point: emit the text as written (as
+					// for any other unknown escape) instead of the NUL the
+					// accumulate-and-break loop used to leave behind.
+					if (!cpHexOk) { out += "\\u"; out.append(s.substr(i + 1, 4)); i += 4; break; }
 					if (cp >= 0xD800 && cp <= 0xDBFF && i + 11 <= s.size() && s[i + 5] == '\\' && s[i + 6] == 'u') {
 						unsigned int lo = 0;
-						for (int j = 0; j < 4; j++) { int h = hex(7 + j); if (h < 0) break; lo = (lo << 4) | static_cast<unsigned int>(h); }
-						if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 10; }
+						bool loHexOk = true;
+						for (int j = 0; j < 4; j++) { int h = hex(7 + j); if (h < 0) { loHexOk = false; break; } lo = (lo << 4) | static_cast<unsigned int>(h); }
+						if (loHexOk && lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 10; }
 						else { i += 4; }
 					} else { i += 4; }
+					// An unpaired surrogate has no UTF-8 form: the 3-byte branch
+					// below would emit ED A0 80 (CESU-8), which is invalid UTF-8.
+					// Substituting U+FFFD matches cppRdUtf8 / udeAppendUtf8.
+					if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
 					if (cp < 0x80) { out += static_cast<char>(cp); }
 					else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
 					else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
@@ -1015,6 +1058,11 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
 inline std::string yamlParseTaggedValue(std::string_view s) {
 	// Guard the tag-chain cycle (yamlParseTaggedValue <-> yamlParseInlineValue):
 	// "!!int !!int ... 5" chains must not overflow the stack.
+	// Do NOT reset the counter before throwing: the guard destructors unwind it
+	// by one per frame on the way out, so a manual reset made the unwind run
+	// from 0 to -(depth) and every failure RAISED the tolerated depth by ~64 for
+	// the rest of the thread (measured: 63 -> 127 -> 191 -> 255), until the
+	// counter could wrap. The RAII guard restores it to 0 by itself.
 	static thread_local int yamlTagNestDepth = 0;
 	struct YamlTagDepthGuard {
 		int& d;
@@ -1022,7 +1070,6 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		~YamlTagDepthGuard() { --d; }
 	} yamlTagDepthGuard(yamlTagNestDepth);
 	if (yamlTagNestDepth >= static_cast<int>(MAX_YAML_DEPTH)) {
-		yamlTagNestDepth = 0;
 		throw asvJSONError("YAML: maximum tag nesting depth exceeded");
 	}
 
@@ -1703,20 +1750,28 @@ inline std::string yamlParseTaggedValue(std::string_view s);
 inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::string_view firstPart, size_t& li) {
 	char openCh = firstPart[0];
 	char closeCh = (openCh == '{') ? '}' : ']';
-	std::string result(firstPart);
+	std::string result;
 	int depth = 0;
 	bool inSq = false, inDq = false;
-	// Count initial depth from firstPart
+	// Count initial depth from firstPart, and DROP a trailing comment: the
+	// multi-line loop below builds its text incrementally, so it stops at a
+	// comment marker -- but `result` used to be pre-seeded with the WHOLE
+	// firstPart, so the `break` below only ended the depth scan while the
+	// comment text stayed in the result. A single-line root flow then failed
+	// with "trailing content after flow value" ("{a: 1} # comment").
+	size_t cut = firstPart.size();
 	for (size_t i = 0; i < firstPart.size(); i++) {
 		char c = firstPart[i];
 		if (inSq) { if (c == '\'' && i + 1 < firstPart.size() && firstPart[i + 1] == '\'') i++; else if (c == '\'') inSq = false; }
-		else if (inDq) { if (c == '\\') i++; else if (c == '"') inDq = false; }
+		else if (inDq) { if (c == '\\' && i + 1 < firstPart.size()) i++; else if (c == '"') inDq = false; }
 		else {
 			if (c == '\'') inSq = true; else if (c == '"') inDq = true;
-			else if (c == '#' && (i == 0 || firstPart[i - 1] == ' ' || firstPart[i - 1] == '\t')) break;
+			else if (c == '#' && (i == 0 || firstPart[i - 1] == ' ' || firstPart[i - 1] == '\t')) { cut = i; break; }
 			else if (c == openCh) depth++; else if (c == closeCh) depth--;
 		}
 	}
+	result.assign(firstPart.substr(0, cut));
+	while (!result.empty() && (result.back() == ' ' || result.back() == '\t')) result.pop_back();
 	if (depth <= 0) {
 		while (!result.empty() && (result.back() == ' ' || result.back() == '\t' || result.back() == '\n')) result.pop_back();
 		return result;
@@ -2019,7 +2074,11 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
                                std::unordered_map<std::string, std::string>& anchors,
                                int depth = 0) {
-	if (depth > 64) throw asvJSONError("YAML: maximum anchor recursion depth exceeded");
+	// Same bound and comparison as every other nesting guard here
+	// (MAX_YAML_DEPTH, rejected AT the limit), so lowering the limit moves this
+	// one too. It used to be a hardcoded `depth > 64`, which admitted two extra
+	// levels and silently disagreed with the other eight sites.
+	if (depth >= static_cast<int>(MAX_YAML_DEPTH)) throw asvJSONError("YAML: maximum anchor recursion depth exceeded");
 	bool found = false;
 	for (size_t li = 0; li < lines.size(); li++) {
 		// Cheap pre-filter: lines without the '&' character cannot define anchors.
@@ -2687,9 +2746,19 @@ inline void yamlNormalizeSeqItems(std::vector<std::string>& lines) {
 	int bsHeaderIndent = -1; // >= 0 while inside a block-scalar body
 	int flowDepth = 0;       // > 0 while inside a multi-line flow collection
 	auto scanFlow = [&](std::string_view s) {
+		// Index loop, NOT a range-for: a `\` inside a double-quoted scalar must
+		// consume the NEXT byte. `for (char c : s) { if (c == '\\') continue; }`
+		// only advanced the iterator, so the escaped quote itself was then read
+		// as a closing quote -- the scanner fell out of the string mid-line and
+		// counted brackets that were string data, leaving flowDepth > 0 and
+		// disabling the sequence-item rewrite for the rest of the document
+		// (`- b: "x\"y[z"` turned later mappings into plain scalar strings).
+		// A doubled '' needs no special case: it toggles the flag twice, so the
+		// parity of the quote count is unchanged.
 		bool dq = false, sq = false;
-		for (char c : s) {
-			if (dq) { if (c == '\\') continue; if (c == '"') dq = false; continue; }
+		for (size_t i = 0; i < s.size(); i++) {
+			const char c = s[i];
+			if (dq) { if (c == '\\' && i + 1 < s.size()) i++; else if (c == '"') dq = false; continue; }
 			if (sq) { if (c == '\'') sq = false; continue; }
 			if (c == '"') { dq = true; continue; }
 			if (c == '\'') { sq = true; continue; }
@@ -3638,6 +3707,17 @@ inline std::string yamlTrailingComment(std::string_view s) {
 	return std::string();
 }
 
+// One node address: "<len>:<bytes>". The length prefix reserves no byte, so a
+// key holding any character -- U+001F, a colon, a NUL -- survives byte for byte
+// (a bare separator cannot: it collides with data. Same scheme as iniPathSeg /
+// json5PathSeg). An empty base is the root, so joining needs no special case.
+inline std::string yamlPathSeg(std::string_view s) {
+	return std::to_string(s.size()) + ":" + std::string(s);
+}
+inline std::string yamlPathJoin(const std::string& base, std::string_view seg) {
+	return base + yamlPathSeg(seg);
+}
+
 inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input) {
 	std::vector<YamlCommentEntry> out;
 	auto lines = splitLines(input);
@@ -3733,8 +3813,7 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 
 		YFrame& top = st.back();
 		if (top.kind == 's') {
-			entryPath = top.path.empty() ? "[" + std::to_string(top.seqIdx) + "]"
-			                             : top.path + "\x1F" + "[" + std::to_string(top.seqIdx) + "]";
+			entryPath = yamlPathJoin(top.path, "[" + std::to_string(top.seqIdx) + "]");
 			top.seqIdx++;
 			valuePart = std::string(rest);
 		} else {
@@ -3752,13 +3831,13 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 					if (!keyPart.empty() && (keyPart[0] == '{' || keyPart[0] == '[')) {
 						bindable = false;
 					} else {
-						const std::string sep = top.path.empty() ? std::string() : "\x1F";
-						if (keyPart.size() >= 2 && keyPart[0] == '"' && keyPart.back() == '"')
-							entryPath = top.path + sep + yamlUnescapeDouble(keyPart.substr(1, keyPart.size() - 2));
-						else if (keyPart.size() >= 2 && keyPart[0] == '\'' && keyPart.back() == '\'')
-							entryPath = top.path + sep + yamlUnescapeSingle(keyPart.substr(1, keyPart.size() - 2));
+						const size_t keyLen = keyPart.size();
+						if (keyLen >= 2 && keyPart[0] == '"' && keyPart.back() == '"')
+							entryPath = yamlPathJoin(top.path, yamlUnescapeDouble(keyPart.substr(1, keyLen - 2)));
+						else if (keyLen >= 2 && keyPart[0] == '\'' && keyPart.back() == '\'')
+							entryPath = yamlPathJoin(top.path, yamlUnescapeSingle(keyPart.substr(1, keyLen - 2)));
 						else
-							entryPath = top.path + sep + std::string(keyPart);
+							entryPath = yamlPathJoin(top.path, keyPart);
 					}
 					if (colon + 1 < rest.size()) valuePart = std::string(rest.substr(colon + 1));
 				}
@@ -3807,14 +3886,27 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 	return out;
 }
 
-// Resolve a comment path ("a\x1Fb\x1F[2]") against the parsed tree.
+// Resolve a comment path against the parsed tree. Path segments are
+// length-prefixed ("<len>:<bytes>", see yamlPathSeg) -- a "\x1F" separator
+// collided with itself: a key may legally hold that byte (raw, or written as
+// "\u001F" in a double-quoted scalar), the collector built the path from the
+// DECODED key, and splitting it produced two segments that match no node, so
+// the comment was silently dropped. This is the same fix INI/JSON5 already have.
 inline asvJSONValue* yamlFindPath(asvJSONValue* root, std::string_view path) {
 	if (path.empty()) return root;
 	asvJSONValue* cur = root;
 	size_t pos = 0;
-	while (pos <= path.size()) {
-		size_t sep = path.find_first_of("\x1F", pos);
-		std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
+	while (pos < path.size()) {
+		size_t colon = path.find(':', pos);
+		if (colon == std::string_view::npos) return nullptr;
+		size_t len = 0;
+		for (size_t k = pos; k < colon; k++) {
+			char d = path[k];
+			if (d < '0' || d > '9' || len > (SIZE_MAX - 9) / 10) return nullptr;
+			len = len * 10 + static_cast<size_t>(d - '0');
+		}
+		if (colon + 1 + len > path.size()) return nullptr;
+		std::string_view seg = path.substr(colon + 1, len);
 		if (seg.empty()) return nullptr;
 		if (seg[0] == '[') {
 			if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
@@ -3832,8 +3924,7 @@ inline asvJSONValue* yamlFindPath(asvJSONValue* root, std::string_view path) {
 			if (it == cur->obj->end()) return nullptr;
 			cur = it->second.get();
 		}
-		if (sep == std::string_view::npos) break;
-		pos = sep + 1;
+		pos = colon + 1 + len;
 	}
 	return cur;
 }

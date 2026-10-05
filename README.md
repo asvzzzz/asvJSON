@@ -596,6 +596,9 @@ YAML parsing details:
 - **Signed non-finite floats** - `+.inf`, `-.inf`, `+.nan`, `+Infinity`, `-Infinity` parse as doubles; unrecognized spellings (`inf`, `+Inf`) stay strings.
 - **Block-form `!!omap` / `!!pairs`** - accepted in block style; applying the tag to a non-sequence block value is an error (was a silent empty array).
 - **Self-referential anchors** - `&x [*x]` and aliases pointing at an anchor that recursively contains itself are reported as an error (guard against infinite pre-scan expansion), while plain aliases keep working.
+- **Escapes** - `\uXXXX` combines surrogate pairs into the astral code point; an unpaired surrogate becomes U+FFFD (it has no UTF-8 form), and an unknown escape such as `\uZZZZ` is kept verbatim.
+- **Comments** - a comment may follow a single-line flow collection (`{a: 1} # c`, also as a mapping value or a `!!set` value), and comment paths are length-prefixed, so a key holding any byte (e.g. U+001F) keeps its comment. At most one trailing comment is re-emitted, inline, and only when it is a single-line one; a multi-line block trailing comment has no inline form and is dropped. Errors inside an anchored or embedded block report a line number relative to that block.
+- **Multi-line strings with `#`** - a `'#'`-leading line is content in a block scalar (the `'#'` only starts a comment below the content indent), so such strings use `|` instead of being quoted.
 
 `toYAML()` also accepts a `YamlWriteOptions` struct for fine-grained control:
 ```cpp

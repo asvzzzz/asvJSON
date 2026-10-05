@@ -9001,19 +9001,40 @@ TEST(testYamlExtras) {
 		ASSERT(json.fromYAML("x: >\n\n\n  hello"));
 		ASSERT_EQ(std::string(json.getString("x")), std::string("\n\nhello\n"));
 	}
-	// Encoder must not emit '#' content lines in block scalars (would be dropped)
+	// A '#' content line IS representable in a block scalar, so the encoder may
+	// use one instead of double-quoting. YAML 1.2.2 Ex 8.5: the '#' starts a
+	// comment only when the line is less indented than the block scalar's
+	// content indent, and the encoder writes every content line at exactly that
+	// indent. Quoting was defensive over-quoting of readable multi-line text.
 	{
 		asvJSON json;
 		ASSERT(json.parse(std::string_view(
 			"{\"s\":\"# line\\nmore\"}")));
 		std::string y = json.toYAML();
-		// The string must be quoted, not a block scalar (block would lose the # line)
-		ASSERT(y.find('|') == std::string::npos
-		       || y.find('\'') != std::string::npos
-		       || y.find('"') != std::string::npos);
 		asvJSON back;
 		ASSERT(back.fromYAML(y));
 		ASSERT_EQ(std::string(back.getString("s")), std::string("# line\nmore"));
+	}
+	// The '#' must survive where it is easiest to lose: right after a blank line
+	// (which is what sets the content indent), and with extra / single leading
+	// spaces (which force the indent indicator).
+	{
+		const char* vals[] = { "#a\n#b", "#a\n\n#b", "#a\n  indented", "#a\n #sp" };
+		for (const char* v : vals) {
+			asvJSON src;
+			std::string json = "{\"s\":\"";
+			for (const char* q = v; *q; q++) {
+				if (*q == '\n') json += "\\n";
+				else if (*q == '"') json += "\\\"";
+				else json += *q;
+			}
+			json += "\"}";
+			ASSERT(src.parse(json));
+			std::string y = src.toYAML();
+			asvJSON back;
+			ASSERT(back.fromYAML(y));
+			ASSERT_EQ(std::string(back.getString("s")), std::string(v));
+		}
 	}
 	// Flow context: [a#b] is a valid scalar "a#b"
 	{
@@ -9068,6 +9089,146 @@ TEST(testYamlExtras) {
 		asvJSON back;
 		ASSERT(back.fromYAML(y));
 		ASSERT_EQ(back.getInt("x"), int64_t(42));
+	}
+}
+
+TEST(testYamlAuditReview) {
+	// A tag-chain rejection must leave the nesting counter at zero. The guard
+	// destructor unwinds one frame per level; resetting the counter by hand
+	// before throwing made the unwind run negative and RAISED the tolerated
+	// depth by ~64 after every failure (63 -> 127 -> 191 -> 255 on one thread),
+	// which eventually wrapped the counter past the limit and rejected
+	// documents that must parse.
+	{
+		auto taggedScalar = [](int n) {
+			std::string s = "k: ";
+			for (int i = 0; i < n; i++) s += "!!int ";
+			return s + "5";
+		};
+		auto depthOf = [&taggedScalar]() -> int {
+			for (int n = 1; n <= 400; n++) {
+				asvJSON j;
+				if (!j.fromYAML(taggedScalar(n))) return n - 1;
+			}
+			return 400;
+		};
+		int first = depthOf();
+		// Saturate the counter with repeated deep rejections on this thread.
+		for (int w = 0; w < 5; w++) {
+			asvJSON j;
+			j.fromYAML(taggedScalar(400));
+		}
+		ASSERT_EQ(first, depthOf());
+		// A document at the accepted depth must still parse after all that.
+		asvJSON j;
+		ASSERT(j.fromYAML(taggedScalar(first)));
+	}
+	// A key may hold U+001F. The comment collector addresses nodes by path, and
+	// a separator byte of its own collided with that data: the path split into
+	// two segments, neither matched a node, and the comment was dropped. The
+	// path is length-prefixed now, so any byte survives.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("\"a\\u001Fb\": 1  # keep me\n"));
+		std::string y = j.toYAML();
+		ASSERT(y.find("keep me") != std::string::npos);
+		asvJSON back;
+		ASSERT(back.fromYAML(y));
+		ASSERT_EQ(back.getInt(std::string("a\x1f" "b", 3)), int64_t(1));
+		// The re-parsed tree must carry the comment as a TRAILING comment on the
+		// member, which proves the collector resolved the length-prefixed path to
+		// the real node rather than to a lookalike.
+		const std::string sepKey("a\x1f" "b", 3);
+		ASSERT(back.getRoot()->get(sepKey) != nullptr);
+		auto member = back.getRoot()->obj->find(sepKey);
+		ASSERT(member != back.getRoot()->obj->end());
+		ASSERT(member->second->comments != nullptr);
+		ASSERT(!member->second->comments->trailing.empty());
+	}
+	// A backslash inside a double-quoted scalar must consume the next byte. The
+	// sequence-item scanner used a range-for, so the escaped quote was read as a
+	// CLOSING quote: brackets in string data were counted, flowDepth stayed
+	// positive, the rewrite was disabled and the remaining mappings degraded to
+	// plain scalar strings.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("l:\n- a: 1\n- b: \"x\\\"y[z\"\n- c: 2\n"));
+		// All three items must be mappings again: item 1 keeps the escaped quote in its
+		// value (the scanner must not treat it as a closing quote, nor count the
+		// '[' inside the string), and item 2 must still parse as `c: 2` rather
+		// than degrading into the scalar "c: 2".
+		const auto& items = *j.getRoot()->get("l")->arr;
+		ASSERT_EQ(items.size(), size_t(3));
+		ASSERT(items[0]->type == asvJSONValue::OBJECT);
+		ASSERT(items[1]->type == asvJSONValue::OBJECT);
+		ASSERT(items[2]->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(items[1]->get("b")->getString()), std::string("x\"y[z"));
+		ASSERT_EQ(items[2]->get("c")->getInt(), int64_t(2));
+	}
+	{
+		// Same for an unescaped brace, and for the doubled-quote single form.
+		asvJSON j;
+		ASSERT(j.fromYAML("l:\n- a: 1\n- b: \"x\\\"y{z\"\n- c: 2\n"));
+		const auto& a = *j.getRoot()->get("l")->arr;
+		ASSERT_EQ(a.size(), size_t(3));
+		ASSERT_EQ(a[1]->type, asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(a[1]->get("b")->getString()), std::string("x\"y{z"));
+		ASSERT_EQ(a[2]->get("c")->getInt(), int64_t(2));
+		asvJSON s;
+		ASSERT(s.fromYAML("l:\n- a: 1\n- b: 'it''s{x'\n- c: 2\n"));
+		const auto& b = *s.getRoot()->get("l")->arr;
+		ASSERT_EQ(b.size(), size_t(3));
+		ASSERT_EQ(b[1]->type, asvJSONValue::OBJECT);
+		ASSERT_EQ(std::string(b[1]->get("b")->getString()), std::string("it's{x"));
+		ASSERT_EQ(b[2]->get("c")->getInt(), int64_t(2));
+	}
+	// A comment may follow a single-line flow collection. The gather pre-seeded
+	// its result with the whole first line and only broke the depth scan at the
+	// '#', so the comment text stayed in the result and the root failed with
+	// "trailing content after flow value".
+	{
+		const char* srcs[] = { "{a: 1} # c\n", "k: {a: 1} # c\n",
+		                       "k: !!set {a, b} # c\n", "[1, 2] # c\n",
+		                       "k: {a: 1 # c\n  , b: 2}\n" };
+		for (const char* src : srcs) {
+			asvJSON j;
+			ASSERT(j.fromYAML(std::string(src)));
+		}
+	}
+	{
+		// A '#' inside a quoted scalar is data; only a real trailing comment is
+		// cut. And a quoted string after the flow is genuinely trailing content.
+		asvJSON j;
+		ASSERT(j.fromYAML("{a: \"x # y\"} # real\n"));
+		ASSERT_EQ(std::string(j.getString("a")), std::string("x # y"));
+		asvJSON bad;
+		ASSERT(!bad.fromYAML("{a: 1} \"# not a comment\"\n"));
+	}
+	// An unpaired surrogate has no UTF-8 form. The 3-byte branch emitted ED A0 80
+	// (CESU-8), which is invalid UTF-8; it is replaced with U+FFFD, matching the
+	// C++/UDE readers. A valid pair still yields the astral code point.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"\\uD800\"\n"));
+		ASSERT_EQ(std::string(j.getString("k")), std::string("\xef\xbf\xbd"));
+		ASSERT(j.fromYAML("k: \"\\uDC00\"\n"));
+		ASSERT_EQ(std::string(j.getString("k")), std::string("\xef\xbf\xbd"));
+		ASSERT(j.fromYAML("k: \"\\uD800x\\uD800\"\n"));
+		ASSERT_EQ(std::string(j.getString("k")), std::string("\xef\xbf\xbd" "x" "\xef\xbf\xbd"));
+		asvJSON p;
+		ASSERT(p.fromYAML("k: \"\\uD83D\\uDE00\"\n"));
+		ASSERT_EQ(std::string(p.getString("k")), std::string("\xf0\x9f\x98\x80"));
+	}
+	// "\\uZZZZ" is not a code point. The accumulate-and-break loop stopped at the
+	// first bad digit and emitted the partial value, which was 0 -> a raw NUL in
+	// the string. Unknown escapes stay verbatim instead.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"\\uZZZZ\"\n"));
+		ASSERT_EQ(std::string(j.getString("k")), std::string("\\uZZZZ"));
+		asvJSON v;
+		ASSERT(v.fromYAML("k: \"\\u00e9\\x41\"\n"));
+		ASSERT_EQ(std::string(v.getString("k")), std::string("\xc3\xa9" "A"));
 	}
 }
 
@@ -31922,6 +32083,7 @@ RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- YAML Extras Tests ---\n";
 	RUN(testYamlExtras);
+RUN(testYamlAuditReview);
 
 	std::cout << "\n--- IsChanged Tests ---\n";
 	RUN(testIsChanged);
