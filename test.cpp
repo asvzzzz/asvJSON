@@ -4373,6 +4373,210 @@ TEST(testCBORFromContainsNonAsvJSONExceptions) {
 	ASSERT(!json2.getLastError().empty());
 }
 
+TEST(testCBORDeclaredLengthVsInput) {
+	// A definite-length array/map count is bounded by the bytes that are left:
+	// every element costs at least one byte (two per map pair), so a bigger count
+	// cannot describe a valid document. The check must precede makeArray()/reserve(),
+	// which used to allocate a full 8 MB vector per header -- 48 nested
+	// `array(1000000)` headers (240 bytes of input) reserved 384 MB before the
+	// first element was even read.
+	{
+		std::vector<uint8_t> data; // array(1000000) with zero payload bytes.
+		for (int levels = 0; levels < 48; levels++) {
+			data.push_back(0x9A); data.push_back(0x00); data.push_back(0x0F); data.push_back(0x42); data.push_back(0x40);
+		}
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted array(1000000) with no payload");
+		ASSERT(json.getLastError().find("longer than input") != std::string::npos);
+	}
+	{
+		std::vector<uint8_t> data; // map(1000000) with zero payload bytes.
+		for (int levels = 0; levels < 48; levels++) {
+			data.push_back(0xBA); data.push_back(0x00); data.push_back(0x0F); data.push_back(0x42); data.push_back(0x40);
+		}
+		asvJSON json;
+		bool ok = json.fromCBOR(data.data(), data.size());
+		if (ok) throw std::runtime_error("fromCBOR accepted map(1000000) with no payload");
+		ASSERT(json.getLastError().find("longer than input") != std::string::npos);
+	}
+	// A count over MAX_ARRAY_SIZE/MAX_OBJECT_SIZE keeps reporting the limit, not the length.
+	{
+		uint8_t arr[] = { 0x9A, 0x00, 0x0F, 0x42, 0x41 }; // 1000001 > MAX_ARRAY_SIZE
+		asvJSON json;
+		bool ok = json.fromCBOR(arr, sizeof(arr));
+		ASSERT(!ok);
+		ASSERT(json.getLastError().find("too large") != std::string::npos);
+	}
+	{
+		uint8_t obj[] = { 0xBA, 0x00, 0x0F, 0x42, 0x41 }; // 1000001 > MAX_OBJECT_SIZE
+		asvJSON json;
+		bool ok = json.fromCBOR(obj, sizeof(obj));
+		ASSERT(!ok);
+		ASSERT(json.getLastError().find("too large") != std::string::npos);
+	}
+	// The bound is exact, so documents that are exactly filled still parse: a
+	// count never exceeds the remaining bytes when every element is present.
+	{
+		uint8_t one[] = { 0x81, 0x01 };                              // array(1) + 1 byte
+		uint8_t three[] = { 0x83, 0x01, 0x02, 0x03 };                // array(3) + 3 bytes
+		uint8_t empty[] = { 0x80 };                                  // array(0)
+		uint8_t pair[] = { 0xA1, 0x61, 0x61, 0x01 };                // map(1) + key(1) + value(1)
+		uint8_t nested[] = { 0x81, 0x81, 0x81, 0x01 };              // nested arrays
+		uint8_t mapArr[] = { 0xA1, 0x61, 0x61, 0x83, 0x01, 0x02, 0x03 }; // map(1) -> array(3)
+		const std::pair<const uint8_t*, size_t> good[] = {
+			{ one, sizeof(one) }, { three, sizeof(three) }, { empty, sizeof(empty) },
+			{ pair, sizeof(pair) }, { nested, sizeof(nested) }, { mapArr, sizeof(mapArr) }
+		};
+		for (const auto& g : good) {
+			asvJSON json;
+			if (!json.fromCBOR(g.first, g.second))
+				throw std::runtime_error("fromCBOR rejected a fully-populated document: " + json.getLastError());
+		}
+	}
+	// One byte short of the declared count is rejected -- by the length bound for
+	// an array, and (with only the key byte present) by the same bound for a map.
+	{
+		uint8_t shortArr[] = { 0x82, 0x01 };        // array(2), one element present
+		uint8_t shortMap[] = { 0xA2, 0x61, 0x61 }; // map(2), one pair's key present
+		asvJSON j1, j2;
+		ASSERT(!j1.fromCBOR(shortArr, sizeof(shortArr)));
+		ASSERT(j1.getLastError().find("longer than input") != std::string::npos);
+		ASSERT(!j2.fromCBOR(shortMap, sizeof(shortMap)));
+		ASSERT(j2.getLastError().find("longer than input") != std::string::npos);
+	}
+}
+
+TEST(testCBORBreakByteOutsideIndefinite) {
+	// 0xFF terminates an indefinite-length array/map/string only (RFC 8949 3.2.2).
+	// At the top level the old "CBOR unexpected indefinite item" was misleading:
+	// major type 7 has no indefinite form at all.
+	{
+		uint8_t data[] = { 0xFF };
+		asvJSON json;
+		bool ok = json.fromCBOR(data, 1);
+		if (ok) throw std::runtime_error("fromCBOR accepted a stray break byte at the top level");
+		ASSERT(json.getLastError().find("break byte outside indefinite-length item") != std::string::npos);
+	}
+	{
+		uint8_t data[] = { 0x81, 0xFF }; // definite-length array(1) holding a break byte
+		asvJSON json;
+		bool ok = json.fromCBOR(data, 2);
+		if (ok) throw std::runtime_error("fromCBOR accepted a break byte as an array element");
+		ASSERT(json.getLastError().find("break byte outside indefinite-length item") != std::string::npos);
+	}
+	{
+		uint8_t data[] = { 0x9F, 0x01, 0xFF }; // well-formed indefinite array: still accepted
+		asvJSON json;
+		ASSERT(json.fromCBOR(data, 3));
+		ASSERT_EQ(json.getRoot()->size(), static_cast<size_t>(1));
+	}
+}
+
+TEST(testCBORNestingDepthMatchesJSONParser) {
+	// The guard is `depth > MAX_NESTING_DEPTH` with the root item at depth 0, which
+	// lands on the same effective limit as the core JSON parser: 48 nested
+	// containers accepted, 49 rejected. Pinned here so the two cannot drift.
+	auto nest = [](size_t n, bool scalarLeaf) {
+		std::vector<uint8_t> cbor(n, 0x81); // array(1) x n
+		cbor.push_back(scalarLeaf ? 0xF6 : 0x80); // null | empty array as the leaf
+		return cbor;
+	};
+	for (int n = 46; n <= 48; n++) {
+		for (int leaf = 0; leaf < 2; leaf++) {
+			std::vector<uint8_t> cbor = nest(static_cast<size_t>(n), leaf != 0);
+			asvJSON json;
+			if (!json.fromCBOR(cbor.data(), cbor.size()))
+				throw std::runtime_error("fromCBOR rejected depth " + std::to_string(n));
+		}
+	}
+	for (int n = 49; n <= 50; n++) {
+		for (int leaf = 0; leaf < 2; leaf++) {
+			std::vector<uint8_t> cbor = nest(static_cast<size_t>(n), leaf != 0);
+			asvJSON json;
+			bool ok = json.fromCBOR(cbor.data(), cbor.size());
+			if (ok) throw std::runtime_error("fromCBOR accepted depth " + std::to_string(n));
+			ASSERT(json.getLastError().find("nesting too deep") != std::string::npos);
+		}
+	}
+}
+
+TEST(testCBORDatetimeFloat64PrecisionLimit) {
+	// Documented in the cbor.hpp header: DATETIME is tag 1 + float64 seconds, so it
+	// inherits float64's exact-integer range. |timestamp| <= 2^53 is exact; beyond
+	// that the seconds are rounded to the nearest representable double and
+	// datetime_ms is dropped entirely. TIMESTAMP (tag 1 + integer) is unaffected.
+	// Returns the whole document by value: a raw asvJSONValue* would dangle as
+	// soon as the local asvJSON that owns it went out of scope.
+	auto roundTrip = [](time_t ts, int ms) {
+		auto v = asvJSONValue::makeDateTime(ts, ms);
+		std::vector<uint8_t> out;
+		v->toCBOR(out);
+		asvJSON json;
+		if (!json.fromCBOR(out.data(), out.size()))
+			throw std::runtime_error("DATETIME round-trip failed: " + json.getLastError());
+		if (json.getRoot() == nullptr || json.getRoot()->type != asvJSONValue::DATETIME)
+			throw std::runtime_error("DATETIME round-trip lost its type");
+		return json;
+	};
+	const time_t two53 = static_cast<time_t>(1LL << 53);
+	// In range: seconds and milliseconds both survive.
+	{
+		asvJSON r = roundTrip(static_cast<time_t>(123456789012LL), 250);
+		ASSERT_EQ(r.getRoot()->timestamp, static_cast<time_t>(123456789012LL));
+		ASSERT_EQ(r.getRoot()->datetime_ms, 250);
+	}
+	// Beyond 2^53 the whole second is gone -- both halves of the documented loss.
+	{
+		asvJSON r = roundTrip(two53 + 1, 500);
+		ASSERT_EQ(r.getRoot()->timestamp, two53);  // rounded to the nearest representable double
+		ASSERT_EQ(r.getRoot()->datetime_ms, 0);    // the .ms fraction cannot survive a spacing of >= 1
+	}
+	{
+		asvJSON r = roundTrip(-two53 - 1, 0);
+		ASSERT_EQ(r.getRoot()->timestamp, -two53);
+		ASSERT_EQ(r.getRoot()->datetime_ms, 0);
+	}
+	// A TIMESTAMP keeps full int64 precision, which is why the two node types
+	// cannot be folded into one another on the wire.
+	{
+		auto v = asvJSONValue::makeTimestamp(static_cast<int64_t>(1LL << 53) + 1);
+		std::vector<uint8_t> out;
+		v->toCBOR(out);
+		asvJSON json;
+		ASSERT(json.fromCBOR(out.data(), out.size()));
+		ASSERT_EQ(json.getRoot()->type, asvJSONValue::TIMESTAMP);
+		ASSERT_EQ(json.getRoot()->num, static_cast<int64_t>((1LL << 53) + 1));
+	}
+}
+
+TEST(testCBORRawNumberBecomesString) {
+	// Documented in the cbor.hpp header: CBOR has no bignum, so a raw_number
+	// STRING (a literal no int64/double can hold) is written as a plain text
+	// string and the flag is lost. Same trade-off as the MessagePack
+	// out-of-range uint64 mapping.
+	asvJSON json;
+	ASSERT(json.parse(std::string(R"({"a":123456789012345678901234567890})")));
+	auto* v = json.get("a");
+	ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+	ASSERT(json.serialize(false) == std::string(R"({"a":123456789012345678901234567890})")); // bare in JSON
+
+	std::vector<uint8_t> cbor = json.toCBOR();
+	ASSERT_EQ(cbor[0], uint8_t(0xA1));        // map(1)
+	ASSERT_EQ(cbor[1], uint8_t(0x61));        // text(1) "a"
+	ASSERT_EQ(cbor[2], uint8_t('a'));
+	ASSERT_EQ(cbor[3], static_cast<uint8_t>((3 << 5) | 24)); // text(30) -- a text string, not a number
+	ASSERT_EQ(cbor[4], uint8_t(30));
+
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+	auto* v2 = json2.get("a");
+	ASSERT(v2 != nullptr && v2->type == asvJSONValue::STRING);
+	ASSERT(!v2->raw_number);                                     // flag lost
+	ASSERT(v2->getString() == std::string("123456789012345678901234567890")); // digits kept verbatim
+	ASSERT(json2.serialize(false) == std::string(R"({"a":"123456789012345678901234567890"})")); // quoted again
+}
+
 TEST(testObjectKeyEscapes) {
 	// Object keys with escape sequences must be decoded per RFC 7159
 	{
@@ -31123,6 +31327,11 @@ RUN(testCBORFloat16);
 	RUN(testCBORTag1MsCarry);
 	RUN(testCBORTag1IntegerDecodesAsTimestamp);
 	RUN(testCBORFromContainsNonAsvJSONExceptions);
+	RUN(testCBORDeclaredLengthVsInput);
+	RUN(testCBORBreakByteOutsideIndefinite);
+	RUN(testCBORNestingDepthMatchesJSONParser);
+	RUN(testCBORDatetimeFloat64PrecisionLimit);
+	RUN(testCBORRawNumberBecomesString);
 
 	std::cout << "\n--- Protobuf Tests ---\n";
 	RUN(testProtobufBasic);

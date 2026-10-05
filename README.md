@@ -656,8 +656,34 @@ CBOR support includes:
 - **All major types**: unsigned/negative integers, byte strings, text strings, arrays, maps, simple values
 - **Indefinite-length** arrays, maps, and strings
 - **Floats**: half-precision (16-bit), single-precision (32-bit), double-precision (64-bit)
-- **Tags**: datetime (tag 1), regular expression (tag 35), extension types (tag 257)
+- **Tags**: datetime (tag 1), regular expression (tag 35), extension types (tag 257), custom tags (tag 258)
 - **Static helper**: `asvJSON::cborFromString()` - JSON string -> CBOR bytes
+
+Documented round-trip limitations:
+- **`DATETIME` is tag 1 + float64** (seconds with a `.ms` fraction), so it inherits
+  float64's exact-integer range. `|timestamp| <= 2^53` is exact; beyond that the
+  seconds are rounded to the nearest representable double (up to ±512 s at the far
+  end of `time_t`) and `datetime_ms` is dropped entirely. Use `TIMESTAMP` (tag 1 +
+  integer) for instants that need full `int64` second precision - that is also why
+  the two node types are kept distinct on the wire: a hand-written tag 1 + integer
+  decodes as `TIMESTAMP`, not as `DATETIME`.
+- **`tz_offset_min` is not encoded** (tag 1 is an absolute UTC instant) and comes
+  back as the default on decode.
+- **A `raw_number` string becomes a quoted string.** A number literal no
+  `int64`/`double` can hold (e.g. `123456789012345678901234567890`) is kept by the
+  JSON parser as a `STRING` with `raw_number` set, so JSON re-emits it unquoted.
+  CBOR has no bignum that would carry the literal text, so it is written as a plain
+  text string: the flag is lost and the value comes back as a `STRING`, quoted
+  again in `toJSON()`. Same trade-off as MessagePack's out-of-range `uint64`.
+- **Text strings must be valid UTF-8** (RFC 8949 §3.1), so `toCBOR()` throws
+  `"CBOR invalid UTF-8 in text string"` rather than emitting a document its own
+  decoder would reject. This also covers a `REGEX` pattern and a `CUSTOM_TAG`
+  name, whose factories copy bytes verbatim and do not validate - other
+  serializers in the library emit such values as-is, CBOR does not. Use `BINARY`
+  (byte string, deliberately unchecked) for arbitrary byte payloads.
+- **Nesting** is capped at `MAX_NESTING_DEPTH` (48) levels, matching the JSON
+  parser; a document claiming a longer depth is rejected rather than risking the
+  stack.
 
 ### CSV
 

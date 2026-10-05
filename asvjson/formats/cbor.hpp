@@ -12,10 +12,51 @@
 //   design choice, needed because the two node types otherwise collapse into
 //   one another; external consumers see a conformant tag 1 either way.
 //
+// Documented lossiness (none of it is a decode error -- the value survives, but
+// in a different shape):
+//   - DATETIME inherits float64's exact-integer range, because tag 1 carries it
+//     as seconds.ms in a float64: |timestamp| <= 2^53 is exact, and beyond that
+//     the seconds are rounded to the nearest representable double (up to +-512 s
+//     at the far end of time_t) while datetime_ms is dropped entirely (it
+//     rounds back to 0 ms). A TIMESTAMP (tag 1 + integer) has no such limit.
+//   - A raw_number STRING -- the exact text of a literal that no int64/double
+//     can hold, e.g. 123456789012345678901234567890 from the JSON parser -- is
+//     written as an ordinary CBOR text string. CBOR has no bignum that would
+//     carry the literal text, so the flag is lost and the value comes back as
+//     a plain STRING (quoted again by toJSON()). Same trade-off as the
+//     MessagePack out-of-range uint64 mapping, see msgpack.hpp.
+//   - RFC 8949 sec 3.1 requires valid UTF-8 in a text string and our own decoder
+//     rejects invalid sequences, so toCBOR() throws "CBOR invalid UTF-8 in text
+//     string" instead of emitting an unreadable document. That reaches beyond
+//     plain strings: makeRegex() and a CUSTOM_TAG name copy bytes verbatim, so
+//     a pattern/tag name holding non-UTF-8 bytes is rejected here even though
+//     every other serializer in the library emits it as-is. Use BINARY (major
+//     type 2, deliberately unchecked) for arbitrary byte payloads.
+//
+// The parser's depth guard is `depth > MAX_NESTING_DEPTH` with the root item at
+// depth 0. That lands on the same effective limit as the core JSON parser --
+// 48 nested containers accepted, 49 rejected -- for both the scalar-leaf and the
+// empty-array-leaf shapes. The single exception is a document whose innermost
+// node is an OBJECT: the JSON parser counts that leaf one level lower and
+// rejects 48, where CBOR accepts it. Both limits are hard caps, so this is a
+// one-level cosmetic difference, not a hole.
+//
+// A definite-length array/map header is validated against the bytes actually
+// left before anything is parsed or reserved: every element costs at least one
+// byte (two per map pair), so a count larger than the remaining input cannot
+// describe a valid document. The check matters because reserve() ran first --
+// 48 nested `array(1000000)` headers (240 bytes of input) each reserved an 8 MB
+// vector, 384 MB in total, before the first element was read.
 #include "../core.hpp"
 #include <limits>
 
 namespace asvJSONInternal {
+
+// The encoder below writes float32/float64 (and tag 1) by copying their raw bit
+// patterns into the output, and the decoder reads them back the same way, so
+// both types must be the IEEE 754 binary32/binary64 layouts the RFC assumes.
+static_assert(sizeof(float) == 4 && sizeof(double) == 8,
+              "CBOR needs IEEE 754 binary32/binary64 float and double");
 
 inline void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
   uint8_t major = mt << 5;
@@ -222,6 +263,10 @@ inline uint64_t cborReadArg(const uint8_t* data, size_t& pos, size_t dataLen, ui
   throw asvJSONError("CBOR: reserved additional info");
 }
 
+// Contract: this either returns a non-null value or throws -- it never hands
+// back a nullptr. The `!chunk` / `!val` / `!v` guards below are therefore dead
+// by construction; they are kept as defense in depth against a future early
+// return, so do not read a failure to trip them as a reachable state.
 inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("CBOR nesting too deep");
   if (pos >= dataLen) throw asvJSONError("CBOR unexpected end");
@@ -232,6 +277,11 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
 
   // Handle indefinite-length items
   if (info == 31) {
+    // 0xFF is the break byte: it only ever terminates an indefinite-length
+    // array/map/string (RFC 8949 sec 3.2.2). Anywhere else it is malformed,
+    // including at the top level, where "unexpected indefinite item" was
+    // actively misleading -- major type 7 has no indefinite form at all.
+    if (major == 7) throw asvJSONError("CBOR break byte outside indefinite-length item");
     if (major == 4) { // indefinite-length array
       auto arr = asvJSONValue::makeArray();
       if (!arr) throw asvJSONError("CBOR array alloc failed");
@@ -338,6 +388,12 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     case 4: { // Array
       uint64_t n64 = cborReadArg(data, pos, dataLen, info);
       if (n64 > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
+      // Every element is at least one byte, so a count above the remaining input
+      // cannot be satisfied. Checked before makeArray()/reserve(): without it a
+      // 5-byte header claiming 1000000 elements reserved 8 MB before the parse
+      // then failed on the first missing element, and 48 nested such headers
+      // (240 bytes of input) turned into 384 MB of vector capacity.
+      if (n64 > static_cast<uint64_t>(dataLen - pos)) throw asvJSONError("CBOR array longer than input");
       auto arr = asvJSONValue::makeArray();
       if (!arr) throw asvJSONError("CBOR array alloc failed");
       size_t n = static_cast<size_t>(n64);
@@ -348,6 +404,10 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     case 5: { // Map
       uint64_t n64 = cborReadArg(data, pos, dataLen, info);
       if (n64 > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("CBOR map too large");
+      // Same bound as the array case, at two bytes per pair (key and value are
+      // each at least one byte). pos <= dataLen is guaranteed by cborReadArg's
+      // bounds checks, so the subtraction cannot wrap.
+      if (n64 > static_cast<uint64_t>((dataLen - pos) / 2)) throw asvJSONError("CBOR map longer than input");
       auto obj = asvJSONValue::makeObject();
       if (!obj) throw asvJSONError("CBOR map alloc failed");
       size_t n = static_cast<size_t>(n64);
