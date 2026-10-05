@@ -17989,6 +17989,138 @@ TEST(testFromCppDefineMacros) {
   }
 }
 
+TEST(testFromCppAudit2) {
+  // --- 1. `public`/`private` without a colon must not spin forever ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct S { public int x; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"S":{"x":0}})"));
+  }
+  // The colon form still consumes the whole specifier, and a later specifier
+  // that is NOT followed by `:` is a plain member.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct S { public: int x; private int y; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"S":{"x":0,"y":0}})"));
+  }
+  // A field literally named `public`, and trivia between the word and the type.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct S { int public; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"S":{"public":0}})"));
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view("struct S { public /*c*/ int x; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"S":{"x":0}})"));
+  }
+  // --- 2. brace-init is decoded, not dropped ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Point { int x; int y; };\n"
+      "struct Document { Point p{1,2}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"p":{"x":1,"y":2}})"));
+  }
+  // Fixed-array length comes from `[N]`, values from the brace group.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int arr[3]{1,2,3}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"arr":[1,2,3]})"));
+  }
+  // `= {1,2,3}` keeps working, and so do two declarators in one declaration.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { int arr[3] = {1,2,3}; int a = 1, b = 2; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"arr":[1,2,3],"a":1,"b":2})"));
+  }
+  // Scalar brace-init is a value, not an aggregate (`int a{1}` decoded as 0
+  // before the literal reader was pointed at the group). Comments inside the
+  // braces are dropped, two declarators each keep their own group, and an empty
+  // group is just the type default.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { int a{1}, b{/*c*/7}; bool c{true}; int d{}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"a":1,"b":7,"c":true,"d":0})"));
+  }
+  // Nested groups and a method body in the same struct must not be confused.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {"
+      " std::array<std::pair<int,int>,2> x{{1,2},{3,4}};"
+      " void f() {} int y{2};\n};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":[[1,2],[3,4]],"y":2})"));
+  }
+  // --- 3./new. strict mode refuses what it cannot represent ---
+  {
+    CppReadOptions strict;
+    strict.strict = true;
+    asvJSON b;
+    ASSERT(!b.fromCpp(std::string_view("struct Document { int x : 3; };\n"), strict));
+    ASSERT(std::string(b.getLastError()).find("bit-field width") != std::string::npos);
+    asvJSON b2;
+    ASSERT(!b2.fromCpp(std::string_view("struct Document { int v = 1 | 2; };\n"), strict));
+    ASSERT(std::string(b2.getLastError()).find("initializer expression") != std::string::npos);
+    asvJSON b3;
+    ASSERT(!b3.fromCpp(std::string_view("struct Document { int v = sizeof(int); };\n"), strict));
+    // A ternary initializer is not a bit-field, and the `=` path is untouched.
+    asvJSON b4;
+    ASSERT(b4.fromCpp(std::string_view("struct Document { int v = 5; int w[2]{7,8}; };\n"), strict));
+    ASSERT_EQ(b4.serialize(), std::string_view(R"({"v":5,"w":[7,8]})"));
+  }
+  // Lenient mode keeps the historical default instead of failing.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int x : 3; int v = 1 << 4; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":0,"v":0})"));
+  }
+  // --- 4. a comment in a #define body is not part of the replacement list ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#define FOO 1 // note\n"
+      "struct Document { int x = FOO; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":1})"));
+    // A truncated block comment must not abort the whole parse.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "#define FOO 1 /* unterminated\n"
+      "struct Document { int x = FOO; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"x":1})"));
+    // `//` inside a string literal is data, not a comment start.
+    asvJSON b3;
+    ASSERT(b3.fromCpp(std::string_view(
+      "#define U \"http://x\" // note\n"
+      "struct Document { std::string s = U; };\n")));
+    ASSERT_EQ(b3.serialize(), std::string_view(R"({"s":"http://x"})"));
+  }
+  // --- 5. a truncated struct body is reported, not silently dropped ---
+  {
+    asvJSON b;
+    ASSERT(!b.fromCpp(std::string_view("struct S { int x;")));
+    ASSERT(std::string(b.getLastError()).find("unterminated struct body") != std::string::npos);
+    // Nested case: the outer struct used to vanish while its inner struct and a
+    // success status came back instead.
+    asvJSON b2;
+    ASSERT(!b2.fromCpp(std::string_view("struct Outer { struct Inner { int y; }; int z;")));
+    ASSERT(std::string(b2.getLastError()).find("unterminated struct body") != std::string::npos);
+    CppReadOptions strict;
+    strict.strict = true;
+    asvJSON b3;
+    ASSERT(!b3.fromCpp(std::string_view("struct S { int x;"), strict));
+  }
+  // --- 6. file-scope instances of an unreferenced type still merge ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Inner { int x; } inst1;\n"
+      "struct Document { int a; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(
+      R"({"Inner":{"x":0},"Document":{"a":0},"inst1":{"x":0}})"));
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -31500,6 +31632,7 @@ RUN(testFromCpp);
 RUN(testFromCppAudit);
 RUN(testFromCppArraySizeGuard);
   RUN(testFromCppDefineMacros);
+RUN(testFromCppAudit2);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);

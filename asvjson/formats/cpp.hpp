@@ -122,8 +122,12 @@ inline std::string cppSingular(std::string w) {
   // Endings that are already singular: -sis (analysis), -us (bus), -is (basis),
   // -as (gas), -os (atlas) and a doubled final -s (address). Dropping the last
   // 's' from these invents a word that does not exist ("bus" -> "bu"), which
-  // is worse than leaving the plural alone. A regular plural never ends in one
-  // of these, so the rule costs nothing.
+  // is worse than leaving the plural alone. The trade-off is real in both
+  // directions: a regular plural ending in one of these keeps its plural name
+  // ("areas" -> "Areas", "ideas" -> "Ideas"), which is cosmetic only -- the
+  // generated type still compiles and round-trips. Guessing which -as word is
+  // already singular is not decidable from the spelling, so the endings rule
+  // wins over an open-ended keep-list.
   if (ends("sis") || ends("us") || ends("is") || ends("as") || ends("os")) return w;
   if (w.size() > 1 && w.back() == 's' && w[w.size() - 2] == 's') return w;
   if (ends("ies")) return w.substr(0, w.size() - 3) + "y";       // cities -> city
@@ -581,10 +585,13 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
       if (cac != objTypeCache_.end()) return cac->second;
       const void* key = static_cast<const void*>(v);
       if (busyObjects_.count(key)) {
-        // Recursive reference: break the cycle with a pointer.
-        // objTypeCache_ was populated by registerStruct before child processing,
-        // so cac (checked above) already covers this case -- we only reach here
-        // if the cache hit failed for some reason; fall back to deriving a name.
+        // Unreachable for a well-formed tree: registerStruct() caches this same
+        // object BEFORE it descends into children, so a re-entrant call for the
+        // same pointer returns at the `cac` lookup above. asvJSONValue owns its
+        // children outright (unique_ptr), so no descendant can be the ancestor's
+        // own pointer. Kept as a cheap backstop for a future container type that
+        // could alias (shared_ptr/weak_ptr children) -- better a pointer-typed
+        // member than unbounded recursion.
         usedUniquePtr_ = true;
         t.kind = CppType::Struct;
         t.structName = cppPascal(hint.empty() ? opts_.rootName : hint, "Node");
@@ -882,6 +889,25 @@ inline void cppRdUtf8(std::string& out, uint32_t cp) {
   }
 }
 
+// Cut a string at the first comment start that is not inside a string/char
+// literal. Comments are removed before a #define replacement list is formed, so
+// the body is everything before them -- and cutting before lexing means a
+// truncated `/*` cannot abort the whole parse with "unterminated block comment".
+inline std::string cppRdCutAtComment(std::string_view s) {
+  char quote = 0;
+  for (size_t i = 0; i + 1 < s.size(); i++) {
+    const char c = s[i];
+    if (quote) {
+      if (c == '\\') { i++; continue; }
+      if (c == quote) quote = 0;
+      continue;
+    }
+    if (c == '"' || c == '\'') { quote = c; continue; }
+    if (c == '/' && (s[i + 1] == '/' || s[i + 1] == '*')) return std::string(s.substr(0, i));
+  }
+  return std::string(s);
+}
+
 inline std::vector<Tok> cppRdLex(std::string_view in,
                                  std::map<std::string, std::vector<Tok>>* macros = nullptr) {
   std::vector<Tok> out;
@@ -1073,7 +1099,10 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                    (repl.back() == ' ' || repl.back() == '\t' || repl.back() == '\r'))
               repl.pop_back();
             if (!repl.empty()) {
-              rtoks = cppRdLex(repl, nullptr);
+              // Strip comments from the replacement list: a `// note` after the
+              // value is not a macro-body token and must not be re-emitted at
+              // every expansion site (where it could attach to a field).
+              rtoks = cppRdLex(cppRdCutAtComment(repl), nullptr);
               if (!rtoks.empty() && rtoks.back().kind == Tok::End) rtoks.pop_back();
             }
             (*macros)[name] = std::move(rtoks);
@@ -1911,10 +1940,15 @@ struct Reader {
         // followed by `:` -- otherwise they could be a field name in a
         // declaration like `int public;` (invalid C++, but we should not mis-parse).
         if (s == "public" || s == "private" || s == "protected") {
+          const size_t save = p;
           adv(); skipTrivia();
-          if (isP(":")) adv();
-          else p--; // not a specifier: rewind so parseMember sees the ident
-          continue;
+          if (isP(":")) { adv(); continue; }
+          // Not an access specifier after all (`public int x;`, or a field
+          // literally named `public`). Rewind to the token start -- not by one
+          // token -- so the ident AND any trivia skipped above are seen again,
+          // then fall through to parseMember(). A one-token rewind followed by
+          // `continue` re-examined the same ident forever and hung.
+          p = save;
         }
         if (s == "template") { skipTemplateParams(); continue; }
         if (s == "typedef") { parseTypedef(); continue; }
@@ -1931,7 +1965,14 @@ struct Reader {
       }
       parseMember(def);
     }
-    return {};
+    // EOF before the closing '}'. Every other exit returns from inside the loop,
+    // so reaching here means the struct body was truncated: `def` was never
+    // registered and all of its fields are silently lost. Report it instead of
+    // dropping the declaration (an unterminated block comment behaves the same
+    // way, in strict and non-strict mode alike -- a truncated header is never
+    // valid C++, so there is no tree to salvage).
+    throw asvJSONError("cpp: unterminated struct body for '" +
+                       (def.name.empty() ? std::string("<anonymous>") : def.name) + "'");
   }
 
   void parseMember(StructDef& def) {
@@ -2004,7 +2045,8 @@ struct Reader {
       const size_t sb = segs[si].first;
       const size_t se = segs[si].second;
       if (sb >= se) continue;
-      size_t seq = npos;
+      size_t seq = npos, biPos = npos;
+      bool bitfield = false;
       {
         int P = 0, A = 0, B = 0, Br = 0;
         for (size_t k = sb; k < se; k++) {
@@ -2016,12 +2058,23 @@ struct Reader {
           else if (s2 == ">") { if (A > 0) A--; }
           else if (s2 == "[") B++;
           else if (s2 == "]") { if (B > 0) B--; }
-          else if (s2 == "{") Br++;
+          else if (s2 == "{") {
+            // Top-level `{` with no `=` before it is brace-init, not a method
+            // body (the outer scan already routed method bodies elsewhere).
+            if (P == 0 && A == 0 && B == 0 && Br == 0) biPos = k;
+            Br++;
+          }
           else if (s2 == "}") { if (Br > 0) Br--; }
           else if (s2 == "=" && P == 0 && A == 0 && B == 0 && Br == 0) { seq = k; break; }
+          // Bit-field width (`int x : 3;`). Reached only before any top-level
+          // `=`, so the `:` of a ternary initializer (`v = c ? 1 : 0`, which
+          // breaks on the `=` first) is never mistaken for one.
+          else if (s2 == ":" && P == 0 && A == 0 && B == 0 && Br == 0) { bitfield = true; break; }
         }
       }
-      size_t lim = (seq == npos) ? se : seq;
+      size_t lim = se;
+      if (seq != npos) lim = seq;
+      else if (biPos != npos) lim = biPos;
       size_t nameI = npos;
       for (size_t k = lim; k > sb; k--)
         if (t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
@@ -2029,6 +2082,12 @@ struct Reader {
         if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
         continue;
       }
+      // A JSON tree has no bit width, so `int x : 3;` can only ever decode to the
+      // field's default. Silent in lenient mode (as before); strict mode rejects
+      // it instead of quietly discarding the width.
+      if (bitfield && opts.strict)
+        throw asvJSONError("cpp: bit-field width is not representable in JSON ('" +
+                           t[nameI].text + "')");
       FieldDef f;
       f.name = t[nameI].text;
       f.leading = (si == 0) ? std::move(lead) : std::vector<Comment>{};
@@ -2063,6 +2122,12 @@ struct Reader {
       if (seq != npos) {
         f.hasInit = true;
         for (size_t k = seq + 1; k < se; k++) f.init.push_back(t[k]);
+      } else if (biPos != npos) {
+        // Brace-init (`Foo bar{5};`, `Point p{1,2};`, `int arr[3]{1,2,3};`).
+        // The braces ARE part of f.init: materialize() locates the group with
+        // cppRdBraceGroup(), exactly as for `= {1,2,3}`.
+        f.hasInit = true;
+        for (size_t k = biPos; k < se; k++) f.init.push_back(t[k]);
       }
       def.fields.push_back(std::move(f));
       parsedAny = true;
@@ -2352,12 +2417,34 @@ struct Reader {
     }
 
     // scalar / unresolved
-    if (hasInit && !grp) {
-      if (auto lit = cppRdScalarLiteral(init, rt.scalar == TypeRef::SDouble)) return lit;
-      const Tok* v = cppRdFirstVal(init);
-      if (v && v->kind == Tok::Ident) {
-        std::string id = cppRdLastIdent(init);
-        if (!id.empty()) return asvJSONValue::makeString(std::move(id));
+    if (hasInit) {
+      const std::vector<Tok>* litSrc = nullptr;
+      if (grp) {
+        // A brace group after a scalar declarator (`int a{1};`, `bool b{true};`)
+        // is a plain scalar initializer, not an aggregate: without this the
+        // group skipped the literal reader entirely and fell through to the
+        // default below, so `int a{1}` decoded as 0. An empty group (`int a{}`)
+        // is just the type default. Restricted to a resolved scalar kind, so an
+        // unresolved (forward referenced) type keeps its existing behaviour.
+        if (rt.kind == TypeRef::Scalar && groups.size() == 1 && !groups[0].empty())
+          litSrc = &groups[0];
+      } else {
+        litSrc = &init;
+      }
+      if (litSrc) {
+        if (auto lit = cppRdScalarLiteral(*litSrc, rt.scalar == TypeRef::SDouble)) return lit;
+        const Tok* v = cppRdFirstVal(*litSrc);
+        if (v && v->kind == Tok::Ident) {
+          std::string id = cppRdLastIdent(*litSrc);
+          if (!id.empty()) return asvJSONValue::makeString(std::move(id));
+        }
+        // An initializer this reader cannot evaluate (`1 | 2`, `1 << 4`,
+        // `sizeof(int)`, `1 ? 2 : 3`) would fall through to the switch below
+        // and silently become 0/false -- a wrong value, not just a missing one.
+        // Lenient mode keeps that default (unchanged); strict mode refuses the
+        // declaration instead of inventing a value.
+        if (opts.strict)
+          throw asvJSONError("cpp: initializer expression is not representable in JSON");
       }
     }
     switch (rt.scalar) {
@@ -2435,6 +2522,12 @@ struct Reader {
     if (roots.size() == 1) {
       const StructDef* s = roots[0];
       if (opts.unwrapRootStruct && s->name == opts.rootName) {
+        // Unwrap to the root struct's own fields. addFileScopeInst() is
+        // deliberately NOT called here, and that is not a lost case: this path
+        // only runs when `roots` holds exactly one struct, so every other
+        // struct is referenced by the root -- which means every fileScope
+        // declarator's type is in `live` and addFileScopeInst() would skip all
+        // of them anyway (see its `live.count()` guard).
         TypeRef st;
         st.kind = TypeRef::Struct;
         st.name = s->name;
