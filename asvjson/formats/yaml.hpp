@@ -2074,11 +2074,20 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
                                std::unordered_map<std::string, std::string>& anchors,
                                int depth = 0) {
-	// Same bound and comparison as every other nesting guard here
-	// (MAX_YAML_DEPTH, rejected AT the limit), so lowering the limit moves this
-	// one too. It used to be a hardcoded `depth > 64`, which admitted two extra
-	// levels and silently disagreed with the other eight sites.
-	if (depth >= static_cast<int>(MAX_YAML_DEPTH)) throw asvJSONError("YAML: maximum anchor recursion depth exceeded");
+	// Recursion backstop mirroring yamlParseDocImpl's entry guard: the caller
+	// passes its OWN depth through, and both use `>`, so a document at exactly
+	// MAX_YAML_DEPTH -- the deepest level the entry check admits -- passes here
+	// as well. A `>=` instead rejected AT the limit: a depth-64 document
+	// containing '&' anywhere (even an inert one inside a comment) died in this
+	// pre-scan while the identical document without '&' parsed fine -- and
+	// because that throw fires at the deepest legal recursion level, it did not
+	// even unwind cleanly: observed as a stack-overflow process crash rather
+	// than the intended error. This guard is unreachable through yamlParseDocImpl
+	// (the entry check stops recursion one level sooner); it protects direct or
+	// future callers. Do not "align" it with the `>=` guards (emitter frame
+	// stack, yamlYamlDepth): those count STACK SIZE and reject when full, while
+	// this one receives a depth VALUE on the entry check's own scale.
+	if (depth > static_cast<int>(MAX_YAML_DEPTH)) throw asvJSONError("YAML: maximum anchor recursion depth exceeded");
 	bool found = false;
 	for (size_t li = 0; li < lines.size(); li++) {
 		// Cheap pre-filter: lines without the '&' character cannot define anchors.
@@ -3907,9 +3916,15 @@ inline asvJSONValue* yamlFindPath(asvJSONValue* root, std::string_view path) {
 		}
 		if (colon + 1 + len > path.size()) return nullptr;
 		std::string_view seg = path.substr(colon + 1, len);
-		if (seg.empty()) return nullptr;
-		if (seg[0] == '[') {
-			if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+		// Dispatch on the node's TYPE, not on the segment's first byte: keys are
+		// arbitrary text, so a key like "[abc]", "[0]" or "" under an OBJECT is a
+		// plain map lookup. Sniffing seg[0] == '[' routed such keys into the array
+		// branch, failed the index parse, returned nullptr, and silently dropped
+		// the comment ("[abc]": 1 # c lost "c"). The collector writes "[N]"
+		// only for ARRAY children, so brackets are a reliable signal there -- and
+		// the size check below keeps an empty segment from reaching front().
+		if (cur->type == asvJSONValue::ARRAY) {
+			if (!cur->arr || seg.size() < 3 || seg.front() != '[' || seg.back() != ']') return nullptr;
 			size_t idx = 0;
 			for (size_t k = 1; k + 1 < seg.size(); k++) {
 				char d = seg[k];
@@ -3918,11 +3933,13 @@ inline asvJSONValue* yamlFindPath(asvJSONValue* root, std::string_view path) {
 			}
 			if (idx >= cur->arr->size()) return nullptr;
 			cur = (*cur->arr)[idx].get();
-		} else {
-			if (cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
+		} else if (cur->type == asvJSONValue::OBJECT) {
+			if (!cur->obj) return nullptr;
 			auto it = mapFind(*cur->obj, seg);
 			if (it == cur->obj->end()) return nullptr;
 			cur = it->second.get();
+		} else {
+			return nullptr;
 		}
 		pos = colon + 1 + len;
 	}

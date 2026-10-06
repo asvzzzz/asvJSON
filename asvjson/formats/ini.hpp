@@ -536,13 +536,17 @@ inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
     }
     if (colon + 1 + len > path.size()) return nullptr;
     std::string_view seg = path.substr(colon + 1, len);
-    // A zero-length segment is reachable: iniSplitDottedPath("a.") yields
-    // ["a", ""], which the decoder turns into {"a": {"": ...}} -- the
-    // comment on that leaf is dropped, but reading seg[0] on an empty view
-    // would be undefined behaviour.
-    if (seg.empty()) return nullptr;
-    if (seg[0] == '[') {
-      if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+    // Dispatch on the node's TYPE, not on the segment's first byte: keys are
+    // arbitrary text, so a key like "[abc]", "[0]" or "" under an OBJECT is a
+    // plain map lookup. Sniffing seg[0] == '[' routed such keys into the array
+    // branch, failed the index parse, returned nullptr, and silently dropped
+    // the comment. An empty segment is reachable (iniSplitDottedPath("a.")
+    // yields ["a", ""], which the decoder turns into {"a": {"": ...}}); here
+    // it is just the empty OBJECT key, and the size check in the ARRAY branch
+    // keeps it from ever reaching front(). The collector writes "[N]" only for
+    // ARRAY children, so brackets are a reliable signal there.
+    if (cur->type == asvJSONValue::ARRAY) {
+      if (!cur->arr || seg.size() < 3 || seg.front() != '[' || seg.back() != ']') return nullptr;
       size_t idx = 0;
       for (size_t k = 1; k + 1 < seg.size(); k++) {
         char d = seg[k];
@@ -551,11 +555,13 @@ inline asvJSONValue* iniFindPath(asvJSONValue* root, std::string_view path) {
       }
       if (idx >= cur->arr->size()) return nullptr;
       cur = (*cur->arr)[idx].get();
-    } else {
-      if (cur->type != asvJSONValue::OBJECT || !cur->obj) return nullptr;
+    } else if (cur->type == asvJSONValue::OBJECT) {
+      if (!cur->obj) return nullptr;
       auto it = (*cur->obj).find(seg);
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
+    } else {
+      return nullptr;
     }
     pos = colon + 1 + len;
   }

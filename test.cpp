@@ -9232,6 +9232,92 @@ TEST(testYamlAuditReview) {
 	}
 }
 
+TEST(testYamlAuditReview2) {
+	// Comment paths are resolved by NODE TYPE, not by the segment's first byte.
+	// A key like "[abc]", "[0]" or "" under an OBJECT went down the array-index
+	// branch (seg[0] == '['), the index parse failed, the lookup returned
+	// nullptr, and the comment was silently dropped -- only ARRAY children use
+	// "[N]" segments, so the object branch must accept any text.
+	{
+		const char* keyed[] = { "\"[abc]\": 1  # keep\n", "\"[0]\": 1  # keep\n",
+		                        "o:\n  \"[x]\": 1  # keep\n" };
+		for (const char* src : keyed) {
+			asvJSON j;
+			ASSERT(j.fromYAML(std::string(src)));
+			std::string y = j.toYAML();
+			ASSERT(y.find("keep") != std::string::npos);
+		}
+		// Array elements still resolve through "[N]" segments.
+		asvJSON aj;
+		ASSERT(aj.fromYAML("a:\n- 1  # keep\n"));
+		ASSERT(aj.toYAML().find("keep") != std::string::npos);
+		// Empty-key leaf: the segment really is "", length prefix "0:".
+		asvJSON ej;
+		ASSERT(ej.fromYAML("\"\": 1  # keep\n"));
+		ASSERT(ej.toYAML().find("keep") != std::string::npos);
+		// Double-check the comment bound to the real node, not a lookalike.
+		asvJSON cj;
+		ASSERT(cj.fromYAML("\"[abc]\": 1  # keep\n"));
+		auto member = cj.getRoot()->obj->find("[abc]");
+		ASSERT(member != cj.getRoot()->obj->end());
+		ASSERT(member->second->comments != nullptr);
+		ASSERT(!member->second->comments->trailing.empty());
+	}
+	// JSON5's collector uses the same length-prefixed paths and had the same
+	// trap: {"[abc]": 1 /* keep */} dropped the comment.
+	{
+		const char* keys[] = { "[abc]", "[0]", "" };
+		for (const char* k : keys) {
+			asvJSON j;
+			ASSERT(j.fromJSON5(std::string("{\"") + k + "\": 1 /* keep */}"));
+			std::string y = j.toJSON5();
+			ASSERT(y.find("keep") != std::string::npos);
+		}
+	}
+	// INI binds comments to ["[abc]"] and to the "a." empty-key leaf
+	// (observable via the node's comment slot; toINI deliberately refuses
+	// bracketed keys, so no output round-trip is involved).
+	{
+		asvJSON j;
+		ASSERT(j.fromINI("a.[abc] = 1 ; keep\n"));
+		auto* n = j.getRoot()->get("a")->get("[abc]");
+		ASSERT(n != nullptr && n->comments != nullptr);
+		ASSERT(!n->comments->trailing.empty());
+		asvJSON j2;
+		ASSERT(j2.fromINI("a. = 1 ; keep\n"));
+		auto* e = j2.getRoot()->get("a")->get("");
+		ASSERT(e != nullptr && e->comments != nullptr);
+	}
+	// The anchor pre-scan guard mirrors yamlParseDocImpl's entry check: same
+	// depth value (the caller passes it through) and the same `>` comparison,
+	// so depth == MAX_YAML_DEPTH is admitted and MAX+1 rejected. A `>=` fired
+	// AT the limit: a depth-64 document carrying an inert '&' (even in a
+	// comment) failed the pre-scan while the identical document without '&'
+	// parsed -- and because the throw happens at the deepest legal recursion
+	// level, a tag-chain document died with a stack overflow instead of a
+	// clean parse error.
+	{
+		std::vector<std::string> anchorDoc = { "a: &x 1", "b: *x" };
+		std::unordered_map<std::string, std::string> anchors64;
+		bool threw = false;
+		try {
+			yamlBuildAnchorMap(anchorDoc, anchors64, static_cast<int>(MAX_YAML_DEPTH));
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(!threw);
+		ASSERT_EQ(anchors64["x"], std::string("1"));
+		std::unordered_map<std::string, std::string> anchors65;
+		threw = false;
+		try {
+			yamlBuildAnchorMap(anchorDoc, anchors65, static_cast<int>(MAX_YAML_DEPTH) + 1);
+		} catch (const asvJSONError& e) {
+			threw = (std::string(e.what()).find("anchor recursion") != std::string::npos);
+		}
+		ASSERT(threw);
+	}
+}
+
 TEST(testToTOON) {
 	// Basic object round-trip
 	{
@@ -32084,6 +32170,7 @@ RUN(testSchemaJsonPointerRefs);
 	std::cout << "\n--- YAML Extras Tests ---\n";
 	RUN(testYamlExtras);
 RUN(testYamlAuditReview);
+	RUN(testYamlAuditReview2);
 
 	std::cout << "\n--- IsChanged Tests ---\n";
 	RUN(testIsChanged);
