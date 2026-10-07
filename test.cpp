@@ -27704,10 +27704,12 @@ TEST(testJSONPathValidator) {
 		ASSERT_EQ(doc.query("$..a").size(), size_t(1));
 		ASSERT_EQ(doc.query("$[?(@..a)]").size(), size_t(0));
 	}
-	// -- filter literals follow the RFC int grammar, which is stricter than JSON --
+	// -- filter literals follow the RFC 9535 2.3.5.1 number grammar
+	//    `number = (int / "-0") [ frac ] [ exp ]`: -0/-0.5 are valid filter
+	//    numbers (the explicit "-0" alternative), leading zeros stay out --
 	{
-		ASSERT(!asvJSON::isValidPath("$[?@.a == -0]"));
-		ASSERT(!asvJSON::isValidPath("$[?@.a == -0.5]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == -0]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == -0.5]"));
 		ASSERT(!asvJSON::isValidPath("$[?@.a == -01]"));
 		ASSERT(asvJSON::isValidPath("$[?@.a == 0]"));
 		ASSERT(asvJSON::isValidPath("$[?@.a == -1]"));
@@ -27726,6 +27728,70 @@ TEST(testJSONPathValidator) {
 		ASSERT_EQ(doc.query("$[?(length(@.s))]").size(), size_t(1));
 		ASSERT_EQ(doc.query("$[?(length(@.s) == 0)]").size(), size_t(1));
 		ASSERT_EQ(doc.query("$[?(value(@.n))]").size(), size_t(2));
+	}
+}
+
+// RFC 9535 conformance fixes: filter -0/-0.5 numbers (2.3.5.1), match/search
+// excluded from path segments (2.4.6/2.4.7), and ValueType function arguments
+// (2.4.3) accepted by the validator and evaluated per the RFC.
+TEST(testJSONPathSpecFixes) {
+	// -- filter number grammar: `number = (int / "-0") [ frac ] [ exp ]` --
+	{
+		ASSERT(asvJSON::isValidPath("$[?@.a == -0]"));
+		ASSERT(asvJSON::isValidPath("$[?@.a == -0.5]"));
+		ASSERT(!asvJSON::isValidPath("$[?@.a == -01]"));
+		ASSERT(!asvJSON::isValidPath("$[?@.a == 01]"));
+		// index/slice selectors keep the 2.3.3 int grammar, where -0 is NOT an int
+		ASSERT(!asvJSON::isValidPath("$[-0]"));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":0,"b":-0.5,"c":1},{"a":2,"b":3,"c":4}])")));
+		// literal -0 takes the exact int64 path and compares as integer 0
+		// (array root so `@` binds to each object; an object root would bind
+		// `@` to the member values and `@.a` on a scalar would be Nothing)
+		ASSERT_EQ(doc.query("$[?@.a == -0]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?@.c == -0]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?@.b == -0.5]").size(), size_t(1));
+		ASSERT_EQ(doc.query("$[?@.a == -0.5]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?@.a == -01]").size(), size_t(0));
+	}
+	// -- match()/search() are never path segments: they take two arguments --
+	{
+		ASSERT(!asvJSON::isValidPath("$.match()"));
+		ASSERT(!asvJSON::isValidPath("$.search()"));
+		ASSERT(!asvJSON::isValidPath("$.match(@.a)"));
+		ASSERT(asvJSON::isValidPath("$.match"));    // plain property selector stays
+		ASSERT(asvJSON::isValidPath("$.length()")); // zero-arg segment extension stays
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"({"match":7,"length":9})")));
+		ASSERT_EQ(doc.query("$.match()").size(), size_t(0));
+		ASSERT_EQ(doc.query("$.search()").size(), size_t(0));
+		ASSERT_EQ(doc.query("$.match").size(), size_t(1));
+		auto* v = doc.queryFirst("$.match");
+		ASSERT(v && v->num == 7);
+	}
+	// -- ValueType function arguments are well-typed with any value literal --
+	{
+		ASSERT(asvJSON::isValidPath("$[?match(5, 'pat')]"));  // non-string input -> LogicalFalse
+		ASSERT(asvJSON::isValidPath("$[?match('abc', 5)]"));  // non-string pattern -> LogicalFalse
+		ASSERT(asvJSON::isValidPath("$[?search(null, true)]"));
+		ASSERT(asvJSON::isValidPath("$[?length(5)]"));
+		ASSERT(asvJSON::isValidPath("$[?length('abc')]"));
+		ASSERT(asvJSON::isValidPath("$[?length(-0.5)]"));
+		ASSERT(asvJSON::isValidPath("$[?(length('abc') == 3)]"));
+		// arity, NodesType parameters and the unimplemented query pattern stay strict
+		ASSERT(!asvJSON::isValidPath("$[?match('a')]"));
+		ASSERT(!asvJSON::isValidPath("$[?match('a','b','c')]"));
+		ASSERT(!asvJSON::isValidPath("$[?count(5)]"));
+		ASSERT(!asvJSON::isValidPath("$[?value(5)]"));
+		ASSERT(!asvJSON::isValidPath("$[?match(@.a, @.b)]"));
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"n":1},{"n":2}])")));
+		ASSERT_EQ(doc.query("$[?match(5, 'pat')]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?match('abc', 5)]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[?match('abc', 'a.c')]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?length('abc') == 3]").size(), size_t(2));
+		ASSERT_EQ(doc.query("$[?length(5) == 0]").size(), size_t(0)); // Nothing == 0 -> false
+		ASSERT_EQ(doc.query("$[?length(-0.5)]").size(), size_t(0));   // Nothing -> falsy
 	}
 }
 
@@ -32266,6 +32332,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testJSONPath);
 	RUN(testJSONPathExtras);
 	RUN(testJSONPathValidator);
+	RUN(testJSONPathSpecFixes);
 
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);

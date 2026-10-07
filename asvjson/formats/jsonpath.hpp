@@ -12,12 +12,15 @@
 //     (no leading zeros) and must lie in the I-JSON exact range
 //     [-(2^53)+1, (2^53)-1]; out-of-range or malformed numbers select nothing
 //     at query time and reject the path in isValidPath.
-//   - Filter *literals* obey the same strict int grammar, which is narrower than
-//     JSON: per 9535 `int = "0" / (["-"] DIGIT1 *DIGIT)` (so -0 is not an int)
-//     and a leading '-' may only introduce a non-zero digit, `-0`, `-0.5` and
-//     `-01` are rejected inside a filter. Such a filter selects nothing at query
-//     time and is reported invalid by isValidPath. This is intentional
-//     conformance, not an oversight, even though the same text is legal JSON.
+//   - Filter *literals* follow the RFC 9535 2.3.5.1 number grammar
+//     `number = (int / "-0") [ frac ] [ exp ]`: `-0` and `-0.5` are valid
+//     filter numbers -- the explicit `"-0"` alternative exists precisely
+//     because `int = "0" / (["-"] DIGIT1 *DIGIT)` on its own rejects `-0`.
+//     A leading zero is still rejected everywhere (`-01`, `01`), matching
+//     both grammars. Index and slice selectors keep the strict 2.3.3 int
+//     grammar, where `-0` is NOT an int: `$[-0]` selects nothing and is
+//     reported invalid by isValidPath, while `$[?@.a == -0]` is a valid
+//     filter that compares as integer 0.
 //   - Recursive descent is supported at the top level ($..name, $..*, $..[...])
 //     but NOT inside a filter. The RFC grammar allows a descendant-segment in a
 //     filter-query, here `$[?(@..a)]` is rejected by isValidPath (the filter's
@@ -46,7 +49,10 @@
 //   - A function used as a path segment must be zero-arg: $.items.length() and
 //     $[?(@.items.length() > 2)] are supported, a segment call with an argument
 //     ($.length(@.a), $[?(@.length(@.a))]) is not a path and is reported
-//     invalid; query() yields no result for it.
+//     invalid; query() yields no result for it. The same holds for
+//     match()/search(): they take two arguments (RFC 9535 2.4.6/2.4.7), so
+//     `$.match()` is not a path either -- isValidPath rejects it and query()
+//     yields no result for it.
 //   - value() as a filter operand formally requires exactly one NodesType
 //     argument (RFC 9535 2.4.8): `value()` with no argument is rejected by
 //     isValidPath() and yields nothing via query(); `value(@.a)` is the correct
@@ -63,17 +69,28 @@
 //     keep the filter evaluator simple and allocation-light, not an oversight;
 //     paths that genuinely need multi-node comparison should be split into
 //     separate query() calls combined by caller code.
-//   - match()/search() take two ValueType arguments per RFC 9535 2.4.6/2.4.7:
-//     the input may be a string literal (match("literal", "pattern")) or a
-//     query path, and the pattern must be a string; a non-string input or
-//     pattern yields LogicalFalse. Patterns go through std::regex
-//     (ECMAScript), which is a superset of the RFC 9485 I-Regexp subset;
-//     patterns relying on lookahead/lookbehind or
-//     backreferences will compile here even though they are not valid I-Regexps.
-//     Untrusted, hand-crafted patterns carry ReDoS risk since std::regex has no
-//     timeout - validate/reject suspiciously nested quantifiers at your boundary
-//     before passing them in when the pattern source is untrusted. Invalid or
-//     otherwise rejected patterns simply yield false (no exception escapes).
+//   - Function arguments follow the RFC 9535 2.4.3 well-typedness rule per
+//     the declared parameter type: a ValueType parameter (match/search input
+//     and pattern, length) accepts any scalar value literal or a singular
+//     query -- there is no static type check to perform, because a non-string
+//     input or pattern simply evaluates to LogicalFalse, which is what the
+//     evaluator does (match(5, "pat") and match("abc", 5) are both
+//     well-typed and both false; length("abc") evaluates to 3). A NodesType
+//     parameter (count, value) accepts only a query path, and min/max/sum/avg
+//     (library extensions not in the RFC) keep the query form their array
+//     semantics need. Two narrowing deviations, kept identical in isValidPath
+//     and query(): a query as the match/search *pattern* (legal per the RFC)
+//     is rejected because the evaluator would read it as a non-string anyway,
+//     and a nested function argument (length(count(@.a)), also legal per the
+//     RFC) is rejected because neither side implements it. Patterns go
+//     through std::regex (ECMAScript), which is a superset of the RFC 9485
+//     I-Regexp subset; patterns relying on lookahead/lookbehind or
+//     backreferences will compile here even though they are not valid
+//     I-Regexps. Untrusted, hand-crafted patterns carry ReDoS risk since
+//     std::regex has no timeout - validate/reject suspiciously nested
+//     quantifiers at your boundary before passing them in when the pattern
+//     source is untrusted. Invalid or otherwise rejected patterns simply
+//     yield false (no exception escapes).
 //   - query()/queryFirst() are lenient: malformed, unterminated, or otherwise
 //     invalid path segments select nothing rather than throwing; however they do
 //     not guard against out-of-memory conditions - std::bad_alloc (or similar)
@@ -156,9 +173,11 @@ inline bool jpParseIntStrict(const std::string& s, int64_t& out) {
   return true;
 }
 
-// Lenient int64 parse for filter numeric literals: RFC int grammar but only
-// the int64 range is enforced (no I-JSON clamp), so exact int64 comparisons in
-// filters keep their precision. Never throws.
+// Lenient int64 parse for filter numeric literals without frac/exp: follows
+// the RFC 9535 2.3.5.1 number grammar `(int / "-0")`, so `-0` is accepted as
+// integer 0 while `-01`/`01` stay rejected; only the int64 range is enforced
+// (no I-JSON clamp), so exact int64 comparisons in filters keep their
+// precision. Never throws.
 inline bool jpParseInt64(const std::string& s, int64_t& out) {
   if (s.empty()) return false;
   size_t i = 0;
@@ -166,7 +185,7 @@ inline bool jpParseInt64(const std::string& s, int64_t& out) {
     if (s.size() == 1) return false;
     i = 1;
   }
-  if (i == 0 && s[i] == '0') {
+  if (s[i] == '0') {
     if (i + 1 != s.size()) return false;
     out = 0;
     return true;
@@ -192,10 +211,10 @@ inline bool jpParseNumber(const std::string& s, double& out) {
     if (s.size() == 1) return false;
     i = 1;
   }
-  // int part ("0" / DIGIT1 *DIGIT)
+  // int part ("0" / DIGIT1 *DIGIT); the optional '-' was consumed above, so
+  // "-0" is accepted per the 2.3.5.1 alternative `(int / "-0")`.
   if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
   if (s[i] == '0') {
-    if (i > 0) return false;
     i++;
     if (i < s.size() && s[i] >= '0' && s[i] <= '9') return false;
   } else {
@@ -702,6 +721,14 @@ inline bool jpIsZeroArgFunc(const std::string& s) {
          s == "sum" || s == "avg" || s == "value";
 }
 
+// The five scalar-literal token types of the RFC 9535 `literal` production
+// (number / string / true / false / null).
+inline bool jpIsScalarLiteralTok(TokType ty) {
+  return ty == TokType::NUMBER || ty == TokType::STRING ||
+         ty == TokType::TRUE_LIT || ty == TokType::FALSE_LIT ||
+         ty == TokType::NULL_LIT;
+}
+
 inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const asvJSONValue* arg);
 
 class JPFilterEval {
@@ -812,14 +839,12 @@ class JPFilterEval {
             node->type == asvJSONValue::ARRAY && node->arr) {
           int64_t i;
           if (!idx.ok || !jpParseIntStrict(idx.val, i)) {
-            if (lex_.peek().type == TokType::RBRACKET) lex_.next();
             node = nullptr;
           } else {
             size_t ai;
             if (i < 0) {
               size_t mag = static_cast<size_t>(-i);
               if (mag > node->arr->size()) {
-                if (lex_.peek().type == TokType::RBRACKET) lex_.next();
                 node = nullptr;
               } else {
                 ai = node->arr->size() - mag;
@@ -833,7 +858,6 @@ class JPFilterEval {
         } else if (idx.type == TokType::STRING && node &&
                    node->type == asvJSONValue::OBJECT && node->obj) {
           if (!idx.ok) {
-            if (lex_.peek().type == TokType::RBRACKET) lex_.next();
             node = nullptr;
           } else {
             auto it = node->obj->find(idx.val);
@@ -843,6 +867,9 @@ class JPFilterEval {
           // wildcard: the node is selected iff it has at least one child
           if (jpAllChildren(node).empty()) node = nullptr;
         }
+        // The single ']' consume point, error paths included: the error
+        // branches above must not eat it themselves or a following ']'
+        // (e.g. in `@[01]]`) would be swallowed twice.
         if (lex_.peek().type == TokType::RBRACKET) lex_.next();
       } else {
         break;
@@ -852,12 +879,13 @@ class JPFilterEval {
     return node;
   }
 
-  const asvJSONValue* parseFuncValue() {
-    Tok t = lex_.peek();
-    lastOperandFromQuery_ = false;
-
+  // Consumes and materializes one scalar-literal token (number/string/true/
+  // false/null); the caller must gate on jpIsScalarLiteralTok(peek) first.
+  // A malformed number/string returns nullptr after the token was consumed.
+  // Never sets lastOperandFromQuery_ (a literal is never a query).
+  const asvJSONValue* parseScalarLiteral() {
+    Tok t = lex_.next();
     if (t.type == TokType::NUMBER) {
-      lex_.next();
       if (!t.ok) return nullptr;
       if (t.val.find('.') != std::string::npos) {
         double d;
@@ -870,27 +898,21 @@ class JPFilterEval {
       if (jpParseNumber(t.val, d)) return hold(asvJSONValue::makeDouble(d));
       return nullptr;
     }
-
     if (t.type == TokType::STRING) {
-      lex_.next();
       if (!t.ok) return nullptr;
       return hold(asvJSONValue::makeString(t.val.data(), t.val.size()));
     }
+    if (t.type == TokType::TRUE_LIT) return hold(asvJSONValue::makeBool(true));
+    if (t.type == TokType::FALSE_LIT) return hold(asvJSONValue::makeBool(false));
+    if (t.type == TokType::NULL_LIT) return hold(asvJSONValue::makeNull());
+    return nullptr;
+  }
 
-    if (t.type == TokType::TRUE_LIT) {
-      lex_.next();
-      return hold(asvJSONValue::makeBool(true));
-    }
+  const asvJSONValue* parseFuncValue() {
+    Tok t = lex_.peek();
+    lastOperandFromQuery_ = false;
 
-    if (t.type == TokType::FALSE_LIT) {
-      lex_.next();
-      return hold(asvJSONValue::makeBool(false));
-    }
-
-    if (t.type == TokType::NULL_LIT) {
-      lex_.next();
-      return hold(asvJSONValue::makeNull());
-    }
+    if (jpIsScalarLiteralTok(t.type)) return parseScalarLiteral();
 
     if (t.type != TokType::IDENT) return nullptr;
 
@@ -944,6 +966,11 @@ class JPFilterEval {
       if (lex_.peek().type == TokType::RPAREN && jpIsZeroArgFunc(fn)) {
         // zero-arg form: the function applies to the current node
         arg = cur_;
+      } else if (fn == "length" && jpIsScalarLiteralTok(lex_.peek().type)) {
+        // RFC 9535 2.4.4: length's parameter is ValueType, so a scalar
+        // literal is a well-typed argument (string -> code-point count,
+        // any other scalar -> Nothing, i.e. nullptr below).
+        arg = parseScalarLiteral();
       } else {
         arg = resolvePath();
       }
@@ -1273,7 +1300,15 @@ inline std::unique_ptr<asvJSONValue> jpApplyFunc(const std::string& fn, const as
   if (fn == "value") {
     return arg ? cloneValue(arg) : nullptr;
   }
-  return nullptr;
+  if (fn == "match" || fn == "search") {
+    // Registered names (jpIsFuncName) but never segment functions: RFC 9535
+    // 2.4.6/2.4.7 give them two arguments, so a zero-arg segment call
+    // ($.match()) has no meaning. jpExpand reaches this branch with the
+    // parentheses already consumed; nullptr makes it an empty result while
+    // isValidPath rejects the path outright.
+    return nullptr;
+  }
+  return nullptr; // unknown function name (defensive; none registered here)
 }
 
 inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) {
@@ -1292,7 +1327,10 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
         // Segment-level functions take no arguments (length(), count(), ...,
         // value()). A call with arguments was previously evaluated with the
         // arguments silently dropped; query() is lenient so reject it as an
-        // empty result instead.
+        // empty result instead. match()/search() are registered names but are
+        // not segment functions at all (they take two arguments, RFC 9535
+        // 2.4.6/2.4.7): jpApplyFunc returns nullptr for them, so $.match()
+        // is an empty result here while isValidPath rejects the path.
         if (lex.peek().type != TokType::RPAREN) {
           current.clear();
           break;
@@ -1429,6 +1467,28 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
   return true;
 }
 
+// Consumes one scalar-literal token for a ValueType function argument; false
+// when the token is not a literal or is malformed (a NUMBER like "-01" fails
+// the 2.3.5.1 number grammar).
+inline bool jpValidateValueLiteral(PathLexer& lex) {
+  Tok t = lex.peek();
+  if (!jpIsScalarLiteralTok(t.type)) return false;
+  if (!t.ok) return false;
+  if (t.type == TokType::NUMBER) {
+    double d;
+    if (!jpParseNumber(t.val, d)) return false;
+  }
+  lex.next();
+  return true;
+}
+
+// A ValueType function argument per RFC 9535 2.4.3: any value literal or a
+// singular query path -- no static type check is required beyond the syntax.
+inline bool jpValidateValueTypeArg(PathLexer& lex) {
+  if (jpIsScalarLiteralTok(lex.peek().type)) return jpValidateValueLiteral(lex);
+  return jpValidateQueryPath(lex);
+}
+
 inline bool jpValidateOperand(PathLexer& lex);
 inline bool jpValidateNotExpr(PathLexer& lex);
 inline bool jpValidateAndExpr(PathLexer& lex);
@@ -1462,20 +1522,23 @@ inline bool jpValidateOperand(PathLexer& lex) {
   lex.next();
   if (!jpIsFuncName(t.val)) return false;
   if (t.val == "match" || t.val == "search") {
-    // First argument is a ValueType: a string literal or a query path. The
-    // pattern argument must be a string. Mirrors the evaluator's parseFuncValue.
-    Tok a = lex.peek();
-    if (a.type == TokType::STRING) {
-      if (!a.ok) return false;
-      lex.next();
-    } else {
-      if (!jpValidateQueryPath(lex)) return false;
-    }
+    // RFC 9535 2.4.6/2.4.7 give both parameters the declared type ValueType,
+    // and 2.4.3 makes a ValueType parameter well-typed with any value literal
+    // or a singular query: there is no type check to perform (a non-string
+    // input or pattern evaluates to LogicalFalse, which is what the evaluator
+    // does, so match(5, "pat") and match("abc", 5) are well-typed and both
+    // false). The pattern stays a literal only -- a query pattern is not
+    // implemented by the evaluator, which would read it as a non-string, so it
+    // remains rejected here to keep validator and evaluator in agreement.
+    if (!jpValidateValueTypeArg(lex)) return false;
     if (lex.peek().type != TokType::COMMA) return false;
     lex.next();
-    Tok s = lex.peek();
-    if (s.type != TokType::STRING || !s.ok) return false;
-    lex.next();
+    if (!jpValidateValueLiteral(lex)) return false;
+  } else if (t.val == "length" && lex.peek().type != TokType::RPAREN) {
+    // RFC 9535 2.4.4: length's parameter is ValueType, so the argument may be
+    // any scalar literal (length("abc") -> 3) or a query. The zero-arg
+    // current-node form falls through to the shared branch below.
+    if (!jpValidateValueTypeArg(lex)) return false;
   } else {
     if (jpIsZeroArgFunc(t.val) && lex.peek().type == TokType::RPAREN) {
       // RFC 9535 2.4.8 gives value() exactly one NodesType argument; its
@@ -1652,10 +1715,13 @@ inline bool jpIsValid(std::string_view path) {
       Tok seg = lex.next();
       if (!seg.ok) return false;
       if (seg.type != TokType::IDENT && seg.type != TokType::STAR) return false;
-      if (seg.type == TokType::IDENT && jpIsFuncName(seg.val) &&
+      if (seg.type == TokType::IDENT && jpIsZeroArgFunc(seg.val) &&
           lex.peek().type == TokType::LPAREN) {
         // Zero-arg only, as above: the closing ')' has to be consumed here, and
         // an argument makes the whole path invalid (jpExpand returns nothing).
+        // match()/search() are deliberately absent from this check -- they take
+        // two arguments (RFC 9535 2.4.6/2.4.7) and are never segments, so the
+        // '(' below falls into the generic path and rejects `$.match()`.
         lex.next(); // consume '('
         if (lex.peek().type != TokType::RPAREN) return false;
         lex.next();
