@@ -1573,6 +1573,14 @@ inline bool asvJSON::fromRON(std::string_view input) {
     allowNaNInfinity = prevNaN;
     lastError = e.what();
     return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromMessagePack).
+    // Restore the permissive flag here too -- a leaked allowNaNInfinity
+    // would silently change later parses (same lesson as fromJSON5).
+    allowNaNInfinity = prevNaN;
+    lastError = e.what();
+    return false;
   }
 }
 

@@ -865,14 +865,23 @@ inline bool asvJSON::fromTOON(std::string_view input) {
   std::string json;
   try {
     json = toonToJson(input);
+    // parse() sits INSIDE the try like every other intermediate-JSON decoder
+    // (goon/yaml/ron/json5/sexpr): it already catches asvJSONError itself, but
+    // std::string growth inside it would otherwise escape the bool contract.
+    bool ok = parse(std::string_view(json));
+    if (ok) formatType = FormatType::TOON;
+    return ok;
   } catch (const asvJSONError& e) {
     lastError = e.what();
     root = nullptr;
     return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromMessagePack).
+    lastError = e.what();
+    root = nullptr;
+    return false;
   }
-  bool ok = parse(std::string_view(json));
-  if (ok) formatType = FormatType::TOON;
-  return ok;
 }
 
 } // namespace asvJSONInternal

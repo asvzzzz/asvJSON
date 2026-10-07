@@ -118,251 +118,264 @@ namespace asvJSONInternal {
 
 inline bool asvJSON::fromAny(std::string_view input) {
   formatType = FormatType::Unknown;
-  if (input.empty()) { lastError = "empty input"; return false; }
+  try {
+    if (input.empty()) { lastError = "empty input"; return false; }
 
-  // Strip UTF-8 BOM
-  if (input.size() >= 3 &&
-      static_cast<unsigned char>(input[0]) == 0xEF &&
-      static_cast<unsigned char>(input[1]) == 0xBB &&
-      static_cast<unsigned char>(input[2]) == 0xBF)
-    input.remove_prefix(3);
+    // Strip UTF-8 BOM
+    if (input.size() >= 3 &&
+        static_cast<unsigned char>(input[0]) == 0xEF &&
+        static_cast<unsigned char>(input[1]) == 0xBB &&
+        static_cast<unsigned char>(input[2]) == 0xBF)
+      input.remove_prefix(3);
 
-  // --- Binary detection ---
-  // Control chars (<0x20, excluding \n\r\t)  ->  binary.
-  // Bytes >=0x80 are validated as UTF-8; non-UTF-8 byte sequences  ->  binary.
-  bool isBinary = false;
-  {
-    size_t n = std::min(input.size(), size_t(256));
-    size_t i = 0;
-    while (i < n) {
-      auto c = static_cast<unsigned char>(input[i]);
-      if (c < 0x80) {
-        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
-          isBinary = true;
+    // --- Binary detection ---
+    // Control chars (<0x20, excluding \n\r\t)  ->  binary.
+    // Bytes >=0x80 are validated as UTF-8; non-UTF-8 byte sequences  ->  binary.
+    bool isBinary = false;
+    {
+      size_t n = std::min(input.size(), size_t(256));
+      size_t i = 0;
+      while (i < n) {
+        auto c = static_cast<unsigned char>(input[i]);
+        if (c < 0x80) {
+          if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+            isBinary = true;
+          }
+          i++;
+          continue;
         }
-        i++;
-        continue;
+        int len = 0;
+        if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        else { isBinary = true; break; }
+        // Truncated sequence at the scan boundary  -  do not flag as binary.
+        if (i + len > n) break;
+        bool valid = true;
+        for (int j = 1; j < len; j++) {
+          if ((static_cast<unsigned char>(input[i+j]) & 0xC0) != 0x80) {
+            valid = false;
+            break;
+          }
+        }
+        if (!valid) { isBinary = true; break; }
+        if (len == 3) {
+          uint32_t cp = (static_cast<uint32_t>(c) & 0x0F) << 12 |
+                        (static_cast<uint32_t>(input[i+1]) & 0x3F) << 6 |
+                        (static_cast<uint32_t>(input[i+2]) & 0x3F);
+          if (cp >= 0xD800 && cp <= 0xDFFF) { isBinary = true; break; }
+        }
+        i += len;
       }
-      int len = 0;
-      if ((c & 0xE0) == 0xC0) len = 2;
-      else if ((c & 0xF0) == 0xE0) len = 3;
-      else if ((c & 0xF8) == 0xF0) len = 4;
-      else { isBinary = true; break; }
-      // Truncated sequence at the scan boundary  -  do not flag as binary.
-      if (i + len > n) break;
-      bool valid = true;
-      for (int j = 1; j < len; j++) {
-        if ((static_cast<unsigned char>(input[i+j]) & 0xC0) != 0x80) {
-          valid = false;
-          break;
+    }
+
+    if (isBinary) {
+      // BSON: 4-byte LE size must equal input.size(), byte[4] valid type
+      if (input.size() >= 5) {
+        uint32_t sz = static_cast<uint32_t>(static_cast<unsigned char>(input[0]))
+          | (static_cast<uint32_t>(static_cast<unsigned char>(input[1])) << 8)
+          | (static_cast<uint32_t>(static_cast<unsigned char>(input[2])) << 16)
+          | (static_cast<uint32_t>(static_cast<unsigned char>(input[3])) << 24);
+        if (sz == static_cast<uint32_t>(input.size())) {
+          auto t = static_cast<unsigned char>(input[4]);
+          if ((t >= 0x01 && t <= 0x08) || t == 0x0A ||
+              (t >= 0x10 && t <= 0x13) || t == 0xFF) {
+            if (fromBSON(std::string(input))) return true;
+          }
         }
       }
-      if (!valid) { isBinary = true; break; }
-      if (len == 3) {
-        uint32_t cp = (static_cast<uint32_t>(c) & 0x0F) << 12 |
-                      (static_cast<uint32_t>(input[i+1]) & 0x3F) << 6 |
-                      (static_cast<uint32_t>(input[i+2]) & 0x3F);
-        if (cp >= 0xD800 && cp <= 0xDFFF) { isBinary = true; break; }
+  #ifndef ASVJSON_DISABLE_BENCODE
+      // Bencode dictionaries (".torrent" files) start with `d<digits>:`. Gated by
+      // that signature so it is not attempted for arbitrary binary data.
+      if (bencodeLooksLikeDictionary(input)) {
+        if (fromBencode(input)) return true;
       }
-      i += len;
+  #endif
+      if (fromMessagePack(std::string(input))) return true;
+      if (fromCBOR(std::string(input))) return true;
+      lastError = "Unable to detect binary format";
+      return false;
     }
-  }
 
-  if (isBinary) {
-    // BSON: 4-byte LE size must equal input.size(), byte[4] valid type
-    if (input.size() >= 5) {
-      uint32_t sz = static_cast<uint32_t>(static_cast<unsigned char>(input[0]))
-        | (static_cast<uint32_t>(static_cast<unsigned char>(input[1])) << 8)
-        | (static_cast<uint32_t>(static_cast<unsigned char>(input[2])) << 16)
-        | (static_cast<uint32_t>(static_cast<unsigned char>(input[3])) << 24);
-      if (sz == static_cast<uint32_t>(input.size())) {
-        auto t = static_cast<unsigned char>(input[4]);
-        if ((t >= 0x01 && t <= 0x08) || t == 0x0A ||
-            (t >= 0x10 && t <= 0x13) || t == 0xFF) {
-          if (fromBSON(std::string(input))) return true;
-        }
+    // --- Text format detection ---
+    // Skip leading whitespace
+    size_t start = 0;
+    while (start < input.size() && (input[start] == ' ' || input[start] == '\t' ||
+           input[start] == '\n' || input[start] == '\r'))
+      start++;
+    std::string_view s = input.substr(start);
+    if (s.empty()) { lastError = "empty input"; return false; }
+
+    char f = s[0];
+
+    // XML: always starts with '<'
+    if (f == '<') {
+      // Apple plist: an XML document declaring a <plist> root. Checked before
+      // the generic XML parser so plists are not claimed with the generic
+      // @attr/#text mapping.
+  #ifndef ASVJSON_DISABLE_PLIST
+      if (plistLooksLike(s)) {
+        if (fromPlist(s)) return true;
+      }
+  #endif
+      if (fromXML(s)) return true;
+    }
+
+    // JSON / JSON5: starts with '{' or '['
+    if (f == '{' || f == '[') {
+      if (parse(s)) return true;          // JSON
+      if (fromJSON5(s)) return true;      // JSON5 superset
+      // Multiple JSON lines: starts with '{'/'[' and has newlines
+      if (s.find('\n') != std::string_view::npos) {
+        if (fromJSONLines(s)) return true;
       }
     }
-#ifndef ASVJSON_DISABLE_BENCODE
-    // Bencode dictionaries (".torrent" files) start with `d<digits>:`. Gated by
-    // that signature so it is not attempted for arbitrary binary data.
-    if (bencodeLooksLikeDictionary(input)) {
-      if (fromBencode(input)) return true;
+
+    // S-Expression: starts with '('
+    if (f == '(') {
+      // RON groups are parenthesized too. Heuristic: if the text contains a ':'
+      // or ',' inside the group it is more likely a RON tuple/struct than an
+      // S-expression.
+      if (s.find(':') != std::string_view::npos || s.find(',') != std::string_view::npos) {
+        if (fromRON(s)) return true;
+      }
+      if (fromSexpr(s)) return true;
     }
-#endif
-    if (fromMessagePack(std::string(input))) return true;
-    if (fromCBOR(std::string(input))) return true;
-    lastError = "Unable to detect binary format";
-    return false;
-  }
 
-  // --- Text format detection ---
-  // Skip leading whitespace
-  size_t start = 0;
-  while (start < input.size() && (input[start] == ' ' || input[start] == '\t' ||
-         input[start] == '\n' || input[start] == '\r'))
-    start++;
-  std::string_view s = input.substr(start);
-  if (s.empty()) { lastError = "empty input"; return false; }
-
-  char f = s[0];
-
-  // XML: always starts with '<'
-  if (f == '<') {
-    // Apple plist: an XML document declaring a <plist> root. Checked before
-    // the generic XML parser so plists are not claimed with the generic
-    // @attr/#text mapping.
-#ifndef ASVJSON_DISABLE_PLIST
-    if (plistLooksLike(s)) {
-      if (fromPlist(s)) return true;
-    }
-#endif
-    if (fromXML(s)) return true;
-  }
-
-  // JSON / JSON5: starts with '{' or '['
-  if (f == '{' || f == '[') {
-    if (parse(s)) return true;          // JSON
-    if (fromJSON5(s)) return true;      // JSON5 superset
-    // Multiple JSON lines: starts with '{'/'[' and has newlines
-    if (s.find('\n') != std::string_view::npos) {
-      if (fromJSONLines(s)) return true;
-    }
-  }
-
-  // S-Expression: starts with '('
-  if (f == '(') {
-    // RON groups are parenthesized too. Heuristic: if the text contains a ':'
-    // or ',' inside the group it is more likely a RON tuple/struct than an
-    // S-expression.
-    if (s.find(':') != std::string_view::npos || s.find(',') != std::string_view::npos) {
+    // RON: starts with '[' '{' or a bare identifier/enum variant. Fall back
+    // after JSON/JSON5/JSONLines and other text formats.
+    if (f == '{' || f == '[') {
       if (fromRON(s)) return true;
     }
-    if (fromSexpr(s)) return true;
-  }
 
-  // RON: starts with '[' '{' or a bare identifier/enum variant. Fall back
-  // after JSON/JSON5/JSONLines and other text formats.
-  if (f == '{' || f == '[') {
+    // RON named structs / tuple structs / enum variants with data: `Name(...)`.
+    // Try RON early when the input starts with an identifier followed by '(';
+    // non-matching input fails quickly and falls through to other formats.
+    if ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_') {
+      if (s.find('(') != std::string_view::npos && fromRON(s)) return true;
+    }
+
+  #ifndef ASVJSON_DISABLE_BENCODE
+    // Bencode dictionaries: `d<digits>:` signature (the whole key length is
+    // scanned, so a 10+ byte first key works). Tried before the loose YAML-like
+    // formats (GOON/TOON) which otherwise claim short, colon-heavy inputs like
+    // "d1:ai1ee" as ordinary mappings, and before JavaProp, which would read
+    // "d13:announce-list..." as the single property {"d13": "..."}.
+    if (bencodeLooksLikeDictionary(s)) {
+      if (fromBencode(s)) return true;
+    }
+  #endif
+
+    // YAML document markers
+    if (s.size() >= 3 && s[0] == '-' && s[1] == '-' && s[2] == '-') {
+      if (fromYAML(s)) return true;
+    }
+    if (s.size() >= 5 && s.compare(0, 5, "%YAML") == 0) {
+      if (fromYAML(s)) return true;
+    }
+
+    // UDE: "# UDE" header
+    if (s.size() >= 5 && s.compare(0, 5, "# UDE") == 0) {
+      if (fromUDE(s)) return true;
+    }
+
+    // TRON: first non-ws line starts with "class "
+    {
+      size_t p = 0;
+      while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) p++;
+      if (p + 6 <= s.size() && s.compare(p, 6, "class ") == 0) {
+        if (fromTRON(s)) return true;
+      }
+    }
+
+    // TOML / INI: both have [section] headers and '=' signs.
+    // Heuristic: quoted values ("...") or inline tables ({...}) -> TOML first.
+    // Plain key=value -> INI first.
+    if (s.find('[') != std::string_view::npos &&
+        s.find('=') != std::string_view::npos) {
+      bool hasQuotedValues = (s.find('"') != std::string_view::npos);
+      bool hasInlineTables = (s.find('{') != std::string_view::npos);
+      if (hasQuotedValues || hasInlineTables) {
+        if (fromTOML(s)) return true;
+        if (fromINI(s)) return true;
+      } else {
+        if (fromINI(s)) return true;
+        if (fromTOML(s)) return true;
+      }
+    }
+
+    // INI without '=': section headers + key:value or key<space>value
+    if (s.find('[') != std::string_view::npos) {
+      if (fromINI(s)) return true;
+    }
+
+    // Dotenv: flat KEY=VALUE lines (no [section] headers). Only attempted after
+    // the section-style TOML/INI paths above, so a `[section]` document is never
+    // mistaken for dotenv.
+  #ifndef ASVJSON_DISABLE_DOTENV
+    if (s.find('=') != std::string_view::npos && s.find('[') == std::string_view::npos) {
+      if (fromDotenv(s)) return true;
+    }
+  #endif
+
+    // Java .properties: '!'/'#' comments, `key=value` / `key:value` (unspaced
+    // colon) pairs, `\uXXXX` escapes. Attempted after TOML/INI/dotenv (which
+    // need '[section]' or '=') so those documents are never mis-claimed; ':' or
+    // whitespace followed by a space is left for the later YAML/GOON/TOON path.
+  #ifndef ASVJSON_DISABLE_JAVAPROP
+    if (javapropLooksLike(s)) {
+      if (fromJavaProp(s)) return true;
+    }
+  #endif
+
+    // CSV: multiple lines with high delimiter density
+    {
+      size_t nl = 0, dl = 0;
+      size_t n = std::min(s.size(), size_t(2048));
+      for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\n') nl++;
+        else if (s[i] == ',' || s[i] == '\t' || s[i] == ';') dl++;
+      }
+      if (nl > 0 && dl > nl) {
+        if (fromCSV(s)) return true;
+      }
+    }
+
+    // YAML (most flexible text format)
+    if (fromYAML(s)) return true;
+
+    // GOON (YAML-like with special syntax)
+    if (fromGOON(s)) return true;
+
+    // TOON (indentation-based)
+    if (fromTOON(s)) return true;
+
+    // JSONLines: multiple JSON values, one per line
+    if (fromJSONLines(s)) return true;
+
+    // RON (structs/maps/lists with Rust-like syntax)
     if (fromRON(s)) return true;
-  }
 
-  // RON named structs / tuple structs / enum variants with data: `Name(...)`.
-  // Try RON early when the input starts with an identifier followed by '(';
-  // non-matching input fails quickly and falls through to other formats.
-  if ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_') {
-    if (s.find('(') != std::string_view::npos && fromRON(s)) return true;
-  }
-
-#ifndef ASVJSON_DISABLE_BENCODE
-  // Bencode dictionaries: `d<digits>:` signature (the whole key length is
-  // scanned, so a 10+ byte first key works). Tried before the loose YAML-like
-  // formats (GOON/TOON) which otherwise claim short, colon-heavy inputs like
-  // "d1:ai1ee" as ordinary mappings, and before JavaProp, which would read
-  // "d13:announce-list..." as the single property {"d13": "..."}.
-  if (bencodeLooksLikeDictionary(s)) {
+  #ifndef ASVJSON_DISABLE_BENCODE
+    // Bencode (BitTorrent encoding). Last because its grammar is loose enough
+    // to match short inputs; a full, consuming parse is required to succeed.
     if (fromBencode(s)) return true;
+  #endif
+
+    lastError = "Unable to detect format";
+    return false;
+  } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error must not escape: the three std::string probe
+    // copies (BSON/MessagePack/CBOR detection) and the lastError assignments
+    // allocate, and fromAny's contract is false + lastError like every from*.
+    lastError = e.what();
+    root = nullptr;
+    return false;
   }
-#endif
-
-  // YAML document markers
-  if (s.size() >= 3 && s[0] == '-' && s[1] == '-' && s[2] == '-') {
-    if (fromYAML(s)) return true;
-  }
-  if (s.size() >= 5 && s.compare(0, 5, "%YAML") == 0) {
-    if (fromYAML(s)) return true;
-  }
-
-  // UDE: "# UDE" header
-  if (s.size() >= 5 && s.compare(0, 5, "# UDE") == 0) {
-    if (fromUDE(s)) return true;
-  }
-
-  // TRON: first non-ws line starts with "class "
-  {
-    size_t p = 0;
-    while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) p++;
-    if (p + 6 <= s.size() && s.compare(p, 6, "class ") == 0) {
-      if (fromTRON(s)) return true;
-    }
-  }
-
-  // TOML / INI: both have [section] headers and '=' signs.
-  // Heuristic: quoted values ("...") or inline tables ({...}) -> TOML first.
-  // Plain key=value -> INI first.
-  if (s.find('[') != std::string_view::npos &&
-      s.find('=') != std::string_view::npos) {
-    bool hasQuotedValues = (s.find('"') != std::string_view::npos);
-    bool hasInlineTables = (s.find('{') != std::string_view::npos);
-    if (hasQuotedValues || hasInlineTables) {
-      if (fromTOML(s)) return true;
-      if (fromINI(s)) return true;
-    } else {
-      if (fromINI(s)) return true;
-      if (fromTOML(s)) return true;
-    }
-  }
-
-  // INI without '=': section headers + key:value or key<space>value
-  if (s.find('[') != std::string_view::npos) {
-    if (fromINI(s)) return true;
-  }
-
-  // Dotenv: flat KEY=VALUE lines (no [section] headers). Only attempted after
-  // the section-style TOML/INI paths above, so a `[section]` document is never
-  // mistaken for dotenv.
-#ifndef ASVJSON_DISABLE_DOTENV
-  if (s.find('=') != std::string_view::npos && s.find('[') == std::string_view::npos) {
-    if (fromDotenv(s)) return true;
-  }
-#endif
-
-  // Java .properties: '!'/'#' comments, `key=value` / `key:value` (unspaced
-  // colon) pairs, `\uXXXX` escapes. Attempted after TOML/INI/dotenv (which
-  // need '[section]' or '=') so those documents are never mis-claimed; ':' or
-  // whitespace followed by a space is left for the later YAML/GOON/TOON path.
-#ifndef ASVJSON_DISABLE_JAVAPROP
-  if (javapropLooksLike(s)) {
-    if (fromJavaProp(s)) return true;
-  }
-#endif
-
-  // CSV: multiple lines with high delimiter density
-  {
-    size_t nl = 0, dl = 0;
-    size_t n = std::min(s.size(), size_t(2048));
-    for (size_t i = 0; i < n; i++) {
-      if (s[i] == '\n') nl++;
-      else if (s[i] == ',' || s[i] == '\t' || s[i] == ';') dl++;
-    }
-    if (nl > 0 && dl > nl) {
-      if (fromCSV(s)) return true;
-    }
-  }
-
-  // YAML (most flexible text format)
-  if (fromYAML(s)) return true;
-
-  // GOON (YAML-like with special syntax)
-  if (fromGOON(s)) return true;
-
-  // TOON (indentation-based)
-  if (fromTOON(s)) return true;
-
-  // JSONLines: multiple JSON values, one per line
-  if (fromJSONLines(s)) return true;
-
-  // RON (structs/maps/lists with Rust-like syntax)
-  if (fromRON(s)) return true;
-
-#ifndef ASVJSON_DISABLE_BENCODE
-  // Bencode (BitTorrent encoding). Last because its grammar is loose enough
-  // to match short inputs; a full, consuming parse is required to succeed.
-  if (fromBencode(s)) return true;
-#endif
-
-  lastError = "Unable to detect format";
-  return false;
 }
 
 static inline std::string asvjsonExtLower(const std::string& s) {

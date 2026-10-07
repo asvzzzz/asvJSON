@@ -329,6 +329,12 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 		lastError = e.what();
 		root = nullptr;
 		return false;
+	} catch (const std::exception& e) {
+		// bad_alloc / length_error etc. must not escape: the public contract is
+		// bool + lastError, like the other from* parsers (see fromMessagePack).
+		lastError = e.what();
+		root = nullptr;
+		return false;
 	}
 }
 

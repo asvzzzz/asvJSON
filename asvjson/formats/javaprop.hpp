@@ -39,6 +39,9 @@
 //     are lost, since nothing tries to reverse the encoding on load.
 // DATETIME is not lossy: it is written in ISO form and tryParseDateTime() gives
 // the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types.
+// One exception: a timestamp gmtimeSafe cannot convert to UTC (e.g. before
+// 1970 or beyond the platform's range) renders as the bare text `null` via
+// fmtDateTimeVal and loads back as NULL -- the type is lost there.
 //
 // A malformed \u escape is kept literally rather than rejected (the JDK throws
 // IllegalArgumentException): "\uZZZZ" loads as the text `uZZZZ`, and a truncated
@@ -526,6 +529,15 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
     formatType = FormatType::JavaProp;
     return true;
   } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromMessagePack).
+    // Not theoretical here: javapropLogicalLines copies and grows the line
+    // list, `key += javapropUnescape(...)`, rawVal.assign/erase, Comments is
+    // new'd and obj->obj->emplace grows the map -- only factories new(nothrow).
     lastError = e.what();
     root = nullptr;
     return false;

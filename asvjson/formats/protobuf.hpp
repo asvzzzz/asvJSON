@@ -1634,37 +1634,39 @@ inline std::string asvJSON::stringFromProtobuf(const uint8_t* data, size_t size)
 }
 
 inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& schemaJson) {
-  // Auto-detect base64 (common usage: passing base64-encoded protobuf) but only
-  // when the string is made of base64 alphabet chars, its length is a multiple
-  // of 4, and it is the *canonical* base64 of its own decode (re-encode
-  // round-trip). The re-encode check prevents a genuine binary protobuf whose
-  // bytes happen to fall inside the base64 alphabet from being misread as
-  // base64 text.
-  if (data.size() >= 4 && (data.size() % 4) == 0) {
-    bool looksLikeBase64 = true;
-    for (size_t i = 0; i < data.size(); i++) {
-      unsigned char c = static_cast<unsigned char>(data[i]);
-      if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') continue;
-      looksLikeBase64 = false;
-      break;
-    }
-    if (looksLikeBase64) {
-      auto decoded = decodeBase64Fast(data.data(), data.size());
-      if (!decoded.empty()) {
-        std::string enc = encodeBase64(decoded.data(), decoded.size());
-        // Accept only the canonical padded re-encode. The unpadded comparison
-        // is unreachable here (an unpadded input has length % 4 != 0 and never
-        // enters this branch), so it was removed.
-        bool canonical = (enc == data);
-        if (canonical &&
-            fromProtobuf(static_cast<const void*>(decoded.data()), decoded.size(), schemaJson))
-          return true;
+  try {
+    // Auto-detect base64 (common usage: passing base64-encoded protobuf) but only
+    // when the string is made of base64 alphabet chars, its length is a multiple
+    // of 4, and it is the *canonical* base64 of its own decode (re-encode
+    // round-trip). The re-encode check prevents a genuine binary protobuf whose
+    // bytes happen to fall inside the base64 alphabet from being misread as
+    // base64 text.
+    if (data.size() >= 4 && (data.size() % 4) == 0) {
+      bool looksLikeBase64 = true;
+      for (size_t i = 0; i < data.size(); i++) {
+        unsigned char c = static_cast<unsigned char>(data[i]);
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') continue;
+        looksLikeBase64 = false;
+        break;
+      }
+      if (looksLikeBase64) {
+        auto decoded = decodeBase64Fast(data.data(), data.size());
+        if (!decoded.empty()) {
+          std::string enc = encodeBase64(decoded.data(), decoded.size());
+          // Accept only the canonical padded re-encode. The unpadded comparison
+          // is unreachable here (an unpadded input has length % 4 != 0 and never
+          // enters this branch), so it was removed.
+          bool canonical = (enc == data);
+          if (canonical &&
+              fromProtobuf(static_cast<const void*>(decoded.data()), decoded.size(), schemaJson))
+            return true;
+        }
       }
     }
-  }
-  // Fall back to raw binary
-  return fromProtobuf(static_cast<const void*>(data.data()), data.size(), schemaJson);
+    // Fall back to raw binary
+    return fromProtobuf(static_cast<const void*>(data.data()), data.size(), schemaJson);
+  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
 }
 
 } // namespace asvJSONInternal

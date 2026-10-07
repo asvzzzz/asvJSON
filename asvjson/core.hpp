@@ -1616,17 +1616,26 @@ public:
 			lastError = "Invalid UTF-8 in input";
 			return false;
 		}
-		jsonBuf.assign(s.data(), s.size());
-		json = jsonBuf;
-		pos = 0;
-		parseDepth = 0;
 		try {
+			// jsonBuf.assign lives inside the try: it allocates, so a bad_alloc
+			// here must reach the same false + lastError contract as a parse
+			// error rather than escaping the public parse() API.
+			jsonBuf.assign(s.data(), s.size());
+			json = jsonBuf;
+			pos = 0;
+			parseDepth = 0;
 			root = parseValue();
 			skip();
 			if (pos != json.size()) { root = nullptr; lastError = "Trailing chars"; return false; }
 			formatType = FormatType::JSON;
 			return root != nullptr;
 		} catch (const asvJSONError& e) {
+			lastError = e.what();
+			root = nullptr;
+			return false;
+		} catch (const std::exception& e) {
+			// bad_alloc / length_error from jsonBuf.assign or the parser's own
+			// string growth must not escape a public bool + lastError API.
 			lastError = e.what();
 			root = nullptr;
 			return false;
