@@ -15752,6 +15752,91 @@ TEST(testSexprNumberKeys) {
   }
 }
 
+TEST(testSexprReviewFixes) {
+  // 1. Integral-valued DOUBLEs keep their type: fmtDoubleVal renders 1.0 as
+  //    "1", which re-reads as INT (and "-0" loses the sign bit). The encoder
+  //    now appends ".0" when the formatter produced no '.' or exponent -- the
+  //    same fix already applied to TOML/YAML/C++/CSV/TRON.
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view(R"({"a":1.0,"b":-0.0,"c":100.0,"d":0.0,"e":-1.0,"f":3.14,"g":1e20})")));
+    std::string s = j.toSexpr();
+    ASSERT(s.find("1.0") != std::string::npos);
+    ASSERT(s.find("-0.0") != std::string::npos);
+    ASSERT(s.find("100.0") != std::string::npos);
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    for (const char* k : {"a", "b", "c", "d", "e", "f", "g"}) {
+      auto* v = j2.get(k);
+      ASSERT(v != nullptr);
+      ASSERT(v->type == asvJSONValue::DOUBLE);
+    }
+    ASSERT_EQ(j2.getDouble("a"), 1.0);
+    // The sign bit of -0.0 must survive: a bare "-0" decodes as INT 0.
+    ASSERT(std::signbit(j2.getDouble("b")));
+    ASSERT_EQ(j2.getDouble("c"), 100.0);
+    ASSERT_EQ(j2.getDouble("d"), 0.0);
+    ASSERT(std::signbit(j2.getDouble("e")));
+    ASSERT_EQ(j2.getDouble("f"), 3.14);
+    ASSERT_EQ(j2.getDouble("g"), 1e20);
+    ASSERT_EQ(j2.serialize(), j.serialize());
+  }
+  // A genuine INT must not gain a ".0".
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view(R"({"n":7,"m":-42})")));
+    std::string s = j.toSexpr();
+    ASSERT(s.find(".0") == std::string::npos);
+    ASSERT(j2.fromSexpr(std::string_view(s)));
+    ASSERT(j2.get("n")->type == asvJSONValue::INT);
+    ASSERT_EQ(j2.getInt("n"), int64_t(7));
+    ASSERT_EQ(j2.getInt("m"), int64_t(-42));
+  }
+  // 2. Depth threshold: encoder and decoder agree on a 48-container document
+  //    (both allow a node AT MAX_NESTING_DEPTH; only past-MAX degrades).
+  auto fill = [](asvJSONValue* cur, int total, bool leaf) {
+    for (int i = 1; i < total; i++) {
+      auto c = asvJSONValue::makeArray();
+      cur->arr->push_back(std::move(c));
+      cur = cur->arr->back().get();
+    }
+    if (leaf) cur->arr->push_back(asvJSONValue::makeInt(1));
+  };
+  for (bool leaf : {true, false}) {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view("[]")));
+    fill(a.getRoot(), 48, leaf);
+    std::string s = a.toSexpr();
+    asvJSON b;
+    ASSERT(b.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(b.serialize(), a.serialize());
+  }
+  // A 49-container document: toSexpr still succeeds (it writes depth 48 and
+  // degrades past it), but reparse dies in parse()'s universal container cap
+  // -- the decoder's own gate no longer fires first (it used to report
+  // "S-Expression nesting too deep" here).
+  for (bool leaf : {true, false}) {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view("[]")));
+    fill(a.getRoot(), 49, leaf);
+    std::string s = a.toSexpr();
+    ASSERT(!s.empty());
+    asvJSON b;
+    ASSERT(!b.fromSexpr(std::string_view(s)));
+    ASSERT(b.getLastError().find("Maximum nesting depth") != std::string::npos);
+  }
+  // Past MAX the encoder degrades to nil instead of recursing unbounded: a
+  // 50-container chain comes back truncated with a nil inside.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view("[]")));
+    fill(a.getRoot(), 50, true);
+    std::string s = a.toSexpr();
+    ASSERT(s.find("nil") != std::string::npos);
+    asvJSON b;
+    ASSERT(!b.fromSexpr(std::string_view(s)));
+  }
+}
+
 TEST(testTOONSpecialTypes) {
   // Special types used to be serialized to `null` (silently lost) on a
   // round-trip. They now serialize via the Extended JSON conventions and the
@@ -32047,6 +32132,7 @@ RUN(testGOONSpecialValues);
     RUN(testSexprSpecialTypes);
     RUN(testSexprExtras);
 RUN(testSexprNumberKeys);
+RUN(testSexprReviewFixes);
 
 	std::cout << "\n--- RON Serialization Tests ---\n";
 	RUN(testToRON);

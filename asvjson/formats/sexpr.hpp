@@ -279,7 +279,12 @@ inline std::string sexprKeyJson(const std::string& item, int type) {
 }
 
 inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size_t& pos, int depth = 0) {
-  if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("S-Expression nesting too deep");
+  // Depth guard aligned with sexprSerializeVal: a list AT MAX_NESTING_DEPTH
+  // is written in full (only past-MAX values degrade to nil), so only past-MAX
+  // input rejects here too. A deeper document still dies in parse()'s own
+  // container cap -- the same one-level-more-vs-JSON difference pinned for
+  // CBOR in testCBORNestingDepthBoundary.
+  if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("S-Expression nesting too deep");
 
   if (pos >= tokens.size()) throw asvJSONError("unexpected end of S-Expression");
   if (tokens[pos].type == SEXPR_RPAREN) throw asvJSONError("unexpected closing parenthesis");
@@ -468,7 +473,12 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
       // serializers emit a placeholder rather than throwing -- the public
       // contract is that to* returns a string and never throws (unlike from*).
       if (std::isnan(d) || std::isinf(d)) { out += "nil"; break; }
-      std::string r; fmtDoubleVal(d, r); out += r;
+      std::string r; fmtDoubleVal(d, r);
+      // fmtDoubleVal renders 1.0 as "1" (shortest form): without a '.' or an
+      // exponent the token re-reads as INT and the DOUBLE type is lost on
+      // round-trip. Mirrors the .0 suffix the TOML/YAML/C++ encoders append.
+      if (r.find_first_of(".eE") == std::string::npos) r += ".0";
+      out += r;
       break;
     }
     case asvJSONValue::STRING: {
