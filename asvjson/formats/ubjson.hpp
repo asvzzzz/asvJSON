@@ -29,9 +29,13 @@
 // C library). The encoder has no C or H forms: C re-encodes as an S ('A' ->
 // "A"), and strings always go out as S. Unoptimized containers may be counted
 // (`[#<n>`, `{#<n>`) or unbounded (closed by `]`/`}`); `$` requires a `#`
-// count per spec. The encoder always writes the plain unbounded form -- the
-// counted form is spec-legal (and preferred by some preallocating readers)
-// but the simple form is a deliberate choice.
+// count per spec, while `#` alone is the ordinary counted form (the decoder
+// accepts both; the encoder never writes `#` without `$`). For arrays and
+// objects the encoder always writes the plain unbounded form -- the counted
+// form is spec-legal (and preferred by some preallocating readers) but the
+// simple form is a deliberate choice. The only counted form the encoder ever
+// emits is the typed `$U#` array used for the binary payloads (BINARY /
+// OBJECTID / EXTENSION, listed above).
 //
 // `N` is a no-op and never produces a value. Inside an UNTYPED container it is
 // skipped without consuming a count slot; at the top level any run of `N`
@@ -60,6 +64,11 @@
 // UBJSON has no magic leading bytes (it starts with the same '{'/'[' as JSON),
 // so fromAny() does not auto-detect it; use fromUBJSON() or the `.ubj`
 // extension explicitly.
+//
+// Encoder recursion is not depth-limited: a tree built programmatically with
+// many more than MAX_NESTING_DEPTH levels (the parser's own ceiling) can
+// exhaust the stack during toUBJSON(). This mirrors the CBOR, MessagePack and
+// BSON encoders -- the depth limit is enforced on the parsing side only.
 
 #include "../core.hpp"
 
@@ -69,6 +78,12 @@
 #include <vector>
 
 namespace asvJSONInternal {
+
+// The encoder writes float32/float64 (and reads them back) by copying raw bit
+// patterns into the output and back, so both types must be the IEEE 754
+// binary32/binary64 layouts the ubjson.org spec assumes.
+static_assert(sizeof(float) == 4 && sizeof(double) == 8,
+              "UBJSON needs IEEE 754 binary32/binary64 float and double");
 
 // ----------------------------------------------------------------------------
 // Encoding
@@ -381,11 +396,14 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       pos++;
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end ($)");
       char t = static_cast<char>(data[pos++]);
-        if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
-        pos++;
-        uint64_t count = ubjReadLen(data, pos, dataLen);
-        if (count > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("UBJSON: array too large");
+      if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
+      pos++;
+      uint64_t count = ubjReadLen(data, pos, dataLen);
       // The spec's binary-data convention: a typed uint8 array is raw bytes.
+      // Its size bound is the BINARY payload limit (matching makeBinary), NOT
+      // the element-count bound: an encoder may legally emit a binary whose
+      // size trips MAX_ARRAY_SIZE, so the "array too large" guard below must
+      // not fire for it. It still bounds every other $type, after this branch.
       if (t == 'U') {
         if (count > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("UBJSON: binary too large");
         if (count > dataLen - pos) throw asvJSONError("UBJSON: truncated binary");
@@ -394,12 +412,30 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
         pos += static_cast<size_t>(count);
         return bin;
       }
+      if (count > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("UBJSON: array too large");
       // $Z/$T/$F have no payload; each element's value is implicit. $N is a
       // no-op: per spec its array is count no-op values with an EMPTY body --
       // a no-op produces no value, so the array is empty (deliberately unlike
       // $Z#n, which is n nulls).
-      if (t == 'Z') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeNull()); }
-      else if (t == 'T' || t == 'F') { for (uint64_t i = 0; i < count; i++) arr->arr->push_back(asvJSONValue::makeBool(t == 'T')); }
+      if (t == 'Z') {
+        // makeNull/makeBool return nullptr on allocation failure. The general
+        // element branch throws inside ubjParseScalar, but these implicit-value
+        // forms never reach it, so the result must be checked here -- a null
+        // unique_ptr pushed next would be dereferenced by any later walk.
+        for (uint64_t i = 0; i < count; i++) {
+          auto v = asvJSONValue::makeNull();
+          if (!v) throw asvJSONError("UBJSON: array element alloc failed");
+          arr->arr->push_back(std::move(v));
+        }
+      }
+      else if (t == 'T' || t == 'F') {
+        const bool b = (t == 'T');
+        for (uint64_t i = 0; i < count; i++) {
+          auto v = asvJSONValue::makeBool(b);
+          if (!v) throw asvJSONError("UBJSON: array element alloc failed");
+          arr->arr->push_back(std::move(v));
+        }
+      }
       else if (t == 'N') {
         // Empty: the no-op array carries no values (spec: "equivalent to an
         // array containing count N markers", and the body must be empty).
@@ -448,25 +484,25 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       pos++;
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end ($)");
       char t = static_cast<char>(data[pos++]);
-        if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
-        pos++;
-        uint64_t count = ubjReadLen(data, pos, dataLen);
-        if (count > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("UBJSON: object too large");
-        for (uint64_t i = 0; i < count; ) {
-          if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed object");
-          // No no-op skip: the key-length byte is bare payload -- a 0x4E there
-          // is an invalid length marker, not a no-op to consume.
-          std::string key = ubjReadRawString(data, pos, dataLen);
-          std::unique_ptr<asvJSONValue> val;
-          if (t == 'Z' || t == 'N') val = asvJSONValue::makeNull();
-          else if (t == 'T') val = asvJSONValue::makeBool(true);
-          else if (t == 'F') val = asvJSONValue::makeBool(false);
-          else val = ubjParseTyped(data, pos, dataLen, depth + 1, t);
-          if (!val) throw asvJSONError("UBJSON: object value alloc failed");
-          obj->obj->insert_or_assign(key, std::move(val));
-          i++;
-        }
-        return obj;
+      if (pos >= dataLen || data[pos] != '#') throw asvJSONError("UBJSON: typed container requires a count");
+      pos++;
+      uint64_t count = ubjReadLen(data, pos, dataLen);
+      if (count > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("UBJSON: object too large");
+      for (uint64_t i = 0; i < count; ) {
+        if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed object");
+        // No no-op skip: the key-length byte is bare payload -- a 0x4E there
+        // is an invalid length marker, not a no-op to consume.
+        std::string key = ubjReadRawString(data, pos, dataLen);
+        std::unique_ptr<asvJSONValue> val;
+        if (t == 'Z' || t == 'N') val = asvJSONValue::makeNull();
+        else if (t == 'T') val = asvJSONValue::makeBool(true);
+        else if (t == 'F') val = asvJSONValue::makeBool(false);
+        else val = ubjParseTyped(data, pos, dataLen, depth + 1, t);
+        if (!val) throw asvJSONError("UBJSON: object value alloc failed");
+        obj->obj->insert_or_assign(key, std::move(val));
+        i++;
+      }
+      return obj;
     }
     if (pos < dataLen && data[pos] == '#') {
       pos++;
@@ -536,6 +572,14 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
     formatType = FormatType::UBJSON;
     return true;
   } catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+  catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromMessagePack).
+    // Not theoretical here: ubjReadRawString allocates std::string and the
+    // container loops push into std::vector -- only the value factories use
+    // new(std::nothrow).
+    lastError = e.what(); root = nullptr; return false;
+  }
 }
 
 } // namespace asvJSONInternal

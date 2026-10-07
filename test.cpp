@@ -23132,6 +23132,61 @@ TEST(testUBJSONRejectDollarBrackets) {
   }
 }
 
+TEST(testUBJSONReviewFixes2) {
+  // 1. A BINARY payload between MAX_ARRAY_SIZE and MAX_STRING_LEN must
+  // round-trip. The encoder writes it as the counted `[$U#<count>` form, and
+  // the decoder rejected such documents with "array too large" because the
+  // general typed-array count guard ran before the $U branch. A 1,000,001-byte
+  // binary (one past MAX_ARRAY_SIZE) no longer trips it.
+  {
+    asvJSON j;
+    std::vector<uint8_t> payload(1000001, uint8_t(0xAB));
+    j.setByPointer("/", asvJSONValue::makeBinary(payload.data(), payload.size()));
+    auto bytes = j.toUBJSON();
+    // Headed `[ $ U #` + an 'l' (4-byte) count + the raw bytes, no end marker.
+    ASSERT_EQ(bytes.size(), size_t(1000001 + 9));
+    ASSERT_EQ(bytes[0], uint8_t('['));
+    ASSERT_EQ(bytes[1], uint8_t('$'));
+    ASSERT_EQ(bytes[2], uint8_t('U'));
+    ASSERT_EQ(bytes[3], uint8_t('#'));
+    ASSERT_EQ(bytes[4], uint8_t('l'));
+    asvJSON k;
+    ASSERT(k.fromUBJSON(bytes.data(), bytes.size()));
+    auto* r = k.getRoot();
+    ASSERT(r != nullptr && r->type == asvJSONValue::BINARY);
+    ASSERT_EQ(r->bin_data.size(), payload.size());
+    ASSERT(memcmp(r->bin_data.data(), payload.data(), payload.size()) == 0);
+  }
+  // 2. The reordering changed only WHICH limit applies where: $U is still
+  // bounded by MAX_STRING_LEN ("binary too large"), element types are still
+  // bounded by MAX_ARRAY_SIZE ("array too large").
+  {
+    asvJSON b;
+    ASSERT(!b.fromUBJSON(std::string("[$U#l\x00\xA0\x00\x01", 9))); // MAX_STRING_LEN + 1
+    ASSERT(b.lastError.find("binary too large") != std::string::npos);
+    asvJSON z;
+    ASSERT(!z.fromUBJSON(std::string("[$Z#l\x00\x0F\x42\x41", 9))); // MAX_ARRAY_SIZE + 1
+    ASSERT(z.lastError.find("array too large") != std::string::npos);
+  }
+  // 3. The implicit-value typed arrays ($Z/$T/$F) still decode after the
+  // alloc-check rewrite, and a binary of exactly MAX_ARRAY_SIZE bytes parses.
+  {
+    asvJSON j;
+    ASSERT(j.fromUBJSON(std::string("[$Z#i\x02", 6)));
+    ASSERT_EQ(j.serialize(), std::string("[null,null]"));
+    ASSERT(j.fromUBJSON(std::string("[$T#i\x02", 6)));
+    ASSERT_EQ(j.serialize(), std::string("[true,true]"));
+    ASSERT(j.fromUBJSON(std::string("[$F#i\x01", 6)));
+    ASSERT_EQ(j.serialize(), std::string("[false]"));
+    std::string doc = std::string("[$U#l\x00\x0F\x42\x40", 9); // count = MAX_ARRAY_SIZE
+    doc.append(1000000, '\x00');
+    asvJSON k;
+    ASSERT(k.fromUBJSON(doc.data(), doc.size()));
+    ASSERT_EQ(k.getRoot()->type, asvJSONValue::BINARY);
+    ASSERT_EQ(k.getRoot()->bin_data.size(), size_t(1000000));
+  }
+}
+
 TEST(testToUDE) {
   // Simple object: scalar types serialize bare
   {
@@ -32070,6 +32125,7 @@ RUN(testPlistAuditRegressions);
 	RUN(testUBJSONNoopInTyped);
 	RUN(testUBJSONTypedElementType);
 	RUN(testUBJSONRejectDollarBrackets);
+	RUN(testUBJSONReviewFixes2);
 
 	std::cout << "\n--- UDE Serialization Tests ---\n";
 	RUN(testToUDE);
