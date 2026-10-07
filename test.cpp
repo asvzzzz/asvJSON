@@ -2340,37 +2340,103 @@ TEST(testBSONExtras) {
 	}
 }
 
-TEST(testBSONSubtype03Realignment) {
-	// Bug: subtype 0x03 ("UUID old") was parsed by trusting an inner length
-	// (oldLen) that is untethered from the enclosing blen.  When they diverge,
-	// pos was left in the middle of the block, so the NEXT element would be
-	// read from arbitrary bytes inside the payload.
-	// Correct behavior: always align to blockEnd; the inner length is honored
-	// only when it exactly matches blen - 4.
-	uint8_t data[] = {
-		0x1E, 0x00, 0x00, 0x00,       // int32 docSize = 30
-		// element "u": binary subtype 0x03, blen = 10, but claimed oldLen = 3
-		0x05, 'u', 0x00,
-		0x0A, 0x00, 0x00, 0x00,       // blen = 10
-		0x03,                          // subtype binary-old
-		0x03, 0x00, 0x00, 0x00,       // oldLen = 3  (mismatch: payload is 6 bytes)
-		0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // actual 6-byte payload
-		// element "n": int32 42 follows directly
-		0x10, 'n', 0x00,
-		42, 0x00, 0x00, 0x00,
-		0x00                           // document terminator
-	};
-	asvJSON json;
-	ASSERT(json.fromBSON(data, sizeof(data)));
-	ASSERT(json.getRoot()->size() == 2);
-	auto* u = json.getRoot()->get("u");
-	ASSERT(u != nullptr);
-	ASSERT_EQ(u->type, asvJSONValue::BINARY);
-	ASSERT_EQ(u->bin_data.size(), static_cast<size_t>(6));
-	auto* n = json.getRoot()->get("n");
-	ASSERT(n != nullptr);
-	ASSERT_EQ(n->type, asvJSONValue::INT);
-	ASSERT_EQ(n->num, 42);
+TEST(testBSONSubtype0203Realignment) {
+	// Bug (security): subtype 0x02 was parsed by trusting an inner length
+	// untethered from the enclosing blen.  When they diverged, pos was left
+	// in the middle of the block, so the NEXT element would be read from
+	// arbitrary bytes inside the payload.
+	// Per bsonspec.org the inner int32 belongs to subtype 0x02 ("Binary
+	// old") only: it is honored on an exact match and rejected (whole raw
+	// block kept as EXTENSION(2)) otherwise, and the cursor always lands on
+	// blockEnd.  Subtype 0x03 ("UUID old") has no inner length at all and
+	// keeps its full raw payload.
+	{
+		// 0x02 with a mismatched inner length -> plain EXTENSION(2), whole
+		// raw block, next element still reads correctly.
+		uint8_t data[] = {
+			0x1E, 0x00, 0x00, 0x00,       // int32 docSize = 30
+			// element "u": binary subtype 0x02, blen = 10, but claimed inner = 3
+			0x05, 'u', 0x00,
+			0x0A, 0x00, 0x00, 0x00,       // blen = 10
+			0x02,                          // subtype Binary (old)
+			0x03, 0x00, 0x00, 0x00,       // inner = 3  (mismatch: payload is 6 bytes)
+			0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // actual 6-byte payload
+			// element "n": int32 42 follows directly
+			0x10, 'n', 0x00,
+			42, 0x00, 0x00, 0x00,
+			0x00                           // document terminator
+		};
+		asvJSON json;
+		ASSERT(json.fromBSON(data, sizeof(data)));
+		ASSERT(json.getRoot()->size() == 2);
+		auto* u = json.getRoot()->get("u");
+		ASSERT(u != nullptr);
+		ASSERT_EQ(u->type, asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int8_t>(u->ext_type), static_cast<int8_t>(2));
+		ASSERT_EQ(u->bin_data.size(), static_cast<size_t>(10));
+		auto* n = json.getRoot()->get("n");
+		ASSERT(n != nullptr);
+		ASSERT_EQ(n->type, asvJSONValue::INT);
+		ASSERT_EQ(n->num, 42);
+	}
+	{
+		// 0x02 with the exact inner length -> BINARY of the inner bytes.
+		uint8_t data[] = {
+			0x15, 0x00, 0x00, 0x00,       // int32 docSize = 21
+			0x05, 'b', 0x00,
+			0x08, 0x00, 0x00, 0x00,       // blen = 8
+			0x02,                          // subtype Binary (old)
+			0x04, 0x00, 0x00, 0x00,       // inner = 4 == blen - 4
+			0xDE, 0xAD, 0xBE, 0xEF,
+			0x00                           // document terminator
+		};
+		asvJSON json;
+		ASSERT(json.fromBSON(data, sizeof(data)));
+		auto* b = json.getRoot()->get("b");
+		ASSERT(b != nullptr);
+		ASSERT_EQ(b->type, asvJSONValue::BINARY);
+		ASSERT_EQ(b->bin_data.size(), static_cast<size_t>(4));
+		ASSERT_EQ(b->bin_data[0], 0xDE);
+		ASSERT_EQ(b->bin_data[3], 0xEF);
+	}
+	{
+		// 0x03 (UUID old): NO inner length per the spec -- the payload is
+		// raw, even when its first 4 bytes look like a plausible length.
+		uint8_t data[] = {
+			0x17, 0x00, 0x00, 0x00,       // int32 docSize = 23
+			0x05, 'u', 0x00,
+			0x0A, 0x00, 0x00, 0x00,       // blen = 10
+			0x03,                          // subtype UUID (old)
+			0x03, 0x00, 0x00, 0x00,       // payload that "looks like" an inner length
+			0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+			0x00                           // document terminator
+		};
+		asvJSON json;
+		ASSERT(json.fromBSON(data, sizeof(data)));
+		auto* u = json.getRoot()->get("u");
+		ASSERT(u != nullptr);
+		ASSERT_EQ(u->type, asvJSONValue::BINARY);
+		ASSERT_EQ(u->bin_data.size(), static_cast<size_t>(10));
+		ASSERT_EQ(u->bin_data[0], 0x03); // no strip
+	}
+	{
+		// Encoder side: an EXTENSION(2) writes the inner length the spec
+		// requires and reads back as BINARY (the extension type is lost --
+		// see the header's subtype-collision list).
+		asvJSON json;
+		json.parse("{}");
+		const unsigned char b[] = {0x01, 0x02, 0x03, 0x04};
+		json.getRoot()->obj->emplace("ext", asvJSONValue::makeExtension(2, b, 4));
+		auto bson = json.toBSON();
+		asvJSON json2;
+		ASSERT(json2.fromBSON(bson.data(), bson.size()));
+		auto* v = json2.getRoot()->get("ext");
+		ASSERT(v != nullptr);
+		ASSERT_EQ(v->type, asvJSONValue::BINARY);
+		ASSERT_EQ(v->bin_data.size(), static_cast<size_t>(4));
+		ASSERT_EQ(v->bin_data[0], 0x01);
+		ASSERT_EQ(v->bin_data[3], 0x04);
+	}
 }
 
 TEST(testBSONStringNULGuard) {
@@ -31995,7 +32061,7 @@ int main() {
 	RUN(testBSONExtensionRoundTrip);
 	RUN(testBSONEmptyArrayRoundTrip);
 	RUN(testBSONExtras);
-	RUN(testBSONSubtype03Realignment);
+	RUN(testBSONSubtype0203Realignment);
 	RUN(testBSONStringNULGuard);
 	RUN(testBSONNestedDocBound);
 	RUN(testBSONIntBounds);

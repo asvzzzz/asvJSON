@@ -4,15 +4,21 @@
 // Known conventions (documented, not bugs):
 // - Duplicate document keys are last-wins (insert_or_assign), matching the JSON
 //   parser; BSON explicitly requires unique keys but the decoder stays lenient.
-// - Binary subtype 0x03 ("UUID old") always reads and discards the inner
-//   4-byte length; the block is treated as the remaining blen - 4 bytes
-//   (for blen < 4 the whole payload is kept) and the cursor is realigned to
-//   the end of the binary block, so malformed input can never smuggle bytes
-//   past a forged inner length.
-// - BSON binary subtypes collide with asvJSON EXTENSION subtypes: 0x00 and
-//   0x05 decode back as BINARY (the extension type is lost) and 0x03 is
-//   consumed by the UUID(OLD) branch. EXTENSION values with ext_type in
-//   {0x00, 0x03, 0x05} therefore do not survive a BSON round-trip unmodified.
+// - Binary subtype 0x02 ("Binary (old)") leads with a second, inner int32
+//   length (bsonspec.org: the inner length belongs to 0x02 only); the decoder
+//   strips it only when it matches blen - 4 exactly ( -> BINARY of the inner
+//   bytes) and otherwise keeps the whole raw block as a plain EXTENSION(2).
+//   Subtype 0x03 ("UUID old") has NO inner length: its payload is raw and
+//   decodes as BINARY unchanged, even when its first 4 bytes look like a
+//   plausible length. Either way the cursor is realigned to the end of the
+//   binary block, so malformed input can never smuggle bytes past a forged
+//   inner length. The encoder writes the inner length for an EXTENSION(2)
+//   value so foreign readers see the layout the spec requires.
+// - BSON binary subtypes collide with asvJSON EXTENSION subtypes: 0x00,
+//   0x02, 0x03 and 0x05 decode back as BINARY (the extension type is lost,
+//   0x02 after the inner-length strip above). EXTENSION values with ext_type
+//   in {0x00, 0x02, 0x03, 0x05} therefore do not survive a BSON round-trip
+//   unmodified.
 // - Element type 0x06 (Undefined, deprecated by the spec) normalizes to null.
 // - Regex element (0x0B) options are stored verbatim; they are not validated
 //   against the spec's 'ilmsux' set or ordering (lenient read).
@@ -22,7 +28,10 @@
 // - Timestamp (0x11) follows the spec: a uint64 with the increment in the low
 //   32 bits (stored first) and the seconds in the high 32 bits.  asvJSONValue
 //   stores only the seconds, so the increment is always encoded as 0 and a
-//   non-zero increment from an external document is discarded on decode.
+//   non-zero increment from an external document is discarded on decode. The
+//   seconds field is uint32: toBSON() throws "BSON timestamp out of uint32
+//   seconds range" for a negative value or one past 2^32-1 (February 2106),
+//   so a post-2106 TIMESTAMP cannot be represented.
 // - MAX_OBJECT_SIZE/MAX_ARRAY_SIZE/MAX_STRING_LEN/MAX_NESTING_DEPTH: the
 //   decoder enforces MAX_NESTING_DEPTH, MAX_STRING_LEN (keys/pattern+options),
 //   MAX_ARRAY_SIZE (for sequential array documents), and MAX_OBJECT_SIZE (for
@@ -45,6 +54,13 @@
 #include "../core.hpp"
 
 namespace asvJSONInternal {
+
+// The encoder writes doubles by copying their raw bit patterns into the
+// output, and the decoder reads them back the same way, so double must be
+// the IEEE 754 binary64 layout the spec assumes. float carries the same
+// assert as the other binary formats (CBOR/UBJSON/MessagePack).
+static_assert(sizeof(float) == 4 && sizeof(double) == 8,
+              "BSON needs IEEE 754 binary32/binary64 float and double");
 
 inline void writeLE32(std::vector<uint8_t>& out, uint32_t v) {
 	out.push_back(static_cast<uint8_t>(v));
@@ -249,11 +265,17 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::EXTENSION: {
-			if (bin_data.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) throw asvJSONError("BSON extension too large");
+			// Subtype 0x02 ("Binary (old)") is the one subtype whose payload
+			// leads with a second int32 length (bsonspec.org), so the outer
+			// length covers 4 extra bytes; without them a foreign reader
+			// would consume the first 4 payload bytes as that length.
+			size_t extra = (static_cast<uint8_t>(ext_type) == 0x02) ? 4 : 0;
+			if (bin_data.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) - extra) throw asvJSONError("BSON extension too large");
 			out.push_back(0x05);
-			uint32_t blen = static_cast<uint32_t>(bin_data.size());
+			uint32_t blen = static_cast<uint32_t>(bin_data.size()) + static_cast<uint32_t>(extra);
 			writeLE32(out, blen);
 			out.push_back(static_cast<uint8_t>(ext_type));
+			if (extra) writeLE32(out, static_cast<uint32_t>(bin_data.size()));
 			out.insert(out.end(), bin_data.begin(), bin_data.end());
 			break;
 		}
@@ -364,7 +386,7 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				// The binary block is blen bytes right after the subtype byte.
 				// Validate that it is fully inside the document, then ALWAYS
 				// advance pos to blockEnd -- a malformed inner length (subtype
-				// 0x03) must never leave pos inside the blob, or the next
+				// 0x02) must never leave pos inside the blob, or the next
 				// element would be read out of attacker-controlled bytes.
 				if (blen > docEnd - pos) throw asvJSONError("BSON binary overflow");
 				size_t blockEnd = pos + blen;
@@ -374,17 +396,29 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				// this is the payload length of this one binary field. The two
 				// used to share a name, and the local shadowed the parameter.
 				size_t payloadLen = blen;
-				if (subtype == 0x03 && blen >= 4) {
-					// UUID (old): the payload leads with a 4-byte length.
-					// The inner length is read but not trusted for sizing --
-					// payloadLen is always blen - 4 so the cursor is always
-					// realigned to blockEnd regardless of the inner value.
-					uint32_t oldLen; readLE32(data, pos, oldLen);
-					(void)oldLen;
-					dataStart = pos;
-					payloadLen = blen - 4;
+				bool binaryOk = (subtype == 0x00 || subtype == 0x03 || subtype == 0x05);
+				if (subtype == 0x02) {
+					// bsonspec.org: only subtype 0x02 ("Binary (old)") leads
+					// with a second int32 length, and it must equal blen - 4.
+					// Trust it only on an exact match; on any mismatch (or a
+					// block shorter than 4 bytes) keep the whole raw block as
+					// a plain EXTENSION(2) below -- no data loss. Either way
+					// pos still lands on blockEnd, so a forged inner length
+					// cannot smuggle the next element into the payload.
+					// Subtype 0x03 ("UUID old") has no inner length at all.
+					if (blen >= 4) {
+						uint32_t inner;
+						size_t innerPos = pos;
+						readLE32(data, innerPos, inner);
+						if (inner == blen - 4) {
+							pos = innerPos;
+							dataStart = pos;
+							payloadLen = inner;
+							binaryOk = true;
+						}
+					}
 				}
-				if (subtype == 0x00 || subtype == 0x03 || subtype == 0x05) {
+				if (binaryOk) {
 					auto val = asvJSONValue::makeBinary(data + dataStart, payloadLen);
 					if (!val) throw asvJSONError("BSON binary too large");
 					obj->obj->insert_or_assign(key, std::move(val));
