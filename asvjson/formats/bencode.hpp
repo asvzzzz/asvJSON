@@ -223,7 +223,7 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       out += ':';
       out += v->str_data;
       break;
-case T::REGEX: {
+    case T::REGEX: {
       // str_data is the canonical "pattern\0options" form (see makeRegex), so
       // the separator is NUL. Split at the LAST one, like plist (and UBJSON):
       // bencode has no regex type, so only the pattern is carried -- options
@@ -300,6 +300,15 @@ inline bool asvJSON::fromBencode(std::string_view input) {
     formatType = FormatType::Bencode;
     return true;
   } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
+  } catch (const std::exception& e) {
+    // bad_alloc / length_error etc. must not escape: the public contract is
+    // bool + lastError, like the other from* parsers (see fromUBJSON).
+    // Not theoretical here: bencodeParseString / bencodeParseInt build
+    // std::string with throwing constructors and the container loops push
+    // into vector/map -- only the value factories use new(std::nothrow).
     lastError = e.what();
     root = nullptr;
     return false;
