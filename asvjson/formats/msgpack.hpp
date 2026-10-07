@@ -23,6 +23,12 @@
 // extension. The decoder detects these types structurally, so it cannot tell a
 // "real" ObjectId from a coincidental EXTENSION body.
 //
+// The MessagePack timestamp is an absolute UTC instant: tz_offset_min is NOT
+// encoded (all three datetime forms carry seconds + nanoseconds only), so a
+// round-trip preserves the instant but comes back with the default offset.
+// This matches CBOR tag 1 and every other epoch-seconds format here -- it is
+// expected data loss, not a bug.
+//
 // Duplicate map keys are last-wins, matching the JSON and CBOR parsers.
 //
 // A well-known ext type carrying a body that cannot form its special value
@@ -46,6 +52,12 @@
 #include "../core.hpp"
 
 namespace asvJSONInternal {
+
+// The encoder writes float32/float64 by copying their raw bit patterns into
+// the output, and the decoder reads them back the same way, so both types
+// must be the IEEE 754 binary32/binary64 layouts the spec assumes.
+static_assert(sizeof(float) == 4 && sizeof(double) == 8,
+              "MessagePack needs IEEE 754 binary32/binary64 float and double");
 
 inline void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uint8_t* data, size_t len) {
 	if (len == 1) { out.push_back(0xD4); }
@@ -75,11 +87,16 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				else if (n <= 0xFFFFFFFFu) { out.push_back(0xCE); out.push_back(static_cast<uint8_t>(n >> 24)); out.push_back(static_cast<uint8_t>(n >> 16)); out.push_back(static_cast<uint8_t>(n >> 8)); out.push_back(static_cast<uint8_t>(n)); }
 				else { out.push_back(0xCF); out.push_back(static_cast<uint8_t>(n >> 56)); out.push_back(static_cast<uint8_t>(n >> 48)); out.push_back(static_cast<uint8_t>(n >> 40)); out.push_back(static_cast<uint8_t>(n >> 32)); out.push_back(static_cast<uint8_t>(n >> 24)); out.push_back(static_cast<uint8_t>(n >> 16)); out.push_back(static_cast<uint8_t>(n >> 8)); out.push_back(static_cast<uint8_t>(n)); }
 			} else {
+				// C++17 leaves a right-shift of a negative signed value
+				// implementation-defined (arithmetic only since C++20), so
+				// emit the bytes through the two's-complement unsigned value
+				// -- the same form the TIMESTAMP case uses.
+				uint64_t u = static_cast<uint64_t>(n);
 				if (n >= -32) { out.push_back(static_cast<uint8_t>(static_cast<int8_t>(n))); }
 				else if (n >= INT8_MIN) { out.push_back(0xD0); out.push_back(static_cast<uint8_t>(static_cast<int8_t>(n))); }
-				else if (n >= INT16_MIN) { out.push_back(0xD1); out.push_back(static_cast<uint8_t>(n >> 8)); out.push_back(static_cast<uint8_t>(n)); }
-				else if (n >= INT32_MIN) { out.push_back(0xD2); out.push_back(static_cast<uint8_t>(n >> 24)); out.push_back(static_cast<uint8_t>(n >> 16)); out.push_back(static_cast<uint8_t>(n >> 8)); out.push_back(static_cast<uint8_t>(n)); }
-				else { out.push_back(0xD3); out.push_back(static_cast<uint8_t>(n >> 56)); out.push_back(static_cast<uint8_t>(n >> 48)); out.push_back(static_cast<uint8_t>(n >> 40)); out.push_back(static_cast<uint8_t>(n >> 32)); out.push_back(static_cast<uint8_t>(n >> 24)); out.push_back(static_cast<uint8_t>(n >> 16)); out.push_back(static_cast<uint8_t>(n >> 8)); out.push_back(static_cast<uint8_t>(n)); }
+				else if (n >= INT16_MIN) { out.push_back(0xD1); out.push_back(static_cast<uint8_t>(u >> 8)); out.push_back(static_cast<uint8_t>(u)); }
+				else if (n >= INT32_MIN) { out.push_back(0xD2); out.push_back(static_cast<uint8_t>(u >> 24)); out.push_back(static_cast<uint8_t>(u >> 16)); out.push_back(static_cast<uint8_t>(u >> 8)); out.push_back(static_cast<uint8_t>(u)); }
+				else { out.push_back(0xD3); out.push_back(static_cast<uint8_t>(u >> 56)); out.push_back(static_cast<uint8_t>(u >> 48)); out.push_back(static_cast<uint8_t>(u >> 40)); out.push_back(static_cast<uint8_t>(u >> 32)); out.push_back(static_cast<uint8_t>(u >> 24)); out.push_back(static_cast<uint8_t>(u >> 16)); out.push_back(static_cast<uint8_t>(u >> 8)); out.push_back(static_cast<uint8_t>(u)); }
 			}
 			break;
 		}
@@ -173,7 +190,10 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				}
 			} else {
 				// ext8 (timestamp 96): 4 bytes nanoseconds + 8 bytes seconds
-				// (nanoseconds first, per the MessagePack timestamp 96 layout)
+				// (nanoseconds first, per the MessagePack timestamp 96 layout).
+				// Seconds may be negative here, so shift the unsigned
+				// two's-complement value (signed right-shift of a negative is
+				// implementation-defined before C++20).
 				out.push_back(0xC7);
 				out.push_back(12);
 				out.push_back(static_cast<uint8_t>(-1)); // extType = 0xFF
@@ -181,8 +201,9 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				out.push_back(static_cast<uint8_t>((ns >> 16) & 0xFF));
 				out.push_back(static_cast<uint8_t>((ns >> 8) & 0xFF));
 				out.push_back(static_cast<uint8_t>(ns & 0xFF));
+				uint64_t ts = static_cast<uint64_t>(timestamp);
 				for (int i = 7; i >= 0; i--) {
-					out.push_back(static_cast<uint8_t>((timestamp >> (i * 8)) & 0xFF));
+					out.push_back(static_cast<uint8_t>((ts >> (i * 8)) & 0xFF));
 				}
 			}
 			break;
@@ -536,6 +557,12 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			uint32_t slen = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
 			if (slen > dataLen - pos) throw asvJSONError("MsgPack str32 overflow");
+			// Reject an oversized declared length before the O(slen) UTF-8 scan:
+			// makeString enforces the same MAX_STRING_LEN below, but only after
+			// isValidUTF8 has walked every byte (a 4 GB declared length on a
+			// large enough buffer used to scan all of it first). str8/str16
+			// cannot reach the limit (max 65535 bytes).
+			if (slen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("MsgPack string too long");
 			if (!isValidUTF8(data + pos, static_cast<size_t>(slen))) throw asvJSONError("MsgPack invalid UTF-8 in string");
 			auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen);
 			pos += slen;
