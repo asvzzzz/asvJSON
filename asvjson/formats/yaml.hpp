@@ -656,7 +656,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	// the remainder with the C++ number grammar, and re-emit a normalised
 	// unsigned token (std::from_chars float formats reject a leading '+').
 	if (!s.empty() && s[0] == '+') {
-	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 		std::string_view rest = s.substr(1);
 		double dv = 0.0;
 		auto [pp, pe] = std::from_chars(rest.data(), rest.data() + rest.size(), dv);
@@ -689,7 +689,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 	// Validate that the string is a valid number (not a YAML plain scalar that looks like a number)
 	{
 		bool validNumber = false;
-	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 		double d;
 		auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), d);
 		validNumber = (ec == std::errc() && ptr == s.data() + s.size() && s.size() > 0);
@@ -722,7 +722,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 			// JSON rejects leading-zero integers ("007", "01e2") even though
 			// the YAML 1.2 spec allows them as plain scalars. Re-emit a
 			// normalized JSON-compatible number instead of a raw token.
-	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 		size_t sign = 0;
 		if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
 		if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
@@ -1179,7 +1179,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(valStr.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == valStr.c_str() + valStr.size() && valStr.size() > 0) {
-			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);
@@ -1200,7 +1200,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(inner.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == inner.c_str() + inner.size()) {
-			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);
@@ -1219,7 +1219,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			double d = std::strtod(parsed.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == parsed.c_str() + parsed.size()) {
-			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 				char buf[64];
 				auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 				if (ec == std::errc()) return std::string(buf, ptr);

@@ -789,7 +789,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
       bool isDbl = n.find('.') != std::string::npos || n.find('e') != std::string::npos || n.find('E') != std::string::npos;
       if (isDbl) {
         double d;
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
         auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), d);
         if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("invalid number: " + n);
 #else

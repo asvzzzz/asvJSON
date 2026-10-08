@@ -36,9 +36,11 @@ namespace asvJSONInternal {
 //     they just return false. Report errors by calling setError(), never by
 //     assigning lastError_/error_ and calling handler_.onError() by hand.
 //   - JsonSaxParser delivers errors at one catch point plus a few early-return
-//     validation paths (empty input, UTF-8) that are not wrapped. A throw from
-//     inside the try is caught and delivered a SECOND time by the same catch; a
-//     throw from an early-return path escapes parse() to the caller.
+//     validation paths (empty input, UTF-8) that are not wrapped. A throw that
+//     escapes the try -- including one thrown by onError() itself, which the
+//     error paths inside the try call directly -- is caught by that catch,
+//     which invokes onError a SECOND time with e.what(); a throw from an
+//     early-return path escapes parse() to the caller.
 
 struct JsonSaxHandler {
   virtual ~JsonSaxHandler() = default;
@@ -76,7 +78,13 @@ public:
     std::fill(std::begin(cntObject_), std::end(cntObject_), size_t(0));
     std::fill(std::begin(cntArray_), std::end(cntArray_), size_t(0));
 
-    if (input_.empty()) { handler_->onError("empty input"); return false; }
+    if (input_.empty()) {
+      // Fill lastError_ like every other error path here, so getLastError()
+      // does not come back empty for the one failure that skips the catch.
+      lastError_ = "empty input";
+      handler_->onError(lastError_);
+      return false;
+    }
 
     // Strip UTF-8 BOM
     if (input_.size() >= 3 &&
@@ -92,7 +100,7 @@ public:
     }
 
     try {
-      if (!parseValue()) return false;
+      parseValue();
       skip();
       if (pos_ != input_.size()) {
         lastError_ = "Trailing chars after value";
@@ -157,21 +165,26 @@ private:
     }
   }
 
-  bool parseValue() {
+  // Every parse helper below reports failure by throwing -- there is no false
+  // return, so the control flow here is plain void calls (an "if (!parseX())
+  // return false;" would be dead code and a trap for future edits).
+  void parseValue() {
     skip();
     char c = cur();
-    if (c == '{') return parseObject();
-    if (c == '[') return parseArray();
-    if (c == '"') return parseStringValue();
-    if (c == 't' || c == 'f') return parseBool();
-    if (c == 'n') return parseNull();
-    if (allowNaNInfinity && c == 'N') return parseNaN();
-    if (allowNaNInfinity && c == 'I') return parseInfinity(false);
-    if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'I')
-      return parseInfinity(true);
-    if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'N')
-      return parseNaN(true);
-    if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
+    if (c == '{') { parseObject(); return; }
+    if (c == '[') { parseArray(); return; }
+    if (c == '"') { parseStringValue(); return; }
+    if (c == 't' || c == 'f') { parseBool(); return; }
+    if (c == 'n') { parseNull(); return; }
+    if (allowNaNInfinity && c == 'N') { parseNaN(); return; }
+    if (allowNaNInfinity && c == 'I') { parseInfinity(false); return; }
+    if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'I') {
+      parseInfinity(true); return;
+    }
+    if (allowNaNInfinity && c == '-' && pos_ + 1 < input_.size() && input_[pos_ + 1] == 'N') {
+      parseNaN(true); return;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) { parseNumber(); return; }
     // End of input: there is no character to name, so the generic branch below
     // would report "Unexpected: ''" -- a NUL inside the message that truncates
     // it for any consumer taking a C string, leaving a dangling quote.
@@ -183,19 +196,19 @@ private:
     throw std::runtime_error(std::string("Unexpected: '") + c + "'");
   }
 
-  bool parseObject() {
+  void parseObject() {
     if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     cntObject_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartObject();
     advance(); // consume '{'
     skip();
-    if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
+    if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return; }
     while (true) {
       skip();
       // A trailing comma ({"a":1,}) is accepted, matching the DOM parser; a
       // leading or duplicate comma ({,}, {"a":1,,}) still fails below.
-      if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
+      if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return; }
       if (cur() != '"') throw std::runtime_error("Expected string key");
       // Parse key
       {
@@ -206,40 +219,40 @@ private:
       skip();
       if (cur() != ':') throw std::runtime_error("Expected ':'");
       advance();
-      if (!parseValue()) return false;
+      parseValue();
       if (++cntObject_[depth_] > asvJSONValue::MAX_OBJECT_SIZE)
         throw std::runtime_error("Object too large");
       skip();
-      if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return true; }
+      if (cur() == '}') { advance(); depth_--; handler_->onEndObject(); return; }
       if (cur() == ',') { advance(); continue; }
       throw std::runtime_error("Expected ',' or '}'");
     }
   }
 
-  bool parseArray() {
+  void parseArray() {
     if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     cntArray_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartArray();
     advance(); // consume '['
     skip();
-    if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
+    if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return; }
     while (true) {
       skip();
       // A trailing comma ([1,]) is accepted, matching the DOM parser; a leading
       // or duplicate comma ([,], [1,,2]) still fails inside parseValue().
-      if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
-      if (!parseValue()) return false;
+      if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return; }
+      parseValue();
       if (++cntArray_[depth_] > asvJSONValue::MAX_ARRAY_SIZE)
         throw std::runtime_error("Array too large");
       skip();
-      if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return true; }
+      if (cur() == ']') { advance(); depth_--; handler_->onEndArray(); return; }
       if (cur() == ',') { advance(); continue; }
       throw std::runtime_error("Expected ',' or ']'");
     }
   }
 
-  bool parseStringValue() {
+  void parseStringValue() {
     std::string raw = scanStringRaw();
     // Strings are always reported unescaped, even when the raw text happens to
     // look like a datetime (SAX has no datetime event; the SAX contract is that
@@ -248,7 +261,6 @@ private:
     try { unescaped = unescapeJsonString(raw, true); }
     catch (const std::runtime_error&) { throw std::runtime_error("Invalid escape in string"); }
     handler_->onStringValue(unescaped);
-    return true;
   }
 
   std::string scanStringRaw() {
@@ -263,12 +275,16 @@ private:
     }
     if (pos_ >= input_.size() || input_[pos_] != '"') throw std::runtime_error("Unclosed string");
     size_t len = pos_ - start;
+    // MAX_STRING_LEN is enforced on the RAW slice (before unescape), exactly
+    // like the DOM parser does in parseStringRaw/parseStringKey. Deliberately
+    // conservative for escape-heavy strings ("\uXXXX" is 6 bytes -> 1 decoded),
+    // keeping the bound cheap (no decode pass just to measure).
     if (!asvJSONValue::checkStringLen(len)) throw std::runtime_error("String too long");
     advance(); // consume closing quote
     return std::string(input_.substr(start, len));
   }
 
-  bool parseNumber() {
+  void parseNumber() {
     size_t start = pos_;
     if (cur() == '-') advance();
     size_t intStart = pos_;
@@ -298,7 +314,12 @@ private:
     if (isDouble) {
       double d = 0;
       bool bad = true;
-    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+      // Gate on the libstdc++ release, not __GNUC__: clang + an old libstdc++
+      // still defines __GNUC__ (as 4) and may advertise __cpp_lib_to_chars
+      // without shipping the floating-point overloads, which would either fail
+      // to link or silently fall back to errc::invalid_argument per number.
+      // MSVC and libc++ have no __GLIBCXX__, so they key off the feature macro.
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
       auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
       if (ec == std::errc() && ptr == buf + numLen) {
         bad = false;
@@ -360,10 +381,9 @@ private:
         handler_->onIntegerValue(l);
       }
     }
-    return true;
   }
 
-  bool parseBool() {
+  void parseBool() {
     if (cur() == 't') {
       const char exp[] = "true";
       for (int i = 0; i < 4; i++) {
@@ -372,7 +392,7 @@ private:
       }
       if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid boolean");
       handler_->onBoolValue(true);
-      return true;
+      return;
     }
     if (cur() == 'f') {
       const char exp[] = "false";
@@ -382,12 +402,12 @@ private:
       }
       if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid boolean");
       handler_->onBoolValue(false);
-      return true;
+      return;
     }
     throw std::runtime_error("Expected boolean");
   }
 
-  bool parseNull() {
+  void parseNull() {
     const char exp[] = "null";
     for (int i = 0; i < 4; i++) {
       if (cur() != exp[i]) throw std::runtime_error("Invalid null");
@@ -395,10 +415,9 @@ private:
     }
     if (pos_ < input_.size() && isIdentChar(cur())) throw std::runtime_error("Invalid null");
     handler_->onNullValue();
-    return true;
   }
 
-  bool parseNaN(bool negative = false) {
+  void parseNaN(bool negative = false) {
     if (negative) advance(); // skip '-'
     if (input_.compare(pos_, 3, "NaN") != 0) throw std::runtime_error("Expected NaN");
     pos_ += 3;
@@ -406,10 +425,9 @@ private:
     double v = std::numeric_limits<double>::quiet_NaN();
     if (negative) v = -v;
     handler_->onDoubleValue(v);
-    return true;
   }
 
-  bool parseInfinity(bool negative) {
+  void parseInfinity(bool negative) {
     if (negative) advance(); // skip '-'
     if (input_.compare(pos_, 8, "Infinity") != 0) throw std::runtime_error("Expected Infinity");
     pos_ += 8;
@@ -417,7 +435,6 @@ private:
     double val = std::numeric_limits<double>::infinity();
     if (negative) val = -val;
     handler_->onDoubleValue(val);
-    return true;
   }
 };
 
@@ -575,6 +592,13 @@ public:
     // parser rejects them too, but names the offending (nonexistent) character
     // as "Unexpected: " + NUL, so this parser's own wording is kept.
     if (!hadValue_) {
+      // needMore_ parked in TOP means a value token WAS recognized but its
+      // bytes never all arrived ('N', 'I', '-', '-I', a lone '/' awaiting its
+      // comment partner). At EOF that token can never complete -- report
+      // "Incomplete input"; saying "Empty input" would claim the caller sent
+      // nothing at all. needMore_ false here means only blanks/comments were
+      // seen (or feed() was never called), which really is empty.
+      if (needMore_) { setError("Incomplete input"); return false; }
       setError("Empty input"); return false;
     }
 
@@ -614,7 +638,12 @@ private:
   // Bound on the accumulated number token (tokenBuffer_ + in-buffer tail) so a
   // pathological number cannot grow tokenBuffer_ without limit (DoS guard).
   static constexpr size_t MAX_NUMBER_LEN = 4096;
-  size_t tokenStart_ = 0;   // start of current token in buffer_
+  size_t tokenStart_ = 0;   // start of the current token in buffer_; meaningful
+                            // only while in STR_*/NUM/LIT_* (kept valid across
+                            // feeds and through compact(), which zeroes it).
+                            // Stale anywhere else -- a completed token leaves it
+                            // pointing into consumed data, and the next token
+                            // entry overwrites it before reading it.
   std::string tokenBuffer_; // accumulated partial token data across chunks
   std::string lastError_;
   bool done_ = false;
@@ -816,12 +845,14 @@ private:
       return true;
     }
     if (c == '}') {
-      if (containerStack_.empty() || containerStack_.back().kind != Container::OBJ) { setError("Unexpected '}'"); return false; }
-      containerStack_.pop_back();
-      depth_--;
-      handler_.onEndObject();
-      advance();
-      return afterValue();
+      // Diagnostic only -- a well-formed '}' never closes an object HERE:
+      // objects close in processObjKey (after a value). By the time this line
+      // runs, OBJ_VALUE has already rejected '}' with "Value expected after ':'"
+      // above, ARR_VALUE has a non-OBJ frame, and at TOP the stack is empty --
+      // every reachable case is a stray closer. (The mirror pop/onEndObject
+      // branch this used to carry was unreachable and has been dropped.)
+      setError("Unexpected '}'");
+      return false;
     }
     if (c == '[') {
       if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
@@ -991,6 +1022,12 @@ private:
         raw.append(buffer_, tokenStart_, pos_ - tokenStart_);
         advance(); // past closing quote
 
+        // Belt and suspenders: feed()'s incremental scanner already walked the
+        // raw bytes of this string (it validates the whole buffer, string
+        // content included), so this second full pass over the assembled raw
+        // slice is redundant in normal operation. Kept as a safety net for the
+        // chunk-boundary bookkeeping (utf8ScanPos_ shifts under BOM stripping
+        // and compact()), not as a per-input cost optimization.
         if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(raw.data()), raw.size())) {
           setError("Invalid UTF-8 in input");
           return false;
@@ -1063,8 +1100,23 @@ private:
     // Scan from pos_ for end of number
     while (pos_ < buffer_.size()) {
       char c = buffer_[pos_];
-      if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
+      if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E') {
         pos_++;
+      } else if (c == '+' || c == '-') {
+        // A sign belongs to a number only right after e/E (and there only
+        // before the exponent digits). Anywhere else the number ended at the
+        // previous byte: stop scanning and emit what we have, so the caller
+        // reports a structural error instead. Greedily swallowing e.g. "1-2"
+        // and then failing validJsonNumber() blamed the NUMBER for what is
+        // really trailing data (or a missing separator), diverging from the
+        // stateless parser -- which stops after 1 and reports trailing chars /
+        // "Expected ',' or ']'". prev==0 means this is the token's first byte
+        // (the '-' that opened the number).
+        char prev = 0;
+        if (pos_ > tokenStart_) prev = buffer_[pos_ - 1];
+        else if (!tokenBuffer_.empty()) prev = tokenBuffer_.back();
+        if (prev == 0 || prev == 'e' || prev == 'E') pos_++;
+        else return emitPendingNumber();
       } else {
         // End of number
         return emitPendingNumber();
@@ -1117,7 +1169,7 @@ private:
 
     if (isDouble) {
       double d = 0;
-    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+    #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
       auto [ptr, ec] = std::from_chars(buf, buf + len, d);
       if (ec == std::errc() && ptr == buf + len) {
         // ok
@@ -1375,6 +1427,12 @@ public:
 private:
   std::unique_ptr<asvJSONValue> root_;
   std::vector<asvJSONValue*> stack_; // raw pointers (root_ owns)
+  // Last onKey() payload; object values attach to it as-is. This relies on
+  // the well-formed SAX contract: within an object, every value is preceded
+  // by its own onKey, and no event is skipped between a nested container's
+  // end event and the following scalar. Both shipped parsers always produce
+  // such a stream; a hand-built one that omits a key silently rebinds the
+  // value to the previous key -- there is no signal to detect it against.
   std::string currentKey_;
   std::string errorMsg_;
   bool fatal_ = false;

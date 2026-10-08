@@ -1467,7 +1467,7 @@ private:
 		const char* buf = json.data() + start;
 		if (isDouble) {
 			double d;
-		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
 			if (ec == std::errc() && ptr == buf + numLen) {
 				// Check if precision is lost: count significant digits in the integer+fractional parts
@@ -2515,7 +2515,7 @@ public:
 inline void fmtDoubleVal(double d, std::string& out) {
 	if (d == 0.0) { out += (std::signbit(d) ? "-0" : "0"); return; }
 	char buf[64];
-	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+	#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 		auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
 		if (ec == std::errc()) { out.append(buf, ptr - buf); return; }
 	#endif

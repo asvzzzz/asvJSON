@@ -559,7 +559,7 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 				return r;
 			}
 			double d;
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 			auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
 			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
@@ -595,7 +595,7 @@ inline bool xmlNeedsStringType(std::string_view s) {
 				if (*p < '0' || *p > '9') { allDigits = false; break; }
 			if (allDigits) return false; // overflow literal -> STRING (raw_number)
 			double d;
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 			auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
 			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return true; // DOUBLE
 #else

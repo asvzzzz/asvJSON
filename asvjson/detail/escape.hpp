@@ -52,7 +52,7 @@ inline bool yamlLooksNumeric(std::string_view s) {
 	std::string_view t = s;
 	if (t.size() > 1 && (t[0] == '+' || t[0] == '-')) t.remove_prefix(1);
 	if (t.empty()) return false;
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 	double d = 0.0;
 	auto [ptr, ec] = std::from_chars(t.data(), t.data() + t.size(), d);
 	return ec == std::errc() && ptr == t.data() + t.size();

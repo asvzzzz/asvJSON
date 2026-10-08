@@ -28770,6 +28770,10 @@ TEST(testSaxStreamAuditFixes) {
 			ASSERT_MSG(!p.parse(src, h), src);
 			ASSERT_MSG(msg == "empty input", std::string(src) + " -> [" + msg + "]");
 			ASSERT_MSG(msg.find('\0') == std::string::npos, src);
+			// getLastError() must tell the same story: the ""-input early
+			// return used to fire onError without filling lastError_.
+			ASSERT_MSG(p.getLastError() == "empty input",
+			           std::string(src) + " -> lastError_=[" + std::string(p.getLastError()) + "]");
 		}
 
 		// Inside a container a value was expected and never arrived -- that must
@@ -28863,6 +28867,60 @@ TEST(testSaxStreamAuditFixes) {
 			ASSERT_MSG(!ok, src);
 			ASSERT_MSG(h.calls == before + 1, src);
 		}
+	}
+
+	// 4. A value token truncated at EOF is INCOMPLETE, not empty. finish()
+	// used to fall through to the !hadValue_ branch for "N" / "-" / "-I"
+	// (parked in TOP by needMore_) and answered "Empty input" -- telling a
+	// caller who sent a partial NaN/Infinity that it had sent nothing.
+	{
+		JsonSaxHandler h;
+		const char* partials[] = {"N", "I", "-", "-I", "-N"};
+		for (const char* src : partials) {
+			JsonStreamParser sp(h);
+			sp.allowNaNInfinity = true;
+			ASSERT_MSG(sp.feed(src), src);
+			ASSERT_MSG(!sp.finish(), src);
+			ASSERT_MSG(sp.getLastError() == "Incomplete input",
+			           std::string(src) + " -> [" + std::string(sp.getLastError()) + "]");
+		}
+		// Genuinely empty input still says "Empty input"...
+		{
+			JsonStreamParser sp(h);
+			ASSERT(!sp.finish());
+			ASSERT_EQ(sp.getLastError(), std::string("Empty input"));
+		}
+		// ...and so does whitespace/comment-only input (no token ever started).
+		{
+			JsonStreamParser sp(h);
+			ASSERT(sp.feed("  // nothing\n"));
+			ASSERT(!sp.finish());
+			ASSERT_EQ(sp.getLastError(), std::string("Empty input"));
+		}
+	}
+
+	// 5. The number scanner stops at a '+'/'-' that is not part of an
+	// exponent, so "1-2" is diagnosed structurally (trailing data / missing
+	// separator) by BOTH parsers instead of being greedily swallowed and
+	// rejected as "Invalid number" by the stream parser only. The exponent
+	// sign itself still belongs to the number.
+	{
+		JsonSaxHandler h;
+		JsonSaxParser p;
+		ASSERT(!p.parse("1-2", h));
+		ASSERT_EQ(p.getLastError(), std::string("Trailing chars after value"));
+
+		JsonStreamParser sp(h);
+		ASSERT(!sp.feed("1-2"));
+		ASSERT_EQ(sp.getLastError(), std::string("Data after complete value"));
+
+		JsonStreamParser sp2(h);
+		ASSERT(!sp2.feed("[1-2]"));
+		ASSERT_EQ(sp2.getLastError(), std::string("Expected ',' or ']'"));
+
+		JsonStreamParser sp3(h);
+		ASSERT(sp3.feed("[1e-5]"));
+		ASSERT(sp3.finish());
 	}
 }
 

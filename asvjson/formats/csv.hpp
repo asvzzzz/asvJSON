@@ -199,7 +199,7 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 			}
 			if (!csvNumberShapeOk(s, nfirst)) return asvJSONValue::makeString(s.data(), s.size());
 			double d;
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 			// from_chars reports result_out_of_range on double overflow (1e400) or
 			// total underflow (1e-400); ec2 != errc falls through to makeString,
 			// keeping the literal's text -- the same outcome as the strtod branch
