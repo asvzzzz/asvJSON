@@ -158,7 +158,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 		case T::DOUBLE: {
 			if (std::isnan(v->dbl)) { out += ".nan"; return true; }
 			if (std::isinf(v->dbl)) { out += (v->dbl > 0 ? ".inf" : "-.inf"); return true; }
-			std::string val; fmtDoubleVal(v->dbl, val);
+			std::string val; fmtDoubleValDot0(v->dbl, val);
 			out += val; return true;
 		}
 		case T::STRING: {
@@ -311,7 +311,7 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 		case T::DOUBLE: {
 			if (std::isnan(v->dbl)) { out += prefix() + ".nan" + yamlTrail(v, wc) + "\n"; break; }
 			if (std::isinf(v->dbl)) { out += prefix() + (v->dbl > 0 ? ".inf" : "-.inf") + yamlTrail(v, wc) + "\n"; break; }
-			std::string val; fmtDoubleVal(v->dbl, val);
+			std::string val; fmtDoubleValDot0(v->dbl, val);
 			out += prefix() + val + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::STRING: {
@@ -744,9 +744,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 			if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
 			double dv = std::strtod(tmp.c_str(), &end);
 			if (end == tmp.c_str() + tmp.size()) {
-				std::string norm;
-				fmtDoubleVal(dv, norm);
-				return norm;
+				return fmtDbl(dv);
 			}
 			return yamlQuoteJsonScalar(tmp);
 		}

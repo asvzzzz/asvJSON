@@ -414,6 +414,7 @@ inline std::string json5ToJson(std::string_view input) {
 
     // Signs (+/-) with whitespace-tolerant lookahead (JSON5: - Infinity, + 5)
     if (c == '+' || c == '-') {
+      bool prevRadix = radixJustEnded;
       radixJustEnded = false;
       size_t j = i + 1;
       while (j < input.size()) {
@@ -465,8 +466,29 @@ inline std::string json5ToJson(std::string_view input) {
         break;
       }
       if (c == '+' || c == '-') {
-        if (!prefix) throw asvJSONError("stray '+'/'-' sign in JSON5 number");
-        if (c == '+') continue;
+        // An exponent sign is part of the number when it sits directly
+        // behind e/E whose mantissa is a digit-bearing literal ('1e+05',
+        // '5.e-3') -- keep it (the intermediate JSON accepts 'e+NN'). The
+        // digit scan keeps an identifier-final 'e' ('true+1') and a radix
+        // literal ('0x1e+5', prevRadix) from posing as an exponent, so both
+        // still hit the stray-sign rejection below. The digits must follow
+        // directly too: '1e+ 5' keeps a gap and is not an exponent.
+        bool expSign = false;
+        if (!prevRadix && i >= 2 && j == i + 1 && isNum && (input[i - 1] == 'e' || input[i - 1] == 'E')) {
+          size_t q = i - 2;
+          bool sawDot = false, sawDigit = false;
+          for (;;) {
+            char pc2 = input[q];
+            if (std::isdigit(static_cast<unsigned char>(pc2))) sawDigit = true;
+            else if (pc2 == '.' && !sawDot) sawDot = true;
+            else break;
+            if (q == 0) break;
+            --q;
+          }
+          expSign = sawDigit;
+        }
+        if (!prefix && !expSign) throw asvJSONError("stray '+'/'-' sign in JSON5 number");
+        if (c == '+' && !expSign) continue;
       }
       if (isNum && j > i + 1) { out += '-'; i = j - 1; continue; }
     }
@@ -967,7 +989,7 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       double d = v->dbl;
       if (std::isnan(d)) { out += (std::signbit(d) ? "-NaN" : "NaN"); break; }
       if (std::isinf(d)) { out += (d > 0 ? "Infinity" : "-Infinity"); break; }
-      std::string r; fmtDoubleVal(d, r); out += r;
+      std::string r; fmtDoubleValDot0(d, r); out += r;
       break;
     }
     case asvJSONValue::STRING: {

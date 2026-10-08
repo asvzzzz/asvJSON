@@ -98,7 +98,7 @@ inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0)
     case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); return;
     case asvJSONValue::INT: out += std::to_string(v->num); return;
     case asvJSONValue::DOUBLE:
-      if (!fmtNaNInfVal(v->dbl, true, out)) fmtDoubleVal(v->dbl, out);
+      if (!fmtNaNInfVal(v->dbl, true, out)) fmtDoubleValDot0(v->dbl, out);
       return;
     case asvJSONValue::STRING:
       out += '"';
@@ -546,7 +546,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
           else if (child->type == asvJSONValue::INT) cell = std::to_string(child->num);
           else if (child->type == asvJSONValue::DOUBLE) {
             double d = child->dbl;
-            if (!fmtNaNInfVal(d, true, cell)) fmtDoubleVal(d, cell);
+            if (!fmtNaNInfVal(d, true, cell)) fmtDoubleValDot0(d, cell);
           } else if (child->type == asvJSONValue::STRING) {
             goonWriteString(child->str_data, cell, dict, opts);
           } else {
@@ -683,7 +683,7 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       out += pad + itemIndent + "- ";
       if (child->type == asvJSONValue::INT) out += std::to_string(child->num);
       else if (child->type == asvJSONValue::DOUBLE) {
-        if (!fmtNaNInfVal(child->dbl, true, out)) fmtDoubleVal(child->dbl, out);
+        if (!fmtNaNInfVal(child->dbl, true, out)) fmtDoubleValDot0(child->dbl, out);
       } else {
         std::string spec = goonFormatSpecial(child);
         if (!spec.empty()) out += spec;
@@ -723,7 +723,7 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
     case asvJSONValue::DOUBLE: {
       double d = v->dbl;
       std::string dv;
-      if (!fmtNaNInfVal(d, true, dv)) fmtDoubleVal(d, dv);
+      if (!fmtNaNInfVal(d, true, dv)) fmtDoubleValDot0(d, dv);
       if (!key.empty() || depth > 0) {
         out += pad;
         goonWriteKey(key, out, opts);
