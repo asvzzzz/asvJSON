@@ -217,7 +217,7 @@ inline void xmlAppendAttrValue(std::string& out, const asvJSONValue* v) {
 			if (std::isnan(v->dbl) || std::isinf(v->dbl))
 				throw asvJSONError("XML: NaN/Infinity attribute value cannot be serialized");
 			std::string t;
-			fmtDoubleVal(v->dbl, t);
+			fmtDoubleValDot0(v->dbl, t);
 			out += t;
 			break;
 		}
@@ -254,7 +254,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 		}
 		case T::DOUBLE: {
 			if (std::isnan(dbl) || std::isinf(dbl)) { out += pad + "<" + xmlSanitizeElementName(name) + " xsi:nil=\"true\"/>\n"; break; }
-			std::string val; fmtDoubleVal(dbl, val);
+			std::string val; fmtDoubleValDot0(dbl, val);
 			out += pad + "<" + xmlSanitizeElementName(name) + ">" + xmlEscapeContent(val) + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
 		}
@@ -345,7 +345,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 							if (ec == std::errc()) out += "<" + safeChildName + ">" + std::string(buf, ptr) + "</" + safeChildName + ">";
 						} else if (childVal->type == asvJSONValue::DOUBLE) {
 							if (!std::isnan(childVal->dbl) && !std::isinf(childVal->dbl)) {
-								std::string val; fmtDoubleVal(childVal->dbl, val);
+								std::string val; fmtDoubleValDot0(childVal->dbl, val);
 								out += "<" + safeChildName + ">" + xmlEscapeContent(val) + "</" + safeChildName + ">";
 							}
 						} else if (childVal->type == asvJSONValue::BOOL_VAL) {
@@ -413,7 +413,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				auto& tv = textIt->second;
 				if (tv->type == asvJSONValue::STRING) out += xmlEscapeContent(tv->str_data);
 				else if (tv->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), tv->num); if (ec == std::errc()) out += std::string(buf, ptr); }
-				else if (tv->type == asvJSONValue::DOUBLE) { if (!std::isnan(tv->dbl) && !std::isinf(tv->dbl)) { std::string val; fmtDoubleVal(tv->dbl, val); out += val; } }
+				else if (tv->type == asvJSONValue::DOUBLE) { if (!std::isnan(tv->dbl) && !std::isinf(tv->dbl)) { std::string val; fmtDoubleValDot0(tv->dbl, val); out += val; } }
 				else if (tv->type == asvJSONValue::BOOL_VAL) out += tv->flag ? "true" : "false";
 				else if (tv->type == asvJSONValue::NULL_VAL) out += "null";
 				for (const auto& [k, v] : *obj) {
@@ -481,7 +481,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 						out += ">";
 						if (item->type == asvJSONValue::STRING) out += xmlEscapeContent(item->str_data);
 						else if (item->type == asvJSONValue::INT) { char buf[32]; auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), item->num); if (ec == std::errc()) out += std::string(buf, ptr); }
-						else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleVal(item->dbl, val); out += xmlEscapeContent(val); }
+						else if (item->type == asvJSONValue::DOUBLE) { std::string val; fmtDoubleValDot0(item->dbl, val); out += xmlEscapeContent(val); }
 						else if (item->type == asvJSONValue::BOOL_VAL) out += item->flag ? "true" : "false";
 						out += "</item>\n";
 					}

@@ -202,7 +202,7 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       std::string txt;
       if (std::isnan(v->dbl)) txt = "NaN";
       else if (std::isinf(v->dbl)) txt = (v->dbl < 0) ? "-Infinity" : "Infinity";
-      else fmtDoubleVal(v->dbl, txt);
+      else fmtDoubleValDot0(v->dbl, txt);
       out += std::to_string(txt.size());
       out += ':';
       out += txt;

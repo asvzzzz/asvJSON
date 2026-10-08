@@ -1691,20 +1691,30 @@ public:
 	}
 
 	bool writeToFile(const std::string& filename, bool pretty = false) const {
-		std::ofstream out(filename);
-		if (!out.is_open()) { lastError = "Failed to open file: " + filename; return false; }
-		out << serialize(pretty);
-		if (!out.good()) { lastError = "Failed to write file: " + filename; out.close(); return false; }
-		out.close();
-		return true;
+		try {
+			std::ofstream out(filename);
+			if (!out.is_open()) { lastError = "Failed to open file: " + filename; return false; }
+			out << serialize(pretty);
+			if (!out.good()) { lastError = "Failed to write file: " + filename; out.close(); return false; }
+			out.close();
+			return true;
+		} catch (const std::exception& e) {
+			lastError = e.what();
+			return false;
+		}
 	}
 
 	bool readFromFile(const std::string& filename) {
-		std::ifstream in(filename);
-		if (!in.is_open()) { lastError = "Failed to open file: " + filename; return false; }
-		std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-		in.close();
-		return parse(content);
+		try {
+			std::ifstream in(filename);
+			if (!in.is_open()) { lastError = "Failed to open file: " + filename; return false; }
+			std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			in.close();
+			return parse(content);
+		} catch (const std::exception& e) {
+			lastError = e.what();
+			return false;
+		}
 	}
 
 	bool readFromFileAny(const std::string& filename);
@@ -2537,6 +2547,20 @@ inline void fmtDoubleVal(double d, std::string& out) {
 	}
 }
 
+// fmtDoubleVal renders 1.0 as "1" and -0.0 as "-0" (shortest round-trip
+// form); a bare integer literal re-decodes as INT and "-0" loses its sign.
+// Text formats that feed their output back through a number parser use this
+// wrapper: it appends ".0" whenever the rendered literal has no '.', 'e' or
+// 'E' -- the convention TOML/YAML/CSV/TRON/sexpr/TOON/UDE/INI/dotenv/core-JSON
+// already follow (an exponent form such as "1e+05" needs no suffix). Finite
+// values only: callers guard NaN/Inf first (fmtNaNInfVal).
+inline void fmtDoubleValDot0(double d, std::string& out) {
+	size_t mark = out.size();
+	fmtDoubleVal(d, out);
+	if (out.size() > mark && out.find_first_of(".eE", mark) == std::string::npos)
+		out += ".0";
+}
+
 inline bool fmtNaNInfVal(double d, bool allowNaNInfinity, std::string& out) {
 	if (!allowNaNInfinity) return false;
 	if (std::isnan(d)) { out += (std::signbit(d) ? "-NaN" : "NaN"); return true; }
@@ -2612,7 +2636,9 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 				if (allowNaNInfinity) { fmtNaNInfVal(v->dbl, true, out); break; }
 				out += "null"; break;
 			}
-			fmtDoubleVal(v->dbl, out);
+			// fmtDoubleValDot0 keeps an integral double a DOUBLE on re-decode
+			// (and "-0.0" its sign): see the helper's comment for the convention.
+			fmtDoubleValDot0(v->dbl, out);
 			break;
 		}
 		case asvJSONValue::STRING: {

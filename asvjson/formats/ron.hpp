@@ -1022,7 +1022,7 @@ inline void ronEmitNum(std::string& out, const asvJSONValue* v) {
       double d = v->dbl;
       if (std::isnan(d)) out += std::signbit(d) ? "-NaN" : "NaN";
       else if (std::isinf(d)) out += (d > 0 ? "inf" : "-inf");
-      else { std::string s; fmtDoubleVal(d, s); out += s; }
+      else { std::string s; fmtDoubleValDot0(d, s); out += s; }
       break;
     }
     case asvJSONValue::STRING:
@@ -1200,7 +1200,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
       double d = v->dbl;
       if (std::isnan(d)) out += std::signbit(d) ? "-NaN" : "NaN";
       else if (std::isinf(d)) out += (d > 0 ? "inf" : "-inf");
-      else { std::string s; fmtDoubleVal(d, s); out += s; }
+      else { std::string s; fmtDoubleValDot0(d, s); out += s; }
       break;
     }
     case asvJSONValue::STRING: {

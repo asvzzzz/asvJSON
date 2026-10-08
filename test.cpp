@@ -599,6 +599,137 @@ TEST(testSerializeNaNInfinity) {
 	ASSERT(s2.find("Infinity") != std::string::npos);
 }
 
+TEST(testSerializeDoubleDotZero) {
+	// A DOUBLE with an integral value must serialize with an explicit ".0"
+	// so the literal re-decodes as DOUBLE, not INT (and "-0.0" keeps its sign).
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"a":1.0,"b":100000.0,"c":2.5,"d":-0.0,"e":0.0})"));
+		std::string s = j.serialize();
+		ASSERT(s.find("1.0") != std::string::npos);
+		// b may render as "100000.0" or the shortest exponent form "1e+05"
+		// (to_chars); either way it must contain '.', 'e' or 'E' so it
+		// re-decodes as DOUBLE rather than INT.
+		ASSERT(s.find("2.5") != std::string::npos);
+		ASSERT(s.find("-0.0") != std::string::npos);
+		ASSERT(s.find("0.0") != std::string::npos);
+		// No bare-integer rendering of a DOUBLE anywhere: ",1}" / ",100000}" etc.
+		ASSERT(s.find(",1}") == std::string::npos);
+		ASSERT(s.find(",100000}") == std::string::npos);
+		ASSERT(j2.parse(s));
+		ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::DOUBLE);
+		ASSERT(j2.getRoot()->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(j2.getRoot()->get("c")->type == asvJSONValue::DOUBLE);
+		ASSERT(j2.getRoot()->get("d")->type == asvJSONValue::DOUBLE);
+		ASSERT(j2.getRoot()->get("e")->type == asvJSONValue::DOUBLE);
+		ASSERT(std::signbit(j2.getRoot()->get("d")->getDouble()));
+		ASSERT_EQ(j2.getRoot()->get("a")->getDouble(), 1.0);
+		ASSERT_EQ(j2.getRoot()->get("b")->getDouble(), 100000.0);
+	}
+	// INT stays bare: no ".0" is ever appended to an integer literal.
+	{
+		asvJSON j;
+		j.parse(std::string_view(R"({"x":1,"y":-42})"));
+		std::string s = j.serialize();
+		ASSERT(s.find("1.0") == std::string::npos);
+		ASSERT(s.find("42.0") == std::string::npos);
+		ASSERT(s.find("\"x\":1,") != std::string::npos);
+	}
+	// Pretty path uses the same token writer.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"({"a":1.0})"));
+		std::string s = j.serialize(true);
+		ASSERT(s.find("1.0") != std::string::npos);
+		ASSERT(j2.parse(s));
+		ASSERT(j2.getRoot()->get("a")->type == asvJSONValue::DOUBLE);
+	}
+	// NaN/Infinity keep their spellings: the ".0" suffix is only for the
+	// fmtDoubleVal output of finite values.
+	{
+		asvJSON j;
+		j.allowNaNInfinity = true;
+		j.putDouble("nan", std::numeric_limits<double>::quiet_NaN());
+		j.putDouble("inf", std::numeric_limits<double>::infinity());
+		std::string s = j.serialize();
+		ASSERT(s.find("NaN") != std::string::npos);
+		ASSERT(s.find("Infinity") != std::string::npos);
+		ASSERT(s.find("NaN.0") == std::string::npos);
+		ASSERT(s.find("Infinity.0") == std::string::npos);
+	}
+}
+
+TEST(testFormatDoubleDotZero) {
+	// An integral DOUBLE must survive every text format's encode/decode
+	// round-trip as a DOUBLE: the encoder writes "1.0" (never a bare "1")
+	// or the decoder re-reads the literal as INT.
+	const std::string_view src = R"({"a":1.0,"b":-0.0,"c":2.5,"d":100000.0,"i":7})";
+	auto check = [](asvJSON& k) {
+		asvJSONValue* r = k.getRoot();
+		ASSERT(r->get("a")->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(r->get("a")->getDouble(), 1.0);
+		ASSERT(r->get("b")->type == asvJSONValue::DOUBLE);
+		ASSERT(std::signbit(r->get("b")->getDouble()));
+		ASSERT_EQ(r->get("c")->getDouble(), 2.5);
+		ASSERT_EQ(r->get("d")->getDouble(), 100000.0);
+		ASSERT(r->get("i")->type == asvJSONValue::INT);
+		ASSERT_EQ(r->get("i")->getInt(), 7);
+	};
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		ASSERT(k.fromRON(j.toRON()));
+		check(k);
+	}
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		ASSERT(k.fromGOON(j.toGOON()));
+		check(k);
+	}
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		ASSERT(k.fromXML(j.toXML()));
+		check(k);
+	}
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		ASSERT(k.fromYAML(j.toYAML()));
+		check(k);
+	}
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		ASSERT(k.fromJSON5(j.toJSON5()));
+		check(k);
+	}
+	// bencode has no number type on decode (a byte string always decodes
+	// as STRING), so only the text survives: 1.0 must not collapse to "1".
+	{
+		asvJSON j, k;
+		ASSERT(j.parse(src));
+		std::string s = j.toBencode();
+		ASSERT(s.find("3:1.0") != std::string::npos);
+		ASSERT(s.find("4:-0.0") != std::string::npos);
+		ASSERT(k.fromBencode(s));
+		ASSERT_EQ(k.getString("a"), "1.0");
+		ASSERT_EQ(k.getString("b"), "-0.0");
+	}
+	// The JSON5 converter must accept a sign inside an exponent -- "1e+05"
+	// is exactly how MSVC's to_chars renders 100000.0 -- while still
+	// rejecting an infix sign ("1 + 2" stays an error).
+	{
+		asvJSON k;
+		ASSERT(k.fromJSON5("{a:1e+05,b:1e-05}"));
+		ASSERT(k.getRoot()->get("a")->type == asvJSONValue::DOUBLE);
+		ASSERT_EQ(k.getRoot()->get("a")->getDouble(), 100000.0);
+		ASSERT_EQ(k.getRoot()->get("b")->getDouble(), 1e-05);
+		ASSERT(!k.fromJSON5("{a: 1 + 2}"));
+	}
+}
+
 TEST(testWriteReadFile) {
 	asvJSON json;
 	json.putString("name", "Test");
@@ -613,6 +744,20 @@ TEST(testWriteReadFile) {
 	ASSERT_EQ(json2.getInt("value"), 42);
 	
 	std::remove("test_output.json");
+
+	// An encoder throw (NaN attribute -> toXML) must surface as
+	// false + lastError, not as an exception past the bool contract.
+	// The @-attr path lives on OBJECT values, so the NaN sits one level
+	// down: a root-level "@x" would be an element, not an attribute.
+	{
+		asvJSON j;
+		j.allowNaNInfinity = true;
+		ASSERT(j.parse(R"({"e":{"@x":NaN}})"));
+		j.allowNaNInfinity = false;
+		ASSERT(!j.writeToFileAny("test_nan_attr.xml"));
+		ASSERT(j.getLastError().find("NaN/Infinity attribute") != std::string::npos);
+		std::remove("test_nan_attr.xml");
+	}
 }
 
 TEST(testMessagePack) {
@@ -17950,7 +18095,7 @@ TEST(testFromCpp) {
       "  Inner innerA, innerB;\n"
       "};\n")));
     ASSERT_EQ(b.serialize(),
-              std::string_view(R"({"x":0,"y":0,"p":"","q":"hi","m":1.5,"n":0,)"
+              std::string_view(R"({"x":0,"y":0,"p":"","q":"hi","m":1.5,"n":0.0,)"
                                R"("innerA":{"v":7},"innerB":{"v":7}})"));
   }
   // East-const qualifiers and multi-word signed types (#4).
@@ -28022,6 +28167,17 @@ TEST(testJsonSax) {
 		ASSERT_EQ(events.size(), size_t(4));
 	}
 
+	// -- a throw from onError on an unwrapped early-return path (empty
+	//    input) must not escape parseSax: bool + lastError is the contract --
+	{
+		struct : JsonSaxHandler {
+			void onError(std::string_view) override { throw std::runtime_error("boom"); }
+		} h;
+		asvJSON doc;
+		ASSERT(!doc.parseSax("", h));
+		ASSERT(doc.getLastError().find("boom") != std::string::npos);
+	}
+
 	// -- regression: stateless JsonSaxParser must enforce array/object size
 	//    limits (stream parser already did; the stateless one previously only
 	//    enforced MAX_NESTING_DEPTH and MAX_STRING_LEN).
@@ -32169,6 +32325,8 @@ int main() {
 	RUN(testSerialize);
 	RUN(testSerializePretty);
 	RUN(testSerializeNaNInfinity);
+	RUN(testSerializeDoubleDotZero);
+	RUN(testFormatDoubleDotZero);
 	
 	std::cout << "\n--- File Tests ---\n";
 	RUN(testWriteReadFile);
