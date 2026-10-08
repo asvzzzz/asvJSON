@@ -27016,10 +27016,13 @@ TEST(testSchemaJsonPointerRefs) {
 	}
 	// -- a chain through several arrays and objects --
 	ASSERT(check(R"({"items":{"allOf":[{"anyOf":[{"type":"null"}]}]},"$ref":"#/items/allOf/0/anyOf/0"})", "null", true));
-	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0/type"})", "5", true));
-	// -- a non-object array element still resolves (no assertion inside) --
-	ASSERT(check(R"({"allOf":["x"],"$ref":"#/allOf/0"})", "5", true));
-	ASSERT(check(R"({"allOf":[null],"$ref":"#/allOf/0"})", "5", true));
+	// -- $ref must land on a schema (boolean or object), not bare data --
+	// "#/allOf/0/type" resolves to the string "integer"; a non-schema target
+	// used to pass every instance through as if the reference were unasserted.
+	ASSERT(check(R"({"allOf":[{"type":"integer"}],"$ref":"#/allOf/0/type"})", "5", false));
+	ASSERT(check(R"({"allOf":["x"],"$ref":"#/allOf/0"})", "5", false));
+	ASSERT(check(R"({"allOf":[null],"$ref":"#/allOf/0"})", "5", false));
+	ASSERT(check(R"({"definitions":{"x":"bar"},"$ref":"#/definitions/x"})", "5", false));
 	// -- object navigation is unchanged, including ~0/~1 and percent escapes --
 	ASSERT(check(R"({"defs":{"a":{"type":"integer"}},"$ref":"#/defs/a"})", "5", true));
 	ASSERT(check(R"({"defs":{"a":{"defs":{"b":{"type":"integer"}}}},"$ref":"#/defs/a/defs/b"})", "5", true));
@@ -29734,6 +29737,188 @@ TEST(testSchemaAuditRegressions) {
 		ASSERT(v.validate(s, err));
 	}
 	rejectsWithSchemaError(R"("x")", R"({"format":5})");
+}
+
+TEST(testJSONSchemaReviewWave2) {
+	// -------------------------------------------------------------------
+	// Review wave 2 fixes. Each block pins one previously-wrong behavior.
+	// -------------------------------------------------------------------
+	auto rejectsWithSchemaError = [](const std::string& valueJson, const std::string& schemaJson) {
+		asvJSON v, s;
+		ASSERT(v.parse(valueJson));
+		ASSERT(s.parse(schemaJson));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Invalid schema") != std::string::npos);
+	};
+
+	// (1) A numeric `exclusiveMinimum`/`exclusiveMaximum` was overwriting
+	// `minimum`/`maximum`, silently dropping the inclusive bound when both
+	// coexisted. Both are independent draft-07 keywords and both apply.
+	{
+		// The value satisfies exclusiveMinimum (3 < 7) but violates the
+		// coexisting inclusive minimum of 10 -- must be rejected.
+		asvJSON v, s;
+		ASSERT(v.parse("7"));
+		ASSERT(s.parse(R"({"type":"number","minimum":10,"exclusiveMinimum":3})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("less than minimum 10") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("10"));
+		ASSERT(s.parse(R"({"type":"number","minimum":10,"exclusiveMinimum":3})"));
+		std::string err;
+		ASSERT(v.validate(s, err)); // == minimum, > exclusiveMinimum
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3"));
+		ASSERT(s.parse(R"({"type":"number","minimum":10,"exclusiveMinimum":3})"));
+		std::string err;
+		ASSERT(!v.validate(s, err)); // fails both
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3.5"));
+		ASSERT(s.parse(R"({"type":"number","minimum":3,"exclusiveMinimum":3.5})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("not greater than exclusiveMinimum 3.5") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3.5"));
+		ASSERT(s.parse(R"({"type":"number","maximum":5,"exclusiveMaximum":3.5})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("not less than exclusiveMaximum 3.5") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("3.5"));
+		ASSERT(s.parse(R"({"type":"number","minimum":3,"exclusiveMaximum":4})"));
+		std::string err;
+		ASSERT(v.validate(s, err)); // inclusive min AND exclusive max both kept
+	}
+
+	// (2) NaN was compared as "equal" to any number (compareIntDouble returns
+	// 0 for it), so const/enum membership and numeric bounds accepted NaN.
+	// valuesEqual and validateNumber now short-circuit on NaN. Note the
+	// allowNaNInfinity flag must be on BEFORE parse (the JSON parser rejects a
+	// bare NaN token otherwise).
+	{
+		asvJSON v, s;
+		v.allowNaNInfinity = true;
+		s.allowNaNInfinity = true;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"const":NaN})"));
+		std::string err;
+		ASSERT(!v.validate(s, err)); // NaN !== 5
+	}
+	{
+		asvJSON v, s;
+		v.allowNaNInfinity = true;
+		s.allowNaNInfinity = true;
+		ASSERT(v.parse("NaN"));
+		ASSERT(s.parse(R"({"const":NaN})"));
+		std::string err;
+		ASSERT(!v.validate(s, err)); // NaN matches nothing, not even itself
+	}
+	{
+		asvJSON v, s;
+		v.allowNaNInfinity = true;
+		ASSERT(v.parse("NaN"));
+		ASSERT(s.parse(R"({"enum":[1,2,3]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err)); // NaN not a listed number
+	}
+	{
+		asvJSON v, s;
+		v.allowNaNInfinity = true;
+		ASSERT(v.parse("NaN"));
+		ASSERT(s.parse(R"({"type":"number","minimum":0})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("not comparable") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		v.allowNaNInfinity = true;
+		ASSERT(v.parse("NaN"));
+		ASSERT(s.parse(R"({"type":"number","maximum":100})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+
+	// (3) Unknown `type` names used to compile into a schema that rejects
+	// every value with a baffling "Expected type 'strng', got 'integer'".
+	// The five valid names plus integer are the draft-07 set; anything else
+	// is now a schema-shape error reported as such.
+	rejectsWithSchemaError("5", R"({"type":"strng"})");
+	rejectsWithSchemaError("5", R"({"type":["integer","strng"]})");
+
+	// (4) `enum` duplicates were accepted; now they are a shape error
+	// (matching the strictness already applied to `type`/`required`).
+	rejectsWithSchemaError("1", R"({"enum":[1,1]})");
+	// 1 and 1.0 are the same JSON number, so they are duplicates too.
+	rejectsWithSchemaError("1", R"({"enum":[1,1.0]})");
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"enum":[1,2]})"));
+		std::string err;
+		ASSERT(v.validate(s, err)); // distinct entries still fine
+	}
+
+	// (5) A $ref resolving to a non-schema value (a bare string, number,
+	// array element that is not an object/boolean) used to pass every
+	// instance through unasserted. It is now a schema error.
+	rejectsWithSchemaError("5", R"({"definitions":{"x":"bar"},"$ref":"#/definitions/x"})");
+	rejectsWithSchemaError("5", R"({"definitions":{"x":7},"$ref":"#/definitions/x"})");
+	rejectsWithSchemaError("5", R"({"allOf":["x"],"$ref":"#/allOf/0"})");
+	rejectsWithSchemaError("5", R"({"allOf":[[1,2]],"$ref":"#/allOf/0"})");
+	// ...but boolean schemas and object schemas remain valid targets.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"definitions":{"x":true},"$ref":"#/definitions/x"})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"definitions":{"x":{"type":"integer"}},"$ref":"#/definitions/x"})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+
+	// (6) propertyNames: the dead outer setError ("Property name 'x' is
+	// invalid") never fired (validateNode already set the error); the name
+	// was not pushed into the path, so the message named no property. Now the
+	// failing key appears in the pointer prefix.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"({"Abc":1})"));
+		ASSERT(s.parse(R"({"propertyNames":{"pattern":"^[a-z]+$"}})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Abc") != std::string::npos); // path names the key
+		ASSERT(err.find("Property name") == std::string::npos); // old generic text gone
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"({"abc":1})"));
+		ASSERT(s.parse(R"({"propertyNames":{"pattern":"^[a-z]+$"}})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+
+	// (7/8) are refactors (makeFork + pushIndexPath path unification in
+	// contains) -- behavior is covered by the audit tests above; the fork
+	// helper keeps the shared caches, which the regressions exercise.
 }
 
 TEST(testReadWriteFileAny) {
@@ -32469,6 +32654,7 @@ RUN(testSchemaJsonPointerRefs);
 	std::cout << "\n--- JSON Schema Validation Tests ---\n";
 	RUN(testSchemaValidate);
 	RUN(testSchemaAuditRegressions);
+	RUN(testJSONSchemaReviewWave2);
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
 	RUN(testReadWriteFileAny);
