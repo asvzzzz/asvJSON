@@ -172,6 +172,21 @@ private:
     return true;
   }
 
+  // Builds the throwaway sub-validator that anyOf/oneOf/not/if/contains fork
+  // off. Copies everything a forked validation shares (the root schema, the
+  // instance path, and the caches that would otherwise have to be re-seeded
+  // per branch); each caller does the same job by hand in its own loop.
+  SchemaValidator makeFork() const {
+    SchemaValidator sub;
+    sub.rootSchema_ = rootSchema_;
+    sub.path_ = path_;
+    sub.refStack_ = refStack_;
+    sub.patternCache_ = patternCache_;
+    sub.shapeCache_ = shapeCache_;
+    sub.refCache_ = refCache_;
+    return sub;
+  }
+
   // Stores the message for an escaping std::exception and reports failure. The
   // nested guard covers the handler itself: building the message allocates, so a
   // bad_alloc caught by validate() could otherwise escape again from in here and
@@ -338,6 +353,13 @@ private:
     if (a->type != b->type) {
       if ((a->type == asvJSONValue::INT || a->type == asvJSONValue::DOUBLE) &&
           (b->type == asvJSONValue::INT || b->type == asvJSONValue::DOUBLE)) {
+        // NaN would otherwise fall into the INT/DOUBLE mix and compareNumbers
+        // (via compareIntDouble) maps it to "equal" -- the whole point of the
+        // `if (b != b) return 0;` ordering quirk. An IEEE NaN is unordered and
+        // not equal to any number, itself included, so reject it here instead.
+        if ((a->type == asvJSONValue::DOUBLE && a->dbl != a->dbl) ||
+            (b->type == asvJSONValue::DOUBLE && b->dbl != b->dbl))
+          return false;
         return compareNumbers(a, b) == 0;
       }
       return false;
@@ -346,6 +368,8 @@ private:
       case asvJSONValue::NULL_VAL: return true;
       case asvJSONValue::BOOL_VAL: return a->flag == b->flag;
       case asvJSONValue::INT: return a->num == b->num;
+      // Same-type DOUBLE is handled by the switch; NaN != NaN is already the
+      // IEEE result of the == below, so no extra guard needed here.
       case asvJSONValue::DOUBLE: return a->dbl == b->dbl;
       case asvJSONValue::STRING: return a->str_data == b->str_data;
       case asvJSONValue::DATETIME: return a->timestamp == b->timestamp &&
@@ -536,6 +560,17 @@ private:
     }
   }
 
+  // draft-07 6.1.1: "The value of this keyword MUST be either a string or an
+  // array. If it is an array, elements of the array MUST be strings." and the
+  // strings MUST be one of the seven type names the spec defines. An unknown
+  // name ("strng") can never match any instance, so rather than let it reject
+  // every value with a baffling "Expected type 'strng', got 'integer'" it is
+  // reported as the schema mistake it is.
+  static bool isKnownTypeName(std::string_view t) {
+    return t == "null" || t == "boolean" || t == "object" || t == "array" ||
+           t == "number" || t == "string" || t == "integer";
+  }
+
   // Returns a compiled regex for `pat` from the validator-wide cache. On a
   // bad pattern sets valid=false (the pattern is remembered so later lookups
   // are fast) and returns nullptr without touching error_.
@@ -583,6 +618,17 @@ private:
         setError("Invalid schema: 'type' must be a string or an array of strings");
         return false;
       }
+      if (t->type == asvJSONValue::STRING && !isKnownTypeName(t->str_data)) {
+        setError("Invalid schema: unknown type name '" + t->str_data + "'");
+        return false;
+      }
+      if (t->type == asvJSONValue::ARRAY && t->arr) {
+        for (const auto& e : *t->arr)
+          if (!isKnownTypeName(e->str_data)) {
+            setError("Invalid schema: unknown type name '" + e->str_data + "'");
+            return false;
+          }
+      }
       // draft-07: the array "SHOULD be unique" and, as with `enum`, an empty
       // list matches nothing at all -- it also produces the useless diagnostic
       // "Expected type [], got 'string'". Same deliberate strictness as the
@@ -616,6 +662,17 @@ private:
         setError("Invalid schema: 'enum' should have at least one element");
         return false;
       }
+      // draft-07: "Elements in the array SHOULD be unique" -- same deliberate
+      // strictness as the `type` array and `required` above. Duplicate entries
+      // are redundant with equal values (1 and 1.0 compare equal via
+      // valuesEqual, the same equality the membership check uses) and hide a
+      // copy-paste slip; a schema that repeats itself is rejected.
+      for (size_t i = 0; i < e->arr->size(); i++)
+        for (size_t j = i + 1; j < e->arr->size(); j++)
+          if (valuesEqual((*e->arr)[i].get(), (*e->arr)[j].get())) {
+            setError("Invalid schema: 'enum' entries must be unique");
+            return false;
+          }
     }
     if (auto r = schemaGet(schema, "required")) {
       if (r->type != asvJSONValue::ARRAY || !r->arr) {
@@ -855,6 +912,16 @@ private:
       }
       auto resolved = resolveRef(refNode->str_data);
       if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
+      if (!isSchema(resolved)) {
+        // $ref must land on a schema instance (boolean or object). A pointer
+        // into bare data (`{"definitions":{"x":"bar"},"$ref":"#/definitions/x"}`)
+        // is a malformed schema, and passing it through would silently validate
+        // everything ("not an object -> true"), contradicting the header's
+        // "malformed subschema is reported, not swallowed".
+        setError("Invalid schema: '$ref' does not resolve to a schema: " + refNode->str_data);
+        shapeFailed_ = true; // malformed schema, not an instance mismatch
+        return false;
+      }
       RefKey key{value, resolved};
       if (refStack_ && refStack_->count(key) != 0) {
         setError("Circular $ref detected at: " + refNode->str_data);
@@ -928,13 +995,7 @@ private:
       auto node = schemaGet(schema, "anyOf");
       if (node && node->type == asvJSONValue::ARRAY && node->arr) {
         for (const auto& sub : *node->arr) {
-          SchemaValidator subVal;
-          subVal.rootSchema_ = rootSchema_;
-          subVal.path_ = path_;
-          subVal.refStack_ = refStack_;
-          subVal.patternCache_ = patternCache_;
-          subVal.shapeCache_ = shapeCache_;
-          subVal.refCache_ = refCache_;
+          SchemaValidator subVal = makeFork();
           if (subVal.validateNode(value, sub.get())) return true;
           // A malformed branch is not "this branch did not match" -- abort,
           // otherwise the schema error disappears behind the anyOf verdict.
@@ -950,13 +1011,7 @@ private:
       if (node && node->type == asvJSONValue::ARRAY && node->arr) {
         int matches = 0;
         for (const auto& sub : *node->arr) {
-          SchemaValidator subVal;
-          subVal.rootSchema_ = rootSchema_;
-          subVal.path_ = path_;
-          subVal.refStack_ = refStack_;
-          subVal.patternCache_ = patternCache_;
-          subVal.shapeCache_ = shapeCache_;
-          subVal.refCache_ = refCache_;
+          SchemaValidator subVal = makeFork();
           if (subVal.validateNode(value, sub.get())) matches++;
           if (adoptShapeError(subVal)) return false;
         }
@@ -970,13 +1025,7 @@ private:
     if (schemaHas(schema, "not")) {
       auto node = schemaGet(schema, "not");
       if (node) {
-        SchemaValidator subVal;
-        subVal.rootSchema_ = rootSchema_;
-        subVal.path_ = path_;
-        subVal.refStack_ = refStack_;
-        subVal.patternCache_ = patternCache_;
-        subVal.shapeCache_ = shapeCache_;
-        subVal.refCache_ = refCache_;
+        SchemaValidator subVal = makeFork();
         if (subVal.validateNode(value, node)) {
           setError("Matches the 'not' schema");
           return false;
@@ -990,13 +1039,7 @@ private:
     if (schemaHas(schema, "if")) {
       auto ifNode = schemaGet(schema, "if");
       if (ifNode) {
-        SchemaValidator ifVal;
-        ifVal.rootSchema_ = rootSchema_;
-        ifVal.path_ = path_;
-        ifVal.refStack_ = refStack_;
-        ifVal.patternCache_ = patternCache_;
-        ifVal.shapeCache_ = shapeCache_;
-        ifVal.refCache_ = refCache_;
+        SchemaValidator ifVal = makeFork();
         bool cond = ifVal.validateNode(value, ifNode);
         // A malformed condition reads as a false one and would steer the
         // instance into the else branch as if the author had asked for that.
@@ -1063,26 +1106,43 @@ private:
 
     // exclusiveMinimum/exclusiveMaximum accept both the draft-07 numeric form
     // and the draft-04 boolean (legacy) form that makes `minimum`/`maximum`
-    // strict.
+    // strict. The draft-07 numeric form is an independent strict bound that
+    // does NOT replace its inclusive sibling: `{"minimum":5,"exclusiveMinimum":3}`
+    // must reject everything below 5 (the plain bound) and at 3 or below (the
+    // strict one), so both checks are applied separately. Overwriting `minimum`
+    // with the exclusive value (as earlier versions did) silently dropped the
+    // inclusive bound when the two coexisted.
     const asvJSONValue* minNode = schemaGet(schema, "minimum");
     const asvJSONValue* maxNode = schemaGet(schema, "maximum");
     bool strictMin = false;
     bool strictMax = false;
+    const asvJSONValue* exMinNode = nullptr; // draft-07 numeric exclusive form
+    const asvJSONValue* exMaxNode = nullptr;
     if (auto exMin = schemaGet(schema, "exclusiveMinimum")) {
       if (exMin->type == asvJSONValue::BOOL_VAL) {
         strictMin = exMin->flag;
       } else if (isNumberType(exMin)) {
-        strictMin = true;
-        minNode = exMin;
+        exMinNode = exMin;
       }
     }
     if (auto exMax = schemaGet(schema, "exclusiveMaximum")) {
       if (exMax->type == asvJSONValue::BOOL_VAL) {
         strictMax = exMax->flag;
       } else if (isNumberType(exMax)) {
-        strictMax = true;
-        maxNode = exMax;
+        exMaxNode = exMax;
       }
+    }
+
+    // A NaN instance is IEEE-unordered: comparing it against a bound via
+    // compareNumbers funnels through compareIntDouble, whose `if (b != b)
+    // return 0;` quirk maps NaN to "equal", so inclusive bounds would pass a
+    // value that satisfies nothing. Reject it whenever a numeric bound exists.
+    const bool valueNaN = value->type == asvJSONValue::DOUBLE && value->dbl != value->dbl;
+    const bool anyBound = (minNode && isNumberType(minNode)) || (maxNode && isNumberType(maxNode)) ||
+                          exMinNode || exMaxNode;
+    if (valueNaN && anyBound) {
+      setError("Value NaN is not comparable to the numeric bounds");
+      return false;
     }
 
     if (minNode && isNumberType(minNode) &&
@@ -1095,6 +1155,11 @@ private:
       return false;
     }
 
+    if (exMinNode && compareNumbers(value, exMinNode) <= 0) {
+      setError("Value " + numberToStr(value) + " is not greater than exclusiveMinimum " + numberToStr(exMinNode));
+      return false;
+    }
+
     if (maxNode && isNumberType(maxNode) &&
         (strictMax ? compareNumbers(value, maxNode) >= 0 : compareNumbers(value, maxNode) > 0)) {
       if (strictMax) {
@@ -1102,6 +1167,11 @@ private:
       } else {
         setError("Value " + numberToStr(value) + " is greater than maximum " + numberToStr(maxNode));
       }
+      return false;
+    }
+
+    if (exMaxNode && compareNumbers(value, exMaxNode) >= 0) {
+      setError("Value " + numberToStr(value) + " is not less than exclusiveMaximum " + numberToStr(exMaxNode));
       return false;
     }
 
@@ -1219,14 +1289,14 @@ private:
       if (node && items) {
         bool found = false;
         // Build the probing validator once; only its path changes per item.
-        SchemaValidator subVal;
-        subVal.rootSchema_ = rootSchema_;
-        subVal.refStack_ = refStack_;
-        subVal.patternCache_ = patternCache_;
-        subVal.shapeCache_ = shapeCache_;
-        subVal.refCache_ = refCache_;
+        // The path is seeded from ours then indexed per item via pushIndexPath
+        // (the same mechanism the array branches use), so a failure message for
+        // `contains` reads "<parent>/<i>: ..." just like an items/properties
+        // verdict instead of the old hand-rolled string concatenation.
+        SchemaValidator subVal = makeFork();
         for (size_t i = 0; i < count; i++) {
-          subVal.path_ = path_ + "/" + std::to_string(i);
+          subVal.path_ = path_;
+          subVal.pushIndexPath(i);
           subVal.error_.clear();
           if (subVal.validateNode((*items)[i].get(), node)) { found = true; break; }
           // Blaming the array for a subschema that never compiled is worse
@@ -1402,10 +1472,15 @@ private:
           for (auto& kv : *obj) {
             propertyNameVal_.type = asvJSONValue::STRING;
             propertyNameVal_.str_data = kv.first;
-            if (!validateNode(&propertyNameVal_, node)) {
-              setError("Property name '" + kv.first + "' is invalid");
-              return false;
-            }
+            // Push the offending property name into the path exactly like
+            // additionalProperties does, so the inner message names it instead
+            // of a generic "Property name 'x' is invalid" on top of the real
+            // cause (setError is idempotent, so that outer call was dead code).
+            std::string oldPath = path_;
+            pushPath(kv.first);
+            bool ok = validateNode(&propertyNameVal_, node);
+            path_ = oldPath;
+            if (!ok) return false;
           }
         }
       }
