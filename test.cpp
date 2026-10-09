@@ -2598,6 +2598,45 @@ TEST(testBSONStringNULGuard) {
 	}
 }
 
+TEST(testBSONEncoderUTF8Validation) {
+	// The encoder must validate UTF-8 before emitting a STRING (type 0x02).
+	// An invalid sequence would produce a document the decoder rejects, so we
+	// catch it at encode time. Binary payloads are deliberately NOT checked --
+	// they carry arbitrary data by design.
+	asvJSON j;
+	j.setValue("s", asvJSONValue::makeString(std::string("hello")));
+	auto bson = j.toBSON();
+	ASSERT(bson.size() > 0); // valid string round-trips
+
+	// Build a node with an invalid UTF-8 byte (0xFE is not a valid start byte).
+	asvJSON jBad;
+	jBad.setValue("s", asvJSONValue::makeString(std::string("\xFE")));
+	bool threw = false;
+	try { auto bson2 = jBad.toBSON(); }
+	catch (const std::exception&) { threw = true; }
+	ASSERT(threw);
+
+	// Same for a map key: invalid UTF-8 in an object key must also throw.
+	asvJSON jKeyBad;
+	auto obj = asvJSONValue::makeObject();
+	if (!obj) throw std::runtime_error("alloc failed");
+	obj->obj->insert_or_assign(std::string("\xFE"), asvJSONValue::makeNull());
+	jKeyBad.setValue("", std::move(obj));
+	threw = false;
+	try { auto bson3 = jKeyBad.toBSON(); }
+	catch (const std::exception&) { threw = true; }
+	ASSERT(threw);
+
+	// A valid multi-byte UTF-8 key must still work.
+	asvJSON jGood;
+	auto obj2 = asvJSONValue::makeObject();
+	if (!obj2) throw std::runtime_error("alloc failed");
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
+	jGood.setValue("", std::move(obj2));
+	auto bson4 = jGood.toBSON();
+	ASSERT(bson4.size() > 0);
+}
+
 TEST(testBSONNestedDocBound) {
 	// Bug: a nested document was parsed with the WHOLE BUFFER as limit, so a
 	// forged child docSize could be validated only against dataLen instead of
@@ -33278,6 +33317,7 @@ int main() {
 	RUN(testBSONExtras);
 	RUN(testBSONSubtype0203Realignment);
 	RUN(testBSONStringNULGuard);
+	RUN(testBSONEncoderUTF8Validation);
 	RUN(testBSONNestedDocBound);
 	RUN(testBSONIntBounds);
 

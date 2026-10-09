@@ -41,8 +41,9 @@
 //   platform and the 32-bit length cap), mirroring the library's general
 //   encoding policy.
 // - toBSON() throws "BSON: cannot serialize unsupported type..." for types that
-//   have no BSON mapping (e.g. CUSTOM_TAG), rather than silently emitting null.
-//   This is documented behavior.
+//   have no BSON mapping (e.g. CUSTOM_TAG, 0x0D Code/JavaScript, 0x0E Symbol,
+//   0x0F CodeWScope, 0x7F MaxKey, 0xFF MinKey), rather than silently emitting
+//   null. This is documented behavior; see the decoder's default: throw path.
 
 // Included explicitly rather than relied on transitively via core.hpp (same
 // rule as ubjson.hpp / cbor.hpp): this file uses memcpy, std::numeric_limits
@@ -54,6 +55,16 @@
 #include "../core.hpp"
 
 namespace asvJSONInternal {
+
+// UTF-8 validation helper for the encoder: BSON strings and keys MUST be valid
+// UTF-8 per the spec; an invalid sequence would produce a document the decoder
+// rejects, so we catch it at encode time. Binary payloads (BINARY, EXTENSION)
+// carry arbitrary bytes and are deliberately not checked.
+inline void bsonWriteText(std::vector<uint8_t>& out, const std::string& s) {
+	if (!isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size()))
+		throw asvJSONError("BSON invalid UTF-8 in string");
+	out.insert(out.end(), s.begin(), s.end());
+}
 
 // The encoder writes doubles by copying their raw bit patterns into the
 // output, and the decoder reads them back the same way, so double must be
@@ -92,7 +103,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			out.push_back(0x02);
 			uint32_t slen = static_cast<uint32_t>(str_data.size()) + 1;
 			writeLE32(out, slen);
-			out.insert(out.end(), str_data.begin(), str_data.end());
+			bsonWriteText(out, str_data); // validates UTF-8 for the string value
 			out.push_back(0);
 			break;
 		}
@@ -107,6 +118,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 					// BSON keys are NUL-terminated C strings; a key containing a
 					// NUL byte cannot be represented (it would truncate on read).
 					if (k.find('\0') != std::string::npos) throw asvJSONError("BSON key contains NUL byte");
+					if (!isValidUTF8(reinterpret_cast<const uint8_t*>(k.data()), k.size())) throw asvJSONError("BSON invalid UTF-8 in key");
 					std::vector<uint8_t> elem;
 					elem.reserve(64 + k.size());
 					size_t elemStart = elem.size();
