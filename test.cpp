@@ -10441,6 +10441,89 @@ TEST(testTOONReviewFollowups) {
 	}
 }
 
+TEST(testTOONReviewFixes2) {
+	// 1. fromTOON strips a UTF-8 BOM (every other from* decoder does). The BOM
+	// used to become the first key's leading bytes "\xEF\xBB\xBFkey".
+	{
+		const char* src = "\xEF\xBB\xBFkey: value\n";
+		asvJSON j;
+		ASSERT(j.fromTOON(src));
+		ASSERT(j.get("key") != nullptr);
+		if (j.get("key")) ASSERT_EQ(std::string(j.getString("key")), "value");
+		ASSERT(j.get("\xEF\xBB\xBFkey") == nullptr);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(j.toTOON()));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// 2. A line whose only ':' sits inside a quote has no unquoted separator.
+	// The old fallback (raw find(':') after toonFindFirstUnquoted returned npos)
+	// split `"a:b"` into the key `"a` and the value `b"`. It is now reported as
+	// an unrecognized line instead of silently mis-parsing.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTOON("key:\n  \"a:b\"\n"));
+		ASSERT(j.lastError.find("unrecognized line") != std::string::npos);
+	}
+	// 3. A pure all-digit declared array length past 1e9 used to degrade into a
+	// "key:value" line with the mangled header as its key. It now fails loudly;
+	// a non-digit trailing token still keeps the old degrade.
+	{
+		asvJSON j;
+		ASSERT(!j.fromTOON("v[2000000000]: x\n"));
+		ASSERT(j.lastError.find("array too large") != std::string::npos);
+		asvJSON k;
+		ASSERT(k.fromTOON("v[2000000000x]: 1\n"));
+		ASSERT(k.get("v[2000000000x]") != nullptr);
+		if (k.get("v[2000000000x]")) ASSERT_EQ(k.get("v[2000000000x]")->getInt(), int64_t(1));
+		// the in-range header is untouched
+		asvJSON ok;
+		ASSERT(ok.fromTOON("v[3]: 1,2,3\n"));
+		ASSERT(ok.get("v") != nullptr);
+		if (ok.get("v")) ASSERT_EQ(ok.get("v")->size(), size_t(3));
+		// the list-item "- [N]:" header enforces the same 1e9 cap
+		asvJSON jl;
+		ASSERT(!jl.fromTOON("- [2000000000]: x\n"));
+		ASSERT(jl.lastError.find("array too large") != std::string::npos);
+		// ...and a non-digit inside its brackets still degrades into a string element
+		asvJSON kl;
+		ASSERT(kl.fromTOON("- [2000000000x]: 1\n"));
+		ASSERT(kl.getRoot() != nullptr && kl.getRoot()->size() == size_t(1));
+		if (kl.getRoot() && kl.getRoot()->size() == size_t(1)) {
+			auto* e = kl.getRoot()->get(0);
+			ASSERT(e != nullptr && e->type == asvJSONValue::STRING);
+			if (e) ASSERT_EQ(std::string(e->str_data), "[2000000000x]: 1");
+		}
+		// a digit prefix longer than the cap still lets a later 'x' degrade:
+		// the scan past 1e9 keeps checking the remaining chars for non-digits
+		asvJSON jh;
+		ASSERT(jh.fromTOON("v[99999999999x]: 1\n"));
+		ASSERT(jh.lastError.find("array too large") == std::string::npos);
+		ASSERT(jh.get("v[99999999999x]") != nullptr);
+		if (jh.get("v[99999999999x]")) ASSERT_EQ(jh.get("v[99999999999x]")->getInt(), int64_t(1));
+		// in-range list headers are untouched: "- [3]: 1,2,3" is one item whose
+		// value is the nested array [1,2,3], so the root holds a single element
+		asvJSON ok2;
+		ASSERT(ok2.fromTOON("- [3]: 1,2,3\n"));
+		ASSERT(ok2.getRoot() != nullptr && ok2.getRoot()->size() == size_t(1));
+		if (ok2.getRoot() && ok2.getRoot()->size() == size_t(1)) {
+			auto* inner = ok2.getRoot()->get(0);
+			ASSERT(inner != nullptr && inner->type == asvJSONValue::ARRAY && inner->size() == size_t(3));
+		}
+	}
+	// 4. A leading-dash STRING is quoted by the encoder (a bare root "-abc"
+	// would be read back as a root array), and the round-trip pins it.
+	{
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(R"({"a":"-abc","b":"-"})")));
+		std::string toon = j.toTOON();
+		ASSERT(toon.find("\"-abc\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromTOON(toon));
+		ASSERT_EQ(std::string(j2.getString("a")), "-abc");
+		ASSERT_EQ(std::string(j2.getString("b")), "-");
+	}
+}
+
 TEST(testToTRON) {
 	// Basic object (no repeated schema -> JSON fallback)
 	{
@@ -33201,6 +33284,7 @@ RUN(testCBORFloat16);
 	RUN(testToTOONHeadersStrict);
 RUN(testTOONReviewFixes);
 	RUN(testTOONReviewFollowups);
+	RUN(testTOONReviewFixes2);
 	RUN(testTOONSpecialTypes);
 	RUN(testToonExtras);
 	
