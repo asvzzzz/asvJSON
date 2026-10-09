@@ -58,6 +58,8 @@
 // 48 nested `array(1000000)` headers (240 bytes of input) each reserved an 8 MB
 // vector, 384 MB in total, before the first element was read.
 #include "../core.hpp"
+#include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace asvJSONInternal {
@@ -90,6 +92,18 @@ inline void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
   }
 }
 
+// CBOR signed integer: major type 0 for n >= 0, major type 1 for n < 0
+// (encoded as -1 - n). The subtraction runs in uint64 so n == INT64_MIN does
+// not overflow the negation (which would be UB). Shared by INT, TIMESTAMP and
+// the EXTENSION type byte (an int8_t that can legitimately be negative, e.g.
+// MessagePack-style fixext types) -- writing that byte as an unsigned major-0
+// value made the tag-257 decoder reject it and drop the value back to a plain
+// array.
+inline void cborWriteSigned(std::vector<uint8_t>& out, int64_t n) {
+  if (n >= 0) cborWriteUint(out, 0, static_cast<uint64_t>(n));
+  else cborWriteUint(out, 1, static_cast<uint64_t>(-1) - static_cast<uint64_t>(n));
+}
+
 
 // RFC 8949 3.1: a text string MUST be valid UTF-8, and our own decoder rejects
 // invalid sequences. Library-held bytes are not guaranteed to be valid UTF-8 --
@@ -115,14 +129,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       out.push_back(flag ? 0xF5 : 0xF4);
       break;
     case T::INT: {
-      int64_t n = num;
-      if (n >= 0) {
-        cborWriteUint(out, 0, static_cast<uint64_t>(n));
-      } else {
-        // CBOR negative-integer encoding: -1 - n. Compute in uint64 to avoid
-        // signed overflow UB when n == INT64_MIN (whose negation is undefined).
-        cborWriteUint(out, 1, static_cast<uint64_t>(-1) - static_cast<uint64_t>(n));
-      }
+      cborWriteSigned(out, num);
       break;
     }
     case T::DOUBLE: {
@@ -162,7 +169,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
         // the type even when the payload is empty (no data-loss to null).
         out.push_back(0xD9); out.push_back(0x01); out.push_back(0x01); // tag 257
         out.push_back(0x82); // array of 2 items
-        cborWriteUint(out, 0, static_cast<uint8_t>(ext_type));
+        cborWriteSigned(out, ext_type);
         cborWriteUint(out, 2, bin_data.size());
         out.insert(out.end(), bin_data.begin(), bin_data.end());
       } else if (type == T::OBJECTID && str_data.size() == 12) {
@@ -214,13 +221,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
     case T::TIMESTAMP: {
       // Encode as tag 1 + integer (seconds)
       out.push_back(0xC1); // tag 1
-      if (num >= 0) {
-        cborWriteUint(out, 0, static_cast<uint64_t>(num));
-      } else {
-        // CBOR negative-integer encoding: -1 - num. Compute in uint64 to avoid
-        // signed overflow UB when num == INT64_MIN (whose negation is undefined).
-        cborWriteUint(out, 1, static_cast<uint64_t>(-1) - static_cast<uint64_t>(num));
-      }
+      cborWriteSigned(out, num);
       break;
     }
     case T::REGEX: {
@@ -379,7 +380,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 2: { // Byte string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
-      if (len64 > dataLen - pos) throw asvJSONError("CBOR binary overflow");
+      if (len64 > dataLen - pos) throw asvJSONError("CBOR byte string longer than input");
       auto v = asvJSONValue::makeBinary(data + pos, static_cast<size_t>(len64));
       pos += static_cast<size_t>(len64);
       if (!v) throw asvJSONError("CBOR binary alloc failed");
@@ -387,7 +388,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     }
     case 3: { // Text string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
-      if (len64 > dataLen - pos) throw asvJSONError("CBOR string overflow");
+      if (len64 > dataLen - pos) throw asvJSONError("CBOR text string longer than input");
       // RFC 8949 sec 3.1: text strings MUST be valid UTF-8; reject invalid sequences outright.
        if (!isValidUTF8(data + pos, static_cast<size_t>(len64))) throw asvJSONError("CBOR invalid UTF-8 in text string");
       auto v = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), static_cast<size_t>(len64));
@@ -529,6 +530,10 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       if (info == 21) return asvJSONValue::makeBool(true);
       if (info == 22) return asvJSONValue::makeNull();
       if (info == 23) return asvJSONValue::makeNull(); // undefined -> null
+      // Unassigned simple values 0..19 (RFC 8949 s3.3) have no JSON equivalent:
+      // map them to null exactly like the info == 24 form below. Without this the
+      // direct encoding (0xE0..0xF3) fell through to "unknown major type".
+      if (info <= 19) return asvJSONValue::makeNull();
       if (info == 24) {
         if (pos >= dataLen) throw asvJSONError("CBOR: unexpected end (simple)");
         uint8_t sv = data[pos++];

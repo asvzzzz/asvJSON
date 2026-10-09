@@ -12,7 +12,8 @@
 //                           C style -> `T name[N]`.
 //   - ARRAY of objects   -> std::vector<Struct> (struct named from the field).
 //   - ARRAY of mixed     -> std::vector<std::variant<...>>.
-//   - empty ARRAY        -> std::vector<NullType> (placeholder; edit the type).
+//   - empty ARRAY        -> std::vector<std::monostate> (placeholder from
+//                           <variant>; edit the type).
 //   - INT/DOUBLE/BOOL    -> int/double/bool (intType configurable).
 //   - STRING             -> stringType; identifier strings in an enum context
 //                           (see emitEnums / emitEnumMaps / enumPaths) become
@@ -26,7 +27,9 @@
 #include "../core.hpp"
 
 #include <cctype>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -242,9 +245,8 @@ private:
     for (const auto& h : opts_.enumPaths) if (pathMatch(path, h)) return true;
     return false;
   }
-  std::string enumNameHint(const std::string& path, const std::string& hint) const {
+  std::string enumNameHint(const std::string& path) const {
     for (const auto& p : opts_.enumNames) if (pathMatch(path, p.first)) return p.second;
-    (void)hint;
     return std::string();
   }
 
@@ -265,7 +267,7 @@ private:
     auto it = enumBySig_.find(sig);
     if (it != enumBySig_.end()) return enums_[it->second].name;
 
-    std::string name = enumNameHint(path, hint);
+    std::string name = enumNameHint(path);
     if (name.empty()) {
       std::string base = hint.empty() ? opts_.rootName : hint;
       if (singular) base = cppSingular(base);
@@ -847,12 +849,64 @@ inline bool cppRdIdentChar(char c) {
 }
 
 inline std::string cppRdStripNumSuffix(std::string s) {
+  // In a hex literal a trailing `f`/`F` is a DIGIT, not the float suffix:
+  // stripping it turned `0xFF` into `0x`, which decoded as the string "0x".
+  // The check is a plain prefix test -- the loop may have already removed a
+  // real suffix (`0xFFu` -> `0xFF`, then the trailing F is kept).
+  const bool hex = s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
   while (!s.empty()) {
     char c = s.back();
+    if ((c == 'f' || c == 'F') && hex) break;
     if (c == 'f' || c == 'F' || c == 'u' || c == 'U' || c == 'l' || c == 'L') s.pop_back();
     else break;
   }
   return s;
+}
+
+// Parse a C++ integer literal into the value it denotes: C++14 digit separators
+// (`1'000'000`) are removed, the `0b`/`0B` binary prefix is honored, and a
+// decimal suffix (`1u`, `2L`) is stripped. Returns false when the text is not a
+// valid integer (bad digit, trailing junk such as `08`, or out-of-range), so the
+// caller can fall back to preserving the literal spelling as a string.
+inline bool cppRdParseIntLiteral(const std::string& raw, long long& out) {
+  // Remove C++14 digit separators, then strip any suffix (hex-aware via
+  // cppRdStripNumSuffix, so `0xFF` keeps its trailing F digit).
+  std::string s = cppRdStripNumSuffix(raw);
+  std::string t;
+  t.reserve(s.size());
+  for (char c : s) if (c != '\'') t += c;
+  s = std::move(t);
+  if (s.empty()) return false;
+  size_t p = 0;
+  bool neg = false;
+  if (s[0] == '+' || s[0] == '-') { neg = (s[0] == '-'); p = 1; }
+  // Binary literal (C++14). strtoll does not accept `0b`, so decode it here.
+  if (p + 1 < s.size() && s[p] == '0' && (s[p + 1] == 'b' || s[p + 1] == 'B')) {
+    unsigned long long v = 0;
+    bool any = false;
+    for (size_t j = p + 2; j < s.size(); j++) {
+      char c = s[j];
+      if (c != '0' && c != '1') return false;
+      any = true;
+      v = (v << 1) | static_cast<unsigned long long>(c - '0');
+    }
+    if (!any) return false;
+    if (neg) {
+      out = (v == (1ull << 63)) ? (std::numeric_limits<long long>::min)()
+                                : -static_cast<long long>(v);
+    } else {
+      if (v > static_cast<unsigned long long>((std::numeric_limits<long long>::max)())) return false;
+      out = static_cast<long long>(v);
+    }
+    return true;
+  }
+  errno = 0;
+  const char* b = s.c_str();
+  char* endp = nullptr;
+  long long v = std::strtoll(b, &endp, 0);
+  if (endp == b || *endp != '\0' || errno == ERANGE) return false;
+  out = v;
+  return true;
 }
 
 // Parse exactly four hex digits (for \uXXXX); returns 0xFFFFFFFF on failure.
@@ -1000,10 +1054,25 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         }
         return macros && macros->count(nm) > 0;
       }
-      if (expr[ep] == '0' &&
-          (ep + 1 >= expr.size() || !std::isalnum((unsigned char)expr[ep + 1]))) { ep++; return false; }
-      if (expr[ep] == '1' &&
-          (ep + 1 >= expr.size() || !std::isalnum((unsigned char)expr[ep + 1]))) { ep++; return true; }
+      if (std::isdigit((unsigned char)expr[ep])) {
+        // Parse the whole integer constant, so `#if 00` is false like `#if 0`
+        // instead of falling through to "unknown -> true". C++ suffixes and the
+        // 0x/0b base prefixes are recognized; a value is true iff any digit is
+        // non-zero (a pure-zero literal of any width is false).
+        size_t s = ep;
+        while (ep < expr.size() &&
+               (std::isalnum((unsigned char)expr[ep]) || expr[ep] == '\'')) ep++;
+        const std::string num = expr.substr(s, ep - s);
+        size_t d = (num.size() >= 2 && num[0] == '0' &&
+                    (num[1] == 'x' || num[1] == 'X' || num[1] == 'b' || num[1] == 'B'))
+                     ? 2 : 0;
+        for (size_t q = d; q < num.size(); q++) {
+          const char ch = num[q];
+          if ((ch >= '1' && ch <= '9') ||
+              (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) return true;
+        }
+        return false;
+      }
       // Unknown token: consume and stay true.
       while (ep < expr.size() && (std::isalnum((unsigned char)expr[ep]) || expr[ep] == '_')) ep++;
       return true;
@@ -1279,6 +1348,7 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         (c == '.' && i + 1 < n && in[i + 1] >= '0' && in[i + 1] <= '9')) {
       size_t s = i;
       while (i < n && (cppRdIdentChar(in[i]) || in[i] == '.' ||
+             (in[i] == '\'' && i + 1 < n && cppRdIdentChar(in[i + 1])) ||
              ((in[i] == '+' || in[i] == '-') && i > s && (in[i - 1] == 'e' || in[i - 1] == 'E'))))
         i++;
       if (!skipTok) {
@@ -1439,12 +1509,8 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
     // Boundary constant: -9223372036854775808 is valid but not a literal.
     if (s == "-9223372036854775808")
       return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
-    try {
-      std::string::size_type pos = 0;
-      long long v = std::stoll(s, &pos, 0);
-      if (pos == s.size()) return asvJSONValue::makeInt(static_cast<int64_t>(v));
-    } catch (const std::out_of_range&) {}
-    catch (...) {}
+    long long iv = 0;
+    if (cppRdParseIntLiteral(s, iv)) return asvJSONValue::makeInt(static_cast<int64_t>(iv));
     // Overflow or a partially-consumed literal ("08"): preserve the value as a
     // string instead of silently zeroing it.
     return asvJSONValue::makeString(cppRdStripNumSuffix(tk->text));
@@ -1493,6 +1559,11 @@ struct AliasDef {
   std::string name;
   TypeRef type;
   int order = 0;
+  // A typedef name for a tagged type (`typedef struct Foo Bar;`). It resolves
+  // references to `Bar`, but never drives the root on its own -- otherwise a
+  // translation unit with real struct definitions would decode to just the
+  // aliased type and lose the struct wrapper.
+  bool weak = false;
 };
 
 inline bool cppRdIsQual(const std::string& s) {
@@ -1558,7 +1629,8 @@ inline long long cppRdIntToks(const std::vector<const Tok*>& v, size_t b, size_t
   for (size_t k = b; k < e; k++)
     if (v[k]->kind == Tok::Number) s = v[k]->text;
   if (s.empty()) return -1;
-  try { return std::stoll(cppRdStripNumSuffix(s)); } catch (...) { return -1; }
+  long long iv = 0;
+  return cppRdParseIntLiteral(s, iv) ? iv : -1;
 }
 
 // Forward declaration for template recursion.
@@ -1648,7 +1720,7 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
     size_t before = et;
     while (et > i && v[et - 1]->kind == Tok::Ident && cppRdIsQual(v[et - 1]->text)) et--;
     while (et > i && v[et - 1]->kind == Tok::Punct &&
-           (v[et - 1]->text == "*" || v[et - 1]->text == "&" || v[et - 1]->text == "&&"))
+           (v[et - 1]->text == "*" || v[et - 1]->text == "&"))
       et--;
     if (et == before) break;
   }
@@ -1676,7 +1748,8 @@ inline TypeRef cppRdParseType(const std::vector<Tok>& t, size_t b, size_t e) {
 // Misreading a comparison as a template unbalances every depth counter built
 // on top of it: the ';' that terminates the declaration stops being
 // recognized, so a member swallows the rest of the file.
-inline bool cppRdIsTemplateOpen(const std::vector<Tok>& t, size_t k, size_t limit) {
+inline bool cppRdIsTemplateOpen(const std::vector<Tok>& t, size_t k, size_t limit,
+                                bool allowComma = true) {
   int d = 0;
   const size_t end = (limit < t.size()) ? limit : t.size();
   for (size_t j = k; j < end; j++) {
@@ -1684,6 +1757,11 @@ inline bool cppRdIsTemplateOpen(const std::vector<Tok>& t, size_t k, size_t limi
     const std::string& s = t[j].text;
     if (s == "<") d++;
     else if (s == ">") { d--; if (d == 0) return true; if (d < 0) return false; }
+    // When splitting an initializer, a comma at angle depth means this was a
+    // comparison (`{a < b, c > d}`), not a template argument list: no template
+    // opens, so the comma still separates elements. Callers that scan a whole
+    // declaration keep the default and let `std::map<int, string>` through.
+    else if (s == "," && !allowComma && d >= 1) return false;
     else if (s == ";" || s == "{" || s == "}") return false;
   }
   return false;
@@ -1712,7 +1790,7 @@ inline std::vector<std::vector<Tok>> cppRdSplitTop(const std::vector<Tok>& body)
     if (tk.kind == Tok::Punct) {
       if (tk.text == "(") pd++;
       else if (tk.text == ")") { if (pd > 0) pd--; }
-      else if (tk.text == "<") { if (cppRdIsTemplateOpen(body, i, body.size())) ad++; }
+      else if (tk.text == "<") { if (cppRdIsTemplateOpen(body, i, body.size(), false)) ad++; }
       else if (tk.text == ">") { if (ad > 0) ad--; }
       else if (tk.text == "[") brd++;
       else if (tk.text == "]") { if (brd > 0) brd--; }
@@ -1879,7 +1957,9 @@ struct Reader {
   }
 
   // --- parsing ---
-  void parseAll() {
+  void parseAll(int depth = 0) {
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("cpp: namespace nesting too deep");
     while (!eof()) {
       skipTrivia();
       if (eof()) break;
@@ -1895,8 +1975,19 @@ struct Reader {
         if (s == "using") { parseUsing(); continue; }
         if (s == "namespace") {
           adv(); skipTrivia();
+          // Skip an optional nested-name (`namespace a::b`) up to the body.
           while (!eof() && !isP("{") && !isP(";")) adv();
-          if (isP("{")) skipBalanced("{", "}");
+          if (isP("{")) parseSubScope(depth);
+          continue;
+        }
+        if (s == "extern") {
+          // `extern "C" { ... }` linkage blocks: recurse so their declarations
+          // are not discarded. A plain `extern` declaration has no `{`.
+          const size_t save = p;
+          adv(); skipTrivia();
+          if (cur().kind == Tok::Str) { adv(); skipTrivia(); }
+          if (isP("{")) parseSubScope(depth);
+          else p = save + 1;
           continue;
         }
       }
@@ -1904,6 +1995,39 @@ struct Reader {
       if (isP(";")) { adv(); continue; }
       adv();
     }
+  }
+
+  // Parse the `{ ... }` scope starting at the current `{` with a fresh reader
+  // and fold its declarations into this one. Namespace and `extern "C"` bodies
+  // used to be skipped wholesale, silently dropping every type they held.
+  void parseSubScope(int depth) {
+    const size_t open = p;
+    int d = 0;
+    size_t close = t.size();
+    for (size_t k = open; k < t.size(); k++) {
+      if (t[k].kind != Tok::Punct) continue;
+      if (t[k].text == "{") d++;
+      else if (t[k].text == "}") { d--; if (d == 0) { close = k; break; } }
+    }
+    if (close == t.size()) { skipBalanced("{", "}"); return; } // unterminated
+    std::vector<Tok> sub(t.begin() + static_cast<std::ptrdiff_t>(open) + 1,
+                         t.begin() + static_cast<std::ptrdiff_t>(close));
+    sub.push_back(Tok()); // End sentinel (Tok's default kind is End)
+    Reader inner(sub, opts);
+    inner.parseAll(depth + 1);
+    mergeFrom(inner);
+    p = close + 1;
+  }
+
+  void mergeFrom(Reader& other) {
+    for (auto& s : other.structs) registerStruct(std::move(s));
+    for (auto& e : other.enums) {
+      bool dup = false;
+      for (auto& x : enums) if (x.name == e.name) { dup = true; break; }
+      if (!dup) enums.push_back(std::move(e));
+    }
+    for (auto& a : other.aliases) { a.order = order++; aliases.push_back(std::move(a)); }
+    for (auto& f : other.fileScope) fileScope.push_back(std::move(f));
   }
 
   // Returns the "extra declarators" declared after the closing brace
@@ -2060,8 +2184,8 @@ struct Reader {
     const size_t npos = static_cast<size_t>(-1);
     size_t start = p, i = p;
     int paren = 0, ang = 0, brk = 0, brace = 0;
-    bool sawEq = false, sawParen = false, methodBody = false;
-    size_t end = npos;
+    bool sawEq = false, sawParen = false, sawFnPtr = false, methodBody = false;
+    size_t eqPos = npos, end = npos;
     std::vector<size_t> commas;
     bool parsedAny = false;
     while (i < t.size()) {
@@ -2070,7 +2194,20 @@ struct Reader {
       if (tk.kind == Tok::Comment) { i++; continue; }
       if (tk.kind == Tok::Punct) {
         const std::string& s = tk.text;
-        if (s == "(") { if (paren == 0 && ang == 0 && brk == 0 && brace == 0) sawParen = true; paren++; }
+        if (s == "(") {
+          if (paren == 0 && ang == 0 && brk == 0 && brace == 0) {
+            // A function-pointer declarator opens with `(` immediately followed
+            // by `*` (`int (*fp)(int)`). Its parens must NOT mark the member as
+            // a function declaration, or the whole member is dropped below as a
+            // method. Everything after the declarator is then ignored by the
+            // normal segment scan, which already picks the name inside `(*...)`.
+            size_t q = i + 1;
+            while (q < t.size() && t[q].kind == Tok::Comment) q++;
+            if (q < t.size() && t[q].kind == Tok::Punct && t[q].text == "*") sawFnPtr = true;
+            else if (!sawFnPtr) sawParen = true;
+          }
+          paren++;
+        }
         else if (s == ")") { if (paren > 0) paren--; }
         else if (s == "<") { if (cppRdIsTemplateOpen(t, i, t.size())) ang++; }
         else if (s == ">") { if (ang > 0) ang--; }
@@ -2102,12 +2239,26 @@ struct Reader {
           if (commas.empty() || commas.back() != i) commas.push_back(i);
         }
         else if (s == ";" && paren == 0 && ang == 0 && brk == 0 && brace == 0) { end = i; break; }
-        else if (s == "=" && paren == 0 && ang == 0 && brk == 0 && brace == 0 && !sawEq) { sawEq = true; }
+        else if (s == "=" && paren == 0 && ang == 0 && brk == 0 && brace == 0 && !sawEq) { sawEq = true; eqPos = i; }
       }
       i++;
     }
     if (methodBody) { p = i; return; }
     if (sawParen && !sawEq) { p = (end == npos) ? i : end + 1; return; }
+    if (sawParen && sawEq) {
+      // `void f() = default;` / `= delete;`, and pure virtual `= 0`, are
+      // function declarations, not data members. Without this check the outer
+      // scan saw merely "paren then equals" and decoded the member as a field
+      // named after the function, initialized to "default"/"delete"/0.
+      size_t q = (eqPos == npos) ? i : eqPos + 1;
+      while (q < t.size() && t[q].kind == Tok::Comment) q++;
+      if (q < t.size() &&
+          ((t[q].kind == Tok::Ident && (t[q].text == "default" || t[q].text == "delete")) ||
+           (t[q].kind == Tok::Number && t[q].text == "0"))) {
+        p = (end == npos) ? i : end + 1;
+        return;
+      }
+    }
     size_t stop = (end == npos) ? i : end;
     // Split the declaration at top-level commas into one segment per
     // declarator (`int a = 1, b = 2;` -> [a], [b]).
@@ -2179,14 +2330,51 @@ struct Reader {
           attrs.emplace_back(start, k);
         }
       }
+      // Function-pointer declarator (`int (*fp)(int, int)`): the name sits
+      // INSIDE the parens, so the "last identifier before lim" rule below would
+      // pick the last PARAMETER (or, with no parameters, fp only by luck).
+      // Detect the `( *` opening and take the identifier after the `*` (an
+      // optional `const`/`volatile` may sit between them: `int (*const fp)()`).
+      size_t fnParen = npos, fpNameI = npos;
+      bool fnPtr = false;
+      {
+        int P2 = 0;
+        for (size_t k = sb; k < se; k++) {
+          if (t[k].kind != Tok::Punct) continue;
+          if (t[k].text == "(") {
+            if (P2 == 0) {
+              size_t m = k + 1;
+              while (m < se && t[m].kind == Tok::Comment) m++;
+              if (m < se && t[m].kind == Tok::Punct && t[m].text == "*") {
+                fnPtr = true;
+                fnParen = k;
+                size_t nn = m + 1;
+                while (nn < se && t[nn].kind == Tok::Comment) nn++;
+                while (nn < se && t[nn].kind == Tok::Ident &&
+                       (t[nn].text == "const" || t[nn].text == "volatile")) {
+                  nn++;
+                  while (nn < se && t[nn].kind == Tok::Comment) nn++;
+                }
+                if (nn < se && t[nn].kind == Tok::Ident) fpNameI = nn;
+                break;
+              }
+            }
+            P2++;
+          } else if (t[k].text == ")") { if (P2 > 0) P2--; }
+        }
+      }
       size_t nameI = npos;
-      for (size_t k = lim; k > sb; k--) {
-        const bool inAttr = [&] {
-          for (const auto& a : attrs)
-            if (k - 1 >= a.first && k - 1 < a.second) return true;
-          return false;
-        }();
-        if (!inAttr && t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+      if (fnPtr && fpNameI != npos) {
+        nameI = fpNameI;
+      } else {
+        for (size_t k = lim; k > sb; k--) {
+          const bool inAttr = [&] {
+            for (const auto& a : attrs)
+              if (k - 1 >= a.first && k - 1 < a.second) return true;
+            return false;
+          }();
+          if (!inAttr && t[k - 1].kind == Tok::Ident) { nameI = k - 1; break; }
+        }
       }
       if (nameI == npos) {
         if (opts.strict) throw asvJSONError("cpp: cannot parse member declaration");
@@ -2225,7 +2413,9 @@ struct Reader {
           seInit = std::min(se, a.first);
       }
       size_t suf = nameI + 1;
-      while (suf < lim2) {
+      // A function pointer's post-name region is its closing `)` and parameter
+      // list -- never an array suffix.
+      while (suf < lim2 && !fnPtr) {
         if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
           size_t j = suf + 1;
           std::string num;
@@ -2347,12 +2537,56 @@ struct Reader {
     if (!a.name.empty()) aliases.push_back(std::move(a));
   }
 
+  // Register `typedef struct Foo Bar;`-style names. `weak` keeps them out of
+  // root selection (a real struct definition should still wrap the output), but
+  // `resolve()` still follows them so a field typed `Bar` becomes `Foo`.
+  void addWeakAlias(const std::string& name, const TypeRef& type) {
+    if (name.empty()) return;
+    AliasDef a;
+    a.name = name;
+    a.type = type;
+    a.order = order++;
+    a.weak = true;
+    aliases.push_back(std::move(a));
+  }
+
   void parseTypedef() {
     takePending();
     adv(); // typedef
     skipTrivia();
-    if (isKw("struct") || isKw("class")) { parseStructDecl(); return; }
-    if (isKw("enum")) { parseEnumDecl(); return; }
+    if (isKw("struct") || isKw("class") || isKw("enum")) {
+      const bool isEnum = isKw("enum");
+      // Look past the tag name: `typedef struct Foo Bar;` has a second name and
+      // is a forward-declared alias, while `typedef struct Foo { ... }` and
+      // `typedef struct Foo;` do not.
+      size_t q = p + 1;
+      while (q < t.size() && t[q].kind == Tok::Comment) q++;
+      std::string tagName;
+      if (q < t.size() && t[q].kind == Tok::Ident) { tagName = t[q].text; q++; }
+      while (q < t.size() && t[q].kind == Tok::Comment) q++;
+      if (!tagName.empty() && q < t.size() && t[q].kind == Tok::Ident) {
+        TypeRef tagged;
+        tagged.kind = TypeRef::Unknown;
+        tagged.name = tagName;
+        while (q < t.size() && t[q].kind == Tok::Ident) {
+          addWeakAlias(t[q].text, tagged);
+          q++;
+          while (q < t.size() && t[q].kind == Tok::Comment) q++;
+          if (q < t.size() && t[q].kind == Tok::Punct && t[q].text == ",") {
+            q++;
+            while (q < t.size() && t[q].kind == Tok::Comment) q++;
+          } else break;
+        }
+        skipToSemi();
+        return;
+      }
+      if (isEnum) { parseEnumDecl(); return; }
+      std::vector<FieldDef> extras = parseStructDecl();
+      // `typedef struct Foo { ... } Bar;` - the trailing names are aliases, not
+      // variables (a typedef declares a type). Register each so `Bar` resolves.
+      for (auto& f : extras) addWeakAlias(f.name, f.type);
+      return;
+    }
     size_t b = p;
     while (!eof() && !isP(";")) {
       if (isP("{")) { skipBalanced("{", "}"); continue; }
@@ -2372,10 +2606,21 @@ struct Reader {
   }
 
   // --- materialization ---
-  void resolve(TypeRef& ty) const {
+  void resolve(TypeRef& ty, int depth = 0) const {
     if (ty.kind != TypeRef::Unknown) return;
     if (findStruct(ty.name)) { ty.kind = TypeRef::Struct; return; }
     if (findEnum(ty.name)) { ty.kind = TypeRef::Enum; return; }
+    // Follow a typedef name (`typedef struct Foo Bar;`) to its underlying type,
+    // so a field declared `Bar` resolves like `Foo`. The depth cap stops a
+    // malformed alias chain (`typedef A B; typedef B A;`) from recursing forever.
+    if (depth < 32) {
+      for (const auto& a : aliases) {
+        if (a.name != ty.name) continue;
+        ty = a.type;
+        if (ty.kind == TypeRef::Unknown) resolve(ty, depth + 1);
+        return;
+      }
+    }
     ty.kind = TypeRef::Scalar;
     ty.scalar = cppRdClassify(ty.name);
   }
@@ -2411,12 +2656,8 @@ struct Reader {
     }
     if (s == "-9223372036854775808")
       return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
-    try {
-      std::string::size_type pos = 0;
-      long long v = std::stoll(s, &pos, 0);
-      if (pos == s.size()) return asvJSONValue::makeInt(static_cast<int64_t>(v));
-    } catch (const std::out_of_range&) {}
-    catch (...) {}
+    long long iv = 0;
+    if (cppRdParseIntLiteral(s, iv)) return asvJSONValue::makeInt(static_cast<int64_t>(iv));
     return asvJSONValue::makeString(cppRdStripNumSuffix(raw));
   }
 
@@ -2554,6 +2795,13 @@ struct Reader {
         // unresolved (forward referenced) type keeps its existing behaviour.
         if (rt.kind == TypeRef::Scalar && groups.size() == 1 && !groups[0].empty())
           litSrc = &groups[0];
+        // `int a{1, 2}` (aggregate-init of a scalar) named one field but held
+        // several values; there is no JSON for it. The literal reader would skip
+        // the group entirely and silently emit the type default (0). Strict mode
+        // refuses it instead (lenient mode keeps the default, as before).
+        else if (rt.kind == TypeRef::Scalar && groups.size() != 1 && opts.strict)
+          throw asvJSONError("cpp: braced initializer for scalar has multiple elements "
+                             "(not representable in JSON)");
       } else {
         litSrc = &init;
       }
@@ -2614,10 +2862,16 @@ struct Reader {
 
   std::unique_ptr<asvJSONValue> buildRoot() {
     if (!aliases.empty()) {
-      // First-declared (lowest order) alias wins - not the last one seen.
-      const AliasDef* best = &aliases[0];
-      for (auto& a : aliases) if (a.order < best->order) best = &a;
-      return materialize(best->type, std::vector<Tok>(), false, 0);
+      // First-declared (lowest order) alias wins - not the last one seen. Weak
+      // aliases (typedef names for tagged types) never drive the root: with a
+      // real struct definition present the struct wrapper must be kept, and
+      // alone they would only resolve to a forward-declared, bodiless type.
+      const AliasDef* best = nullptr;
+      for (auto& a : aliases) {
+        if (a.weak) continue;
+        if (!best || a.order < best->order) best = &a;
+      }
+      if (best) return materialize(best->type, std::vector<Tok>(), false, 0);
     }
     if (structs.empty() && fileScope.empty()) return nullptr;
 
@@ -2687,7 +2941,7 @@ struct Reader {
 
 inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts) {
   formatType = FormatType::Unknown;
-  if (input.empty()) { lastError = "empty input"; return false; }
+  if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
   dirty_ = false;
   try {
     std::map<std::string, std::vector<cppread::Tok>> macros;
