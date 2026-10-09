@@ -22617,6 +22617,92 @@ TEST(testJavaPropFromAny) {
   }
 }
 
+TEST(testJavaPropReviewFixes) {
+  // 1. NaN/Infinity round-trip: the DOUBLE case used to append ".0" to
+  //    fmtDoubleVal's "nan"/"inf"/"-inf" literal (it carries no '.', 'e' or
+  //    'E'), emitting "nan.0" that strtod only partially consumes -- it reads
+  //    "nan" and stops at the '.', so the full-string check in javapropParseVal
+  //    fails and the value degraded to the STRING "nan.0". The encoder now
+  //    writes the three special values bare, mirroring INI/plist.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("nan", asvJSONValue::makeDouble(NAN));
+    j.getRoot()->obj->emplace("inf", asvJSONValue::makeDouble(INFINITY));
+    j.getRoot()->obj->emplace("ninf", asvJSONValue::makeDouble(-INFINITY));
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("nan=nan\n") != std::string::npos);
+    ASSERT(out.find("inf=inf\n") != std::string::npos);
+    ASSERT(out.find("ninf=-inf\n") != std::string::npos);
+    ASSERT(out.find("nan.0") == std::string::npos);
+    ASSERT(out.find("inf.0") == std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromJavaProp(out));
+    ASSERT(k.get("nan") != nullptr && k.get("nan")->type == asvJSONValue::DOUBLE);
+    ASSERT(std::isnan(k.getDouble("nan")));
+    ASSERT(std::isinf(k.getDouble("inf")) && k.getDouble("inf") > 0);
+    ASSERT(std::isinf(k.getDouble("ninf")) && k.getDouble("ninf") < 0);
+  }
+  // 2. The loader accepts the bare spellings on input (no gate needed).
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp(std::string("x=nan\ny=inf\nz=-inf\n")));
+    ASSERT(std::isnan(j.getDouble("x")));
+    ASSERT(std::isinf(j.getDouble("y")) && j.getDouble("y") > 0);
+    ASSERT(std::isinf(j.getDouble("z")) && j.getDouble("z") < 0);
+  }
+  // 3. Finite doubles keep the ".0" suffix (a bare "1" would re-decode as INT)
+  //    and round-trip as DOUBLE; exponent forms (MSVC renders 100000.0 as
+  //    "1e+05") round-trip too -- both re-decode as DOUBLE.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("n", asvJSONValue::makeDouble(1.0));
+    j.getRoot()->obj->emplace("m", asvJSONValue::makeDouble(100000.0));
+    asvJSON k;
+    ASSERT(k.fromJavaProp(j.toJavaProp()));
+    ASSERT(k.get("n") != nullptr && k.get("n")->type == asvJSONValue::DOUBLE);
+    ASSERT(k.getDouble("n") == 1.0);
+    ASSERT(k.get("m") != nullptr && k.get("m")->type == asvJSONValue::DOUBLE);
+    ASSERT(k.getDouble("m") == 100000.0);
+  }
+  // 4. TIMESTAMP / OBJECTID / REGEX / CUSTOM_TAG reach the default branch and
+  //    are written as their extended-JSON text, which reads back as a plain
+  //    STRING -- the header's lossy list names them (not only objects/arrays).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"ts\":{\"$timestamp\":{\"t\":1700000000}},"
+                               "\"oid\":{\"$oid\":\"ABCDEFGHIJKLMNOPQRSTUVWX\"},"
+                               "\"rx\":{\"$regex\":\"^a$\",\"$options\":\"i\"},"
+                               "\"ct\":{\"$customTag\":{\"name\":\"mytag\",\"value\":42}}}")));
+    ASSERT(j.get("ts") != nullptr && j.get("ts")->type == asvJSONValue::TIMESTAMP);
+    ASSERT(j.get("oid") != nullptr && j.get("oid")->type == asvJSONValue::OBJECTID);
+    ASSERT(j.get("rx") != nullptr && j.get("rx")->type == asvJSONValue::REGEX);
+    ASSERT(j.get("ct") != nullptr && j.get("ct")->type == asvJSONValue::CUSTOM_TAG);
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("ts={\"$timestamp\":") != std::string::npos);
+    ASSERT(out.find("oid={\"$oid\":\"") != std::string::npos);
+    ASSERT(out.find("rx={\"$regex\":\"") != std::string::npos);
+    ASSERT(out.find("ct={\"$customTag\":") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromJavaProp(out));
+    ASSERT(k.get("ts") != nullptr && k.get("ts")->type == asvJSONValue::STRING);
+    ASSERT(k.get("oid") != nullptr && k.get("oid")->type == asvJSONValue::STRING);
+    ASSERT(k.get("rx") != nullptr && k.get("rx")->type == asvJSONValue::STRING);
+    ASSERT(k.get("ct") != nullptr && k.get("ct")->type == asvJSONValue::STRING);
+    ASSERT(std::string(k.getString("ts")).find("$timestamp") != std::string::npos);
+  }
+  // 5. The fromAny heuristic needs '=' (or an unspaced ':') BEFORE any
+  //    whitespace on the line: the scan stops at the first space, so "name =
+  //    My App" and "key : value" are not lured, "name=My App" / "key:value" are.
+  {
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("name = My App")));
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("key : value")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("name=My App")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("key:value")));
+  }
+}
+
 TEST(testFromPlist) {
   // Full hand-written plist: BOM, XML declaration, DOCTYPE, comments, entity
   // and numeric escapes, line-wrapped <data>, all scalar types, nesting.
@@ -33220,6 +33306,7 @@ RUN(testCppReviewFixes);
 	RUN(testToJavaProp);
 	RUN(testJavaPropRoundTrip);
 	RUN(testJavaPropFromAny);
+	RUN(testJavaPropReviewFixes);
 	RUN(testFromPlist);
 	RUN(testToPlist);
 	RUN(testPlistRoundTrip);

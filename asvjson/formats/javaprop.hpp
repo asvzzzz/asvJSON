@@ -34,28 +34,38 @@
 // Lossy on encode, because .properties has no syntax for these:
 //   - nested objects and arrays are written as their compact JSON text, escaped
 //     as a bare value (the text survives, but decodes back as a STRING);
+//   - the remaining special types (TIMESTAMP, OBJECTID, REGEX, CUSTOM_TAG)
+//     ride serialize()'s extended-JSON text the same way -- `{"$timestamp":
+//     {"t":...}}`, `{"$oid":"..."}`, `{"$regex":...,"$options":...}`,
+//     `{"$customTag":{"name":...,"value":...}}` -- which reads back as a plain
+//     STRING holding that JSON text (type lost, payload kept);
 //   - BINARY and EXTENSION are written as base64 of their bytes, which decodes
 //     back as a plain STRING holding that base64 -- both the type and the bytes
 //     are lost, since nothing tries to reverse the encoding on load.
 // DATETIME is not lossy: it is written in ISO form and tryParseDateTime() gives
-// the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types.
-// One exception: a timestamp gmtimeSafe cannot convert to UTC (e.g. before
-// 1970 or beyond the platform's range) renders as the bare text `null` via
-// fmtDateTimeVal and loads back as NULL -- the type is lost there.
+// the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types (a
+// finite double whose fmtDoubleVal literal carries no '.', 'e' or 'E' gets a
+// ".0" suffix so it re-loads as DOUBLE, not INT; NaN/Infinity/-Infinity are
+// written bare as `nan`/`inf`/`-inf`, which strtod reads whole). One exception:
+// a timestamp gmtimeSafe cannot convert to UTC (e.g. before 1970 or beyond the
+// platform's range) renders as the bare text `null` via fmtDateTimeVal and
+// loads back as NULL -- the type is lost there.
 //
 // A malformed \u escape is kept literally rather than rejected (the JDK throws
 // IllegalArgumentException): "\uZZZZ" loads as the text `uZZZZ`, and a truncated
 // escape such as "\u00" as `u00`.
 //
 // fromAny() detection is a heuristic, not a parser: it needs a line with an '='
-// separator, an unspaced ':' separator, an '!' comment or a \u escape. A
-// whitespace-only separator ("key value") or "key: value" is deliberately left
-// to the YAML/GOON/TOON cascade, since those are far more common. Call
-// fromJavaProp() directly for such files.
+// or an unspaced ':' before any whitespace on that line, an '!' comment or a \u
+// escape. So "name=My App" and "key:value" signal, while "name = My App" (the '='
+// only after whitespace), a whitespace-only separator ("key value") or "key:
+// value" is deliberately left to the YAML/GOON/TOON cascade, since those are far
+// more common. Call fromJavaProp() directly for such files.
 
 #include "../core.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -297,6 +307,13 @@ inline void javapropFormatVal(const asvJSONValue* v, std::string& out) {
       out += std::to_string(v->num);
       break;
     case T::DOUBLE: {
+      // NaN/Infinity must be written bare: fmtDoubleVal renders them as
+      // "nan"/"inf"/"-inf" (no '.', 'e' or 'E'), and stamping the ".0" suffix
+      // on top would produce "nan.0" that strtod only partially consumes (it
+      // reads "nan" and stops at the '.'), so the full-string check in
+      // javapropParseVal fails on load and the double degrades to a STRING.
+      if (std::isnan(v->dbl)) { out += "nan"; break; }
+      if (std::isinf(v->dbl)) { out += (v->dbl < 0 ? "-inf" : "inf"); break; }
       std::string tmp;
       fmtDoubleVal(v->dbl, tmp);
       if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
@@ -318,8 +335,9 @@ inline void javapropFormatVal(const asvJSONValue* v, std::string& out) {
       out += encodeBase64(v->bin_data.data(), v->bin_data.size());
       break;
     default: {
-      // Objects, arrays and other special types have no .properties syntax:
-      // emit their compact JSON text as an escaped bare value.
+      // Objects, arrays and the remaining special types (TIMESTAMP, OBJECTID,
+      // REGEX, CUSTOM_TAG) have no .properties syntax: emit their compact JSON
+      // text as an escaped bare value.
       std::string s;
       v->serialize(s, false);
       out += javapropEscapeVal(s);
@@ -364,16 +382,17 @@ inline std::string asvJSON::toJavaProp() const {
 }
 
 // fromAny() heuristic: an '!' comment line, a '\u' escape, or a line with an
-// '=' separator or an unspaced ':' separator. Whitespace-separated pairs and
-// ':' followed by a space are not distinctive enough (YAML/TOON/... style) and
-// are left for the later YAML/GOON/TOON cascade. '#' comment lines are SKIPPED
-// entirely -- unlike '!', a '#' is not a JavaProp signal (too many formats use
-// it), and its text must not misread `=`/`:`/`\u` inside the comment as data.
+// '=' or unspaced ':' before any whitespace. Whitespace-separated pairs, an '='
+// that only appears after whitespace, and ':' followed by a space are not
+// distinctive enough (YAML/TOON/... style) and are left for the later
+// YAML/GOON/TOON cascade. '#' comment lines are SKIPPED entirely -- unlike '!',
+// a '#' is not a JavaProp signal (too many formats use it), and its text must
+// not misread `=`/`:`/`\u` inside the comment as data.
 inline bool javapropLooksLike(std::string_view s) {
   size_t p = 0;
   int sig = 0;
   int lines = 0;
-  while (p <= s.size() && lines < 16) {
+  while (p < s.size() && lines < 16) {
     size_t nl = s.find('\n', p);
     if (nl == std::string_view::npos) nl = s.size();
     std::string_view line = s.substr(p, nl - p);
