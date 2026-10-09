@@ -20547,29 +20547,40 @@ TEST(testINITableOrder) {
 }
 
 TEST(testINIKeyLeadingBracket) {
-  // A key starting with '[' cannot be represented in INI (it collides with
-  // the section-header syntax). The encoder must throw.
+  // A key starting with '[' IS representable: iniEscapeKey hex-escapes the '['
+  // to "\x5B", so the emitted line never begins with '[' at all (a bare
+  // "[k] = v" line would be read as a section header -- the encoder never
+  // writes one), and iniUnescapeSectionKey restores the byte on decode. Earlier
+  // INI versions rejected the key; that restriction was based on the pre-escape
+  // output and became false once hex escaping landed. Every encoder path
+  // round-trips it (here: the root flat-key path and a nested dotted section).
   {
-    asvJSON j;
-    auto obj = asvJSONValue::makeObject();
-    auto child = asvJSONValue::makeInt(1);
-    obj->obj->emplace("[x", std::move(child));
-    j.setValue("", std::move(obj));
-    bool threw = false;
-    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
-    ASSERT(threw);
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("[x", asvJSONValue::makeInt(1));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("[x") == std::string::npos);    // never a raw section-header spelling
+    ASSERT(ini.find("\\x5Bx") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* k = back.getRoot()->get("[x");
+    ASSERT(k != nullptr && k->type == asvJSONValue::INT);
+    ASSERT_EQ(k->getInt(), int64_t(1));
   }
   {
-    asvJSON j;
-    auto obj = asvJSONValue::makeObject();
+    auto doc = asvJSONValue::makeObject();
     auto inner = asvJSONValue::makeObject();
-    auto child = asvJSONValue::makeInt(1);
-    inner->obj->emplace("[x", std::move(child));
-    obj->obj->emplace("a", std::move(inner));
-    j.setValue("", std::move(obj));
-    bool threw = false;
-    try { j.toINI(); } catch (const asvJSONError&) { threw = true; }
-    ASSERT(threw);
+    inner->obj->emplace("[x", asvJSONValue::makeInt(1));
+    doc->obj->emplace("a", std::move(inner));
+    std::string ini;
+    doc->toINI(ini);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* a = back.getRoot()->get("a");
+    ASSERT(a != nullptr && a->type == asvJSONValue::OBJECT);
+    auto* v = a->get("[x");
+    ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+    ASSERT_EQ(v->getInt(), int64_t(1));
   }
 }
 
@@ -20595,6 +20606,31 @@ TEST(testINIReviewFidelity) {
     asvJSON j2;
     ASSERT(j2.fromINI(j.toINI()));
     ASSERT_EQ(j2.toINI(), j.toINI());
+  }
+  // An ESCAPED quote ('\"' inside the value) must not end the multi-line scan
+  // early. iniCollectComments cleared inMlValue on ANY '"', so a continuation
+  // line holding a '\"' was treated as the value's closing quote and a ';'/'#'
+  // line after it (still inside the value) was stolen into a pending comment.
+  // The decoder tracks backslash escapes on these lines; the collector now
+  // does too.
+  {
+    const char* src = "k = \"line 1\nline \\\"2\\\"\n; inside value\nclosing\"\nj = 1\n";
+    asvJSON j;
+    ASSERT(j.fromINI(src));
+    // The value keeps its escaped quotes AND the ';' line verbatim.
+    ASSERT_EQ(std::string(j.getString("k")),
+              std::string("line 1\nline \"2\"\n; inside value\nclosing"));
+    // The ';' line was not collected as a comment: with no pending comment left
+    // at EOF the root has no footing, and j has no leading comment.
+    auto* jj = j.getRoot()->get("j");
+    ASSERT(jj != nullptr);
+    ASSERT(!(jj->comments && !jj->comments->leading.empty()));
+    ASSERT(j.getRoot()->comments == nullptr || j.getRoot()->comments->footing.empty());
+    // Stable round-trip through the encoder.
+    asvJSON j2;
+    ASSERT(j2.fromINI(j.toINI()));
+    ASSERT_EQ(std::string(j2.getString("k")),
+              std::string("line 1\nline \"2\"\n; inside value\nclosing"));
   }
   // A comment line above a multi-line value still attaches to that value's key.
   {
@@ -20902,24 +20938,28 @@ TEST(testINIReviewFixes) {
     ASSERT(back.fromINI(ini));
     ASSERT_EQ(std::string(back.getString("k")), std::string("it's"));
   }
-  // 5. The '['-prefixed key rejection lives in iniEscapeFlatKey, so it fires
-  //    from every encoder path (root, nested section, compact mode).
+  // 5. A key starting with '[' used to be rejected as unrepresentable ("the
+  //    decoder would read it as a section header"), but that was a false
+  //    restriction: '[' is hex-escaped to "\x5B" by iniEscapeKey, so NO encoder
+  //    path ever emits a line beginning with '[', and iniUnescapeSectionKey
+  //    restores the byte on decode. Every path (nested section, compact mode)
+  //    round-trips it today, exactly like any other non-alphanumeric key byte.
   {
     auto leaf = asvJSONValue::makeObject();
     leaf->obj->emplace("[x", asvJSONValue::makeInt(1));
     auto doc = asvJSONValue::makeObject();
     doc->obj->emplace("r", std::move(leaf));
     std::string ini;
-    bool threw = false;
-    try { doc->toINI(ini); } catch (const asvJSONError& e) {
-      threw = true;
-      ASSERT(std::string(e.what()).find("starting with '['") != std::string::npos);
-    }
-    ASSERT(threw);
+    doc->toINI(ini);
+    ASSERT(ini.find("\\x5Bx") != std::string::npos);
     std::string compact;
-    threw = false;
-    try { doc->toINI(compact, false); } catch (const asvJSONError&) { threw = true; }
-    ASSERT(threw);
+    doc->toINI(compact, false);
+    ASSERT(compact.find("\\x5Bx") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(compact));
+    auto* r = back.getRoot()->get("r");
+    ASSERT(r != nullptr && r->type == asvJSONValue::OBJECT);
+    ASSERT(r->get("[x") != nullptr && r->get("[x")->getInt() == 1);
   }
   // A section-header key may still contain '[' (hex-escaped), so the rejection
   // must not leak into iniEscapeSectionKey.
@@ -21125,6 +21165,129 @@ TEST(testINIReviewFixes) {
     ASSERT(b.fromINI(ini));
     auto* v = b.getRoot()->get("value");
     ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->arr->size() == 2);
+  }
+}
+
+TEST(testINISpecialValues) {
+  // Special value types degrade to TEXT in INI the way they do in CSV/dotenv/
+  // Java Properties. DATETIME is the only one with a native INI form: its bare
+  // ISO-8601 text re-detects as a DATETIME on parse, so the instant,
+  // milliseconds and tz offset all round-trip. The others keep their payload as
+  // a STRING and lose the type identity (documented in ini.hpp's KNOWN
+  // LIMITATIONS).
+  // 1. DATETIME round-trips losslessly through its bare ISO-8601 text.
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("dt", asvJSONValue::makeDateTime(0, 123, 300));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("dt = 1970-01-01T05:00:00.123+05:00") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("dt");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v->timestamp, time_t(0));
+    ASSERT_EQ(v->datetime_ms, 123);
+    ASSERT_EQ(v->tz_offset_min, 300);
+  }
+  // 2. A bare HAND-WRITTEN ISO value is typed as a DATETIME too (the strlen-20
+  //    whole-string check cannot misfire on a number or ordinary word).
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string("k = 1970-01-01T00:00:00Z\n")));
+    auto* v = j.getRoot()->get("k");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v->timestamp, time_t(0));
+  }
+  // 3. A plain STRING that merely looks like an ISO date is QUOTED by the
+  //    encoder (the colons are escaped to \: inside the quotes), so it stays a
+  //    STRING on the round-trip instead of re-typing as a DATETIME.
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("s", asvJSONValue::makeString("1970-01-01T00:00:00Z"));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("s = \"1970-01-01T00\\:00\\:00Z\"") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), "1970-01-01T00:00:00Z");
+  }
+  // 4. TIMESTAMP: bare epoch seconds, comes back as the same INT number.
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("ts", asvJSONValue::makeTimestamp(1712345678));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("ts = 1712345678") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("ts");
+    ASSERT(v != nullptr && v->type == asvJSONValue::INT);
+    ASSERT_EQ(v->getInt(), int64_t(1712345678));
+  }
+  // 5. BINARY / EXTENSION: the payload survives as a quoted BASE64 STRING
+  //    (base64 of 00 01 FE FF is "AAH+/w=="; the '+', '=' and '/' force the
+  //    quoting, and '=' is escaped to \= inside the quotes).
+  {
+    const uint8_t bytes[] = {0x00, 0x01, 0xFE, 0xFF};
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("b", asvJSONValue::makeBinary(bytes, 4));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("b = \"AAH+/w\\=\\=\"") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("b");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), "AAH+/w==");
+  }
+  // 6. OBJECTID: the 12 bytes as a quoted 24-hex STRING.
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("oid", asvJSONValue::makeObjectId("0123456789ab"));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("oid = \"303132333435363738396162\"") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("oid");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), "303132333435363738396162");
+  }
+  // 7. REGEX: the pattern text only (options after the NUL dropped, like
+  //    CSV/bencode/plist), quoted. makeRegex("\\d+","gi") stores "\\d+\0gi".
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("rx", asvJSONValue::makeRegex("\\d+", "gi"));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("rx = \"\\\\d+\"") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("rx");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), "\\d+");
+  }
+  // 8. CUSTOM_TAG: the whole {"$customTag":{"name":...,"value":...}} convention
+  //    text as a quoted STRING, so the tag name and its value survive as text.
+  {
+    auto tag = asvJSONValue::makeString("!foo");
+    tag->type = asvJSONValue::CUSTOM_TAG;
+    tag->custom_value = asvJSONValue::makeInt(42);
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("c", std::move(tag));
+    std::string ini;
+    doc->toINI(ini);
+    ASSERT(ini.find("$customTag") != std::string::npos);
+    asvJSON back;
+    ASSERT(back.fromINI(ini));
+    auto* v = back.getRoot()->get("c");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    std::string text(v->getString());
+    ASSERT(text.find("$customTag") != std::string::npos);
+    ASSERT(text.find("!foo") != std::string::npos);
   }
 }
 
@@ -32861,6 +33024,7 @@ RUN(testCppReviewFixes);
 	RUN(testINIReviewFidelity);
 	RUN(testINIDottedKeyRoundTrip);
 	RUN(testINIReviewFixes);
+	RUN(testINISpecialValues);
 	RUN(testINIRepeatedArrayComments);
 
 	std::cout << "\n--- Dotenv Serialization Tests ---\n";
