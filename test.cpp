@@ -23316,6 +23316,11 @@ TEST(testUBJSONReviewFixes) {
     asvJSON c;
     ASSERT(c.fromUBJSON(std::string("[#i\x02", 4) + "NN" + std::string("i\x07", 2) + std::string("i\x08", 2)));
     ASSERT_EQ(c.serialize(), std::string("[7,8]"));
+    // ...so a counted array whose only elements are no-ops does NOT collapse
+    // to empty: count stays unsatisfied and the input falls off the end.
+    asvJSON nr;
+    ASSERT(!nr.fromUBJSON(std::string("[#i\x03", 4) + "NNN"));
+    ASSERT(nr.lastError.find("unterminated counted array") != std::string::npos);
   }
   // Round-trip is untouched by all of the above.
   {
