@@ -3842,6 +3842,32 @@ TEST(testCBORExtension) {
 	ASSERT_EQ(ext.second[0], 0xDE);
 }
 
+TEST(testCBORNegativeExtensionType) {
+	// Regression: a negative ext_type (int8_t, MessagePack-style) used to be
+	// written as an unsigned major-0 value, so the tag-257 decoder rejected it
+	// and the value decayed to a plain [extType, bytes] array. It must survive.
+	uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+	asvJSON json;
+	json.parse(std::string("{}"));
+	json.getRoot()->obj->emplace("pos", asvJSONValue::makeExtension(7, payload, 4));
+	json.getRoot()->obj->emplace("neg1", asvJSONValue::makeExtension(-1, payload, 4));
+	json.getRoot()->obj->emplace("min", asvJSONValue::makeExtension(-128, payload, 2));
+	json.getRoot()->obj->emplace("zero", asvJSONValue::makeExtension(0, nullptr, 0));
+
+	auto cbor = json.toCBOR();
+	asvJSON json2;
+	ASSERT(json2.fromCBOR(cbor.data(), cbor.size()));
+
+	auto* pos = json2.getRoot()->get("pos");
+	ASSERT(pos != nullptr && pos->type == asvJSONValue::EXTENSION && pos->ext_type == 7);
+	auto* neg1 = json2.getRoot()->get("neg1");
+	ASSERT(neg1 != nullptr && neg1->type == asvJSONValue::EXTENSION && neg1->ext_type == -1);
+	auto* mn = json2.getRoot()->get("min");
+	ASSERT(mn != nullptr && mn->type == asvJSONValue::EXTENSION && mn->ext_type == -128);
+	auto* z = json2.getRoot()->get("zero");
+	ASSERT(z != nullptr && z->type == asvJSONValue::EXTENSION && z->ext_type == 0 && z->bin_data.empty());
+}
+
 TEST(testCBORObjectIdTimestamp) {
 	asvJSON json;
 	json.putObjectId("oid", std::string_view("ABCDEF123456", 12));
@@ -4428,6 +4454,20 @@ TEST(testCBORExtras) {
 		asvJSON json;
 		ASSERT(json.fromCBOR(f, 2));
 		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::BOOL_VAL && !json.getRoot()->flag);
+	}
+	// Direct-encoded unassigned simple values 0..19 map to null, matching the
+	// info==24 form just above (both encodings denote the same simple values).
+	{
+		uint8_t e0[] = { 0xE0 }; // simple(0)
+		asvJSON json;
+		ASSERT(json.fromCBOR(e0, 1));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::NULL_VAL);
+	}
+	{
+		uint8_t f3[] = { 0xF3 }; // simple(19)
+		asvJSON json;
+		ASSERT(json.fromCBOR(f3, 1));
+		ASSERT(json.getRoot() != nullptr && json.getRoot()->type == asvJSONValue::NULL_VAL);
 	}
 }
 
@@ -18790,6 +18830,112 @@ TEST(testFromCppAudit3) {
   }
 }
 
+TEST(testCppReviewFixes) {
+  // --- A. `= default` / `= delete` / pure virtual are functions, not members ---
+  // `void foo() = default;` used to decode as a field named foo initialized to
+  // "default"; a pure virtual `= 0` as a field holding 0.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  Document() = default;\n"
+      "  Document(const Document&) = delete;\n"
+      "  virtual void foo() = 0;\n"
+      "  int x = 1;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":1})"));
+  }
+  // --- B. function-pointer members survive ---
+  // `int (*fp)();` used to be dropped wholesale as a "method". The name is
+  // the identifier inside `(*...)` and the type is the return type.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  int (*fp)();\n"
+      "  void (*cb)(int, int);\n"
+      "  int x = 2;\n"
+      "};\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"fp":0,"cb":null,"x":2})"));
+  }
+  // --- C. typedef struct Foo Bar; keeps Bar as a resolvable alias ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "typedef struct Foo Bar;\n"
+      "struct Foo { int x = 5; };\n"
+      "struct Doc { Bar b; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"Foo":{"x":5},"Doc":{"b":{"x":5}}})"));
+    // Body form: `typedef struct Foo { ... } Bar;` registers the same alias.
+    asvJSON b2;
+    ASSERT(b2.fromCpp(std::string_view(
+      "typedef struct Foo { int x = 5; } Bar;\n"
+      "struct Doc { Bar b; };\n")));
+    ASSERT_EQ(b2.serialize(), std::string_view(R"({"Foo":{"x":5},"Doc":{"b":{"x":5}}})"));
+    // A weak alias alone declares no type -- still "no type declarations".
+    asvJSON b3;
+    ASSERT(!b3.fromCpp(std::string_view("typedef struct Foo Bar;\n")));
+  }
+  // --- D. multi-element brace-init of a scalar ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int a{1, 2}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"a":0})"));
+    CppReadOptions strict;
+    strict.strict = true;
+    asvJSON c;
+    ASSERT(!c.fromCpp(std::string_view("struct Document { int a{1, 2}; };\n"), strict));
+  }
+  // --- E. namespace / extern "C" bodies are parsed, not dropped ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "namespace app {\n"
+      "  struct Inner { int v = 9; };\n"
+      "}\n"
+      "extern \"C\" {\n"
+      "  struct Cfg { int n = 1; };\n"
+      "}\n"
+      "struct Document { Inner i; Cfg c; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"i":{"v":9},"c":{"n":1}})"));
+  }
+  // --- F. `#if 00` is false, like `#if 0` ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "#if 00\n"
+      "struct A { int x = 1; };\n"
+      "#else\n"
+      "struct Document { int y = 2; };\n"
+      "#endif\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"y":2})"));
+  }
+  // --- G. binary literals and C++14 digit separators ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { int a = 0b101; int b = 1'000'000; int c = 0xFF; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"a":5,"b":1000000,"c":255})"));
+  }
+  // --- H. empty input resets the root ---
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view("struct Document { int x = 1; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"x":1})"));
+    ASSERT(!b.fromCpp(std::string_view("")));
+    ASSERT(b.getRoot() == nullptr);
+  }
+  // --- I. a bare comma inside <...> is not a template argument list ---
+  // `{1 < 2, 3 > 4}` split the comparison comma wrongly when cppRdIsTemplateOpen
+  // swallowed it, collapsing the pair to a single value.
+  {
+    asvJSON b;
+    ASSERT(b.fromCpp(std::string_view(
+      "struct Document { std::pair<int, int> p = {1 < 2, 3 > 4}; };\n")));
+    ASSERT_EQ(b.serialize(), std::string_view(R"({"p":[1,3]})"));
+  }
+}
+
 TEST(testFromJSON5) {
   // Single-quoted strings
   {
@@ -32515,6 +32661,7 @@ int main() {
 	RUN(testCBORDateTime);
 	RUN(testCBORRegex);
 	RUN(testCBORExtension);
+	RUN(testCBORNegativeExtensionType);
 	RUN(testCBORObjectIdTimestamp);
 	RUN(testCBORNestedObject);
 	RUN(testCBORCorrupted);
@@ -32681,6 +32828,7 @@ RUN(testFromCppArraySizeGuard);
   RUN(testFromCppDefineMacros);
 RUN(testFromCppAudit2);
 RUN(testFromCppAudit3);
+RUN(testCppReviewFixes);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
