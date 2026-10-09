@@ -38,7 +38,11 @@
 // OBJECTID / EXTENSION, listed above).
 //
 // `N` is a no-op and never produces a value. Inside an UNTYPED container it is
-// skipped without consuming a count slot; at the top level any run of `N`
+// skipped without consuming a count slot (so a counted array whose no-ops are
+// its only elements does NOT collapse to empty: `[#i3 N N N` falls off the end
+// with "unterminated counted array", because the count 3 is still unsatisfied
+// after three no-ops -- the alternative "no-op consumes a slot" reading is the
+// one that would yield an empty array); at the top level any run of `N`
 // before or after the document's value is skipped, and a document consisting
 // only of no-ops is rejected ("no value"). Typed containers do NOT skip
 // no-ops: their elements are bare payload bytes with no markers, so a 0x4E
@@ -47,7 +51,10 @@
 // different thing yet again -- `$N#n` declares an array of n no-ops, which per
 // the spec have an empty body and yield an EMPTY array (a no-op is not a
 // value; `$Z#n` is the null-filling form), while `{$N#n` fixes every value of
-// a typed object to null.
+// a typed object to null. The array/object asymmetry is intentional: an array
+// element may legitimately be empty (no-op = nothing), but an object entry
+// must have a value, and there is no "no value" for a value slot -- so the
+// object form fills null instead of omitting the pair.
 //
 // Typed containers: the `$<type>` marker describes the element payloads, so
 // `[$i#3` is followed by three BARE int8 bytes with no per-element `i` marker.
@@ -97,7 +104,10 @@ inline void ubjWriteBE(std::vector<uint8_t>& out, uint64_t v, int n) {
     out.push_back(static_cast<uint8_t>(v >> (8 * i)));
 }
 
-// Length/count prefix: smallest integer type (signed) that fits.
+// Length/count prefix: smallest type (signed or unsigned) that fits. 'i' has
+// room for the signed range (0..127 is the overlap), 'U' covers 128..255 with
+// the unsigned uint8 form. The values written are never negative (checked
+// below), so the unsigned marker is only ever used for non-negative payloads.
 inline void ubjWriteLen(int64_t n, std::vector<uint8_t>& out) {
   uint64_t v = static_cast<uint64_t>(n);
   if (n < 0) throw asvJSONError("UBJSON: negative length");
@@ -292,10 +302,13 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
 inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t& pos,
                                                     size_t dataLen, int depth, char m) {
   switch (m) {
-    // 'N' is a no-op and never yields a value. Container loops skip no-ops
-    // BEFORE calling here, so reaching this case means a no-op sat where a
-    // value was required. The $N *type* position is handled by the container
-    // branch, not here.
+    // 'N' is a no-op and never yields a value. Believed UNREACHABLE: the
+    // container loops skip no-ops before recursing, fromUBJSON skips leading /
+    // trailing no-ops at the top level, and ubjParseScalar's case '['/'{' is
+    // the only other caller path (m there is '[' or '{', never 'N'). The $N
+    // *type* position is handled by the container branch, not here. Kept as
+    // belt-and-braces: any future caller that forwards an 'N' past the skips
+    // must get a named error, not a silent fall-through to "unknown marker".
     case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
     case 'Z': return asvJSONValue::makeNull();
     case 'T': return asvJSONValue::makeBool(true);
@@ -400,10 +413,13 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       pos++;
       uint64_t count = ubjReadLen(data, pos, dataLen);
       // The spec's binary-data convention: a typed uint8 array is raw bytes.
-      // Its size bound is the BINARY payload limit (matching makeBinary), NOT
-      // the element-count bound: an encoder may legally emit a binary whose
-      // size trips MAX_ARRAY_SIZE, so the "array too large" guard below must
-      // not fire for it. It still bounds every other $type, after this branch.
+      // Its size bound is the BINARY payload limit (MAX_STRING_LEN, the same
+      // limit makeBinary enforces internally via checkStringLen -- a binary
+      // too large for the factory is rejected here so the call below never
+      // parses into a nullptr slip), NOT the element-count bound: an encoder
+      // may legally emit a binary whose size trips MAX_ARRAY_SIZE, so the
+      // "array too large" guard below must not fire for it. It still bounds
+      // every other $type, after this branch.
       if (t == 'U') {
         if (count > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("UBJSON: binary too large");
         if (count > dataLen - pos) throw asvJSONError("UBJSON: truncated binary");
@@ -584,7 +600,10 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
 
 } // namespace asvJSONInternal
 
-// string_view convenience overload
+// Convenience overload: delegates to the byte-pointer form without copying.
+// Takes `const std::string&` (not std::string_view) to mirror the MessagePack /
+// BSON / CBOR string overloads in core.hpp -- the parse itself borrows the
+// caller's buffer either way, so there is nothing to gain from a view here.
 inline bool asvJSON::fromUBJSON(const std::string& data) {
   return fromUBJSON(data.data(), data.size());
 }
