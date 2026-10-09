@@ -3659,6 +3659,55 @@ TEST(testMsgpackDateTimeMsNormalize) {
 	}
 }
 
+TEST(testMsgpackEncoderUTF8Validation) {
+	// The encoder must validate UTF-8 before emitting a STRING (major type 2).
+	// An invalid sequence would produce a document the decoder rejects, so we
+	// catch it at encode time. Byte strings (FIXSTR with raw bytes, BIN types)
+	// are deliberately NOT checked -- they carry arbitrary data by design.
+	asvJSON j;
+	j.setValue("s", asvJSONValue::makeString(std::string("hello")));
+	auto mp = j.toMessagePack();
+	ASSERT(mp.size() > 0); // valid string round-trips
+
+	// Build a node with an invalid UTF-8 byte (0xFE is not a valid start byte).
+	asvJSON jBad;
+	jBad.setValue("s", asvJSONValue::makeString(std::string("\xFE")));
+	bool threw = false;
+	try { auto mp2 = jBad.toMessagePack(); }
+	catch (const std::exception&) { threw = true; }
+	ASSERT(threw);
+
+	// Same for a map key: invalid UTF-8 in an object key must also throw.
+	asvJSON jKeyBad;
+	auto obj = asvJSONValue::makeObject();
+	if (!obj) throw std::runtime_error("alloc failed");
+	obj->obj->insert_or_assign(std::string("\xFE"), asvJSONValue::makeNull());
+	jKeyBad.setValue("", std::move(obj));
+	threw = false;
+	try { auto mp3 = jKeyBad.toMessagePack(); }
+	catch (const std::exception&) { threw = true; }
+	ASSERT(threw);
+
+	// A valid multi-byte UTF-8 key must still work.
+	asvJSON jGood;
+	auto obj2 = asvJSONValue::makeObject();
+	if (!obj2) throw std::runtime_error("alloc failed");
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
+	jGood.setValue("", std::move(obj2));
+	auto mp4 = jGood.toMessagePack();
+	ASSERT(mp4.size() > 0);
+}
+
+TEST(testMsgpackFixextSanity) {
+	// Sanity decode of a hand-built fixext4 value to confirm the ext parser path
+	// works end-to-end. The array element null-guard is exercised indirectly by
+	// the general MessagePack round-trip and corrupted-data tests -- an explicit
+	// OOM repro would require overriding new, which is not practical in a unit test.
+	asvJSON j;
+	std::vector<uint8_t> fixext = {0xD6, 0x00, 0x01, 0x02, 0x03, 0x04}; // fixext4: type 0, 4 payload bytes
+	ASSERT(j.fromMessagePack(fixext.data(), fixext.size()));
+}
+
 TEST(testCBOR) {
 	asvJSON json;
 	json.putString("str", "hello");
@@ -33267,7 +33316,9 @@ int main() {
 	RUN(testMsgpackReservedExtTypes);
 	RUN(testMsgpackEmptyRegexBody);
 	RUN(testMsgpackDateTimeMsNormalize);
-	
+	RUN(testMsgpackEncoderUTF8Validation);
+	RUN(testMsgpackFixextSanity);
+
 	std::cout << "\n--- Object Key Escape Tests ---\n";
 	RUN(testObjectKeyEscapes);
 	
