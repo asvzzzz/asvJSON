@@ -15377,6 +15377,77 @@ b = 2)")));
   }
 }
 
+TEST(testTomlReviewFixes) {
+  // A DATETIME whose instant gmtimeSafe cannot convert renders as the QUOTED
+  // string "null" -- a bare `null` is not valid TOML and the emitted line would
+  // not re-parse. It decodes back as a STRING.
+  {
+    auto doc = asvJSONValue::makeObject();
+    doc->obj->emplace("d", asvJSONValue::makeDateTime(-631152000LL, 0, 0));
+    std::string toml;
+    doc->toTOML(toml, true);
+    ASSERT(toml.find("d = \"null\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(toml));
+    auto* v = j2.getRoot()->get("d");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), "null");
+  }
+  // A NULL scalar ROOT emits an empty document, never the invalid `value = `.
+  {
+    asvJSON j;
+    ASSERT(j.parse("null"));
+    ASSERT(j.toTOML().empty());
+  }
+  // Single-line basic strings accept the TOML 0.5 `\`+newline continuation:
+  // the backslash, the line break and the next line's indentation fold away.
+  // (TOML 1.0 moved the rule to multi-line strings only; kept as a documented
+  // lenient extension.) The spec's own example round-trips exactly.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = "The quick brown fox \
+        jumps over the lazy dog.")")));
+    ASSERT_EQ(std::string(j.getString("str")), "The quick brown fox jumps over the lazy dog.");
+  }
+  // Several chained continuations.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(str = "one \
+two \
+three")")));
+    ASSERT_EQ(std::string(j.getString("str")), "one two three");
+  }
+  // A comment after the folded string still binds to its own line, and the
+  // gather must not confuse a later key=value line.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(R"(a = "foo \
+bar" # trailing comment
+b = 1)")));
+    ASSERT_EQ(std::string(j.getString("a")), "foo bar");
+    ASSERT_EQ(j.getInt("b"), int64_t(1));
+  }
+  // A single-line basic string with NO active trailing backslash cannot span
+  // lines: it stays unterminated instead of eating the next line.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("a = \"abc\nb = 1")));
+  }
+  // Weak date-time validation: the time FIELDS go unvalidated (documented
+  // leniency) -- an out-of-range clock decodes as a STRING...
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("d = 2024-01-01T99:99:99Z")));
+    ASSERT_EQ(std::string(j.getString("d")), "2024-01-01T99:99:99Z");
+  }
+  // ...but a malformed date PREFIX is no date at all and fails the numeric
+  // parse ("invalid number"), matching the existing 2024-01-32 rejection.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML(std::string_view("d = 2024-13-01")));
+  }
+}
+
 TEST(testToJSONLines) {
   // Array of objects -> one JSON line per element
   {
@@ -33067,6 +33138,7 @@ RUN(testGOONSpecialValues);
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);
 	RUN(testFromTOML);
+	RUN(testTomlReviewFixes);
 
 	std::cout << "\n--- JSON Lines Serialization Tests ---\n";
 	// ByteSize Tests
