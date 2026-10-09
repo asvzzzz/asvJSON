@@ -3,15 +3,16 @@
 // Supports schema-less dynamic encoding (field numbers as keys) and JSON-driven schema.
 //
 // Known limitations (documented, not errors):
-// - NULL values are not serialized by the text format (protoTextSerializeVal
-//   skips them); a toProtobufText()/fromProtobufText() round-trip drops nulls.
-//   A null array element is skipped without leaving a separator behind, so
-//   [1, null, 2] is written as [1, 2] (valid text), never as [1, , 2] -- the
-//   same holds for the bracketed array-of-messages form, whose trailing comma
-//   is placed between written elements only. A NULL root has no text
-//   representation at all: toProtobufText() returns an empty string for it (a
-//   bare newline would parse back as an empty document), which fromProtobufText()
-//   then rejects.
+// - NULL values and the special types DATETIME / OBJECTID / REGEX / TIMESTAMP /
+//   CUSTOM_TAG are not serialized by the text format (protoTextSerializeVal has
+//   no case for them); a toProtobufText()/fromProtobufText() round-trip drops
+//   nulls and all five special types. A null array element is skipped without
+//   leaving a separator behind, so [1, null, 2] is written as [1, 2] (valid text),
+//   never as [1, , 2] -- the same holds for the bracketed array-of-messages form,
+//   whose trailing comma is placed between written elements only. A NULL root has
+//   no text representation at all: toProtobufText() returns an empty string for it
+//   (a bare newline would parse back as an empty document), which
+//   fromProtobufText() then rejects.
 // - A JSON-driven schema must give every field an integer "id"; a field without
 //   one throws asvJSONError instead of being dropped from the schema silently.
 // - Protobuf groups (wire types 3/4) are deprecated and not supported; a
@@ -635,6 +636,12 @@ inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue*
   } else if (field.type == "message") {
     if (val->type != asvJSONValue::OBJECT)
       throw asvJSONError("Protobuf encode: message field does not hold an object");
+    // An empty message has no nested fields, so the wire emits zero bytes and
+    // the decoder sees nothing -- indistinguishable from a missing field. Reject
+    // it explicitly so the caller knows the value is unrepresentable rather than
+    // silently encoding a no-op length-delimited blob.
+    if (!val->obj || val->obj->empty())
+      throw asvJSONError("Protobuf encode: message field holds an empty object");
     std::vector<uint8_t> sub;
     protoEncodeMessage(sub, val, field.schema.get());
     protoWriteVarint(out, sub.size());
@@ -1124,8 +1131,10 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
     if (c == '-' || c == '+') pos++;
     protoTextSkipWS(text, pos);
     if (pos >= text.size()) return nullptr; // lone sign: not a valid number
-    // Signed inf / infinity / nan words.
-    if (text[pos] == 'i' || text[pos] == 'I' || text[pos] == 'n' || text[pos] == 'N') {
+    // Signed inf / infinity / nan words, or any alphabetic token after a sign.
+    // "-inf" / "+nan" → double; everything else (e.g. "-abc", "+infx") survives
+    // as a raw-number string instead of disappearing as nullptr.
+    if (std::isalpha(static_cast<unsigned char>(text[pos])) || text[pos] == '_') {
       std::string w = protoTextParseIdent(text, pos);
       if (w == "inf" || w == "infinity" || w == "Inf" || w == "Infinity")
         return asvJSONValue::makeDouble(neg ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity());
@@ -1133,7 +1142,18 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
         double v = std::numeric_limits<double>::quiet_NaN();
         return asvJSONValue::makeDouble(neg ? -v : v);
       }
-      return nullptr; // sign followed by a non-numeric identifier
+      // Non-inf/nan alphabetic token after a sign: consume any trailing alpha/
+      // underscore and return the whole run (including the sign) as a raw-number
+      // string so "-abc", "+infx" survive losslessly instead of being eaten as nullptr.
+      {
+        std::string id = std::move(w);
+        if (pos < text.size() &&
+            (std::isalpha(static_cast<unsigned char>(text[pos])) || text[pos] == '_'))
+          id += protoTextParseIdent(text, pos);
+        auto v = asvJSONValue::makeString((neg ? "-" : "+") + id);
+        if (v) v->raw_number = true;
+        return v;
+      }
     }
     // C-style hex integer literal: 0x...
     if (text[pos] == '0' && pos + 1 < text.size() && (text[pos + 1] == 'x' || text[pos + 1] == 'X')) {
@@ -1219,12 +1239,16 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
       pos++;
       return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
     }
-    // Trailing alphanumeric junk ("123abc", "1e5x") is kept as part of the
-    // literal so it round-trips losslessly as a raw number instead of being
-    // silently split into a number plus a stray identifier.
+    // Trailing junk -- alphanumeric or another dot ("123abc", "1e5x", "1.2.3") --
+    // is kept as part of the literal so it round-trips losslessly as a raw number
+    // instead of being silently split into a number plus stray characters.
     if (pos < text.size() &&
-        (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
-      num += protoTextParseIdent(text, pos);
+        (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_' || text[pos] == '.')) {
+      size_t tailStart = pos;
+      while (pos < text.size() &&
+             (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_' || text[pos] == '.'))
+        pos++;
+      num.append(text, tailStart, pos - tailStart);
       auto v = asvJSONValue::makeString(std::move(num));
       if (v) v->raw_number = true;
       return v;
@@ -1450,7 +1474,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
     case asvJSONValue::DOUBLE: {
       if (std::isnan(val->dbl)) { out += "nan"; break; }
       if (std::isinf(val->dbl)) { out += (val->dbl > 0) ? "inf" : "-inf"; break; }
-      fmtDoubleVal(val->dbl, out); break;
+      fmtDoubleValDot0(val->dbl, out); break;
     }
     case asvJSONValue::STRING: protoTextQuote(val->str_data, out); break;
     case asvJSONValue::BINARY:

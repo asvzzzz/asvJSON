@@ -13372,6 +13372,109 @@ TEST(testProtobufAuditFixesRound3) {
 	}
 }
 
+TEST(testProtobufReviewFixes) {
+	// 1. DOUBLE text-round-trip must keep the ".0" suffix so re-parsing is not a bare INT.
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("n", asvJSONValue::makeDouble(0.0));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("n: 0.0") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.isDouble("n"));
+	}
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("n", asvJSONValue::makeDouble(100000.0));
+		std::string text = j.toProtobufText();
+		// MSVC to_chars may emit "1e+05" for 100000.0 -- either "1e+05" or ".0" must be present (both are finite doubles).
+		bool hasDotZero = text.find("n: 100000.0") != std::string::npos;
+		bool hasExp = text.find("n: 1e+05") != std::string::npos;
+		ASSERT(hasDotZero || hasExp);
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.isDouble("n"));
+	}
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("nan", asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+		j.setValue("negInf", asvJSONValue::makeDouble(-std::numeric_limits<double>::infinity()));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		ASSERT(j2.isDouble("nan") && std::isnan(j2.getDouble("nan")));
+		ASSERT(j2.isDouble("negInf") && j2.getDouble("negInf") == -std::numeric_limits<double>::infinity());
+	}
+	// 2. Special types are silently dropped by the text format (documented, not a bug).
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("dt", asvJSONValue::makeDateTime(0, 123));
+		j.setValue("oid", asvJSONValue::makeObjectId("550e8400e29b41d4a716446655440000"));
+		j.setValue("rx", asvJSONValue::makeRegex("foo|bar", "i"));
+		j.setValue("ts", asvJSONValue::makeTimestamp(1700000000));
+		auto ct = std::make_unique<asvJSONValue>();
+		ct->type = asvJSONValue::CUSTOM_TAG;
+		ct->str_data = "mytag";
+		ct->custom_value = asvJSONValue::makeInt(42);
+		j.setValue("ct", std::move(ct));
+		std::string text = j.toProtobufText();
+		ASSERT(text.find("dt:") == std::string::npos);
+		ASSERT(text.find("oid:") == std::string::npos);
+		ASSERT(text.find("rx:") == std::string::npos);
+		ASSERT(text.find("ts:") == std::string::npos);
+		ASSERT(text.find("ct:") == std::string::npos);
+	}
+	// 3. A multi-dot literal like "1.2.3" must round-trip as a raw-number string, not silently truncate to 1.2.
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("x: 1.2.3\n"));
+		auto* v = j.getRoot()->get("x");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+		ASSERT(v->str_data == "1.2.3");
+	}
+	// 4. A sign followed by a non-numeric alphabetic token ("abc", "infx") must survive as a raw-number string, not nullptr.
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("a: -abc\n"));
+		auto* v = j.getRoot()->get("a");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+		ASSERT(v->str_data == "-abc");
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromProtobufText("b: +infx\n"));
+		auto* v = j.getRoot()->get("b");
+		ASSERT(v != nullptr && v->type == asvJSONValue::STRING && v->raw_number);
+		ASSERT(v->str_data == "+infx");
+	}
+	// 5. Schema-driven encoding: an empty message field must throw, not silently encode zero bytes.
+	{
+		const std::string schema = R"({"m":{"id":1,"type":"message"}})";
+		asvJSON j;
+		j.parse(std::string("{}"));
+		j.setValue("m", asvJSONValue::makeObject());
+		bool threw = false;
+		try { (void)j.toProtobuf(schema); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// A message field with at least one real key still encodes fine.
+	{
+		const std::string schema = R"({"m":{"id":1,"type":"message"}})";
+		asvJSON j;
+		j.parse(std::string("{}"));
+		auto m = asvJSONValue::makeObject();
+		m->obj->emplace("k", asvJSONValue::makeInt(1));
+		j.setValue("m", std::move(m));
+		auto buf = j.toProtobuf(schema);
+		ASSERT(!buf.empty());
+	}
+}
+
 TEST(testToCSV) {
 	// Empty root (scalar fallback outputs empty line? Actually "null" case)
 	{
