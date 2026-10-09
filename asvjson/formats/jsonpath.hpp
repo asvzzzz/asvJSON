@@ -1213,9 +1213,10 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       // the ',' introducing the next selector -- not run past it (the old
       // skipToEndBracket() consumed both, silently dropping every selector
       // after a filter). The whole expression is then skipped with
-      // skipToFilterEnd(), which is a standalone token-depth scan: it must not
-      // rely on the filter evaluator's final position, because parseAnd and
-      // parseOr short-circuit and may leave a trailing `&& term` unconsumed.
+       // skipToFilterEnd(), which is a standalone token-depth scan: it must not
+       // rely on the filter evaluator's final position, because parseAnd/parseOr
+       // evaluate ALL terms (no short-circuit) and the evaluator may leave a
+       // trailing `&& term` unconsumed if it errors out partway through.
       // Do not skip an immediately following '(' either: that opening paren is
       // the start of a paren-expr and JPFilterEval::parseComparison's '('
       // branch consumes the whole balanced group, so `?(@.a) && (@.b)`
