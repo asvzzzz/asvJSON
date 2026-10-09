@@ -50,8 +50,19 @@
 // parser would then reject -- the limits guard decoding, not encoding.
 
 #include "../core.hpp"
+#include <cstring>
 
+// UTF-8 validation helper for the encoder: a text string MUST be valid UTF-8 per
+// MessagePack spec, and our own decoder rejects invalid sequences, so validate
+// before writing instead of silently emitting a document that cannot be read back.
+// Byte strings (major type 2) carry arbitrary bytes and are deliberately not checked.
 namespace asvJSONInternal {
+
+inline void msgpackWriteText(std::vector<uint8_t>& out, const std::string& s) {
+	if (!isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size()))
+		throw asvJSONError("MsgPack invalid UTF-8 in string");
+	out.insert(out.end(), s.begin(), s.end());
+}
 
 // The encoder writes float32/float64 by copying their raw bit patterns into
 // the output, and the decoder reads them back the same way, so both types
@@ -130,7 +141,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			else if (str_data.size() <= 0xFF) { out.push_back(0xD9); out.push_back(static_cast<uint8_t>(str_data.size())); }
 			else if (str_data.size() <= 0xFFFF) { out.push_back(0xDA); out.push_back(static_cast<uint8_t>(str_data.size() >> 8)); out.push_back(static_cast<uint8_t>(str_data.size())); }
 			else { out.push_back(0xDB); out.push_back(static_cast<uint8_t>(str_data.size() >> 24)); out.push_back(static_cast<uint8_t>(str_data.size() >> 16)); out.push_back(static_cast<uint8_t>(str_data.size() >> 8)); out.push_back(static_cast<uint8_t>(str_data.size())); }
-			out.insert(out.end(), str_data.begin(), str_data.end());
+			msgpackWriteText(out, str_data);
 			break;
 		}
 		case T::BINARY: {
@@ -158,7 +169,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				else if (k.size() <= 0xFF) { out.push_back(0xD9); out.push_back(static_cast<uint8_t>(k.size())); }
 				else if (k.size() <= 0xFFFF) { out.push_back(0xDA); out.push_back(static_cast<uint8_t>(k.size() >> 8)); out.push_back(static_cast<uint8_t>(k.size())); }
 				else { out.push_back(0xDB); out.push_back(static_cast<uint8_t>(k.size() >> 24)); out.push_back(static_cast<uint8_t>(k.size() >> 16)); out.push_back(static_cast<uint8_t>(k.size() >> 8)); out.push_back(static_cast<uint8_t>(k.size())); }
-				out.insert(out.end(), k.begin(), k.end());
+				msgpackWriteText(out, k);
 				v->toMessagePack(out);
 			}
 			break;
@@ -239,7 +250,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			else if (str_data.size() <= 0xFF) { body.push_back(0xD9); body.push_back(static_cast<uint8_t>(str_data.size())); }
 			else if (str_data.size() <= 0xFFFF) { body.push_back(0xDA); body.push_back(static_cast<uint8_t>(str_data.size() >> 8)); body.push_back(static_cast<uint8_t>(str_data.size())); }
 			else { body.push_back(0xDB); body.push_back(static_cast<uint8_t>(str_data.size() >> 24)); body.push_back(static_cast<uint8_t>(str_data.size() >> 16)); body.push_back(static_cast<uint8_t>(str_data.size() >> 8)); body.push_back(static_cast<uint8_t>(str_data.size())); }
-			body.insert(body.end(), str_data.begin(), str_data.end());
+			msgpackWriteText(body, str_data); // validates UTF-8 for the tag name
 			if (custom_value) custom_value->toMessagePack(body); else body.push_back(0xC0);
 			writeMsgPackExt(out, 4, body.data(), body.size());
 			break;
@@ -295,7 +306,11 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) throw asvJSONError("MsgPack array alloc failed");
 		arr->arr->reserve(n);
-		for (uint32_t i = 0; i < n; i++) arr->arr->push_back(parseMessagePack(data, pos, dataLen, depth + 1));
+		for (uint32_t i = 0; i < n; i++) {
+			auto elem = parseMessagePack(data, pos, dataLen, depth + 1);
+			if (!elem) throw asvJSONError("MsgPack array element failed");
+			arr->arr->push_back(std::move(elem));
+		}
 		return arr;
 	}
 	if (tag >= 0x80 && tag <= 0x8F) {
@@ -573,10 +588,15 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack array16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
+			if (n > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
 			arr->arr->reserve(n);
-			for (uint16_t i = 0; i < n; i++) arr->arr->push_back(parseMessagePack(data, pos, dataLen, depth + 1));
+			for (uint16_t i = 0; i < n; i++) {
+				auto elem = parseMessagePack(data, pos, dataLen, depth + 1);
+				if (!elem) throw asvJSONError("MsgPack array element failed");
+				arr->arr->push_back(std::move(elem));
+			}
 			return arr;
 		}
 		case 0xDD: {
@@ -587,13 +607,18 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
 			arr->arr->reserve(n);
-			for (uint32_t i = 0; i < n; i++) arr->arr->push_back(parseMessagePack(data, pos, dataLen, depth + 1));
+			for (uint32_t i = 0; i < n; i++) {
+				auto elem = parseMessagePack(data, pos, dataLen, depth + 1);
+				if (!elem) throw asvJSONError("MsgPack array element failed");
+				arr->arr->push_back(std::move(elem));
+			}
 			return arr;
 		}
 		case 0xDE: {
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack map16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
+			if (n > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("MsgPack map alloc failed");
 			for (uint16_t i = 0; i < n; i++) {
