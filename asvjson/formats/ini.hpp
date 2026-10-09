@@ -72,6 +72,40 @@
 //     [A-Za-z0-9_.-] and iniUnescapeSectionKey restores it, so a key can
 //     contain NUL, 0x1F or a high byte. The comment collector's path segments
 //     are length-prefixed for exactly that reason (see iniPathSeg).
+//   - A key that is EMPTY, or whose section path would be empty, has no INI
+//     spelling: "" is skipped by the decoder on a " = v" line and "[]" is
+//     rejected as a section header. The encoder therefore throws for both, so
+//     {"": {...}} (whose section header would be "[]") is an error, never a
+//     silently collapsed {"a":1} in the output. A key STARTING with '[' needs
+//     no rejection: iniEscapeKey hex-escapes the '[' to "\x5B", so the emitted
+//     line never begins with '[' at all (a bare "[k] = v" line would be read as
+//     a section header -- the encoder never writes one) and the decoder restores
+//     the byte. Section-header, dotted and flat keys all round-trip bracketed
+//     keys today.
+//   - Special value types have no native INI value syntax, so they degrade to
+//     text like the other text formats (CSV, dotenv, Java Properties):
+//       DATETIME    - written as bare ISO-8601 text (fmtDateTimeVal's 'T'
+//                     separator needs no quotes). This is the ONLY special type
+//                     with a native INI form: iniParseVal detects the exact ISO
+//                     text back as a DATETIME, so the instant, milliseconds and
+//                     tz offset round-trip. A bare HAND-WRITTEN ISO value is
+//                     typed as a DATETIME too; a plain STRING that merely looks
+//                     like one is QUOTED by the encoder (the STRING case in
+//                     iniFormatVal re-parse the text, sees the DATETIME, and
+//                     quotes), so it stays a STRING. A quoted "..." value is
+//                     never re-typed. A timestamp gmtimeSafe cannot convert
+//                     renders the literal "null", quoted, so it re-parses as the
+//                     STRING "null", not the null value.
+//       TIMESTAMP   - bare epoch seconds; re-parses as an INT of the same
+//                     number (type identity lost).
+//       BINARY / EXTENSION - the payload as a QUOTED BASE64 string; type lost,
+//                     the value survives as text.
+//       OBJECTID    - the 12 bytes as a QUOTED 24-hex string.
+//       REGEX       - the pattern text only (the options after the NUL are
+//                     dropped, like CSV/bencode/plist), QUOTED.
+//       CUSTOM_TAG  - the {"$customTag":{"name":...,"value":...}} Extended-JSON
+//                     convention text (serialize()), QUOTED, so both the tag
+//                     name and its value survive as text.
 
 #include "../core.hpp"
 
@@ -246,8 +280,16 @@ inline std::string iniEscapeKey(std::string_view s) {
   return out;
 }
 
-// Escape a key for use inside a section header [...] or a dotted path
+// Escape a key for use inside a section header [...] or a dotted path. An EMPTY
+// key is rejected: a "" segment in a section path or a dotted key would have no
+// spelling any decoder can read (iniSplitDottedPath("") is not a valid header,
+// and a [[]] table name is rejected as an empty section too). The decoder
+// already rejects every "[]" form, so rejecting here keeps the encoder from
+// ever emitting a headless section header and silently collapsing {"": {...}}
+// into the merged content of whatever section follows.
 inline std::string iniEscapeSectionKey(std::string_view s) {
+  if (s.empty())
+    throw asvJSONError("cannot represent empty key in INI"); // "[]" would be rejected by the decoder
   return iniEscapeKey(s);
 }
 
@@ -276,18 +318,18 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
   return out;
 }
 
-// Escape a flat (key = value side) key. Two keys have no INI spelling as a flat
-// key, both rejected here rather than at each of the call sites: an empty
-// key (" = v" is skipped by the decoder and "[...]" would need a nameless
-// section) and a key starting with '[' (the decoder would read it as the start
-// of a section header). Section-header keys have no such restriction -- there
-// '[' is hex-escaped by iniEscapeKey -- so this restriction is deliberately
-// not applied to iniEscapeSectionKey.
+// Escape a flat (key = value side) key. The one key with no INI spelling as a
+// flat key is the EMPTY one (" = v" is skipped by the decoder), rejected here
+// rather than at each of the call sites. A key STARTING with '[' used to be
+// rejected too ("the decoder would read it as a section header"), but that was
+// a false restriction: iniEscapeKey hex-escapes the '[' into "\x5B", so the
+// emitted line never begins with '[' at all and iniUnescapeSectionKey restores
+// the byte on decode. Every encode path (root flat key, dotted key, section
+// header, [[...]] table) therefore round-trips a bracketed key today, exactly
+// like any other non-alphanumeric byte.
 inline std::string iniEscapeFlatKey(std::string_view s) {
   if (s.empty())
     throw asvJSONError("cannot represent empty key in INI"); // {"": ...} has no INI spelling
-  if (s[0] == '[')
-    throw asvJSONError("cannot represent key starting with '[' in INI");
   return iniEscapeKey(s);
 }
 
@@ -408,7 +450,72 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
     case T::ARRAY:
       out += "[]";
       break;
-    default:
+    case T::DATETIME:
+      {
+        // Bare ISO-8601 text: fmtDateTimeVal's 'T' separator means the value
+        // contains no space, so it stays BARE (no quotes needed), and iniParseVal
+        // detects the exact ISO text back as a DATETIME -- the instant,
+        // milliseconds and tz offset all round-trip. A timestamp gmtimeSafe
+        // cannot convert renders the literal "null" (same convention as the JSON
+        // encoder); it is quoted so it re-parses as the STRING "null", not as the
+        // null value.
+        std::string dt;
+        fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
+        if (dt == "null") { out += '"'; out += "null"; out += '"'; }
+        else out += dt;
+      }
+      break;
+    case T::TIMESTAMP:
+      // The epoch seconds survive as the same INT number on a re-parse; the type
+      // identity is lost (mirrors CSV/Java Properties/UBJSON).
+      out += std::to_string(v->num);
+      break;
+    case T::BINARY:
+    case T::EXTENSION:
+      {
+        // The payload as quoted BASE64 text, like the other text formats; on a
+        // re-parse it is a plain STRING (no "base64:" prefix convention exists
+        // in INI).
+        std::string b = encodeBase64(v->bin_data.data(), v->bin_data.size());
+        out += '"';
+        out += iniEscape(b);
+        out += '"';
+      }
+      break;
+    case T::OBJECTID:
+      {
+        // The 12 bytes as a quoted 24-hex string.
+        std::string hex;
+        fmtObjectIdHexVal(v->str_data, hex);
+        out += '"';
+        out += iniEscape(hex);
+        out += '"';
+      }
+      break;
+    case T::REGEX:
+      {
+        // Only the pattern text survives; the options after the NUL are dropped,
+        // mirroring the CSV/bencode/plist encoders.
+        size_t sep = v->str_data.rfind('\0');
+        std::string_view pat = (sep == std::string_view::npos)
+                                 ? std::string_view(v->str_data)
+                                 : std::string_view(v->str_data.data(), sep);
+        out += '"';
+        out += iniEscape(pat);
+        out += '"';
+      }
+      break;
+    case T::CUSTOM_TAG:
+      {
+        // No native INI form: keep the tag name AND value as the same
+        // Extended-JSON convention text serialize()/appendJsonToken emit, quoted
+        // so it re-parses as a STRING holding that JSON.
+        std::string payload;
+        v->serialize(payload, false);
+        out += '"';
+        out += iniEscape(payload);
+        out += '"';
+      }
       break;
   }
 }
@@ -418,6 +525,19 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
 inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted) {
   if (quoted) {
     return asvJSONValue::makeString(s.data(), s.size());
+  }
+  // A BARE value in the exact ISO-8601 form fmtDateTimeVal() writes is a
+  // DATETIME (the same convention as CSV/dotenv/Java Properties). The encoder's
+  // STRING case in iniFormatVal QUOTES any plain STRING that merely looks like
+  // one, and a quoted "..." value is never re-typed here, so only a bare
+  // hand-written ISO value -- or a DATETIME node's own text -- becomes a
+  // DATETIME on decode. tryParseDateTime is strict (whole string, seconds and
+  // timezone mandatory), so it cannot misfire on a number or an ordinary word.
+  {
+    time_t ts = 0;
+    int ms = 0, tz = 0;
+    if (tryParseDateTime(s, ts, &ms, &tz))
+      return asvJSONValue::makeDateTime(ts, ms, tz);
   }
   // Bare "null" decodes to the null type (encoder emits the literal, and a
   // STRING "null" is quoted so it stays text -- see iniFormatVal).
@@ -616,8 +736,19 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
   for (size_t li = 0; li < lineCount; li++) {
     std::string_view line = iniTrim(lines[li]);
     if (inMlValue) {
-      // Continue scanning a multi-line quoted value for its closing quote.
-      if (line.find('"') != std::string_view::npos) inMlValue = false;
+      // Continue scanning a multi-line quoted value for its closing quote. The
+      // scan must be escape-aware like the decoder's (fromINI tracks backslash
+      // escapes on these continuation lines, see its gather loop): a naive
+      // line.find('"') cleared inMlValue on an ESCAPED '\"' inside the value, so
+      // the rest of the value (including any ';'/ '#' line) was then classified
+      // on its own, stolen into a pending comment, and re-attached to the wrong
+      // node on the round-trip.
+      bool escaped = false;
+      for (size_t i = 0; i < line.size(); i++) {
+        if (escaped) { escaped = false; continue; }
+        if (line[i] == '\\') { escaped = true; continue; }
+        if (line[i] == '"') { inMlValue = false; break; }
+      }
       continue;
     }
     if (line.empty()) continue;

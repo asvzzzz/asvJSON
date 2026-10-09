@@ -11,12 +11,13 @@
 //
 // Bare values are type-inferred (null/bool/int/double/string) mirroring the
 // INI convention for numbers, booleans and null. Additionally a full ISO-8601
-// timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|+/-hh:mm]`) is inferred as DATETIME --
-// unlike INI, which never date-parses -- and this is lossy on re-encode:
-// DATETIME serializes as a quoted string and decodes back as STRING (see
-// below). A bare date like `2024-01-01` is too short for the parser and stays
-// a STRING. Container braces are not INI syntax either: `K={}` stays the
-// string "{}". Single-quoted values are always literal strings; double-quoted
+// timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|+/-hh:mm]`) is inferred as DATETIME
+// (INI infers the same full-ISO form since v1.26.x; both formats leave a bare
+// date like `2024-01-01` -- too short for the ISO grammar -- a STRING) and this
+// is lossy on re-encode: DATETIME serializes as a quoted string and decodes
+// back as STRING (see below). A bare date like `2024-01-01` is too short for
+// the parser and stays a STRING. Container braces are not INI syntax either:
+// `K={}` stays the string "{}". Single-quoted values are always literal strings; double-quoted
 // values process C-style escapes and may span multiple lines; a control byte
 // with no short escape form (0x01-0x06, 0x0E-0x1F, 0x7F) is written as \xHH so
 // no control byte ever lands raw in the file -- keys included: a key is written
