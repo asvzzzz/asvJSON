@@ -19,7 +19,10 @@
 // <integer> -> INT, <real> -> DOUBLE, <true/>/<false/> -> BOOL, <date> ->
 // DATETIME, <data> -> BINARY, <dict> (alternating <key>/value) -> OBJECT and
 // <array> -> ARRAY. XML comments and the optional XML declaration/DOCTYPE are
-// accepted on parse and dropped on output.
+// accepted on parse and dropped on output. Tag attributes are accepted and
+// ignored (the standard <plist version="1.0"> and stray attributes alike), and a
+// <![CDATA[...]]> section inside a text element is read as its raw content
+// (entities inside the section stay literal).
 //
 // plist has no null type: null values are written as an empty <string/> and
 // read back as an empty string (a documented lossy round-trip). Nested
@@ -48,6 +51,7 @@
 #include "../core.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -174,6 +178,17 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
       out += pad + "<integer>" + std::to_string(v->num) + "</integer>\n";
       break;
     case T::DOUBLE: {
+      // Non-finite values have their own spelling: fmtDoubleVal renders them as
+      // "nan"/"inf"/"-inf" (no '.', 'e' or 'E'), so the integral-suffix rule
+      // below would turn them into "nan.0", which strtod rejects ("nan.0"
+      // parses "nan" and stops at the '.'). Write them bare, like the INI
+      // encoder, and let the parser's strtod bring them back. The header
+      // promises <real>nan</real>/<real>inf</real> and this keeps it true.
+      if (std::isnan(v->dbl)) { out += pad + "<real>nan</real>\n"; break; }
+      if (std::isinf(v->dbl)) {
+        out += pad + "<real>" + (v->dbl < 0 ? "-inf" : "inf") + "</real>\n";
+        break;
+      }
       std::string tmp;
       fmtDoubleVal(v->dbl, tmp);
       if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
@@ -316,12 +331,22 @@ struct PlistReader {
     return true;
   }
 
-  // Read raw text up to the matching '</tag>' and advance past it. XML
+  // Read the raw text up to the matching '</tag>' and advance past it. XML
   // comments inside the text are skipped -- they are markup, not part of the
-  // value -- and whitespace before the closing '>' is tolerated.
+  // value -- and whitespace before the closing '>' is tolerated. Entities are
+  // unescaped on every ordinary run of characters, but the content of a CDATA
+  // section is character data and stays literal (XML 1.0 s2.7). Callers
+  // receive already-unescaped text and MUST NOT apply plistUnescape again.
   std::string textUntil(std::string_view tag) {
     std::string out;
+    std::string raw;
     size_t i = pos;
+    auto flushRaw = [&]() {
+      if (!raw.empty()) {
+        out += plistUnescape(raw);
+        raw.clear();
+      }
+    };
     for (;;) {
       if (i >= s.size()) fail("missing closing </" + std::string(tag) + ">");
       if (s.compare(i, 4, "<!--") == 0) {
@@ -330,13 +355,29 @@ struct PlistReader {
         i = e + 3;
         continue;
       }
+      // A CDATA section is raw text: consume it whole minus the
+      // <![CDATA[ ... ]]> delimiters. "]]>" ends a section, so the closing tag
+      // may appear verbatim inside the content, and entities inside the
+      // section pass through unescaped.
+      if (s.compare(i, 9, "<![CDATA[") == 0) {
+        size_t e = s.find("]]>", i + 9);
+        if (e == std::string_view::npos) fail("unterminated CDATA section");
+        flushRaw();
+        out.append(s.data() + i + 9, e - (i + 9));
+        i = e + 3;
+        continue;
+      }
       if (i + 2 < s.size() && s[i] == '<' && s[i + 1] == '/' &&
           s.compare(i + 2, tag.size(), tag) == 0) {
         size_t q = i + 2 + tag.size();
         while (q < s.size() && wsChar(s[q])) q++;
-        if (q < s.size() && s[q] == '>') { pos = q + 1; return out; }
+        if (q < s.size() && s[q] == '>') {
+          pos = q + 1;
+          flushRaw();
+          return out;
+        }
       }
-      out += s[i];
+      raw += s[i];
       i++;
     }
   }
@@ -368,7 +409,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
   }
 
   if (name == "string") {
-    std::string t = sc ? std::string() : plistUnescape(textUntil("string"));
+    std::string t = sc ? std::string() : textUntil("string");
     if (!asvJSONValue::checkStringLen(t.size())) fail("string too long");
     return asvJSONValue::makeString(t.data(), t.size());
   }
@@ -454,7 +495,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
       auto [ktag, ksc] = openTag();
       if (ktag != "key" || ksc) fail("expected <key> in <dict>");
     }
-    std::string k = plistUnescape(textUntil("key"));
+    std::string k = textUntil("key");
     if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE) fail("object too large");
     skipWs();
     auto v = parseValue(depth + 1);

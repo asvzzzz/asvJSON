@@ -22867,6 +22867,114 @@ TEST(testPlistFromAny) {
   }
 }
 
+TEST(testPlistReviewFixes) {
+  // 1. NaN/Infinity round-trip: the DOUBLE case used to append ".0" to
+  //    fmtDoubleVal's "nan"/"inf"/"-inf" literal (no '.', 'e' or 'E'), emitting
+  //    <real>nan.0</real> which strtod rejects (it parses "nan" and stops at
+  //    the '.'), so all three special values failed to round-trip despite the
+  //    header promising <real>nan</real>/<real>inf</real>. The encoder now
+  //    writes them bare, mirroring INI.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("nan", asvJSONValue::makeDouble(NAN));
+    j.getRoot()->obj->emplace("inf", asvJSONValue::makeDouble(INFINITY));
+    j.getRoot()->obj->emplace("ninf", asvJSONValue::makeDouble(-INFINITY));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<real>nan</real>") != std::string::npos);
+    ASSERT(out.find("<real>inf</real>") != std::string::npos);
+    ASSERT(out.find("<real>-inf</real>") != std::string::npos);
+    ASSERT(out.find("nan.0") == std::string::npos);
+    ASSERT(out.find("inf.0") == std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    ASSERT(std::isnan(k.getDouble("nan")));
+    ASSERT(std::isinf(k.getDouble("inf")) && k.getDouble("inf") > 0);
+    ASSERT(std::isinf(k.getDouble("ninf")) && k.getDouble("ninf") < 0);
+  }
+  // 2. A hand-written <real> with the bare spellings parses too.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>a</key><real>nan</real>"
+                                   "<key>b</key><real>-inf</real></dict></plist>")));
+    ASSERT(std::isnan(j.getDouble("a")));
+    ASSERT(std::isinf(j.getDouble("b")) && j.getDouble("b") < 0);
+  }
+  // 3. CDATA sections inside a text element are raw content: the markers are
+  //    stripped and no entity is unescaped inside them. "]]>" ends a section,
+  //    so the closing tag may appear verbatim in the content.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string><![CDATA[a&b]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("a&b"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string><![CDATA[</string> <b>]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("</string> <b>"));
+  }
+  //    Entities inside a section stay literal (XML 1.0 s2.7: CDATA content is
+  //    character data, not markup), unlike entities in ordinary text.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string><![CDATA[a&amp;b]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("a&amp;b"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string><![CDATA[&lt;]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("&lt;"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string><![CDATA[&#65;]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("&#65;"));
+  }
+  //    Ordinary text next to a CDATA section still unescapes; only the section
+  //    keeps its entities literal.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>code</key>"
+                                   "<string>&amp;<![CDATA[&amp;]]></string></dict></plist>")));
+    ASSERT_EQ(std::string(j.getString("code")), std::string("&&amp;"));
+  }
+  //    A CDATA section in a <key> keeps its entities too.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict><key>x<![CDATA[y&amp;z]]></key>"
+                                   "<string>v</string></dict></plist>")));
+    ASSERT(j.getRoot()->get("xy&amp;z") != nullptr);
+    ASSERT_EQ(std::string(j.getRoot()->get("xy&amp;z")->str_data), std::string("v"));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromPlist(std::string("<plist><dict><key>a</key>"
+                                    "<string>x<![CDATA[abc</string></dict></plist>")));
+  }
+  // 4. The fmtDateTimeVal/tryParseDateTime pair must stay in step: a DATETIME
+  //    carrying a tz offset round-trips through its <date> text exactly (the
+  //    offset form is what fmtDateTimeVal writes for offset datetimes).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("when", asvJSONValue::makeDateTime(0, 123, 300));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<date>1970-01-01T05:00:00.123+05:00</date>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    auto* v = k.getRoot()->get("when");
+    ASSERT(v != nullptr && v->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v->timestamp, time_t(0));
+    ASSERT_EQ(v->datetime_ms, 123);
+    ASSERT_EQ(v->tz_offset_min, 300);
+  }
+}
+
 TEST(testFromBencode) {
   {
     asvJSON j;
@@ -33045,6 +33153,7 @@ RUN(testCppReviewFixes);
 	RUN(testPlistRoundTrip);
 RUN(testPlistAuditRegressions);
 	RUN(testPlistFromAny);
+	RUN(testPlistReviewFixes);
 
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
 	RUN(testFromBencode);
