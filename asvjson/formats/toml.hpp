@@ -5,7 +5,8 @@
 // - TOML has no null type: a NULL value is silently dropped by tomlVal(), both
 //   in objects ({"a": null, "b": 1} -> b = 1) and in arrays ([1, null, 2] ->
 //   [1, 2]). An object whose members are all NULL is therefore emitted as an
-//   empty table ([a] in pretty mode, a = {} in compact mode).
+//   empty table ([a] in pretty mode, a = {} in compact mode), and a NULL
+//   scalar ROOT emits an empty document instead of the invalid line `value = `.
 // - Multi-line basic/literal strings and dotted keys are decoded but never
 //   emitted: toTOML() writes every string as a single-line basic string with
 //   escapes, and nests objects as [table] headers in pretty mode or as inline
@@ -14,7 +15,9 @@
 // - BINARY and DATETIME do not round-trip: toTOML() emits them as a base64
 //   string / formatted date-time string, and fromTOML() decodes both back as
 //   STRING (they cannot be retagged without an external schema). This includes
-//   the RFC 3339 form `t = 2024-01-01T00:00:00Z`, which decodes to STRING.
+//   the RFC 3339 form `t = 2024-01-01T00:00:00Z`, which decodes to STRING. A
+//   DATETIME whose instant gmtimeSafe cannot convert renders as the QUOTED
+//   string "null" (a bare `null` is not valid TOML), so it re-parses as STRING.
 // - Mixed-type arrays are accepted, a lenient extension: TOML 1.0 requires an
 //   array to be homogeneous ("data types may not be mixed"), but fromTOML()
 //   parses `[1, "two"]` without complaint. It has to: toTOML() writes whatever
@@ -25,6 +28,18 @@
 //   `a = { b = 1, # c` + `d = 2 }` parses. The one-line form stays strict: a
 //   '#' before the closing brace is a comment that swallows it, which leaves
 //   the table unterminated, so `a = {b = 1 # c}` is an error.
+// - `\` + newline basic-string continuation is accepted, a TOML 0.5 rule that
+//   TOML 1.0 dropped for single-line strings: the backslash, the line break and
+//   the next line's indentation are discarded, so `a = "foo \` + `bar"` folds
+//   to "foobar". Only an ACTIVE trailing backslash (an odd run, so the last
+//   one is not itself escaped) lets a single-line string span lines; a string
+//   with no continuation still fails as unterminated.
+// - Date/time validation is deliberately weak: tomlDateTimeEnd() checks only
+//   the date prefix month (1-12) and day (1-31) ranges, so the time fields go
+//   unvalidated -- `2024-01-01T99:99:99Z` decodes to the STRING
+//   "2024-01-01T99:99:99Z" rather than being rejected. A malformed date
+//   prefix (month/day out of range, e.g. `2024-13-01`) is NOT a date at all and
+//   fails the numeric parse ("invalid number").
 // - Table redefinition is scoped to the resolved tree: a repeated `[a.b]`
 //   header is an error, but `[items.s]` after a new `[[items]]` element is
 //   accepted, because every reference to an array of tables resolves to its
@@ -192,6 +207,11 @@ inline std::string tomlVal(const asvJSONValue* v) {
     case T::DATETIME: {
       std::string s;
       fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
+      // A timestamp gmtimeSafe cannot convert renders as "null"; emit it as
+      // the QUOTED string "null" so the line stays valid TOML and re-parses as
+      // a STRING (the same convention the INI encoder uses; a bare `null` is
+      // not valid TOML and would fail the decode).
+      if (s == "null") return "\"null\"";
       return s;
     }
     case T::BINARY: return "\"" + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\"";
@@ -408,6 +428,42 @@ inline size_t tomlFindUnescapedDelim(std::string_view s, size_t from,
     i += run;
   }
   return std::string_view::npos;
+}
+
+// Single-line basic-string state scanner for the fromTOML gather. Returns true
+// once a `"..."` string opened in `s` is closed on this text, and when the
+// string is STILL open, sets `*continues` when the text ends in an ACTIVE
+// line-continuation backslash (an odd trailing run -- an even run means the
+// backslash itself is escaped and the string simply has no closer). The `\` +
+// newline fold discards the backslash, the line break and the next line's
+// indentation, exactly like parseTomlValue's basic-string branch.
+inline bool tomlBasicStrClosed(std::string_view s, bool* continues) {
+  if (continues) *continues = false;
+  if (s.size() < 2 || s[0] != '"') return false;
+  size_t i = 1;
+  bool escape = false;
+  while (i < s.size()) {
+    char c = s[i];
+    if (escape) { escape = false; i++; continue; }
+    if (c == '\\') {
+      size_t skip = i + 1;
+      while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t')) skip++;
+      if (skip < s.size() && (s[skip] == '\n' || s[skip] == '\r')) {
+        if (s[skip] == '\r' && skip + 1 < s.size() && s[skip + 1] == '\n') skip++;
+        skip++;
+        while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t' || s[skip] == '\n' || s[skip] == '\r')) skip++;
+        i = skip;
+        continue;
+      }
+      escape = true;
+      i++;
+      continue;
+    }
+    if (c == '"') return true;
+    i++;
+  }
+  if (continues) *continues = escape;
+  return false;
 }
 
 // Strip a comment (# to end of line) from one line, respecting quoted strings.
@@ -871,7 +927,23 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
         else throw asvJSONError("unknown escape sequence in string");
         continue;
       }
-      if (c == '\\') { escape = true; continue; }
+      if (c == '\\') {
+        // Line continuation: a backslash directly before a line break discards
+        // itself, the break and the next line's indentation (a TOML 0.5 rule
+        // kept for single-line strings as a lenient extension -- TOML 1.0 moved
+        // it to multi-line strings only). fromTOML gathers the continuation
+        // lines before this parser sees the value.
+        size_t skip = 0;
+        while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t')) skip++;
+        if (skip < s.size() && (s[skip] == '\n' || s[skip] == '\r')) {
+          if (s[skip] == '\r' && skip + 1 < s.size() && s[skip + 1] == '\n') skip++;
+          skip++;
+          while (skip < s.size() && (s[skip] == ' ' || s[skip] == '\t' || s[skip] == '\n' || s[skip] == '\r')) skip++;
+          s.remove_prefix(skip);
+          continue;
+        }
+        escape = true; continue;
+      }
       if (c == '"') break;
       if ((static_cast<unsigned char>(c) < 0x20 && c != '\t') || static_cast<unsigned char>(c) == 0x7F)
         throw asvJSONError("raw control character in basic string");
@@ -1154,8 +1226,12 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
       }
     }
   } else if (v->type == T::ARRAY && v->arr) {
+    // Only tables carry `[key]` headers, never arrays. This branch is reached
+    // (when at all) with `needHeader` already false -- the callers hand in an
+    // OBJECT or OBJECT-array elements -- so forward it explicitly as false
+    // rather than re-forwarding the parameter.
     for (const auto& elem : *v->arr)
-      tomlEmitVal(elem.get(), prefix, needHeader, out, pretty);
+      tomlEmitVal(elem.get(), prefix, false, out, pretty);
   }
 }
 
@@ -1180,7 +1256,11 @@ inline void asvJSONValue::toTOML(std::string& out, bool pretty) const {
       }
     }
   } else {
-    out += "value = " + tomlVal(this) + "\n";
+    std::string valueOut = tomlVal(this);
+    // TOML has no null, so a NULL scalar ROOT (tomlVal returns "") would emit
+    // the invalid line `value = `. Emit an empty document instead -- the same
+    // silent-drop rule that governs NULL inside objects and arrays.
+    if (!valueOut.empty()) out += "value = " + valueOut + "\n";
   }
 }
 
@@ -1492,6 +1572,30 @@ inline bool asvJSON::fromTOML(std::string_view input) {
           // Reset persistent stripComment state -- multiline string closed (or will throw)
           stripInBasic = false;
           stripInLiteral = false;
+        }
+      } else if (vtmp.size() >= 2 && vtmp[0] == '"' &&
+                 !(vtmp.size() >= 3 && vtmp.substr(0, 3) == "\"\"\"")) {
+        // Single-line basic string: TOML 0.5 let a string span lines via a
+        // trailing `\` (the backslash, line break and the next line's
+        // indentation are folded away). Gather the continuation lines only when
+        // the opening line ends in an ACTIVE backslash (odd trailing run) -- a
+        // plain unterminated `a = "abc` has no continuation and still fails
+        // immediately instead of eating later lines. parseTomlValue performs
+        // the actual fold in its basic-string branch.
+        bool cont = false;
+        if (!tomlBasicStrClosed(std::string_view(vtmp), &cont) && cont) {
+          std::string accum = vtmp;
+          for (size_t ml = lineNum + 1; ml < lines.size(); ml++) {
+            accum += '\n' + std::string(lines[ml]);
+            lineNum = ml;
+            if (tomlBasicStrClosed(std::string_view(accum), nullptr)) break;
+          }
+          // Reset persistent stripComment state -- string closed (or will throw)
+          stripInBasic = false;
+          stripInLiteral = false;
+          valueStr = accum;
+        } else {
+          valueStr = vtmp;
         }
       } else if (!vtmp.empty() && vtmp[0] == '[' &&
                  !tomlArrayBalanced(std::string_view(vtmp))) {

@@ -913,7 +913,10 @@ TOML features:
 - **Quoted keys**: `"key with spaces"` via JSON-style basic strings
 - **Literal strings**: `'C:\Windows'` for raw unescaped strings
 - **Comments**: `#` to end of line, both full-line and inline
-- **Null handling**: TOML has no null type; null values are skipped during encoding
+- **Null handling**: TOML has no null type; null values are skipped during encoding (a NULL scalar root emits an empty document)
+- **Quoted "null" strings**: a DATETIME whose instant `gmtimeSafe` cannot convert (e.g. pre-1970) is emitted as the quoted string `"null"`, so the line stays valid TOML and re-reads as a STRING
+- **Line continuations in basic strings**: a `\` at end of line folds the line break and the next line's indentation (a TOML 0.5 rule kept as a lenient extension for single-line strings)
+- **Weak date-time validation**: only the month (1-12) and day (1-31) ranges are checked; `2024-01-01T99:99:99Z` decodes to the STRING `"2024-01-01T99:99:99Z"`, while a malformed date prefix (`2024-13-01`) fails the numeric parse
 - **Full round-trip**: `toTOML()` then `fromTOML()` returns the original data
 
 ### JSON Lines (NDJSON)
