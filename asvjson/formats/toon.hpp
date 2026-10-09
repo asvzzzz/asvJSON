@@ -201,6 +201,9 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
       // changing the type. Matches the core JSON serializer; the DATETIME does
       // not survive such a round-trip as a DATETIME.
       std::string r = "\"";
+      // toonJsonEscape is deliberately SKIPPED: fmtDateTimeVal emits only digits,
+      // 'T', ':', '.', 'Z', '+'/'-' (or the literal "null"), all safe inside a
+      // JSON string. If that output set ever grows, route it through the escape.
       fmtDateTimeVal(v->timestamp, v->datetime_ms, r, v->tz_offset_min);
       r += '"';
       return r;
@@ -465,16 +468,26 @@ inline bool toonParseListArrayHeader(std::string_view val, size_t& len) {
   size_t i = 1;
   if (i >= val.size() || val[i] < '0' || val[i] > '9') return false;
   size_t n = 0;
+  bool tooLarge = false;
   if (val[i] == '0') {
     n = 0; i++;
   } else {
     while (i < val.size() && val[i] >= '0' && val[i] <= '9') {
-      if (n > 1000000000ULL / 10) return false;
+      // Pre-multiply guard keeps n from overflowing; past 1e9 the declared
+      // length fails with the same "array too large" error as the key[N]:
+      // header in toonToJson (which uses this exact cap).
+      if (n > 1000000000ULL / 10) { tooLarge = true; i++; continue; }
       n = n * 10 + static_cast<size_t>(val[i] - '0');
+      if (n > 1000000000) tooLarge = true;
       i++;
     }
   }
+  // Pure digits before ']' make this a candidate length header; a non-digit
+  // inside the brackets ("[2000000000x]") is a JSON literal / string element
+  // and must keep the old degrade -- so the too-large throw waits until here.
   if (i >= val.size() || val[i] != ']') return false;
+  if (tooLarge)
+    throw asvJSONError("TOON: array too large (declared " + std::string(val.substr(1, i - 1)) + ")");
   i++;
   // A trailing ':' is optional here: when the ']' is the final character, i ==
   // val.size() and the guard below is skipped, so "- [3]" (no colon) still parses
@@ -499,6 +512,19 @@ inline size_t toonFindFirstUnquoted(std::string_view s, char target) {
     if (c == target && !inQ) return i;
   }
   return std::string_view::npos;
+}
+// True when the same escape-aware quote scan ends with the quote left OPEN
+// (unterminated). Only then can a ':' that toonFindFirstUnquoted skipped still be
+// a real key:value separator: the escaped-quote key token `"a\"` of the line
+// `"a\": 1` never closes its quote, while a balanced quoted token with an
+// interior ':' (e.g. `"a:b"`) genuinely has no unquoted separator.
+inline bool toonQuoteLeftOpen(std::string_view s) {
+  bool inQ = false;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '\\' && inQ) { i++; continue; }
+    if (s[i] == '"') inQ = !inQ;
+  }
+  return inQ;
 }
 // Note: this scans only quotes, not brackets -- a ':' inside an unquoted {a: 1}
 // value would be seen as unquoted. That is harmless because the FIRST unquoted
@@ -628,11 +654,21 @@ inline std::string toonToJson(std::string_view input) {
           std::string_view num = content.substr(lb + 1, rb - lb - 1);
           bool digits = !num.empty() && !(num[0] == '0' && num.size() > 1);
           size_t acc = 0;
+          bool tooLarge = false;
           for (char c : num) {
             if (c < '0' || c > '9') { digits = false; break; }
+            // Past the cap keep SCANNING the rest of the token as digits: a huge
+            // digit prefix must still let a later non-digit ("99999999999x")
+            // clear `digits` and keep the old degrade-to-key:value path.
+            if (acc > 1000000000) { tooLarge = true; continue; }
             acc = acc * 10 + static_cast<size_t>(c - '0');
-            if (acc > 1000000000) { digits = false; break; }
+            if (acc > 1000000000) tooLarge = true;
           }
+          // A pure all-digit header past the cap used to degrade silently into a
+          // "key:value" line whose key was the whole mangled header. Fail loudly.
+          // Non-digit tokens ("v[2000000000x]: 1") still keep the old degrade.
+          if (digits && tooLarge)
+            throw asvJSONError("TOON: array too large (declared " + std::string(num) + ")");
           if (digits) { arrLen = acc; okArrLen = true; }
         }
         if (okArrLen) {
@@ -807,9 +843,16 @@ inline std::string toonToJson(std::string_view input) {
       continue;
     }
 
-    // key: value  (first ':' OUTSIDE any quoted key is the separator)
+    // key: value  (first ':' OUTSIDE any quoted key is the separator). A raw find
+    // for a BEST-EFFORT colon is allowed ONLY when the escape-aware scan left the
+    // quote OPEN (unterminated): that is the escaped-quote key token `"a\"` of the
+    // line `"a\": 1`, where the scan never sees a closing quote and the ':' is a
+    // real separator. A line like `"a:b"` (balanced quotes around the ':') has no
+    // unquoted separator, and splitting at the QUOTED colon made the garbage key
+    // `"a` / value `b"` -- it must fall through to the unrecognized-line error.
     size_t colonPos = toonFindFirstUnquoted(content, ':');
-    if (colonPos == std::string_view::npos) colonPos = content.find(':');
+    if (colonPos == std::string_view::npos && toonQuoteLeftOpen(content))
+      colonPos = content.find(':');
     if (colonPos != std::string_view::npos) {
       std::string_view key = content.substr(0, colonPos);
       while (!key.empty() && key.back() == ' ') key = key.substr(0, key.size() - 1);
@@ -861,9 +904,14 @@ inline std::string asvJSON::toTOON() const {
 }
 
 inline bool asvJSON::fromTOON(std::string_view input) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   std::string json;
   try {
+    // UTF-8 BOM, like every other from* decoder. Without this the BOM became the
+    // first key's leading bytes ("\xEF\xBB\xBFkey").
+    if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+      input = input.substr(3);
     json = toonToJson(input);
     // parse() sits INSIDE the try like every other intermediate-JSON decoder
     // (goon/yaml/ron/json5/sexpr): it already catches asvJSONError itself, but

@@ -749,6 +749,17 @@ What follows the hyphen-space is the element: `-  ` (two spaces) is a one-space
 string, and `-<TAB>` is neither form -  it misses both guards and is read as the
 root scalar string `"-<TAB>"`.
 
+Decoder robustness: a UTF-8 BOM at the start is stripped (it used to become part
+of the first key's name). A pure all-digit declared array length over 1e9 is
+rejected with an `array too large` error in both the named `key[N]` form and the
+list-item `- [N]` form, instead of degrading into a mangled `key:value` line or a
+bogus string element; a non-digit inside the brackets (`v[2000000000x]`) still
+keeps the old degrade. A line whose only `:` sits inside a balanced quoted token
+has no unquoted separator and is reported as an `unrecognized line` -  a
+hand-written quoted scalar like `"a:b"` must appear as a value (e.g. `k: "a:b"`)
+or as the whole document. (An *unterminated* quoted token, e.g. the escaped-quote
+key `"a\"` of `"a\": 1`, still falls back to the raw `:` so it keeps parsing.)
+
 ### TRON
 
 TRON (Token Reduced Object Notation) is a JSON superset that reduces token count by defining reusable class schemas for repeated object structures.
