@@ -341,7 +341,17 @@ inline std::string json5ToJson(std::string_view input) {
             static_cast<unsigned char>(input[j + 2]) == 0xBF) { j += 2; continue; }
         if (nc == '/') {
           if (j + 1 < input.size() && input[j + 1] == '/') { while (j < input.size() && input[j] != '\n') j++; continue; }
-          if (j + 1 < input.size() && input[j + 1] == '*') { j += 2; while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++; if (j < input.size()) j += 2; continue; }
+          if (j + 1 < input.size() && input[j + 1] == '*') {
+            // Leave j ON the closing '/' (advance by 1, not 2): this is a
+            // for-loop, so `continue` runs its own j++. Advancing by 2 here as
+            // well skipped the byte after "*/", so the ':' in {a/* c */:1} was
+            // skipped and the key went unquoted (invalid JSON). Mirrors the
+            // tokenizer's block-comment handling above.
+            j += 2;
+            while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++;
+            if (j + 1 < input.size()) j += 1;
+            continue;
+          }
         }
         if (nc == '#') { while (j < input.size() && input[j] != '\n') j++; continue; }
         if (nc == ':') isKey = true;
@@ -711,14 +721,28 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
   const auto isWs = [](char c) {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
   };
-  // Is this comment the first thing on its line? Uses the same whitespace set
-  // as isWs() below, so \v and \f (which the lexer already treats as
-  // whitespace) do not make an own-line comment look like a trailing one.
+  // Is this comment the first thing on its line? A line break resets the scan
+  // and a bare space/tab/\v/\f keeps it going. \n and a lone \r are line breaks,
+  // as are U+2028 / U+2029 (E2 80 A8 / E2 80 A9) -- JSON5 line terminators that
+  // the lexer also accepts as whitespace. \r is a break, not whitespace, so a
+  // comment after a lone \r is own-line, not trailing.
   const auto ownLineStart = [&](size_t start) {
-    for (size_t j = start; j-- > 0;) {
-      char c = input[j];
-      if (c == '\n') return true;
-      if (c != ' ' && c != '\t' && c != '\r' && c != '\v' && c != '\f') return false;
+    size_t j = start;
+    while (j > 0) {
+      j--;
+      unsigned char c = static_cast<unsigned char>(input[j]);
+      if (c == '\n' || c == '\r') return true;   // line breaks
+      // U+2028 / U+2029 (E2 80 A8 / E2 80 A9) are JSON5 line terminators too.
+      if ((c == 0xA8 || c == 0xA9) && j >= 2 &&
+          static_cast<unsigned char>(input[j - 1]) == 0x80 &&
+          static_cast<unsigned char>(input[j - 2]) == 0xE2) return true;
+      // NBSP (C2 A0) and the BOM (EF BB BF) are whitespace, not breaks -- skip
+      // the whole sequence so its trailing byte does not read as content and
+      // misclassify a genuinely own-line comment.
+      if (c == 0xA0 && j >= 1 && static_cast<unsigned char>(input[j - 1]) == 0xC2) { j -= 1; continue; }
+      if (c == 0xBF && j >= 2 && static_cast<unsigned char>(input[j - 1]) == 0xBB &&
+          static_cast<unsigned char>(input[j - 2]) == 0xEF) { j -= 2; continue; }
+      if (c != ' ' && c != '\t' && c != '\v' && c != '\f') return false;
     }
     return true;
   };
@@ -729,13 +753,17 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
   size_t i = 0;
   while (i < n) {
     char c = input[i];
-    if (isWs(c) || (c == '\xC2' && i + 1 < n && static_cast<unsigned char>(input[i + 1]) == 0xA0) ||
-        (c == '\xE2' && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
-         (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) ||
-        (c == '\xEF' && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0xBB && static_cast<unsigned char>(input[i + 2]) == 0xBF)) {
-      i++;
-      continue;
-    }
+    if (isWs(c)) { i++; continue; }
+    // Multi-byte whitespace must advance its FULL width: a bare i++ left the
+    // trailing bytes (0xA0 of NBSP, the 0x80 0xA8 of U+2028, ...) to be lexed
+    // as a spurious bare token, so a key became "\xA0K" and the comment bound to
+    // the wrong path (or was dropped). NBSP is 2 bytes, U+2028 / U+2029 and the
+    // BOM are 3 -- matching the widths the lexer skips in json5ToJson.
+    if (static_cast<unsigned char>(c) == 0xC2 && i + 1 < n && static_cast<unsigned char>(input[i + 1]) == 0xA0) { i += 2; continue; }
+    if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) { i += 3; continue; }
+    if (static_cast<unsigned char>(c) == 0xEF && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
+        static_cast<unsigned char>(input[i + 2]) == 0xBF) { i += 3; continue; }
     // Comments.
     bool isLineCmt = false, isBlockCmt = false;
     if (c == '#') isLineCmt = true;
