@@ -7811,17 +7811,19 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("s: \"\\u0048\\u0065\\u006c\\u006c\\u006f\""));
 		ASSERT_EQ(std::string(json.getString("s")), "Hello");
 	}
-	// Double-quoted YAML string: short \x (one hex digit) -- must not read out of bounds
+	// Double-quoted YAML string: short \x (one hex digit) -- must not read out
+	// of bounds; the incomplete escape is preserved literally (symmetric with
+	// the \uZZZZ invalid-hex fallback) instead of being silently dropped.
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("s: \"\\x4\""));
-		ASSERT_EQ(std::string(json.getString("s")), "4");
+		ASSERT_EQ(std::string(json.getString("s")), "\\x4");
 	}
-	// Double-quoted YAML string: \x with zero hex digits -- escape dropped
+	// Double-quoted YAML string: \x with zero hex digits -- escape preserved
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("s: \"\\x\""));
-		ASSERT_EQ(std::string(json.getString("s")), "");
+		ASSERT_EQ(std::string(json.getString("s")), "\\x");
 	}
 	// Double-quoted YAML string: valid \x41 -> 'A'
 	{
@@ -7829,11 +7831,12 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("s: \"\\x41\""));
 		ASSERT_EQ(std::string(json.getString("s")), "A");
 	}
-	// Double-quoted YAML string: short \u (three hex digits) -- must not read out of bounds
+	// Double-quoted YAML string: short \u (three hex digits) -- must not read
+	// out of bounds; incomplete escape preserved literally like \x above.
 	{
 		asvJSON json;
 		ASSERT(json.fromYAML("s: \"\\u004\""));
-		ASSERT_EQ(std::string(json.getString("s")), "004");
+		ASSERT_EQ(std::string(json.getString("s")), "\\u004");
 	}
 	// Explicit tag !!str -- forces number to string
 	{
