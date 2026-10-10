@@ -6126,6 +6126,65 @@ TEST(testXMLMixedContentTypedScalars) {
 	}
 }
 
+TEST(testXMLMixedContentTextIsCharacterData) {
+	// External mixed-content text (text after an element) is character data,
+	// like CDATA: it must NOT be value-detected, otherwise the encoder wraps the
+	// scalar in <item>N</item> and the re-parse yields {"item":N} -- a one-way
+	// reshape that broke round-trips like <x><b>z</b>123</x>.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x><b>z</b>123</x>"));
+		auto* c = j.getRoot()->get("x")->get("#content");
+		ASSERT(c != nullptr && c->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(c->arr->size(), size_t(2));
+		ASSERT((*c->arr)[1]->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string((*c->arr)[1]->getString()), "123");
+		std::string x1 = j.toXML();
+		asvJSON j2;
+		ASSERT(j2.fromXML(x1));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// Leading+trailing mixture and a decimal: both stay raw strings and the
+	// document round-trips exactly (no {"item":N} wrappers).
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x>10<b>z</b>20</x>"));
+		ASSERT_EQ(j.serialize(), std::string(R"({"x":{"#content":["10",{"b":"z"},"20"]}})"));
+		std::string x1 = j.toXML();
+		asvJSON j2;
+		ASSERT(j2.fromXML(x1));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x><b>z</b>9.99</x>"));
+		ASSERT_EQ(j.serialize(), std::string(R"({"x":{"#content":[{"b":"z"},"9.99"]}})"));
+		std::string x1 = j.toXML();
+		asvJSON j2;
+		ASSERT(j2.fromXML(x1));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// Leading text on the NON-interleaved path still value-detects (a plain-text
+	// element's content), and that still round-trips.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x>123<b>z</b></x>"));
+		ASSERT(j.getRoot()->get("x")->get("#text")->type == asvJSONValue::INT);
+		std::string x1 = j.toXML();
+		asvJSON j2;
+		ASSERT(j2.fromXML(x1));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// A CDATA-only mixed run stays string too (unchanged).
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<x><b>z</b><![CDATA[456]]></x>"));
+		auto* c = j.getRoot()->get("x")->get("#content");
+		ASSERT(c != nullptr);
+		ASSERT_EQ(std::string((*c->arr)[1]->getString()), "456");
+	}
+}
+
 TEST(testXMLArrayTypedItems) {
 	// Typed scalar items in a primitive array used to serialize as empty
 	// <item></item> (silent data loss). They must carry their type="" tag so
@@ -33742,6 +33801,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLElementNameSanitization);
 	RUN(testXMLEmptyContainerTypeMarkers);
 	RUN(testXMLMixedContentTypedScalars);
+	RUN(testXMLMixedContentTextIsCharacterData);
 	RUN(testXMLArrayTypedItems);
 	RUN(testXMLAuditFixes);
 	RUN(testXMLAuditFixes2);

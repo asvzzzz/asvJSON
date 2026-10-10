@@ -48,6 +48,18 @@
 //     marker for the leading case would resurrect exactly the asv:s key
 //     collision documented below, and no empty text node is representable in
 //     XML, so neither is fixable without changing the on-wire marker scheme.
+//   - A non-STRING scalar directly inside a #content array (reachable from a
+//     programmatically built tree -- the decoder only ever produces {name:value}
+//     wrappers and, since mixed text is character data, raw strings) serializes
+//     as an <item>N</item> element and re-parses as the wrapper {"item": N}.
+//     That is a stable fixed point, and the <item> element is the only XML form
+//     that carries the scalar's number/bool type, but it is a one-way reshaping
+//     of the bare scalar on the first encode.
+//   - An xsi:nil="true" element decodes as null and the element's OTHER
+//     attributes are dropped (a null has no attribute slot in the data model).
+//     toXML never writes a nil element with sibling attributes, so this is only
+//     reachable from hand-written or foreign XML. The asv:arr="1" array pin is
+//     likewise honoured only for an attribute-less element.
 //   - RESERVED KEYS: inside a #content array the keys/attributes asv:s, asv:xc
 //     and asv:arr are reserved as internal round-trip markers; asv:ut is
 //     reserved document-wide as the user @type attribute name. A user object
@@ -62,8 +74,13 @@
 //     never leaks to earlier or later siblings.
 //   - Multiple root elements (invalid XML, tolerated as an extension) merge
 //     last-wins into one object.
-//   - CDATA sections are always character data: their text is never
-//     re-interpreted as a number/bool/null.
+//   - CDATA sections and mixed-content text are always character data: their
+//     text is never re-interpreted as a number/bool/null. (Leading text before
+//     any child element on the non-interleaved path still goes through value
+//     detection, matching a plain-text element.) This is what lets external
+//     mixed-content documents ("<x><b>z</b>123</x>") round-trip exactly; the
+//     encoder's asv:xc pin already routes text to raw strings, and the decoder
+//     now matches it for non-pinned external input too.
 //   - A NaN/Infinity attribute value throws (it has no XML attribute text
 //     form); NaN/Infinity doubles in element content serialize as xsi:nil.
 
@@ -725,8 +742,9 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 			// A '<' with no name chars following (< junk, malformed input) has
 			// an empty name that never matches elemName, so p advances past the
 			// '<' by exactly one and the remainder scans as ordinary content
-			// until the next '<'. Never stalls; worst case is a linear per-
-			// stray-'<' re-scan (O(n^2) on pathological input, no crash).
+			// until the next '<' -- O(1) per stray '<'. A pathological body of
+			// repeated MATCHING opening tags that each lack a '>' does rescan to
+			// EOF per tag (O(n^2) worst case, no crash).
 			if (std::string_view(s.data() + q, e - q) == elemName) {
 				// Only a genuinely OPENING tag balances against a later </name>.
 				// A self-closing tag -- "<x/>", "<x />" or "<x a=\"1\"/>" -- completes
@@ -1164,14 +1182,15 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
 				arr->arr->push_back(std::move(wrapper));
 			} else {
-				// Marker-pinned content keeps raw strings (no type detection),
-				// so {"#content":["123"]} round-trips instead of becoming [123];
-				// CDATA is likewise always character data.
-				if (forceMixed || seg.isCdata) {
-					arr->arr->push_back(asvJSONValue::makeString(seg.text.data(), seg.text.size()));
-				} else {
-					arr->arr->push_back(xmlDetectValue(seg.text));
-				}
+				// Text in mixed content is character data, like CDATA: always
+				// a raw STRING, never value-detected. Marker-pinned content
+				// must stay raw so {"#content":["123"]} round-trips instead of
+				// becoming [123]; the same rule now covers external interleaved
+				// text. Detecting it produced a scalar ({"#content":[10,...]})
+				// that the encoder had to wrap as <item>10</item>, re-parsing as
+				// {"item":10} -- a one-way reshape that broke external
+				// mixed-content round-trips. Always-string closes that gap.
+				arr->arr->push_back(asvJSONValue::makeString(seg.text.data(), seg.text.size()));
 			}
 		}
 		obj->obj->emplace("#content", std::move(arr));
