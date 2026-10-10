@@ -9,7 +9,8 @@
 //   Lists:      [1, 2, 3]
 //   Tuples:     (10, 20, 30)
 //   Named:      GameConfig( width: 800, height: 600 )  ->  {"GameConfig": {...}}
-//   Optionals:  Some(1) / None  -> 1 / null
+//   Optionals:  Some(1) / None  -> 1 / null (a bare Some() with no argument
+//   also decodes as null, leniently)
 //   Enum unit variants:  Up, Down  ->  strings
 //   Numbers:    42, 1_000, 0xFF, 0o17, 0b1010, 3.14, .5, 5., 1e6,
 //               suffixes i8..i128 / u8..u128 / f32 / f64 (stripped),
@@ -31,9 +32,18 @@
 //   round-trips as that string rather than as a collection. A comment inside such
 //   a compound key is rejected (the key is parsed without comment skipping), not
 //   silently dropped.
+//   Named-struct wrapping applies only when the key passes ronIsValidTypeName: a
+//   single identifier or an `A::B` path of at most two segments. A JSON key like
+//   "A::B::C" is not a type name and emits as a plain map entry {"A::B::C": {...}},
+//   which round-trips fine -- the named form just does not apply to longer paths.
 //   Comments: a `//` comment is always emitted as one comment per line, so a
 //   `Comment.text` set programmatically with embedded newlines still produces
 //   parseable RON (the decoder itself can never produce one).
+//
+//   Depth: toRON() returns std::string with no error channel, so a tree nested
+//   deeper than MAX_NESTING_DEPTH (reachable via setByPointer, which does not
+//   enforce the limit) is emitted with "None" past that depth instead of
+//   reporting an error. This matches TOML/JSON5/sexpr/GOON.
 //
 // JSON mapping:
 //   () empty tuple -> {} empty object; None -> null; Some(x) -> x; bare idents
@@ -707,7 +717,17 @@ struct RonParser {
         if (in[i + 1] == '\'') { ++i; return parseChar(); }        // b'c'
         if (in[i + 1] == 'r') {
           i += 2;
-          if (i < in.size() && (in[i] == '"' || in[i] == '#')) return parseRawString(); // br#"..."
+          if (i < in.size() && in[i] == '"') return parseRawString();            // br"..."
+          if (i < in.size() && in[i] == '#') {
+            size_t j = i;
+            while (j < in.size() && in[j] == '#') ++j;          // br#<n>"..."
+            if (j < in.size() && in[j] == '"') return parseRawString();
+            // br#foo is not a raw byte string at all: the raw byte-string form
+            // always ends its '#' run in a '"'. Report the bad prefix instead
+            // of the generic "invalid raw string", which blames a form the user
+            // never wrote (an identifier `br` followed by `#foo` is invalid RON).
+            throw asvJSONError("RON: invalid byte-string prefix: expected '\"' after 'br#'");
+          }
           i = save;
         }
       }
