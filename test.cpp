@@ -30894,6 +30894,114 @@ TEST(testSchemaAuditRegressions) {
 	rejectsWithSchemaError(R"("x")", R"({"format":5})");
 }
 
+TEST(testSchemaRegexAndRefShapeFix) {
+	// -------------------------------------------------------------------
+	// A regex that cannot compile is a malformed schema. The compile used to be
+	// lazy (first application), so inside a fork keyword it failed with
+	// shapeFailed_ == false and adoptShapeError read it as "branch did not
+	// match" -- {"anyOf":[{"pattern":"["},{"maxLength":5}]} validated "hello".
+	// The compile now runs in validateKeywordShapes (cached once per schema
+	// node), setting shapeFailed_ and aborting the fork like other shape errors.
+	// -------------------------------------------------------------------
+	auto rejectsWithSchemaError = [](const std::string& valueJson, const std::string& schemaJson) {
+		asvJSON v, s;
+		ASSERT(v.parse(valueJson));
+		ASSERT(s.parse(schemaJson));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Invalid schema") != std::string::npos);
+	};
+	// Top-level bad pattern.
+	rejectsWithSchemaError(R"("hello")", R"({"pattern":"["})");
+	// Inside each fork keyword, where another branch would otherwise match.
+	rejectsWithSchemaError(R"("hello")", R"({"anyOf":[{"pattern":"["},{"maxLength":5}]})");
+	rejectsWithSchemaError(R"("hello")", R"({"oneOf":[{"pattern":"["},{"maxLength":5}]})");
+	rejectsWithSchemaError(R"("hello")", R"({"not":{"pattern":"["}})");
+	rejectsWithSchemaError(R"("hello")", R"({"if":{"pattern":"["},"else":{"type":"string"}})");
+	rejectsWithSchemaError(R"(["hello"])", R"({"contains":{"pattern":"["}})");
+	// A bad patternProperties key, on its own and behind a fork.
+	rejectsWithSchemaError(R"({"a":"x"})", R"({"patternProperties":{"[":{"type":"string"}}})");
+	rejectsWithSchemaError(R"({"a":"x"})", R"({"anyOf":[{"patternProperties":{"[":{"type":"string"}}},{"type":"integer"}]})");
+	// A bad pattern nested as a schema-form dependency reaches the same
+	// shapeFailed_ path via validateNode -> shapesOk on the dependency schema.
+	rejectsWithSchemaError(R"({"x":"v"})", R"({"dependencies":{"x":{"pattern":"["}}})");
+	// The error message names the offending regex.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("hello")"));
+		ASSERT(s.parse(R"({"pattern":"["})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("'pattern' is not a valid regex") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"({"a":"x"})"));
+		ASSERT(s.parse(R"({"patternProperties":{"[":{"type":"string"}}})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("'patternProperties' key is not a valid regex") != std::string::npos);
+	}
+	// A well-formed pattern still validates (shape-check compile must not
+	// reject it) and a genuine mismatch is still an instance verdict.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("abc")"));
+		ASSERT(s.parse(R"({"pattern":"^a"})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"({"abc":"x"})"));
+		ASSERT(s.parse(R"({"patternProperties":{"^a":{"type":"string"}}})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("xyz")"));
+		ASSERT(s.parse(R"({"pattern":"^a"})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("does not match") != std::string::npos);
+		ASSERT(err.find("Invalid schema") == std::string::npos);
+	}
+
+	// -------------------------------------------------------------------
+	// An UNRESOLVED $ref is now shapeFailed_ too (a dangling local pointer is
+	// a schema typo, the same class as $ref landing on a non-schema), so a
+	// fork aborts instead of matching through a sibling branch. Circular $ref
+	// stays an unsatisfiable branch condition (deliberately NOT shapeFailed_):
+	// inside a fork it reads as "did not match" and another branch decides.
+	// -------------------------------------------------------------------
+	// The message keeps its own wording (not the "Invalid schema: ..."
+	// prefix the shape errors use); what matters is that the fork aborted
+	// on the dangling pointer rather than matching via the integer branch.
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"anyOf":[{"$ref":"#/definitions/missing"},{"type":"integer"}]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Unresolved $ref") != std::string::npos);
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse("1"));
+		ASSERT(s.parse(R"({"definitions":{"a":{"$ref":"#/definitions/a"}},"anyOf":[{"$ref":"#/definitions/a"},{"type":"integer"}]})"));
+		std::string err;
+		ASSERT(v.validate(s, err));
+	}
+	{
+		asvJSON v, s;
+		ASSERT(v.parse(R"("x")"));
+		ASSERT(s.parse(R"({"definitions":{"a":{"$ref":"#/definitions/a"}},"anyOf":[{"$ref":"#/definitions/a"},{"type":"integer"}]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+	}
+}
+
 TEST(testJSONSchemaReviewWave2) {
 	// -------------------------------------------------------------------
 	// Review wave 2 fixes. Each block pins one previously-wrong behavior.
@@ -33824,6 +33932,7 @@ RUN(testSchemaJsonPointerRefs);
 	std::cout << "\n--- JSON Schema Validation Tests ---\n";
 	RUN(testSchemaValidate);
 	RUN(testSchemaAuditRegressions);
+	RUN(testSchemaRegexAndRefShapeFix);
 	RUN(testJSONSchemaReviewWave2);
 
 	std::cout << "\n--- readFromFileAny / writeToFileAny Tests ---\n";
