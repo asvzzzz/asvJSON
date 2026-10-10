@@ -20314,6 +20314,29 @@ TEST(testJSON5CommentPaths) {
     ASSERT(j2.get("a") && j2.get("a")->comments &&
            j2.get("a")->comments->trailing.size() == 1);
   }
+  // An unquoted key followed directly by a block comment and ':'. The ident
+  // look-ahead used "j += 2; continue" inside a for-loop, so the loop's own
+  // j++ skipped the ':' as well: the key was emitted unquoted and the whole
+  // document was rejected as invalid JSON. A space after the comment hid it.
+  {
+    for (const char* src : {"{a/* c */:1}", "{a/* c */ :1}", "{a/*c*/:1}",
+                            "{abc/* x */:{b/* y */:2}}"}) {
+      asvJSON j;
+      bool ok = j.fromJSON5(src);
+      ASSERT(ok);
+      if (!ok) std::cout << "    src=" << src << " err=" << j.getLastError() << "\n";
+    }
+    asvJSON j;
+    ASSERT(j.fromJSON5("{a/* c */:1}"));
+    ASSERT_EQ(j.getInt("a"), 1);
+    asvJSON k;
+    ASSERT(k.fromJSON5("{abc/* x */:{b/* y */:2}}"));
+    const asvJSONValue* abc = k.get("abc");
+    ASSERT(abc && abc->type == asvJSONValue::OBJECT);
+    const asvJSONValue* b = abc->getConst("b");
+    ASSERT(b && b->type == asvJSONValue::INT);
+    ASSERT_EQ(b->getInt(), 2);
+  }
   // \v and \f are whitespace for the lexer, so a //-comment after one at the
   // start of a line is an own-line comment (leading), not a trailing one.
   {
@@ -20323,6 +20346,34 @@ TEST(testJSON5CommentPaths) {
       const asvJSONValue* v = j.get("K");
       ASSERT(v && v->comments && v->comments->leading.size() == 1);
       ASSERT(v->comments->trailing.empty());
+    }
+  }
+  // A lone \r and U+2028 / U+2029 are line terminators in JSON5 too, so a
+  // comment right after one is own-line (leading); they used to be treated as
+  // ordinary whitespace (or an unknown byte), misclassifying it as trailing.
+  // NBSP and the BOM are whitespace, so an own-line comment indented with one
+  // must still classify as leading (its trailing byte is not content).
+  {
+    for (const char* src : {"{\r// c\nK: 1\n}", "{\xE2\x80\xA8// c\nK: 1\n}", "{\xE2\x80\xA9// c\nK: 1\n}",
+                            "{\n\xC2\xA0// c\nK: 1\n}", "{\n\xEF\xBB\xBF// c\nK: 1\n}"}) {
+      asvJSON j;
+      ASSERT(j.fromJSON5(src));
+      const asvJSONValue* v = j.get("K");
+      ASSERT(v && v->comments && v->comments->leading.size() == 1);
+      ASSERT(v->comments->trailing.empty());
+    }
+  }
+  // The collector's whitespace skip must advance a multi-byte sequence by its
+  // full width: a bare i++ left the tail bytes (0xA0 of NBSP, 0xBB 0xBF of the
+  // BOM) as a spurious bare token, so the key became "\xA0K" and the trailing
+  // comment bound to the wrong path.
+  {
+    for (const char* src : {"{\xC2\xA0K: 1 // t\n}", "{\xEF\xBB\xBFK: 1 // t\n}"}) {
+      asvJSON j;
+      ASSERT(j.fromJSON5(src));
+      ASSERT_EQ(j.getInt("K"), 1);
+      const asvJSONValue* v = j.get("K");
+      ASSERT(v && v->comments && v->comments->trailing.size() == 1);
     }
   }
   // Special types are lossless in both directions -- DATETIME included, with
