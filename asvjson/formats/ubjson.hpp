@@ -81,7 +81,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <vector>
 
 namespace asvJSONInternal {
@@ -310,34 +309,44 @@ inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t&
     // belt-and-braces: any future caller that forwards an 'N' past the skips
     // must get a named error, not a silent fall-through to "unknown marker".
     case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
-    case 'Z': return asvJSONValue::makeNull();
-    case 'T': return asvJSONValue::makeBool(true);
-    case 'F': return asvJSONValue::makeBool(false);
+    case 'Z': { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("UBJSON: null alloc failed"); return v; }
+    case 'T': { auto v = asvJSONValue::makeBool(true); if (!v) throw asvJSONError("UBJSON: bool alloc failed"); return v; }
+    case 'F': { auto v = asvJSONValue::makeBool(false); if (!v) throw asvJSONError("UBJSON: bool alloc failed"); return v; }
     case 'i': {
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (int8)");
-      return asvJSONValue::makeInt(static_cast<int8_t>(data[pos++]));
+      auto v = asvJSONValue::makeInt(static_cast<int8_t>(data[pos++]));
+      if (!v) throw asvJSONError("UBJSON: integer alloc failed");
+      return v;
     }
     case 'U': {
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (uint8)");
-      return asvJSONValue::makeInt(data[pos++]);
+      auto v = asvJSONValue::makeInt(data[pos++]);
+      if (!v) throw asvJSONError("UBJSON: integer alloc failed");
+      return v;
     }
     case 'I': {
       if (pos + 2 > dataLen) throw asvJSONError("UBJSON: unexpected end (int16)");
       int64_t v = static_cast<int16_t>(ubjReadBE(data, pos, 2));
       pos += 2;
-      return asvJSONValue::makeInt(v);
+      auto r = asvJSONValue::makeInt(v);
+      if (!r) throw asvJSONError("UBJSON: integer alloc failed");
+      return r;
     }
     case 'l': {
       if (pos + 4 > dataLen) throw asvJSONError("UBJSON: unexpected end (int32)");
       int64_t v = static_cast<int32_t>(ubjReadBE(data, pos, 4));
       pos += 4;
-      return asvJSONValue::makeInt(v);
+      auto r = asvJSONValue::makeInt(v);
+      if (!r) throw asvJSONError("UBJSON: integer alloc failed");
+      return r;
     }
     case 'L': {
       if (pos + 8 > dataLen) throw asvJSONError("UBJSON: unexpected end (int64)");
       int64_t v = static_cast<int64_t>(ubjReadBE(data, pos, 8));
       pos += 8;
-      return asvJSONValue::makeInt(v);
+      auto r = asvJSONValue::makeInt(v);
+      if (!r) throw asvJSONError("UBJSON: integer alloc failed");
+      return r;
     }
     case 'd': {
       if (pos + 4 > dataLen) throw asvJSONError("UBJSON: unexpected end (float32)");
@@ -346,7 +355,8 @@ inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t&
       float f;
       memcpy(&f, &bits, sizeof(f));
       auto v = asvJSONValue::makeDouble(f);
-      if (v) v->is_float32 = true;
+      if (!v) throw asvJSONError("UBJSON: float alloc failed");
+      v->is_float32 = true;
       return v;
     }
     case 'D': {
@@ -355,12 +365,16 @@ inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t&
       pos += 8;
       double d;
       memcpy(&d, &bits, sizeof(d));
-      return asvJSONValue::makeDouble(d);
+      auto v = asvJSONValue::makeDouble(d);
+      if (!v) throw asvJSONError("UBJSON: float alloc failed");
+      return v;
     }
     case 'C': {
       if (pos >= dataLen) throw asvJSONError("UBJSON: unexpected end (char)");
       char c = static_cast<char>(data[pos++]);
-      return asvJSONValue::makeString(&c, 1);
+      auto v = asvJSONValue::makeString(&c, 1);
+      if (!v) throw asvJSONError("UBJSON: string alloc failed");
+      return v;
     }
     case 'S':
     case 'H': {
@@ -461,7 +475,9 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
           if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated typed array");
           // No no-op skip here: typed elements are bare payload bytes, so a
           // 0x4E byte is data (int8 78), not a marker to consume.
-          arr->arr->push_back(ubjParseTyped(data, pos, dataLen, depth + 1, t));
+          auto elem = ubjParseTyped(data, pos, dataLen, depth + 1, t);
+          if (!elem) throw asvJSONError("UBJSON: array element alloc failed");
+          arr->arr->push_back(std::move(elem));
           i++;
         }
       }
@@ -475,7 +491,9 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       while (count > 0) {
         if (pos >= dataLen) throw asvJSONError("UBJSON: unterminated counted array");
         if (data[pos] == 'N') { pos++; continue; }
-        arr->arr->push_back(ubjParseValue(data, pos, dataLen, depth + 1));
+        auto elem = ubjParseValue(data, pos, dataLen, depth + 1);
+        if (!elem) throw asvJSONError("UBJSON: array element alloc failed");
+        arr->arr->push_back(std::move(elem));
         count--;
       }
       return arr;
@@ -486,7 +504,9 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
       if (data[pos] == ']') { pos++; break; }
       if (data[pos] == 'N') { pos++; continue; }
       if (arr->arr->size() >= asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("UBJSON: array too large");
-      arr->arr->push_back(ubjParseValue(data, pos, dataLen, depth + 1));
+      auto elem = ubjParseValue(data, pos, dataLen, depth + 1);
+      if (!elem) throw asvJSONError("UBJSON: array element alloc failed");
+      arr->arr->push_back(std::move(elem));
     }
     return arr;
   }
