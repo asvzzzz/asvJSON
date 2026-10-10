@@ -1141,6 +1141,13 @@ private:
     size_t start = pos_;
     while (!eof() && udeIsIdentCont(text_[pos_])) pos_++;
     if (pos_ == start) throw asvJSONError("UDE: expected anchor name at line " + std::to_string(lineNum_));
+    // ANCHOR/ALIAS ::= '&'/'*' IDENTIFIER, and IDENTIFIER is
+    // [A-Za-z_][A-Za-z0-9_-]* -- the first character must be a letter or '_'.
+    // udeIsIdentCont above is permissive so the scan can find the name's end;
+    // the shape is validated here, so "&1abc" is rejected instead of silently
+    // accepted as an anchor named "1abc".
+    if (!udeIsIdentStart(text_[start]))
+      throw asvJSONError("UDE: anchor name must start with a letter or '_' at line " + std::to_string(lineNum_));
     return std::string(text_.substr(start, pos_ - start));
   }
 
@@ -1542,7 +1549,11 @@ private:
         if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
           throw asvJSONError("UDE: object too large");
         auto copy = cloneValue(v.get());
-        if (copy) obj->obj->emplace(k, std::move(copy));
+        // A failed clone (clone budget exhausted) must not be swallowed: that
+        // would drop a key from the merge with no error, unlike registerAnchor/
+        // parseAlias, which both turn the same failure into a throw.
+        if (!copy) throw asvJSONError("UDE: failed to clone merged key " + k);
+        obj->obj->emplace(k, std::move(copy));
       }
     }
   }
@@ -2274,6 +2285,14 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       // verbatim !<name> form suppresses that dispatch, so a built-in name is
       // written verbatim too.
       bool verbatim = !udeIsSimpleTagName(v->str_data) || udeIsBuiltinTagName(v->str_data);
+      // The verbatim !<name> form scans up to the FIRST '>', so a name that
+      // contains one cannot be spelled back: the parser would stop early and
+      // read the remainder as the value (a name "a>b" emitted as "!<a>b>" came
+      // back as name "a"). Neither spelling can represent it, so reject it
+      // rather than emit a document we cannot read back. A name built through
+      // the public API can hold a '>'; the parser never accepts one.
+      if (v->str_data.find('>') != std::string::npos)
+        throw asvJSONError("UDE: CUSTOM_TAG name must not contain '>'");
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
       if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
