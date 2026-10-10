@@ -28,6 +28,15 @@
 // malformed subschema that the instance never reaches (an unused `properties`
 // entry, a `then` that never fires) is not detected, since only schemas actually
 // visited are structurally checked.
+//
+// `pattern` and `patternProperties` keys are compiled at shape-check time, so a
+// regex that cannot compile is a malformed schema even when the branch would
+// never be exercised. A $ref that is not a string, does not resolve (a dangling
+// local pointer), or does not land on a schema is a malformed branch too.
+// Circular $ref is the one exception: it re-applies the same schema to the same
+// instance with no progress, an unsatisfiable condition that legitimately
+// matches nothing, so inside a fork it reads as "branch did not match" rather
+// than "schema is broken".
 
 #include "../core.hpp"
 #include <cstring>
@@ -753,6 +762,18 @@ private:
         setError("Invalid schema: 'pattern' must be a string");
         return false;
       }
+      // Compile here, at shape-check time, so a bad regex is a malformed schema
+      // reported like any other (and cached once per schema node) instead of
+      // failing lazily at first application -- a lazy failure inside a fork
+      // keyword (anyOf/oneOf/not/if/contains) would read as "branch did not
+      // match" and be swallowed by adoptShapeError. The runtime compile below
+      // still guards the regex_search itself.
+      bool validPattern = false;
+      getCompiled(p->str_data, validPattern);
+      if (!validPattern) {
+        setError("Invalid schema: 'pattern' is not a valid regex: " + p->str_data);
+        return false;
+      }
     }
 
     // allOf / anyOf / oneOf -- non-empty arrays of schemas.
@@ -817,6 +838,21 @@ private:
         for (const auto& [key, val] : *n->obj) {
           if (!isSchema(val.get())) {
             setError(std::string("Invalid schema: '") + k + "' values must be schemas");
+            return false;
+          }
+        }
+      }
+    }
+    // patternProperties KEYS are regexes. Compile them here too (see the
+    // `pattern` case): an invalid key is a malformed schema, reported at
+    // shape-check time even when no object instance ever reaches this node.
+    if (auto pp = schemaGet(schema, "patternProperties")) {
+      if (pp->type == asvJSONValue::OBJECT && pp->obj) {
+        for (const auto& [key, _] : *pp->obj) {
+          bool validPattern = false;
+          getCompiled(key, validPattern);
+          if (!validPattern) {
+            setError("Invalid schema: 'patternProperties' key is not a valid regex: " + key);
             return false;
           }
         }
@@ -911,7 +947,15 @@ private:
         return false;
       }
       auto resolved = resolveRef(refNode->str_data);
-      if (!resolved) { setError("Unresolved $ref: " + refNode->str_data); return false; }
+      if (!resolved) {
+        // A dangling local reference is a schema typo, not a verdict about the
+        // instance (same class as $ref landing on a non-schema -- both are
+        // shapeFailed_ so fork keywords abort on them instead of reading the
+        // branch as "did not match").
+        setError("Unresolved $ref: " + refNode->str_data);
+        shapeFailed_ = true; // malformed schema, not an instance mismatch
+        return false;
+      }
       if (!isSchema(resolved)) {
         // $ref must land on a schema instance (boolean or object). A pointer
         // into bare data (`{"definitions":{"x":"bar"},"$ref":"#/definitions/x"}`)
@@ -924,6 +968,11 @@ private:
       }
       RefKey key{value, resolved};
       if (refStack_ && refStack_->count(key) != 0) {
+        // Deliberately NOT shapeFailed_: a circular $ref re-applies the same
+        // schema to the same instance with no progress, so it is an
+        // unsatisfiable condition that matches nothing rather than a malformed
+        // schema. Inside a fork it legitimately reads as "branch did not match"
+        // (see the header for the full distinction).
         setError("Circular $ref detected at: " + refNode->str_data);
         return false;
       }
