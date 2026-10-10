@@ -18120,6 +18120,28 @@ TEST(testRONReviewFixes) {
     ASSERT(j2.fromRON(std::string_view(s)));
     ASSERT_EQ(j2.toRON(true), s);
   }
+  // 10. `br#foo` is not a raw byte string at all (the raw byte-string form always
+  // ends its '#' run in a '"'), so it must be reported as a bad byte-string
+  // prefix rather than the generic "invalid raw string" blaming a form the user
+  // never wrote.
+  {
+    asvJSON bad;
+    ASSERT(!bad.fromRON(std::string_view("br#foo")));
+    ASSERT(bad.getLastError().find("byte-string prefix") != std::string::npos);
+    asvJSON bad2;
+    ASSERT(!bad2.fromRON(std::string_view("br#'c'")));
+    ASSERT(bad2.getLastError().find("byte-string prefix") != std::string::npos);
+    // Every valid raw / byte-string form still parses, and the payload survives.
+    const char* good[] = {"br\"abc\"", "br#\"x\"#", "br##\"raw\"##",
+                          "b\"bytes\"", "b'Z'", "r\"lit\"", "r#\"raw\"#"};
+    for (const char* g : good) {
+      asvJSON ok;
+      ASSERT_MSG(ok.fromRON(std::string_view(g)), g);
+    }
+    asvJSON v;
+    ASSERT(v.fromRON(std::string_view("br##\"ra\\w\"##")));
+    ASSERT_EQ(std::string(v.getRoot()->getString()), std::string("ra\\w"));
+  }
 }
 
 TEST(testRONCommentOrderAndPendants) {
