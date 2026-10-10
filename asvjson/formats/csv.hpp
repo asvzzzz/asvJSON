@@ -27,16 +27,25 @@
 //      an ARRAY of {items: "..."} rows (see testCsvSingleKeyArrayOfObjects);
 //    - a scalar root is a lone headerless data line that fromCSV re-reads as
 //      a header, so it does not round-trip (a scalar export is data-only).
+//    - an EMPTY OBJECT or ARRAY root produces an empty document (no header, no
+//      rows), so toCSV() returns ""; fromCSV("") rejects it as empty input.
+//      An empty CSV carries no schema, so there is nothing to preserve.
 // 4. Cell typing follows the JSON number grammar plus a leading '+' extension.
 //    ".5" is NOT a number (JSON forbids "." without a leading digit) and stays
 //    STRING; "0"/"+0"/"-0" are INT 0. A STRING whose text would re-detect as a
 //    different type is quoted on output so the round-trip preserves STRING.
+//    An EMPTY STRING is such a case ("") and is written as the quoted literal
+//    "", which re-reads as an explicit empty STRING (a bare empty cell is
+//    NULL on decode).
 // 5. A TIMESTAMP has no CSV cell syntax of its own: it is written as its bare
 //    epoch number and comes back as an INT (the type is lost), exactly like
 //    the other non-native types REGEX/BINARY/EXTENSION/OBJECTID, which keep
 //    only their text form. DATETIME is the one exception -- it has a native
 //    bare ISO-8601 cell form that detects back as DATETIME. To keep a
-//    TIMESTAMP a TIMESTAMP, store its text in a STRING cell.
+//    TIMESTAMP a TIMESTAMP, store its text in a STRING cell. The one DATETIME
+//    that cannot round-trip as DATETIME is a timestamp outside gmtimeSafe's
+//    range, which fmtDateTimeVal renders as the literal "null"; that cell is
+//    quoted so it decodes back as the STRING "null" (matching INI/TOML).
 // 6. A row wider than the header is rejected, with one exception: trailing
 //    BARE empty fields ("a,b" / "1,2,") are tolerated, since a trailing comma
 //    carries no data. A trailing QUOTED empty (a cell holding only "") is an
@@ -52,6 +61,7 @@
 
 #include "../core.hpp"
 
+#include <map>
 #include <unordered_set>
 
 namespace asvJSONInternal {
@@ -420,6 +430,14 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					// already IS raw_number must stay bare so it keeps its flag.
 					quote = !d || d->type != T::STRING || (d->raw_number && !v->raw_number);
 				}
+				break;
+			case T::DATETIME:
+				// fmtDateTimeVal renders a timestamp outside gmtimeSafe's range
+				// as the literal "null". Emitted bare it would re-detect as the
+				// NULL value, silently changing the type, so quote it: the cell
+				// then reads back as the STRING "null" (the same degenerate-case
+				// convention as INI/TOML, which also emit a quoted "null").
+				if (s == "null") quote = true;
 				break;
 			default: break;
 		}
