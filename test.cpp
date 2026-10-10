@@ -12207,6 +12207,32 @@ TEST(testGOONSpecialValues) {
 		ASSERT_EQ(static_cast<int>(j2.get("ext")->ext_type), 7);
 		ASSERT_EQ(j2.get("ext")->bin_data.size(), size_t(0));
 	}
+	// An out-of-range or overflowing __EXT__ type is rejected instead of being
+	// silently wrapped via `& 0xFF` (hand-written input; the encoder always
+	// writes an int8_t). Same no-silent-data-loss rule as TRON/UDE.
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__300__AAAA\n")));
+		ASSERT(j.getLastError().find("extension type out of range") != std::string::npos);
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__-200__AAAA\n")));
+		ASSERT(j.getLastError().find("extension type out of range") != std::string::npos);
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__99999999999999999999__AAAA\n")));
+		// The representable boundary values still decode.
+		asvJSON lo;
+		ASSERT(lo.fromGOON(std::string_view("a: __EXT__-128__AAAA\n")));
+		ASSERT_EQ(lo.get("a")->type, asvJSONValue::EXTENSION);
+		ASSERT_EQ(static_cast<int>(lo.get("a")->ext_type), -128);
+		asvJSON hi;
+		ASSERT(hi.fromGOON(std::string_view("a: __EXT__127__AAAA\n")));
+		ASSERT_EQ(static_cast<int>(hi.get("a")->ext_type), 127);
+	}
+	// A separator-less line inside an ARRAY frame reports the array context,
+	// not the object one (the message was hard-coded).
+	{
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view("- a\nhello\n")));
+		ASSERT(j.getLastError().find("array context") != std::string::npos);
+	}
 }
 
 TEST(testProtobufBasic) {

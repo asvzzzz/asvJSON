@@ -44,6 +44,12 @@
 // tabular and the rows are indented one level deeper, which keeps it
 // unambiguous. See goonCellFit().
 //
+// Tabular detection threshold: an array of objects is written as a table only
+// when it has at most 5 elements, in the Balanced and LLM modes; a longer array
+// falls back to the list form (past a handful of rows the table saves little and
+// the list reads better). Compact mode always keeps the table. This is a
+// formatting choice, not a data change -- both forms round-trip.
+//
 // REGEX markers: the payload is a bare token (no quotes, no braces), so
 // goonEscapeRegPayload() backslash-escapes every byte that could otherwise end
 // the cell, the row, the line, or look like structure: '\' and '|' (the '|'
@@ -1168,10 +1174,22 @@ inline std::string goonToJson(std::string_view input) {
         std::string rest(unquoted.substr(7));
         size_t us = rest.find('_');
         if (us != std::string::npos) {
-          int type = static_cast<int>(std::strtol(rest.substr(0, us).c_str(), nullptr, 10));
+          // The extension type is an int8_t, so only [-128, 127] is
+          // representable. A bare strtol + & 0xFF mask used to silently wrap a
+          // hand-written __EXT__300_... to 0x2c (44), losing the intended type
+          // -- the same no-silent-data-loss rule enforced in TRON/UDE. Reject an
+          // out-of-range or overflowing field instead (errno == ERANGE, plus the
+          // end-pointer check, also catches trailing garbage).
+          const std::string num = rest.substr(0, us);
+          errno = 0;
+          char* endp = nullptr;
+          long ltype = std::strtol(num.c_str(), &endp, 10);
+          if (num.empty() || endp == num.c_str() || *endp != '\0' || errno == ERANGE ||
+              ltype < -128 || ltype > 127)
+            throw GoonDecodeError("GOON: extension type out of range [-128, 127]");
           std::string b64 = rest.substr(us + 1);
           char hbuf[3];
-          snprintf(hbuf, sizeof(hbuf), "%02x", static_cast<unsigned>(type) & 0xFF);
+          snprintf(hbuf, sizeof(hbuf), "%02x", static_cast<unsigned>(static_cast<int>(ltype)) & 0xFF);
           return "{\"$binary\":{\"base64\":\"" + b64 + "\",\"subType\":\"" + hbuf + "\"}}";
         }
         return "{\"$binary\":{\"base64\":\"" + rest + "\",\"subType\":\"00\"}}";
@@ -1731,7 +1749,8 @@ int rindent = countIndent(rline);
       // Any other separator-less line is not valid GOON in this context;
       // previously it fell off the loop and was silently dropped (data loss).
       if (!(curFrame.isRoot && li == firstLine && (content == "{}" || content == "[]")))
-        throw GoonDecodeError("GOON: unrecognized line " + std::to_string(li + 1) + " in object context");
+        throw GoonDecodeError("GOON: unrecognized line " + std::to_string(li + 1) +
+                              (curFrame.type == 'A' ? " in array context" : " in object context"));
     }
   }
 
