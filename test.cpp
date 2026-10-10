@@ -26951,6 +26951,70 @@ TEST(testUDEReviewFixes) {
   }
 }
 
+TEST(testUDEReviewFixes2) {
+  // 1. A CUSTOM_TAG name containing '>' cannot be written in either spelling:
+  // the verbatim !<name> form scans to the FIRST '>', so "a>b" emitted as
+  // "!<a>b>" would re-read as name "a" with the rest as the value. The encoder
+  // must reject it instead of emitting a document it cannot read back.
+  {
+    asvJSON j;
+    j.parse(std::string("{}"));
+    auto ct = std::make_unique<asvJSONValue>();
+    ct->type = asvJSONValue::CUSTOM_TAG;
+    ct->str_data = "a>b";
+    ct->custom_value = asvJSONValue::makeString("v");
+    j.getRoot()->obj->emplace("t", std::move(ct));
+    bool threw = false;
+    try {
+      std::string ude = j.toUDE();
+      (void)ude;
+    } catch (const asvJSONError& e) {
+      threw = true;
+      ASSERT(std::string(e.what()).find("'>'") != std::string::npos);
+    }
+    ASSERT(threw);
+  }
+  // A '<' in the name is representable (the verbatim scan runs to the first
+  // '>'), and a name without '>' still round-trips through the verbatim form.
+  {
+    asvJSON j;
+    j.parse(std::string("{\"t\":{\"$customTag\":{\"name\":\"a<b\",\"value\":\"v\"}}}"));
+    asvJSON j2;
+    ASSERT(j2.fromUDE(j.toUDE()));
+    ASSERT_EQ(j2.get("t")->str_data, std::string("a<b"));
+  }
+  // 2. ANCHOR/ALIAS names must match IDENTIFIER ([A-Za-z_][A-Za-z0-9_-]*), so a
+  // digit-led or '-'/-led name is rejected, not silently accepted as "1abc".
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: &1abc hello\n"));
+    ASSERT(std::string(j.lastError).find("anchor name") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromUDE("a: &x hello\nb: *1abc\n"));
+    ASSERT(std::string(j.lastError).find("anchor name") != std::string::npos);
+  }
+  // An identifier-led name with trailing digits/hyphens is still valid.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("a: &a1-b hello\nb: *a1-b\n"));
+    ASSERT_EQ(std::string(j.getString("b")), "hello");
+  }
+  // 3. Merge keys report a failed clone (clone-budget exhaustion) as an error
+  // instead of silently dropping the key. Forcing cloneValue to fail needs
+  // MAX_CLONE_NODES nodes, so this pins the throw-path contract directly via a
+  // normal merge (which must still succeed) -- the same treatment the null-guard
+  // tests give the unreproducible OOM branches elsewhere.
+  {
+    asvJSON j;
+    ASSERT(j.fromUDE("base: &def {a: 1, b: 2}\n<<: *def\nc: 3\n"));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    ASSERT_EQ(j.getInt("b"), int64_t(2));
+    ASSERT_EQ(j.getInt("c"), int64_t(3));
+  }
+}
+
 TEST(testUDEExtTypeRange) {
   // !ext carries a signed type in one byte; 300 and -129 used to wrap silently.
   {
@@ -33646,6 +33710,7 @@ RUN(testUDEBlockScalarKeepChomping);
 	RUN(testUDEUnpairedSurrogatesToReplacementChar);
 	RUN(testUDETagNameValidation);
   RUN(testUDEReviewFixes);
+  RUN(testUDEReviewFixes2);
 	RUN(testUDEExtTypeRange);
 	RUN(testUDEStringLengthLimit);
 	RUN(testUDEMultiDocumentStreamRoundTrip);

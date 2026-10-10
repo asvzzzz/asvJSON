@@ -37,7 +37,7 @@ Because a multi-document stream decodes to a single root array, re-encoding it w
 The first non-empty line can be an optional header that identifies the format and may include flags:
 
 ```text
-# UDE v1.0
+# UDE v1.1
 
 ```
 * `UDE`  -  literal marker.
@@ -45,7 +45,7 @@ The first non-empty line can be an optional header that identifies the format an
 * `strict`  -  optional flag that enables strict mode for the whole stream.
 * Unknown flags are ignored so that forward-compatible minor versions keep working.
 
-If no header is present, the document consists of a single plain-text line. The parser treats it as a string value. A line is only treated as plain text when it cannot be a structured document at all (no `:` separator and no structured start character); malformed or strict-mode-rejected documents report an error instead of degrading to plain text.
+If no header is present, the document consists of a single plain-text line. A multi-word line that has no structured shape is kept as a verbatim `STRING`; a single token is parsed as a scalar per the normal typing rules (so `123` is an `INT`, `true` a `BOOL`, `1.5` a `DOUBLE`, an unquoted word a `STRING`). A line is only treated as plain text when it cannot be a structured document at all (no `:` separator and no structured start character); malformed or strict-mode-rejected documents report an error instead of degrading to plain text.
 
 ---
 
@@ -315,7 +315,7 @@ An unknown tag stores its **name separately from its value**:
 ```
 
 * The name is a plain identifier, an optional namespace form `!ns:tag` / `!a.b`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
-* Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `UDE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name.
+* Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `UDE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name. `>` is the one character with no spelling in either form: the verbatim form scans to the *first* `>`, so a name containing one cannot be read back, and the encoder rejects it with `UDE: CUSTOM_TAG name must not contain '>'`. (A `<` is fine  -  `!<a<b>` scans to the first `>` and reads the name `a<b` correctly.)
 * The value is any UDE value (string, number, object, array, ...), not flattened text  -  `!point {x: 1, y: 2}` keeps the object intact.
 * **The angle brackets mean "this name is a literal custom-tag name", not "a synonym for the simple form".** That is what lets a custom tag whose name collides with a built-in be expressed at all:
 
@@ -358,7 +358,7 @@ Strict mode is useful when data integrity is critical; the default permissive mo
 
 ## 10. Example Document
 ```text
-# UDE v1.0
+# UDE v1.1
 
 name: "Example Document"
 created_at: !datetime "2026-07-30T14:45:00Z"
