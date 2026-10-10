@@ -29,6 +29,9 @@
 // error. This matches the other recursive encoders (JSON5/RON/sexpr/GOON).
 // CUSTOM_TAG values are not preserved: they serialize as "null" (the encoder's
 // default case), as TRON has no marker form for them.
+// Decoder diagnostics are prefixed "TRON: " and carry no line number (unlike the
+// JSON/INI/TOML parsers): the lexer tokenizes the whole document before parsing,
+// so positions are not tracked through to the error sites.
 
 #include "../core.hpp"
 
