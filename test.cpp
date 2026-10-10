@@ -17246,6 +17246,63 @@ TEST(testTRONRoundTripFidelity) {
 }
 
 
+TEST(testTRONReviewFixes) {
+  // 1. An __EXT__ type outside int8_t must be rejected, not silently truncated.
+  //    from_chars parses into an int, so __EXT__300__... used to wrap to 44 via
+  //    static_cast<int8_t> (mod 256) and corrupt the value with no error.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view(R"({"e":"__EXT__300__AAAA"})")));
+    ASSERT(j.getLastError().find("out of range") != std::string::npos);
+    asvJSON j2;
+    ASSERT(!j2.fromTRON(std::string_view(R"({"e":"__EXT__-200__AAAA"})")));
+  }
+  // The int8_t boundaries themselves still round-trip.
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view("{}")));
+    uint8_t bin[] = {0x01, 0x02};
+    j.getRoot()->obj->emplace("lo", asvJSONValue::makeExtension(-128, bin, 2));
+    j.getRoot()->obj->emplace("hi", asvJSONValue::makeExtension(127, bin, 2));
+    ASSERT(j2.fromTRON(std::string_view(j.toTRON())));
+    ASSERT_EQ(int(j2.getRoot()->getConst("lo")->ext_type), -128);
+    ASSERT_EQ(int(j2.getRoot()->getConst("hi")->ext_type), 127);
+  }
+  // 2. A DATETIME outside gmtimeSafe's range renders as the literal "null".
+  //    Wrapped in quotes it re-decodes as the STRING "null" (matching the
+  //    CSV/INI/TOML degenerate-case convention), never the NULL value.
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view(R"({"d":1})")));
+    auto* d = j.getRoot()->get("d");
+    d->type = asvJSONValue::DATETIME;
+    d->timestamp = std::numeric_limits<int64_t>::min();
+    std::string s = j.toTRON();
+    ASSERT(s.find("\"null\"") != std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    auto* d2 = j2.getRoot()->getConst("d");
+    ASSERT(d2 != nullptr && d2->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(d2->str_data), std::string("null"));
+  }
+  // 3. Class hoisting is gated on two or more properties: a repeated
+  //    single-property object stays inline, while a repeated two-key object is
+  //    hoisted into a class.
+  {
+    asvJSON j, j2;
+    ASSERT(j.parse(std::string_view(R"([{"id":1},{"id":2},{"id":3}])")));
+    std::string s = j.toTRON();
+    ASSERT(s.find("class ") == std::string::npos);
+    ASSERT(j2.fromTRON(std::string_view(s)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(3));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([{"a":1,"b":2},{"a":3,"b":4}])")));
+    ASSERT(j.toTRON().find("class ") != std::string::npos);
+  }
+}
+
+
 TEST(testToJSON5) {
   // Basic object round-trip
   {
@@ -33580,6 +33637,7 @@ RUN(testTOONReviewFixes);
 	RUN(testTRONSpecialTypes);
 	RUN(testTRONAudit);
 	RUN(testTRONRoundTripFidelity);
+	RUN(testTRONReviewFixes);
 	RUN(testTRONStringDateTimeRoundTrip);
 	
 	std::cout << "\n--- GOON Serialization Tests ---\n";
