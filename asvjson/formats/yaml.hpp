@@ -156,6 +156,11 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			return false;
 		}
 		case T::DOUBLE: {
+			// YAML 1.1's !!float NaN spelling is unsigned (.nan), and the
+			// decoder maps every NaN spelling -- .nan/.NaN/NaN, signed or not
+			// -- to a positive NaN. Emitting -.nan for a negative-signed NaN
+			// would therefore not round-trip (it would re-read as positive),
+			// so the sign bit is intentionally dropped here (unlike .inf).
 			if (std::isnan(v->dbl)) { out += ".nan"; return true; }
 			if (std::isinf(v->dbl)) { out += (v->dbl > 0 ? ".inf" : "-.inf"); return true; }
 			std::string val; fmtDoubleValDot0(v->dbl, val);
@@ -533,7 +538,12 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 				case '/': out += '/'; break;
 				case '0': out += '\0'; break;
 				case 'x': {
-					if (i + 2 >= s.size()) break;
+					// Truncated (\x at end of string, fewer than two hex
+					// digits left): keep the escape literally instead of
+					// silently dropping "\x", symmetric with the \uZZZZ
+					// fallback below (the loop's own i++ then copies the
+					// remaining bytes verbatim).
+					if (i + 2 >= s.size()) { out += "\\x"; break; }
 					auto hex = [&](size_t off) -> int {
 						char c = s[i + off];
 						if (c >= '0' && c <= '9') return c - '0';
@@ -547,7 +557,10 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 					break;
 				}
 				case 'u': {
-					if (i + 4 >= s.size()) break;
+					// Truncated (\u at end of string, fewer than four hex
+					// digits left): keep it literally, like the invalid-hex
+					// fallback below, rather than dropping "\u".
+					if (i + 4 >= s.size()) { out += "\\u"; break; }
 					auto hex = [&](size_t off) -> int {
 						char c = s[i + off];
 						if (c >= '0' && c <= '9') return c - '0';
@@ -702,23 +715,6 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		}
 	#endif
 		if (validNumber) {
-			// JSON has no leading '+' sign; strip it and re-emit a normalized token.
-			if (!s.empty() && s[0] == '+') {
-				std::string_view rest = s.substr(1);
-				long long iv = 0;
-				auto [ip, ie] = std::from_chars(rest.data(), rest.data() + rest.size(), iv);
-				if (ie == std::errc() && ip == rest.data() + rest.size()) return std::to_string(iv);
-				double dv = 0.0;
-				auto [dp2, de2] = std::from_chars(rest.data(), rest.data() + rest.size(), dv);
-				if (de2 == std::errc() && dp2 == rest.data() + rest.size()) {
-					return fmtDbl(dv);
-				}
-				// Not a number after all: it is a plain scalar, so it must be
-				// QUOTED. Returning the raw token would splice unquoted text
-				// into the intermediate JSON and fail there with a misleading
-				// parser error ("Unexpected: i" for "k: +Infinity").
-				return yamlQuoteJsonScalar(rest);
-			}
 			// JSON rejects leading-zero integers ("007", "01e2") even though
 			// the YAML 1.2 spec allows them as plain scalars. Re-emit a
 			// normalized JSON-compatible number instead of a raw token.
@@ -737,17 +733,6 @@ inline std::string yamlScalarToJson(std::string_view s) {
 			}
 		}
 	#else
-		if (!s.empty() && s[0] == '+') {
-			std::string tmp(s.substr(1));
-			char* end = nullptr;
-			long long iv = std::strtoll(tmp.c_str(), &end, 10);
-			if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
-			double dv = std::strtod(tmp.c_str(), &end);
-			if (end == tmp.c_str() + tmp.size()) {
-				return fmtDbl(dv);
-			}
-			return yamlQuoteJsonScalar(tmp);
-		}
 			size_t sign = 0;
 			if (!s.empty() && (s[0] == '+' || s[0] == '-')) sign = 1;
 			if (sign < s.size() && s[sign] == '0' && sign + 1 < s.size() &&
@@ -1270,7 +1255,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
 		if (raw.empty() && !val.empty() && val != "\"\"") raw = std::string(val);
-		return "{\"$binary\":{\"base64\":\"" + raw + "\",\"subType\":\"00\"}}";
+		std::string esc;
+		appendJsonEscaped(esc, raw);
+		return "{\"$binary\":{\"base64\":\"" + esc + "\",\"subType\":\"00\"}}";
 	}
 	if (tag == "!objectid") {
 		std::string resolved = yamlParseInlineValue(val);
@@ -1279,7 +1266,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		std::string raw;
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
 		if (raw.empty() && !val.empty() && val != "\"\"") raw = std::string(val);
-		return "{\"$oid\":\"" + raw + "\"}";
+		std::string esc;
+		appendJsonEscaped(esc, raw);
+		return "{\"$oid\":\"" + esc + "\"}";
 	}
 	if (tag == "!regex") {
 		std::string resolved = yamlParseInlineValue(val);
@@ -1310,8 +1299,19 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		std::string remaining = std::string(val);
 		size_t sp = remaining.find(' ');
 		if (sp == std::string::npos) return yamlParseInlineValue(val);
-		int extType = 0;
-		std::from_chars(remaining.data(), remaining.data() + sp, extType);
+		// The extension type is an int8_t, so only [-128, 127] is representable.
+		// A bare from_chars + uint8_t cast silently wrapped a hand-written
+		// "!ext 300 ..." to subtype 0x2c and turned a non-numeric type into 0
+		// (BINARY). Reject an out-of-range/overflowing/garbage field instead,
+		// symmetric with the TRON/UDE/GOON extension checks.
+		const std::string num = remaining.substr(0, sp);
+		errno = 0;
+		char* endp = nullptr;
+		long ltype = std::strtol(num.c_str(), &endp, 10);
+		if (num.empty() || endp == num.c_str() || *endp != '\0' || errno == ERANGE ||
+		    ltype < -128 || ltype > 127)
+			throw asvJSONError("YAML: extension type out of range [-128, 127]");
+		int extType = static_cast<int>(ltype);
 		std::string resolved = yamlParseInlineValue(std::string_view(remaining).substr(sp + 1));
 		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
 			resolved = resolved.substr(1, resolved.size() - 2);
@@ -1319,7 +1319,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
 		char hex[3];
 		snprintf(hex, sizeof(hex), "%02x", static_cast<uint8_t>(extType));
-		return "{\"$binary\":{\"base64\":\"" + raw + "\",\"subType\":\"" + hex + "\"}}";
+		std::string esc;
+		appendJsonEscaped(esc, raw);
+		return "{\"$binary\":{\"base64\":\"" + esc + "\",\"subType\":\"" + hex + "\"}}";
 	}
 
 	// !!set -- convert to the {"$set":[...]} marker; the JSON object parser
@@ -2216,6 +2218,10 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	char chomp = 0; // 0 = clip, '+' = keep, '-' = strip
 	int explicitIndent = 0;
 	size_t h = 1;
+	// Both indicator orders are accepted, per YAML 1.2 s8.1.1.1
+	// (c-b-block-header = indent-then-chomp OR chomp-then-indent), so "|2-"
+	// and "|+2" are equally valid here. (The UDE.md block scalar, a separate
+	// simplified format, documents digit-first only and rejects "|+2".)
 	for (; h < header.size(); h++) {
 		char ch = header[h];
 		if (ch == ' ' || ch == '\t') continue;
