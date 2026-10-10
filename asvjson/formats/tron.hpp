@@ -6,12 +6,18 @@
 //   A(Alice,30)                  -- positional instantiation
 //   A(name=Alice,age=30)         -- named instantiation
 //   class B(A): z                -- inheritance (B = A's props + z)
+// A class is hoisted only for a key set with TWO OR MORE properties that occurs
+// at least twice; a single-property object (e.g. [{"id":1},{"id":2}]) is always
+// serialized inline, since hoisting one property saves nothing.
 // Comments use `#` to end of line; trailing commas allowed. Full round-trip
 // via toTRON()/fromTRON(). A literal STRING whose text starts with a special-type
 // marker prefix (__TS__, __OID__, __REGEX__, __BASE64__, __EXT__) or has the
 // ISO-8601 shape the decoder auto-detects as a date has its leading character
 // escaped as \uXXXX, so it stays a STRING; DATETIME itself is written unescaped
-// in plain ISO form and decodes back as a DATETIME.
+// in plain ISO form and decodes back as a DATETIME. The one DATETIME that cannot
+// round-trip as DATETIME is a timestamp outside gmtimeSafe's range, which
+// fmtDateTimeVal renders as the literal "null"; it is quoted so it decodes back
+// as the STRING "null" (matching INI/TOML/CSV).
 //
 // The encoder emits FLAT class definitions: inheritance (`class B(A):`) is fully
 // supported by the decoder, but re-serialized as an equivalent flat class (the
@@ -759,6 +765,11 @@ asvJSONValue* TronParseState::parseValue(int depth) {
           int extType;
           auto [ptr, ec] = std::from_chars(s.data() + 7, s.data() + sep, extType);
           if (ec == std::errc() && ptr == s.data() + sep) {
+            // ext_type is a signed byte; from_chars parses into an int, so an
+            // out-of-range value (e.g. __EXT__300__...) would silently wrap via
+            // static_cast<int8_t>. Reject it instead (same guard as UDE).
+            if (extType < -128 || extType > 127)
+              throw asvJSONError("TRON: extension type out of range [-128, 127]");
             auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2);
             auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
             if (!v) throw asvJSONError("out of memory");
