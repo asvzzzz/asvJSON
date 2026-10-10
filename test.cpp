@@ -14701,6 +14701,31 @@ TEST(testCsvAuditReview) {
 	}
 }
 
+TEST(testCsvOutOfRangeDatetime) {
+	// A DATETIME whose instant gmtimeSafe cannot convert renders as the literal
+	// "null". Emitted bare that would re-detect as the NULL value, silently
+	// changing the type; the cell must be quoted so it reads back as the STRING
+	// "null" (matching the INI/TOML degenerate-case convention). Before the fix
+	// the cell was a bare `null` and decoded to a NULL value.
+	asvJSON j;
+	ASSERT(j.parse(std::string_view(R"({"d":1})")));
+	auto* d = j.getRoot()->get("d");
+	ASSERT(d != nullptr);
+	d->type = asvJSONValue::DATETIME;
+	d->timestamp = std::numeric_limits<int64_t>::min(); // far outside gmtimeSafe's range
+	d->datetime_ms = 0;
+	std::string csv = j.toCSV();
+	ASSERT(csv.find("\"null\"") != std::string::npos);
+	ASSERT(csv.find("\nnull\n") == std::string::npos); // never a bare null
+	asvJSON j2;
+	ASSERT(j2.fromCSV(std::string_view(csv)));
+	ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+	auto* r = j2.getRoot()->arr->at(0).get();
+	auto* v = r->get("d");
+	ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+	ASSERT_EQ(std::string(v->getString()), "null");
+}
+
 TEST(testToTOML) {
   // Round-trip: simple object
   {
@@ -33533,6 +33558,7 @@ RUN(testCBORFloat16);
 	RUN(testCsvNoRawNumberDrift);
 	RUN(testCsvAuditCells);
 	RUN(testCsvAuditReview);
+	RUN(testCsvOutOfRangeDatetime);
 	
 	std::cout << "\n--- TOON Serialization Tests ---\n";
 	RUN(testToTOON);
