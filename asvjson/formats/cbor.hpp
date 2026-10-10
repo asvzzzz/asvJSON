@@ -58,6 +58,7 @@
 // 48 nested `array(1000000)` headers (240 bytes of input) each reserved an 8 MB
 // vector, 384 MB in total, before the first element was read.
 #include "../core.hpp"
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -275,9 +276,12 @@ inline uint64_t cborReadArg(const uint8_t* data, size_t& pos, size_t dataLen, ui
 }
 
 // Contract: this either returns a non-null value or throws -- it never hands
-// back a nullptr. The `!chunk` / `!val` / `!v` guards below are therefore dead
-// by construction; they are kept as defense in depth against a future early
-// return, so do not read a failure to trip them as a reachable state.
+// back a nullptr. Every factory result is checked, including the leaf ones
+// (makeInt/makeBool/makeNull/makeDouble/makeDateTime/makeTimestamp) that a bare
+// `return makeX(...)` would otherwise pass through as a null on OOM. The
+// `!elem` (array element) / `!chunk` / `!val` / `!v` guards below are therefore
+// dead by construction; they are kept as defense in depth against a future
+// early return, so do not read a failure to trip them as a reachable state.
 inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
   if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("CBOR nesting too deep");
   if (pos >= dataLen) throw asvJSONError("CBOR unexpected end");
@@ -301,7 +305,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       while (pos < dataLen) {
         if (data[pos] == 0xFF) { pos++; terminated = true; break; }
         if (count >= asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
-        arr->arr->push_back(parseCBOR(data, pos, dataLen, depth + 1));
+        auto elem = parseCBOR(data, pos, dataLen, depth + 1);
+        if (!elem) throw asvJSONError("CBOR array element failed");
+        arr->arr->push_back(std::move(elem));
         count++;
       }
       if (!terminated) throw asvJSONError("CBOR indefinite array missing terminator");
@@ -371,12 +377,16 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
     case 0: { // Unsigned integer
       uint64_t val = cborReadArg(data, pos, dataLen, info);
       if (val > 0x7FFFFFFFFFFFFFFFULL) throw asvJSONError("CBOR unsigned integer out of range");
-      return asvJSONValue::makeInt(static_cast<int64_t>(val));
+      auto v = asvJSONValue::makeInt(static_cast<int64_t>(val));
+      if (!v) throw asvJSONError("CBOR integer alloc failed");
+      return v;
     }
     case 1: { // Negative integer
       uint64_t val = cborReadArg(data, pos, dataLen, info);
       if (val > 0x7FFFFFFFFFFFFFFFULL) throw asvJSONError("CBOR negative integer out of range");
-      return asvJSONValue::makeInt(static_cast<int64_t>(-1) - static_cast<int64_t>(val));
+      auto v = asvJSONValue::makeInt(static_cast<int64_t>(-1) - static_cast<int64_t>(val));
+      if (!v) throw asvJSONError("CBOR integer alloc failed");
+      return v;
     }
     case 2: { // Byte string
       uint64_t len64 = cborReadArg(data, pos, dataLen, info);
@@ -409,7 +419,11 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       if (!arr) throw asvJSONError("CBOR array alloc failed");
       size_t n = static_cast<size_t>(n64);
       arr->arr->reserve(n);
-      for (size_t i = 0; i < n; i++) arr->arr->push_back(parseCBOR(data, pos, dataLen, depth + 1));
+      for (size_t i = 0; i < n; i++) {
+        auto elem = parseCBOR(data, pos, dataLen, depth + 1);
+        if (!elem) throw asvJSONError("CBOR array element failed");
+        arr->arr->push_back(std::move(elem));
+      }
       return arr;
     }
     case 5: { // Map
@@ -462,10 +476,14 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
             t += 1; ms = 0;
           }
           if (ms < 0) ms = 0;
-          return asvJSONValue::makeDateTime(t, ms);
+          auto dt = asvJSONValue::makeDateTime(t, ms);
+          if (!dt) throw asvJSONError("CBOR datetime alloc failed");
+          return dt;
         }
         if (val->type == asvJSONValue::INT) {
-          return asvJSONValue::makeTimestamp(val->num);
+          auto ts = asvJSONValue::makeTimestamp(val->num);
+          if (!ts) throw asvJSONError("CBOR timestamp alloc failed");
+          return ts;
         }
         return val; // pass through unknown
       }
@@ -526,24 +544,24 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
       return val; // unknown tags pass through
     }
     case 7: { // Simple values and floats
-      if (info == 20) return asvJSONValue::makeBool(false);
-      if (info == 21) return asvJSONValue::makeBool(true);
-      if (info == 22) return asvJSONValue::makeNull();
-      if (info == 23) return asvJSONValue::makeNull(); // undefined -> null
+      if (info == 20) { auto v = asvJSONValue::makeBool(false); if (!v) throw asvJSONError("CBOR bool alloc failed"); return v; }
+      if (info == 21) { auto v = asvJSONValue::makeBool(true); if (!v) throw asvJSONError("CBOR bool alloc failed"); return v; }
+      if (info == 22) { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; }
+      if (info == 23) { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; } // undefined -> null
       // Unassigned simple values 0..19 (RFC 8949 s3.3) have no JSON equivalent:
       // map them to null exactly like the info == 24 form below. Without this the
       // direct encoding (0xE0..0xF3) fell through to "unknown major type".
-      if (info <= 19) return asvJSONValue::makeNull();
+      if (info <= 19) { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; }
       if (info == 24) {
         if (pos >= dataLen) throw asvJSONError("CBOR: unexpected end (simple)");
         uint8_t sv = data[pos++];
-        if (sv == 20) return asvJSONValue::makeBool(false);
-        if (sv == 21) return asvJSONValue::makeBool(true);
-        if (sv == 22) return asvJSONValue::makeNull();
-        if (sv == 23) return asvJSONValue::makeNull();
+        if (sv == 20) { auto v = asvJSONValue::makeBool(false); if (!v) throw asvJSONError("CBOR bool alloc failed"); return v; }
+        if (sv == 21) { auto v = asvJSONValue::makeBool(true); if (!v) throw asvJSONError("CBOR bool alloc failed"); return v; }
+        if (sv == 22) { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; }
+        if (sv == 23) { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; }
         // RFC 8949 s3.3: simple values 24-31 are reserved and MUST error.
         if (sv >= 24 && sv <= 31) throw asvJSONError("CBOR: reserved simple value");
-        return asvJSONValue::makeNull(); // unassigned simple value
+        auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("CBOR null alloc failed"); return v; // unassigned simple value
       }
       if (info == 25) {
         // Half-precision float (IEEE 754): decode to double
@@ -564,7 +582,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
           d = (1.0 + mant / 1024.0) * std::ldexp(1.0, static_cast<int>(exp) - 15);
         }
         if (sign) d = -d;
-        return asvJSONValue::makeDouble(d); // makeDouble defaults is_float32=false
+        auto v = asvJSONValue::makeDouble(d); // makeDouble defaults is_float32=false
+        if (!v) throw asvJSONError("CBOR float alloc failed");
+        return v;
       }
       if (info == 26) {
         if (pos + 4 > dataLen) throw asvJSONError("CBOR: unexpected end (float32)");
@@ -573,7 +593,8 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         pos += 4;
         float f; memcpy(&f, &fval, sizeof(f));
         auto v = asvJSONValue::makeDouble(f);
-        if (v) v->is_float32 = true;
+        if (!v) throw asvJSONError("CBOR float alloc failed");
+        v->is_float32 = true;
         return v;
       }
       if (info == 27) {
@@ -582,7 +603,9 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         for (int i = 0; i < 8; i++) dval = (dval << 8) | data[pos + i];
         pos += 8;
         double d; memcpy(&d, &dval, sizeof(d));
-        return asvJSONValue::makeDouble(d);
+        auto v = asvJSONValue::makeDouble(d);
+        if (!v) throw asvJSONError("CBOR float alloc failed");
+        return v;
       }
       if (info >= 28 && info <= 31) throw asvJSONError("CBOR: reserved encoding (additional information 28-31 are reserved by RFC 8949 s3.2)");
     }
