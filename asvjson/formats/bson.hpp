@@ -232,6 +232,8 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			size_t sep = str_data.rfind('\0');
 			std::string_view pattern = (sep != std::string_view::npos) ? std::string_view(str_data.data(), sep) : str_data;
 			std::string_view opts = (sep != std::string_view::npos) ? std::string_view(str_data.data() + sep + 1, str_data.size() - sep - 1) : std::string_view();
+			if (!isValidUTF8(reinterpret_cast<const uint8_t*>(pattern.data()), pattern.size())) throw asvJSONError("BSON invalid UTF-8 in regex pattern");
+			if (!isValidUTF8(reinterpret_cast<const uint8_t*>(opts.data()), opts.size())) throw asvJSONError("BSON invalid UTF-8 in regex options");
 			out.insert(out.end(), pattern.begin(), pattern.end());
 			out.push_back(0);
 			out.insert(out.end(), opts.begin(), opts.end());
