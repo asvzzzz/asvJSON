@@ -21362,6 +21362,58 @@ TEST(testINIReviewFidelity) {
   }
 }
 
+TEST(testINIMultilineTrailingComment) {
+  // A ';'/'#' comment written after the CLOSING quote of a multi-line quoted
+  // value belongs to that value's node. The decoder's gather loop keeps only
+  // the text before the closing quote and drops the rest; the collector used to
+  // `continue` past the closing line, silently losing the comment (the
+  // single-line case was already handled). iniCollectComments now remembers the
+  // value's path and collects the closing line's comment.
+  {
+    const char* src = "k = \"line1\nline2\" ; note\nj = 1\n";
+    asvJSON j;
+    ASSERT(j.fromINI(src));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("line1\nline2"));
+    auto* k = j.getRoot()->get("k");
+    ASSERT(k != nullptr && k->comments && k->comments->trailing.size() == 1);
+    ASSERT_EQ(k->comments->trailing[0].text, std::string("note"));
+    // The comment stayed on k instead of moving to the next key.
+    auto* jj = j.getRoot()->get("j");
+    ASSERT(jj != nullptr);
+    ASSERT(!(jj->comments && !jj->comments->leading.empty()));
+  }
+  // '#' comment form too.
+  {
+    const char* src = "k = \"a\nb\" # note\n";
+    asvJSON j;
+    ASSERT(j.fromINI(src));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("a\nb"));
+    auto* k = j.getRoot()->get("k");
+    ASSERT(k != nullptr && k->comments && k->comments->trailing.size() == 1);
+    ASSERT_EQ(k->comments->trailing[0].text, std::string("note"));
+  }
+  // Round-trip: the encoder writes the value quoted on one line, and the
+  // trailing comment survives on that value.
+  {
+    asvJSON j, j2;
+    ASSERT(j.fromINI("k = \"line1\nline2\" ; note\n"));
+    ASSERT(j2.fromINI(j.toINI()));
+    ASSERT_EQ(std::string(j2.getString("k")), std::string("line1\nline2"));
+    auto* k = j2.getRoot()->get("k");
+    ASSERT(k != nullptr && k->comments && k->comments->trailing.size() == 1);
+    ASSERT_EQ(k->comments->trailing[0].text, std::string("note"));
+  }
+  // No comment after the quote: the closing line contributes nothing.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("k = \"a\nb\"\n"));
+    ASSERT_EQ(std::string(j.getString("k")), std::string("a\nb"));
+    auto* k = j.getRoot()->get("k");
+    ASSERT(k != nullptr);
+    ASSERT(!(k->comments && !k->comments->trailing.empty()));
+  }
+}
+
 TEST(testINIDottedKeyRoundTrip) {
   // A flat key containing '.' must round-trip losslessly (regression: the
   // encoder wrote "a.b" and the decoder re-split it, turning {"a.b":1} into
@@ -33984,6 +34036,7 @@ RUN(testCppReviewFixes);
 	RUN(testINITableOrder);
 	RUN(testINIKeyLeadingBracket);
 	RUN(testINIReviewFidelity);
+	RUN(testINIMultilineTrailingComment);
 	RUN(testINIDottedKeyRoundTrip);
 	RUN(testINIReviewFixes);
 	RUN(testINISpecialValues);
