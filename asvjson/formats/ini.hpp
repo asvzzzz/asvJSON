@@ -517,6 +517,12 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
         out += '"';
       }
       break;
+    default:
+      // Defensive: every current core type is handled above, but a future type
+      // must not silently produce `key = ` (an invalid INI line). Degrade to the
+      // null literal like the other encoders' default branches.
+      out += "null";
+      break;
   }
 }
 
@@ -715,6 +721,7 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
   std::vector<Comment> pending;
   std::vector<std::string> sectionPath;  // decoded segments of the current section
   std::string curArrayElemPath;          // path of the current [[...]] element (e.g. items -> "[0]")
+  std::string mlValuePath;               // path of the multi-line quoted value being scanned
   bool inSection = false, inArrayElement = false, inMlValue = false;
   std::vector<std::pair<std::string, size_t>> arrayCounts;  // array key path -> next element index
 
@@ -743,11 +750,32 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
       // the rest of the value (including any ';'/ '#' line) was then classified
       // on its own, stolen into a pending comment, and re-attached to the wrong
       // node on the round-trip.
-      bool escaped = false;
+      bool escaped = false, closed = false;
+      size_t qi = 0;
       for (size_t i = 0; i < line.size(); i++) {
         if (escaped) { escaped = false; continue; }
         if (line[i] == '\\') { escaped = true; continue; }
-        if (line[i] == '"') { inMlValue = false; break; }
+        if (line[i] == '"') { inMlValue = false; closed = true; qi = i; break; }
+      }
+      // A multi-line quoted value may carry an inline comment after its closing
+      // quote on that same line (`k = "line1\nline2" ; comment`). The decoder's
+      // gather loop keeps only the text before the quote and drops the rest, so
+      // the collector must record the comment here as well -- skipping it left
+      // the encoder's own trailing comment on any multi-line value silently
+      // dropped on a toINI() -> fromINI() round-trip (the single-line case is
+      // handled below). Bind it to the value's path, saved when the scan opened.
+      if (closed) {
+        size_t t = qi + 1;
+        while (t < line.size() && (line[t] == ' ' || line[t] == '\t')) t++;
+        if (t < line.size() && (line[t] == ';' || line[t] == '#')) {
+          std::string_view rest = iniTrim(line.substr(t + 1));
+          IniCommentEntry e;
+          e.path = mlValuePath;
+          Comment c;
+          c.text.assign(rest.data(), rest.size());
+          e.trailing.push_back(std::move(c));
+          entries.push_back(std::move(e));
+        }
       }
       continue;
     }
@@ -945,6 +973,11 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
     std::vector<std::string> keyPath = iniSplitDottedPath(keyView);
     std::string path = base;
     for (const auto& s : keyPath) path = iniPathJoin(path, s);
+
+    // Remember the value's path for the closing-quote line: `path` is moved
+    // into the entry below, and the multi-line scan (which resumes on the next
+    // iterations) needs it to attach a comment written after the closing quote.
+    if (inMlValue) mlValuePath = path;
 
     if (!pending.empty() || !trailing.empty()) {
       IniCommentEntry e;
