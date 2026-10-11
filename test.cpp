@@ -15619,6 +15619,35 @@ key = "value" # inline comment)")));
     asvJSON m;
     ASSERT(!m.fromTOML(std::string_view("[[a]]\n[a.b]\nx = 1\n[a.b]\ny = 2")));
   }
+  // An inline table under one [[items]] element must not block a same-named
+  // subtable under ANOTHER element: they are independent tables. The plain
+  // path "items.foo" collided across elements and falsely rejected the second
+  // header; inlineTablePaths is now keyed by the [N]-marked canonical path.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view(
+        "[[items]]\nfoo = {x = 1}\n[[items]]\n[items.foo]\ny = 2")));
+    auto arr = j.getRoot()->get("items");
+    ASSERT_EQ(arr->size(), size_t(2));
+    ASSERT_EQ(arr->get(static_cast<size_t>(0))->get("foo")->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(arr->get(static_cast<size_t>(1))->get("foo")->get("y")->getInt(), int64_t(2));
+    ASSERT(arr->get(static_cast<size_t>(0))->get("foo")->get("y") == nullptr);
+    // The same header in the SAME element would still extend the inline table.
+    asvJSON bad;
+    ASSERT(!bad.fromTOML(std::string_view("[[items]]\nfoo = {x = 1}\n[items.foo]\ny = 2")));
+  }
+  // Same invariant for a dotted key=value in a new element.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("[[items]]\nfoo = {x = 1}\n[[items]]\nfoo.y = 2")));
+    auto arr = j.getRoot()->get("items");
+    ASSERT_EQ(arr->size(), size_t(2));
+    ASSERT_EQ(arr->get(static_cast<size_t>(0))->get("foo")->get("x")->getInt(), int64_t(1));
+    ASSERT_EQ(arr->get(static_cast<size_t>(1))->get("foo")->get("y")->getInt(), int64_t(2));
+    // ... but the SAME element still rejects the extension.
+    asvJSON k;
+    ASSERT(!k.fromTOML(std::string_view("[[items]]\nfoo = {x = 1}\nfoo.y = 2")));
+  }
   // A '#' inside a multi-line string is content, not a comment -- including on
   // the opening line, where the quote run has an even length
   {
