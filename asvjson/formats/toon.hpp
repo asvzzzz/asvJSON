@@ -112,7 +112,7 @@ inline bool toonValNeedsQuotes(std::string_view s, bool forKey) {
 
 inline std::string toonQuoteVal(std::string_view s, bool forKey = true) {
   if (toonValNeedsQuotes(s, forKey)) return '"' + toonJsonEscape(s) + '"';
-  return s;
+  return std::string(s);
 }
 
 inline std::string toonLeafVal(const asvJSONValue* v) {
