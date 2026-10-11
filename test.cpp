@@ -10672,6 +10672,45 @@ TEST(testTOONReviewFixes2) {
 		ASSERT_EQ(std::string(j2.getString("a")), "-abc");
 		ASSERT_EQ(std::string(j2.getString("b")), "-");
 	}
+	// 5. A root STRING containing '[' (no ':') must round-trip. The encoder
+	// emits it bare (only keys get the key[N]: collision guard, via forKey), and
+	// the decoder's root-scalar detection used to also require the absence of
+	// '[', so `a[3]` fell into the length-header branch and died with
+	// "unrecognized line 1". ':' alone already separates a scalar from a header.
+	{
+		const char* roots[] = {"a[3]", "foo[bar]", "x[]", "test[a1]", "config[v2]", "a["};
+		for (const char* rs : roots) {
+			asvJSON r;
+			ASSERT(r.parse(std::string("\"") + rs + "\""));
+			ASSERT(r.getRoot() != nullptr && r.getRoot()->type == asvJSONValue::STRING);
+			std::string toon = r.toTOON();
+			asvJSON back;
+			ASSERT(back.fromTOON(toon));
+			ASSERT(back.getRoot() != nullptr && back.getRoot()->type == asvJSONValue::STRING);
+			if (back.getRoot()) ASSERT_EQ(std::string(back.getRoot()->str_data), std::string(rs));
+		}
+		// An OBJECT value holding '[' already round-tripped (value sits after
+		// "key: "); keep it pinned so the fix cannot disturb the key: path.
+		asvJSON o;
+		ASSERT(o.parse(std::string("{\"k\":\"a[3]\"}")));
+		asvJSON o2;
+		ASSERT(o2.fromTOON(o.toTOON()));
+		ASSERT_EQ(std::string(o2.getString("k")), "a[3]");
+		// A quoted KEY with '[' still round-trips.
+		asvJSON q;
+		ASSERT(q.parse(std::string("{\"a[3]\":1}")));
+		asvJSON q2;
+		ASSERT(q2.fromTOON(q.toTOON()));
+		ASSERT(q2.get("a[3]") != nullptr);
+		if (q2.get("a[3]")) ASSERT_EQ(q2.get("a[3]")->getInt(), int64_t(1));
+		// A root STRING that looks like a real header (has ':') was always
+		// quoted by the encoder and must stay quoted.
+		asvJSON h;
+		ASSERT(h.parse(std::string("\"a[3]: x\"")));
+		asvJSON h2;
+		ASSERT(h2.fromTOON(h.toTOON()));
+		ASSERT_EQ(std::string(h2.getRoot()->str_data), "a[3]: x");
+	}
 }
 
 TEST(testToTRON) {
