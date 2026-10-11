@@ -617,8 +617,7 @@ inline void CppGenerator::valueLiteral(const asvJSONValue* v, const CppType& t,
                                        std::string& out) const {
   if (!v) { out += "{}"; return; }
   if (t.kind == CppType::Enum) {
-    out += t.enumName;
-    if (enumQualified()) out += "::";
+    if (enumQualified()) { out += t.enumName; out += "::"; }
     out += cppIdent(v->str_data, "Value");
     return;
   }

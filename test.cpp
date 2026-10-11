@@ -19580,6 +19580,23 @@ TEST(testCppReviewFixes) {
       "struct Document { std::pair<int, int> p = {1 < 2, 3 > 4}; };\n")));
     ASSERT_EQ(b.serialize(), std::string_view(R"({"p":[1,3]})"));
   }
+  // --- J. a plain (non-class) enum array member uses bare enumerators ---
+  // `useEnumClass = false` emitted `Roleadmin` (enum name glued to the
+  // enumerator) because valueLiteral always prefixed the type before an
+  // optional `::`, which is only valid for a scoped enum.
+  {
+    asvJSON b;
+    ASSERT(b.parse(std::string_view(R"({"config":{"roles":["admin","user"]}})")));
+    CppWriteOptions plain;
+    plain.useEnumClass = false;
+    std::string s = b.toCpp(plain);
+    ASSERT(s.find("enum Role {") != std::string::npos);
+    ASSERT(s.find("{admin, user}") != std::string::npos);
+    ASSERT(s.find("Roleadmin") == std::string::npos);
+    // Default (scoped enum) still qualifies its enumerators.
+    std::string d = b.toCpp(CppWriteOptions{});
+    ASSERT(d.find("{Role::admin, Role::user}") != std::string::npos);
+  }
 }
 
 TEST(testFromJSON5) {
