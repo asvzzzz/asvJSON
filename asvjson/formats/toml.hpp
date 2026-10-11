@@ -340,7 +340,13 @@ inline std::unique_ptr<asvJSONValue> tomlParseJsonValue(const std::string& jsonV
   if (!tmp.parse(std::string_view("{\"_\":" + jsonVal + "}"))) {
     throw asvJSONError("invalid TOML value");
   }
-  return cloneValue(tmp.getRoot()->get("_"));
+  auto v = cloneValue(tmp.getRoot()->get("_"));
+  // cloneValue() returns null on OOM / node-budget exhaustion (nothrow). Throw
+  // instead of returning it: every caller guards with `if (val)`, so a null
+  // would silently drop the key=value pair rather than failing the parse
+  // (CBOR/MessagePack/UBJSON diagnose the same condition explicitly).
+  if (!v) throw asvJSONError("out of memory");
+  return v;
 }
 
 // Quote-aware scanner: skip a string literal (single or triple-quoted)
@@ -1405,24 +1411,18 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         tablePath = parseTomlKeyPath(headerPath);
         isArrayTable = isArr;
 
-        // Reject headers that extend an inline-table path (inline tables are immutable)
+        // Reject headers that extend an inline-table path (inline tables are
+        // immutable). inlineTablePaths is keyed by CANONICAL path (the
+        // [N]-marked form tomlCanonicalPath builds), so the comparison must use
+        // canonical paths too: a plain "items.foo" collides with the foo of a
+        // DIFFERENT [[items]] element and would wrongly reject that element's
+        // legal [items.foo] header. Same reasoning as defKey below.
         if (!tablePath.empty()) {
-          std::string fullPath;
-          for (size_t i = 0; i < tablePath.size(); i++) {
-            if (i > 0) fullPath += '.';
-            fullPath += tablePath[i];
-          }
-          if (inlineTablePaths.count(fullPath))
-            throw asvJSONError("cannot extend inline table '" + fullPath + "'");
-          // Check prefix matches: [x.b] must be rejected if x.a is an inline table
-          for (size_t i = 1; i < tablePath.size(); i++) {
-            std::string prefix;
-            for (size_t j = 0; j < i; j++) {
-              if (j > 0) prefix += '.';
-              prefix += tablePath[j];
-            }
-            if (inlineTablePaths.count(prefix))
-              throw asvJSONError("cannot extend inline table '" + prefix + "'");
+          for (size_t i = 1; i <= tablePath.size(); i++) {
+            std::vector<std::string> sub(tablePath.begin(), tablePath.begin() + i);
+            std::string canon = tomlCanonicalPath(root.get(), sub);
+            if (inlineTablePaths.count(canon))
+              throw asvJSONError("cannot extend inline table '" + canon + "'");
           }
         }
 
@@ -1639,11 +1639,11 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       if (trimSV(std::string_view(valueStr)).empty())
         throw asvJSONError("missing value for key");
 
-      std::string prefix;
-      for (size_t pi = 0; pi < tablePath.size(); pi++) {
-        if (pi > 0) prefix += '.';
-        prefix += tablePath[pi];
-      }
+      // Canonical prefix: an array-of-tables segment carries its current [N]
+      // index, so an inline table registered under one [[items]] element is not
+      // confused with the same-named key under another element (the plain path
+      // collides across elements).
+      std::string prefix = tomlCanonicalPath(root.get(), tablePath);
       for (size_t ki = 0; ki < keys.size(); ki++) {
         if (!prefix.empty()) prefix += '.';
         prefix += keys[ki];
@@ -1669,6 +1669,21 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         auto it = parent->obj->find(arrKey);
         if (it == parent->obj->end() || it->second->arr->empty()) continue;
         asvJSONValue* elem = it->second->arr->back().get();
+        // Reject extending an inline table that already existed in THIS
+        // element (inline tables are immutable), the same rule the regular
+        // branch applies. Without it `[[items]]\nfoo = {x=1}\nfoo.y = 2`
+        // silently added to foo. Canonical paths so a same-named inline table
+        // under a different [[items]] element is not confused with this one.
+        {
+          std::vector<std::string> fullPath = tablePath;
+          fullPath.insert(fullPath.end(), keys.begin(), keys.end());
+          for (size_t i = 1; i <= fullPath.size(); i++) {
+            std::vector<std::string> sub(fullPath.begin(), fullPath.begin() + i);
+            std::string canon = tomlCanonicalPath(root.get(), sub);
+            if (preInlinePaths.count(canon))
+              throw asvJSONError("cannot extend inline table '" + canon + "'");
+          }
+        }
         // Set key=value on the element (handle dotted keys)
         if (keys.size() == 1) {
           auto val = tomlParseJsonValue(jsonVal);
@@ -1699,14 +1714,11 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         // so checking the live set here would self-reject the very line that
         // defines the inline table (`point = {x = 1, y = 2}` would fail with
         // "cannot extend inline table 'point'").
-        for (size_t i = 0; i < fullPath.size(); i++) {
-          std::string p;
-          for (size_t j = 0; j <= i; j++) {
-            if (j > 0) p += '.';
-            p += fullPath[j];
-          }
-          if (preInlinePaths.count(p))
-            throw asvJSONError("cannot extend inline table '" + p + "'");
+        for (size_t i = 1; i <= fullPath.size(); i++) {
+          std::vector<std::string> sub(fullPath.begin(), fullPath.begin() + i);
+          std::string canon = tomlCanonicalPath(root.get(), sub);
+          if (preInlinePaths.count(canon))
+            throw asvJSONError("cannot extend inline table '" + canon + "'");
         }
         std::string lastKey = fullPath.back();
         fullPath.pop_back();
