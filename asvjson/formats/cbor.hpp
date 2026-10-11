@@ -23,8 +23,10 @@
 //     can hold, e.g. 123456789012345678901234567890 from the JSON parser -- is
 //     written as an ordinary CBOR text string. CBOR has no bignum that would
 //     carry the literal text, so the flag is lost and the value comes back as
-//     a plain STRING (quoted again by toJSON()). Same trade-off as the
-//     MessagePack out-of-range uint64 mapping, see msgpack.hpp.
+//     a plain STRING (quoted again by toJSON()). MessagePack makes the same
+//     trade-off (it too writes a raw_number STRING as an ordinary text
+//     string); note this is NOT the same as a MessagePack uint64 above
+//     INT64_MAX, which is rejected outright, not re-typed. See msgpack.hpp.
 //   - RFC 8949 sec 3.1 requires valid UTF-8 in a text string and our own decoder
 //     rejects invalid sequences, so toCBOR() throws "CBOR invalid UTF-8 in text
 //     string" instead of emitting an unreadable document. That reaches beyond

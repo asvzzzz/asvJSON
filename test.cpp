@@ -4691,19 +4691,47 @@ TEST(testCBORTag1Boundary) {
 }
 
 TEST(testCBORTag1MsCarry) {
-	// A fractional seconds value that rounds up to exactly 1000 ms (e.g. ...9995) must carry into the next second, not be clamped and lose a whole second of precision.
-	const double sec = 'A'; // ASCII for letter A (decimal *3*) as a small, legal epoch value in whole seconds; far below INT64_MAX on every platform and exercises the tag-1 float64 decode path end to end -- the fractional-carry scenario itself is already covered by testCBORTag1Boundary above.
-	std::vector<uint8_t> cbor;
-	cbor.push_back(0xD9); cbor.push_back(0x00); cbor.push_back(0x01); // tag 1
-	cbor.push_back(0xFB); // float64 marker, required before the mantissa bytes.
-	uint64_t bits; memcpy(&bits, &sec, sizeof(bits));
-	for (int i = 7; i >= 0; i--) cbor.push_back(static_cast<uint8_t>(bits >> (i * 8)));
+	// A fractional seconds value that rounds up to exactly 1000 ms (e.g. 65.9996)
+	// must carry into the next second, not be clamped to 999 and silently lose a
+	// whole second of precision (the old ms>999 clamp dropped the carry). Built
+	// by hand so the test is independent of asvJSON's own encoder.
+	auto decodeTag1Float = [](double sec, int64_t& ts, int& ms) {
+		std::vector<uint8_t> cbor;
+		cbor.push_back(0xD9); cbor.push_back(0x00); cbor.push_back(0x01); // tag 1
+		cbor.push_back(0xFB); // float64 marker, required before the mantissa bytes.
+		uint64_t bits; memcpy(&bits, &sec, sizeof(bits));
+		for (int i = 7; i >= 0; i--) cbor.push_back(static_cast<uint8_t>(bits >> (i * 8)));
+		asvJSON json;
+		if (!json.fromCBOR(cbor.data(), cbor.size())) return false;
+		auto* v = json.getRoot();
+		if (!v || v->type != asvJSONValue::DATETIME) return false;
+		ts = static_cast<int64_t>(v->timestamp);
+		ms = v->datetime_ms;
+		return true;
+	};
 
-	asvJSON json;
-	ASSERT(json.fromCBOR(cbor.data(), cbor.size())); // must decode without throwing.
-	auto* v = json.getRoot();
-	// Exact split can't be asserted portably here (floor/round of a value this large is platform-precision dependent), but it MUST succeed -- the old code path that clamped ms>999 silently discarded one full second, which would have been visible as an off-by-one in t; we only assert no exception + type sanity.
-	ASSERT(v != nullptr); // (type may be DATETIME or TIMESTAMP depending on platform rounding -- both are acceptable outcomes of a successful carry)
+	// 65.9996 rounds to 66.000 s: the millisecond rounds up to 1000 and must carry.
+	{
+		int64_t ts = -1; int ms = -1;
+		ASSERT(decodeTag1Float(65.9996, ts, ms));
+		ASSERT_EQ(ts, int64_t(66));
+		ASSERT_EQ(ms, 0);
+	}
+	// 65.9994 stays below the half-up threshold: 65 s + 999 ms, no carry.
+	{
+		int64_t ts = -1; int ms = -1;
+		ASSERT(decodeTag1Float(65.9994, ts, ms));
+		ASSERT_EQ(ts, int64_t(65));
+		ASSERT_EQ(ms, 999);
+	}
+	// The carry also works for a negative instant: -1.0004 s is floor -2 s plus a
+	// 0.9996 fraction, which carries back to -1 s + 0 ms (not -2 s + 1000 ms).
+	{
+		int64_t ts = -1; int ms = -1;
+		ASSERT(decodeTag1Float(-1.0004, ts, ms));
+		ASSERT_EQ(ts, int64_t(-1));
+		ASSERT_EQ(ms, 0);
+	}
 }
 
 TEST(testCBORFromContainsNonAsvJSONExceptions) {
@@ -4945,8 +4973,9 @@ TEST(testCBORDatetimeFloat64PrecisionLimit) {
 TEST(testCBORRawNumberBecomesString) {
 	// Documented in the cbor.hpp header: CBOR has no bignum, so a raw_number
 	// STRING (a literal no int64/double can hold) is written as a plain text
-	// string and the flag is lost. Same trade-off as the MessagePack
-	// out-of-range uint64 mapping.
+	// string and the flag is lost -- the same trade-off MessagePack makes (it
+	// too writes a raw_number STRING as an ordinary text string; note that a
+	// MessagePack uint64 above INT64_MAX is instead rejected, not re-typed).
 	asvJSON json;
 	ASSERT(json.parse(std::string(R"({"a":123456789012345678901234567890})")));
 	auto* v = json.get("a");
