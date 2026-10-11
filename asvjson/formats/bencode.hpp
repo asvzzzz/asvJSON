@@ -45,6 +45,8 @@
 #include "../core.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -110,7 +112,15 @@ inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_
     throw asvJSONError("bencode: nesting too deep");
   if (pos >= s.size()) throw asvJSONError("bencode: unexpected end of input");
   char c = s[pos];
-  if (c == 'i') return asvJSONValue::makeInt(bencodeParseInt(s, pos));
+  if (c == 'i') {
+    // makeInt uses new(std::nothrow): a bare `return` handed back the nullptr
+    // it produces on OOM, which then landed in a list/dictionary as a null
+    // element (dereferenced by any later tree walk). Every factory result in
+    // this parser is checked; do not drop this guard (see CBOR/UBJSON/plist).
+    auto v = asvJSONValue::makeInt(bencodeParseInt(s, pos));
+    if (!v) throw asvJSONError("bencode: out of memory");
+    return v;
+  }
   if (c == 'l') {
     pos++;
     auto arr = asvJSONValue::makeArray();
@@ -120,7 +130,9 @@ inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_
       if (s[pos] == 'e') { pos++; break; }
       if (arr->arr->size() >= asvJSONValue::MAX_ARRAY_SIZE)
         throw asvJSONError("bencode: list too large");
-      arr->arr->push_back(bencodeParseValue(s, pos, depth + 1));
+      auto elem = bencodeParseValue(s, pos, depth + 1);
+      if (!elem) throw asvJSONError("bencode: list element alloc failed");
+      arr->arr->push_back(std::move(elem));
     }
     return arr;
   }
@@ -135,6 +147,7 @@ inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_
         throw asvJSONError("bencode: dictionary key must be a byte string");
       std::string key = bencodeParseString(s, pos);
       auto val = bencodeParseValue(s, pos, depth + 1);
+      if (!val) throw asvJSONError("bencode: dictionary value alloc failed");
       if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE)
         throw asvJSONError("bencode: dictionary too large");
       obj->obj->insert_or_assign(key, std::move(val));
