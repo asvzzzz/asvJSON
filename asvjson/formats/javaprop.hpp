@@ -41,7 +41,14 @@
 //     STRING holding that JSON text (type lost, payload kept);
 //   - BINARY and EXTENSION are written as base64 of their bytes, which decodes
 //     back as a plain STRING holding that base64 -- both the type and the bytes
-//     are lost, since nothing tries to reverse the encoding on load.
+//     are lost, since nothing tries to reverse the encoding on load;
+//   - a STRING whose text would type-infer as one of the bare scalar forms ("5",
+//     "true", "null", "3.14", an ISO-8601 timestamp) is emitted bare and reads
+//     back as that typed value, not as a STRING. The format has no quoting, and
+//     escaping cannot help because the escape is decoded before inference
+//     (`\u0035` decodes to `5` and is then typed INT), so the STRING-ness is
+//     unrecoverable. INI/dotenv avoid this with a quoted form; here it is a
+//     documented loss, like CSV/TOML.
 // DATETIME is not lossy: it is written in ISO form and tryParseDateTime() gives
 // the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types (a
 // finite double whose fmtDoubleVal literal carries no '.', 'e' or 'E' gets a
@@ -67,6 +74,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -401,9 +409,20 @@ inline bool javapropLooksLike(std::string_view s) {
     while (b > a && (line[b - 1] == ' ' || line[b - 1] == '\t' || line[b - 1] == '\r')) b--;
     line = line.substr(a, b - a);
     if (!line.empty()) {
-      lines++;
       if (line[0] == '!') { sig |= 4; break; }
-      if (line[0] == '#') continue; // comment: not data, and '#' is no signal
+      if (line[0] == '#') {
+        // Comment lines are skipped entirely -- no signal, and their text must
+        // not be scanned for '='/':'/'\u' -- and do NOT count against the
+        // 16-line budget. Advance p BEFORE continuing: a bare `continue` jumps
+        // to the loop condition and skips the `p = nl + 1` at the bottom, so the
+        // same comment line was rescanned 16 times and a document whose first
+        // non-empty line is a '#' comment never reached its data lines (false
+        // negative for the extremely common `# comment\nkey=value`).
+        if (nl == s.size()) break;
+        p = nl + 1;
+        continue;
+      }
+      lines++;
       if (line.find("\\u") != std::string_view::npos) { sig |= 8; break; }
       for (size_t i = 0; i < line.size(); i++) {
         char c = line[i];

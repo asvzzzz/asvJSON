@@ -23299,6 +23299,36 @@ TEST(testJavaPropReviewFixes) {
     ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("name=My App")));
     ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("key:value")));
   }
+  // 6. A '#' comment as the FIRST non-empty line must not stall the detector:
+  //    the '# ' branch used to `continue` without advancing `p`, so it rescanned
+  //    the same line 16 times and never reached the data below (false negative
+  //    for the common `# comment\nkey=value`). Comments are now skipped entirely
+  //    and do not count against the 16-line budget.
+  {
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("# comment\nKEY=value")));
+    ASSERT(asvJSONInternal::javapropLooksLike(std::string_view("! config\nkey:value")));
+    ASSERT(asvJSONInternal::javapropLooksLike(
+        std::string_view("# a\n# b\n# c\n# d\n# e\n# f\n# g\n# h\n# i\n# j\n"
+                         "# k\n# l\n# m\n# n\n# o\n# p\n# q\n# r\nname=My App")));
+    // A comment's own '='/':' text is still not a signal.
+    ASSERT(!asvJSONInternal::javapropLooksLike(std::string_view("# a=b:c")));
+  }
+  // 7. Documented loss: a STRING that spells a bare scalar re-types on load
+  //    (the format has no quoting and escaping cannot help). Pinned so the
+  //    known loss is explicit and a future change that alters it is caught.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"n\":\"5\",\"b\":\"true\",\"z\":\"null\","
+                               "\"d\":\"3.14\",\"t\":\"2024-01-01T00:00:00Z\"}")));
+    ASSERT(j.get("n")->type == asvJSONValue::STRING);
+    asvJSON k;
+    ASSERT(k.fromJavaProp(j.toJavaProp()));
+    ASSERT(k.get("n")->type == asvJSONValue::INT);
+    ASSERT(k.get("b")->type == asvJSONValue::BOOL_VAL);
+    ASSERT(k.get("z")->type == asvJSONValue::NULL_VAL);
+    ASSERT(k.get("d")->type == asvJSONValue::DOUBLE);
+    ASSERT(k.get("t")->type == asvJSONValue::DATETIME);
+  }
 }
 
 TEST(testFromPlist) {
