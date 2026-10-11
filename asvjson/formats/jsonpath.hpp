@@ -835,38 +835,40 @@ class JPFilterEval {
       } else if (lex_.peek().type == TokType::LBRACKET) {
         lex_.next();
         Tok idx = lex_.next();
+        const asvJSONValue* nextNode = nullptr;
         if (idx.type == TokType::NUMBER && node &&
             node->type == asvJSONValue::ARRAY && node->arr) {
           int64_t i;
           if (!idx.ok || !jpParseIntStrict(idx.val, i)) {
-            node = nullptr;
+            nextNode = nullptr;
           } else {
             size_t ai;
             if (i < 0) {
               size_t mag = static_cast<size_t>(-i);
               if (mag > node->arr->size()) {
-                node = nullptr;
+                nextNode = nullptr;
               } else {
                 ai = node->arr->size() - mag;
-                node = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
+                nextNode = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
               }
             } else {
               ai = static_cast<size_t>(i);
-              node = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
+              nextNode = (ai < node->arr->size()) ? (*node->arr)[ai].get() : nullptr;
             }
           }
         } else if (idx.type == TokType::STRING && node &&
                    node->type == asvJSONValue::OBJECT && node->obj) {
           if (!idx.ok) {
-            node = nullptr;
+            nextNode = nullptr;
           } else {
             auto it = node->obj->find(idx.val);
-            node = (it != node->obj->end()) ? it->second.get() : nullptr;
+            nextNode = (it != node->obj->end()) ? it->second.get() : nullptr;
           }
         } else if (idx.type == TokType::STAR && node) {
           // wildcard: the node is selected iff it has at least one child
-          if (jpAllChildren(node).empty()) node = nullptr;
+          if (!jpAllChildren(node).empty()) nextNode = node;
         }
+        node = nextNode;
         // The single ']' consume point, error paths included: the error
         // branches above must not eat it themselves or a following ']'
         // (e.g. in `@[01]]`) would be swallowed twice.
