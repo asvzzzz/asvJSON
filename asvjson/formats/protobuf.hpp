@@ -346,7 +346,8 @@ inline int protoFieldExtType(const asvJSONValue* v) {
 // Map a name-map type code back to a protobuf wire type string and repeated flag.
 inline std::string protoLessCodeToType(const std::string& code, bool& repeated) {
   repeated = false;
-  if (code.empty() || code == "u" || code == "A" || code == "n" || code == "N") return "";
+  if (code.empty() || code == "u" || code == "A" || code == "n") return "";
+  if (code == "N") { repeated = true; return ""; }
   char c = code[0];
   if (c >= 'A' && c <= 'Z') { repeated = true; c = static_cast<char>(c + 32); }
   switch (c) {
@@ -820,12 +821,12 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
   // as their element count is not recoverable from the wire.)
   if (!schema && less.present) {
     for (const auto& [fnum, code] : less.types) {
-      if (code != "A" && code != "n") continue;
+      if (code != "A" && code != "n" && code != "N") continue;
       std::string fname = std::to_string(fnum);
       auto nit = less.names.find(fnum);
       if (nit != less.names.end()) fname = nit->second;
       if (obj->obj->find(fname) != obj->obj->end()) continue;
-      if (code == "A") {
+      if (code == "A" || code == "N") {
         auto arr = asvJSONValue::makeArray();
         if (arr) (*obj->obj)[fname] = std::move(arr);
       } else {
