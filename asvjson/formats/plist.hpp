@@ -485,6 +485,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
 
 inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
   auto obj = asvJSONValue::makeObject();
+  if (!obj) fail("out of memory");
   for (;;) {
     skipWs();
     if (atEnd()) fail("unterminated <dict>");
@@ -496,6 +497,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
       if (ktag != "key" || ksc) fail("expected <key> in <dict>");
     }
     std::string k = textUntil("key");
+    if (!asvJSONValue::checkStringLen(k.size())) fail("key too long");
     if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE) fail("object too large");
     skipWs();
     auto v = parseValue(depth + 1);
@@ -509,6 +511,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseDict(int depth) {
 
 inline std::unique_ptr<asvJSONValue> PlistReader::parseArray(int depth) {
   auto arr = asvJSONValue::makeArray();
+  if (!arr) fail("out of memory");
   for (;;) {
     skipWs();
     if (atEnd()) fail("unterminated <array>");
@@ -560,6 +563,7 @@ inline bool asvJSON::fromPlist(std::string_view input) {
       if (sc) throw asvJSONError("plist: empty <plist/>");
       r.skipWs();
       val = r.parseValue(0);
+      if (!val) throw asvJSONError("plist: out of memory");
       r.skipWs();
       if (!r.acceptClose("plist")) r.fail("expected </plist>");
       r.skipWs();
@@ -567,6 +571,7 @@ inline bool asvJSON::fromPlist(std::string_view input) {
     } else {
       // Lenient: a bare plist value without the <plist> wrapper.
       val = r.parseValue(0);
+      if (!val) throw asvJSONError("plist: out of memory");
       r.skipWs();
       if (!r.atEnd()) throw asvJSONError("plist: trailing content");
     }
