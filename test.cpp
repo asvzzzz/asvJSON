@@ -2635,6 +2635,18 @@ TEST(testBSONEncoderUTF8Validation) {
 	jGood.setValue("", std::move(obj2));
 	auto bson4 = jGood.toBSON();
 	ASSERT(bson4.size() > 0);
+
+	// A ROOT document's OWN keys must be validated too. The root encoder in
+	// asvJSON::toBSON is a separate loop from the value-level toBSON; it used
+	// to check only the NUL byte, so an invalid-UTF-8 key at the root was
+	// emitted unchecked (the earlier check above only exercised a NESTED
+	// object, because setValue("", obj) wraps it one level deep).
+	asvJSON jRootBad;
+	jRootBad.setValue(std::string("\xFE"), asvJSONValue::makeNull());
+	threw = false;
+	try { auto bson5 = jRootBad.toBSON(); }
+	catch (const std::exception&) { threw = true; }
+	ASSERT(threw);
 }
 
 TEST(testBSONNestedDocBound) {

@@ -3376,6 +3376,12 @@ inline std::vector<uint8_t> asvJSON::toBSON() const {
 			// BSON keys are NUL-terminated C strings; a key containing a
 			// NUL byte cannot be represented (it would truncate on read).
 			if (k.find('\0') != std::string::npos) throw asvJSONError("BSON key contains NUL byte");
+			// Keys must also be valid UTF-8 (bsonspec.org). This root loop is a
+			// separate copy of the value-level asvJSONValue::toBSON object
+			// branch and must apply the same check -- it used to skip it, so a
+			// root document's OWN keys were emitted unchecked while a nested
+			// object's key threw.
+			if (!isValidUTF8(reinterpret_cast<const uint8_t*>(k.data()), k.size())) throw asvJSONError("BSON invalid UTF-8 in key");
 			std::vector<uint8_t> elem;
 			elem.reserve(64 + k.size());
 			size_t elemStart = elem.size();
