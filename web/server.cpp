@@ -253,6 +253,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
       else if (fromFmt == "TRON") ok = j.fromTRON(textData);
       else if (fromFmt == "GOON") ok = j.fromGOON(textData);
       else if (fromFmt == "ProtobufText") ok = j.fromProtobufText(textData);
+      else if (fromFmt == "SVG") ok = j.fromSVG(textData);
       else if (fromFmt == "MessagePack") ok = j.fromMessagePack(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "BSON") ok = j.fromBSON(resolvedBin.data(), resolvedBin.size());
       else if (fromFmt == "CBOR") ok = j.fromCBOR(resolvedBin.data(), resolvedBin.size());
@@ -296,6 +297,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     else if (toFmt == "TRON") result = j.toTRON();
     else if (toFmt == "GOON") result = j.toGOON();
     else if (toFmt == "ProtobufText") result = j.toProtobufText();
+    else if (toFmt == "SVG") result = j.toSVG();
     else if (toFmt == "CPP") result = j.toCpp();
     else if (toFmt == "CPP_C") {
       CppWriteOptions co;
