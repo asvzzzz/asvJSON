@@ -299,7 +299,7 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
       if (std::isnan(v->dbl)) { out += std::signbit(v->dbl) ? "-nan" : "nan"; break; }
       if (std::isinf(v->dbl)) { out += (v->dbl < 0 ? "-inf" : "inf"); break; }
       // A double with an integral value must round-trip as a float (otherwise
-      // "100000" would re-decode as an INT). Same rule as INI/UDE.
+      // "100000" would re-decode as an INT). Same rule as INI/ADE.
       std::string tmp;
       fmtDoubleVal(v->dbl, tmp);
       if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&

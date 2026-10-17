@@ -1,9 +1,9 @@
 #pragma once
-// UDE (Unified Data Exchange) format support for asvJSON++
-// See UDE.md for the full specification.
+// ADE (Advanced Data Exchange) format support for asvJSON++
+// See ade.md for the full specification.
 //
 // Features:
-//   - Optional "# UDE vX.Y" header
+//   - Optional "# ADE vX.Y" header
 //   - Multiple documents separated by "// --- End of Document ---" lines
 //   - Comments: #, //, /* ... */ (outside strings)
 //   - Keys: identifiers, quoted strings, dotted keys (a.b.c => nested objects)
@@ -57,7 +57,7 @@ inline bool udeIsIdentCont(char c) {
 // marker is what keeps the canonical encoding distinguishable from the
 // historical "decoded text, split at the last '|'" form that the decoder
 // still accepts, so an old `!regex "a|b|c"` is not read as canonical and
-// silently truncated. Declared before UDEParser and the encoder, which are
+// silently truncated. Declared before ADEParser and the encoder, which are
 // separate classes that both need it.
 constexpr std::string_view kUdeRegexMarker = "__REGEX__";
 
@@ -161,7 +161,7 @@ inline void udeDecodeUtf32(std::string& out, const uint8_t* p, size_t n, bool li
 }
 
 // Normalize the byte order mark: a UTF-8 BOM is stripped, UTF-16/UTF-32 input
-// (detected by its BOM) is transcoded to UTF-8 so that Windows-produced UDE
+// (detected by its BOM) is transcoded to UTF-8 so that Windows-produced ADE
 // files parse correctly. The BOM itself is a byte-order signature, not part of
 // the document text, and is consumed without altering the remaining content.
 // Returns true when a BOM was present.
@@ -211,7 +211,7 @@ inline int udeHexDigit(char c) {
 inline bool udeIsDocSeparator(std::string_view line) {
   return line == "---" ||
          line == "// --- End of Document ---" ||
-         line == "// UDE document separator";
+         line == "// ADE document separator";
 }
 
 // A "..." line is a YAML-style document end marker and is skipped entirely.
@@ -219,7 +219,7 @@ inline bool udeIsDocEndMarker(std::string_view line) {
   return line == "...";
 }
 
-// Split a UDE stream into documents on document separator lines.
+// Split a ADE stream into documents on document separator lines.
 inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
   auto lines = splitLines(text);
   std::vector<std::string> docs;
@@ -253,7 +253,7 @@ inline std::vector<std::string> splitUdeDocuments(const std::string& text) {
 }
 
 // Try to interpret a bare token as a number (decimal / hex / octal / binary).
-// Returns nullptr when the token is not a valid UDE number literal.
+// Returns nullptr when the token is not a valid ADE number literal.
 // Supports digit separators ('_' between digits) and, on int64 overflow,
 // stores the exact literal as a STRING with raw_number set (so it round-trips).
 inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
@@ -287,7 +287,7 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
 
   size_t i = 0;
   bool neg = false;
-  // Per the UDE grammar SIGNED_INT ::= '-'? INT, a leading '+' is not a
+  // Per the ADE grammar SIGNED_INT ::= '-'? INT, a leading '+' is not a
   // valid numeric sign; such tokens are treated as unquoted strings.
   if (t[0] == '-') { neg = true; i = 1; }
 
@@ -379,7 +379,7 @@ inline std::unique_ptr<asvJSONValue> udeTryParseNumber(const std::string& tok) {
   return asvJSONValue::makeInt(static_cast<int64_t>(ll));
 }
 
-// Parse a UDE datetime value. Accepts the full ISO-8601 form handled by
+// Parse a ADE datetime value. Accepts the full ISO-8601 form handled by
 // tryParseDateTime (with optional fractional seconds and timezone offset) as
 // well as date-only "YYYY-MM-DD" (midnight UTC).
 inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int* tz_out = nullptr) {
@@ -410,9 +410,9 @@ inline bool udeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out, i
 
 // ====================== Parser ======================
 
-class UDEParser {
+class ADEParser {
 public:
-  explicit UDEParser(std::string_view text, bool strict) : text_(text), strict_(strict) {}
+  explicit ADEParser(std::string_view text, bool strict) : text_(text), strict_(strict) {}
 
   std::unique_ptr<asvJSONValue> parseDocument();
   std::unique_ptr<asvJSONValue> parseScalarDocValue() {
@@ -427,7 +427,7 @@ public:
   }
 
 private:
-  // Documented resource limits (Section 12 of the UDE spec): the maximum
+  // Documented resource limits (Section 12 of the ADE spec): the maximum
   // number of anchors that may be registered while parsing a document.
   static constexpr size_t kMaxAnchors = 1000000;
 
@@ -582,7 +582,7 @@ private:
 
   // True when a tag is immediately followed by something that cannot start a
   // value: the end of the line, the end of the input, or a flow delimiter.
-  // UDE has no block-sequence production (Appendix A: DOC_LINE is only
+  // ADE has no block-sequence production (Appendix A: DOC_LINE is only
   // WS? (LINE | BLOCK_COMMENT | COMMENT)), so a value-less tag is only legal
   // at end of line or right before a ',' / '}' / ']' in a flow collection,
   // which is what makes "[!null, 1]" and "{y: !null, z: 1}" work.
@@ -610,7 +610,7 @@ private:
     // A key may be dotted: each dot-separated segment is either a quoted
     // string (literal) or a plain identifier. "a.b.c" nests; "a.b".c nests
     // with a literal first segment "a.b"; a fully quoted "a.b.c" is a single
-    // literal key (Section 3 of the UDE spec).
+    // literal key (Section 3 of the ADE spec).
     std::vector<std::pair<std::string, bool>> segs;
     while (true) {
       std::pair<std::string, bool> seg;
@@ -681,7 +681,7 @@ private:
     return parseScalar();
   }
 
-  // Unescape a double-quoted UDE string. Supports JSON escapes (\n, \t, \r,
+  // Unescape a double-quoted ADE string. Supports JSON escapes (\n, \t, \r,
   // \b, \f, \\, \", \/), byte escapes \xHH, Unicode escapes \uXXXX (including
   // surrogate pairs), \UXXXXXXXX and \u{...}, plus INI-style line continuation
   // (backslash immediately before a line break joins the next line, stripping
@@ -787,7 +787,7 @@ private:
     return out;
   }
 
-  // Single-quoted UDE string: everything is literal, '' is the only escape
+  // Single-quoted ADE string: everything is literal, '' is the only escape
   // (YAML-style). No backslash processing. Literal \r\n is normalized to \n.
   static std::string udeUnescapeSingle(const std::string_view& raw) {
     std::string out;
@@ -1486,7 +1486,7 @@ private:
       // carries no VALUE, so accepting the anchored spelling is the consistent
       // reading rather than a new capability -- and an anchor with nothing to
       // point at would otherwise be unrepresentable. Every other tag still
-      // requires its value. Documented in UDE.md beside the !null rule.
+      // requires its value. Documented in ade.md beside the !null rule.
       if (atTagValueEnd()) {
         if (!verbatim && tag == "null") {
           auto n = asvJSONValue::makeNull();
@@ -1643,7 +1643,7 @@ private:
 
 };
 
-std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
+std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
   skipWsAndComments();
   if (eof()) return asvJSONValue::makeObject(); // empty document
 
@@ -1690,7 +1690,7 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
   }
 
 // Fall back to a plain string for a single-line document that failed to parse.
-// Only applied when the line cannot be a structured UDE document at all, so
+// Only applied when the line cannot be a structured ADE document at all, so
 // that malformed documents and strict-mode rejections report their error
 // instead of silently degrading to a plain string.
 inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& text, bool strict) {
@@ -1711,18 +1711,18 @@ inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& tex
   // the original error for malformed ones.
   if (c != '"' && c != '\'' && c != '!' && c != '&' && c != '*' && t.find(' ') != std::string_view::npos)
     return asvJSONValue::makeStringView(t);
-  // Keep the temporary buffer alive for the whole parse: UDEParser stores a
+  // Keep the temporary buffer alive for the whole parse: ADEParser stores a
   // string_view, so the std::string must outlive the parser object.
   std::string buffer(t);
   try {
-    UDEParser p(buffer, strict);
+    ADEParser p(buffer, strict);
     return p.parseScalarDocValue();
   } catch (...) {
     return nullptr;
   }
 }
 
-// Versioning of the "# UDE vX.Y" header (Section 6 of the spec): the major
+// Versioning of the "# ADE vX.Y" header (Section 6 of the spec): the major
 // digit X is a breaking change, the minor digit Y is backward compatible.
 // The current implementation supports major version 1. Documents declaring a
 // newer major version are rejected; older minor versions are accepted. The
@@ -1759,7 +1759,7 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
     scan = eol + 1;
   }
   if (headEnd == std::string_view::npos) return text;
-  // t = "# UDE v1.1 [flags]"
+  // t = "# ADE v1.1 [flags]"
   std::string_view rest = t.substr(6); // "v1.1 [flags]"
   if (rest.empty() || rest[0] != 'v') return text;
   rest.remove_prefix(1);
@@ -1775,7 +1775,7 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
   if (j == i) throw asvJSONError("ADE: malformed version header");
   int minor = 0;
   for (size_t k = i; k < j; k++) minor = minor * 10 + (rest[k] - '0');
-  if (major != 1) throw asvJSONError("ADE: unsupported UDE version v" + std::to_string(major) + "." + std::to_string(minor));
+  if (major != 1) throw asvJSONError("ADE: unsupported ADE version v" + std::to_string(major) + "." + std::to_string(minor));
   (void)minor;
   // Optional flags after the version number.
   size_t k = j;
@@ -1793,7 +1793,7 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
   return std::string(text.substr(headEnd));
 }
 
-inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool strict) {
+inline std::unique_ptr<asvJSONValue> parseADE(const std::string& text, bool strict) {
   std::string normalized;
   udeNormalizeEncoding(text, normalized);
   std::string body = udeStripAndCheckHeader(normalized, strict);
@@ -1803,7 +1803,7 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
     for (const auto& doc : docs) {
       std::unique_ptr<asvJSONValue> v;
       try {
-        UDEParser p(doc, strict);
+        ADEParser p(doc, strict);
         v = p.parseDocument();
       } catch (const asvJSONError&) {
         v = udePlainTextFallback(doc, strict);
@@ -1816,7 +1816,7 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
     return arr;
   }
   try {
-    UDEParser p(docs[0], strict);
+    ADEParser p(docs[0], strict);
     return p.parseDocument();
   } catch (const asvJSONError&) {
     auto v = udePlainTextFallback(docs[0], strict);
@@ -1839,7 +1839,7 @@ inline bool udeKeySafe(const std::string& key) {
 
 inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
   // UPPERCASE hex digits, matching udeEscPipe and the canonical bodies in
-  // UDE.md, so one character is never spelled two ways across the two writers.
+  // ade.md, so one character is never spelled two ways across the two writers.
   os << '"';
   for (unsigned char c : s) {
     switch (c) {
@@ -1863,16 +1863,16 @@ inline void udeWriteQuoted(std::ostream& os, std::string_view s) {
   os << '"';
 }
 
-// Write `s` as UDE string-body content, additionally turning any literal '|'
+// Write `s` as ADE string-body content, additionally turning any literal '|'
 // into \u007C. The escape is UPPERCASE to match this file's own udeWriteQuoted
-// and the bodies spelled out in UDE.md ("__REGEX__a\u007C||"); one spelling per
+// and the bodies spelled out in ade.md ("__REGEX__a\u007C||"); one spelling per
 // character keeps a diff between two documents that differ only in that escape
 // meaningful. The decoder accepts either case. Used by the !regex encoder so that raw '|' characters appear
 // ONLY as the pattern/options separator and the trailing terminator, never as
 // pattern or option content. The decoder splits the raw token text before
 // unescaping, so the escape is what keeps the two apart. A plain backslash
 // escape is not usable: udeUnescape would collapse "\|" into "|" (and "\|" is
-// not itself a valid UDE escape).
+// not itself a valid ADE escape).
 inline void udeEscPipe(std::ostream& os, std::string_view s) {
   static constexpr char HEX[] = "0123456789ABCDEF";
   for (unsigned char c : s) {
@@ -2072,7 +2072,7 @@ inline void udeWriteCommentLines(std::ostream& os, const std::vector<Comment>& l
 
 // Appends a trailing comment after a value; returns true when the comment
 // was terminated with a newline (a `#`-style comment swallows anything on the
-// same line, so UDE separators/closers must start on a fresh line).
+// same line, so ADE separators/closers must start on a fresh line).
 inline bool udeWriteTrailing(std::ostream& os, const asvJSONValue* v) {
   if (!v->comments || v->comments->trailing.empty()) return false;
   for (const auto& c : v->comments->trailing) {
@@ -2328,7 +2328,7 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
   }
 }
 
-inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, bool strict) {
+inline void serializeADE(std::ostream& os, const asvJSONValue& val, int indent, bool strict) {
   if (val.type == asvJSONValue::OBJECT && val.obj && indent == 0) {
     if (val.comments) udeWriteCommentLines(os, val.comments->leading, 0);
     bool first = true;
@@ -2384,7 +2384,7 @@ inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, 
 
 inline std::string asvJSON::toADE(bool strict) const {
   std::ostringstream os;
-  if (root) asvJSONInternal::serializeUDE(os, *root, 0, strict);
+  if (root) asvJSONInternal::serializeADE(os, *root, 0, strict);
   return os.str();
 }
 
@@ -2393,7 +2393,7 @@ inline bool asvJSON::fromADE(std::string_view input, bool strict) {
   formatType = FormatType::Unknown;
   root = nullptr;
   try {
-    auto parsed = asvJSONInternal::parseUDE(std::string(input), strict);
+    auto parsed = asvJSONInternal::parseADE(std::string(input), strict);
     if (!parsed) {
       lastError = "ADE: failed to parse input";
       return false;

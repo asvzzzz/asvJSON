@@ -1303,7 +1303,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		// A bare from_chars + uint8_t cast silently wrapped a hand-written
 		// "!ext 300 ..." to subtype 0x2c and turned a non-numeric type into 0
 		// (BINARY). Reject an out-of-range/overflowing/garbage field instead,
-		// symmetric with the TRON/UDE/GOON extension checks.
+		// symmetric with the TRON/ADE/GOON extension checks.
 		const std::string num = remaining.substr(0, sp);
 		errno = 0;
 		char* endp = nullptr;
@@ -2220,7 +2220,7 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 	size_t h = 1;
 	// Both indicator orders are accepted, per YAML 1.2 s8.1.1.1
 	// (c-b-block-header = indent-then-chomp OR chomp-then-indent), so "|2-"
-	// and "|+2" are equally valid here. (The UDE.md block scalar, a separate
+	// and "|+2" are equally valid here. (The ade.md block scalar, a separate
 	// simplified format, documents digit-first only and rejects "|+2".)
 	for (; h < header.size(); h++) {
 		char ch = header[h];
@@ -2424,7 +2424,7 @@ inline std::string yamlGatherYamlEmbed(const std::string& tail,
 }
 
 // YAML forbids using tabs for indentation (Section 6). A tab appearing in the
-// leading whitespace of a line is a structural error; throw to match UDE behavior.
+// leading whitespace of a line is a structural error; throw to match ADE behavior.
 inline void yamlRejectTabIndent(const std::string& line, int lineNum) {
 	for (char c : line) {
 		if (c == ' ') continue;

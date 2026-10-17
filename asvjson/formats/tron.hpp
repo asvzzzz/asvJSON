@@ -235,7 +235,7 @@ inline void tronSerializeVal(const asvJSONValue* v,
       // classifies a token as DOUBLE only when it contains '.', 'e' or 'E'.
       // A bare "1" would therefore re-decode as INT, and "-0" as INT 0 (losing
       // the sign), so append ".0" whenever the literal is a plain integer.
-      // This mirrors the CSV/TOON/UDE convention.
+      // This mirrors the CSV/TOON/ADE convention.
       if (std::isnan(v->dbl) || std::isinf(v->dbl)) {
         appendJsonToken(out, v, allowNaNInfinity);
         break;
@@ -770,7 +770,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
           if (ec == std::errc() && ptr == s.data() + sep) {
             // ext_type is a signed byte; from_chars parses into an int, so an
             // out-of-range value (e.g. __EXT__300__...) would silently wrap via
-            // static_cast<int8_t>. Reject it instead (same guard as UDE).
+            // static_cast<int8_t>. Reject it instead (same guard as ADE).
             if (extType < -128 || extType > 127)
               throw asvJSONError("TRON: extension type out of range [-128, 127]");
             auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2);

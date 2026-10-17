@@ -199,7 +199,7 @@ inline std::string tomlVal(const asvJSONValue* v) {
       // TOML separates int from float lexically, so an integral double must
       // keep a '.' or an exponent: fmtDoubleVal renders 1.0 as "1", which
       // would re-read as INT and lose the DOUBLE type. Mirrors the .0 suffix
-      // the INI/dotenv/UDE encoders append.
+      // the INI/dotenv/ADE encoders append.
       if (s.find_first_of(".eE") == std::string::npos) s += ".0";
       return s;
     }
