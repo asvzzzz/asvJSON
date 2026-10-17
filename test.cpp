@@ -6932,6 +6932,189 @@ TEST(testXMLTextAndRegexFidelity) {
 	}
 }
 
+// --- SVG Tests ---
+
+TEST(testToSVG) {
+	// Empty root -> minimal SVG
+	{
+		asvJSON json;
+		json.parse(std::string("{}"));
+		std::string svg = json.toSVG();
+		ASSERT(!svg.empty());
+	}
+	// Root object with rect element and attributes
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"rect":{"@x":"10","@y":"20","@width":"100","@height":"50","@fill":"red"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<rect") != std::string::npos);
+		ASSERT(svg.find("x=\"10\"") != std::string::npos);
+		ASSERT(svg.find("y=\"20\"") != std::string::npos);
+		ASSERT(svg.find("width=\"100\"") != std::string::npos);
+		ASSERT(svg.find("height=\"50\"") != std::string::npos);
+		ASSERT(svg.find("fill=\"red\"") != std::string::npos);
+	}
+	// Circle element
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"circle":{"@cx":"50","@cy":"50","@r":"40","@stroke":"blue","@fill":"none"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<circle") != std::string::npos);
+		ASSERT(svg.find("cx=\"50\"") != std::string::npos);
+		ASSERT(svg.find("r=\"40\"") != std::string::npos);
+	}
+	// Text element with #text content
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"text":{"@x":"10","@y":"30","#text":"Hello SVG"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<text") != std::string::npos);
+		ASSERT(svg.find("x=\"10\"") != std::string::npos);
+		ASSERT(svg.find(">Hello SVG</text>") != std::string::npos);
+	}
+	// Nested groups: g element with children
+	{
+		asvJSON json;
+		json.parse("{\"g\":{\"@transform\":\"translate(10,10)\",\"rect\":{\"@x\":\"0\",\"@y\":\"0\",\"@width\":\"20\",\"@height\":\"20\"}}}");
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<g") != std::string::npos);
+		ASSERT(svg.find("transform=\"translate(10,10)\"") != std::string::npos);
+		ASSERT(svg.find("<rect") != std::string::npos);
+	}
+	// Array of objects -> multiple elements with same tag
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"items":[{"item":{"@id":"1"}},{"item":{"@id":"2"}}]})"));
+		std::string svg = json.toSVG();
+		int count = 0;
+		size_t pos = 0;
+		while ((pos = svg.find("<item ", pos)) != std::string::npos) { ++count; ++pos; }
+		ASSERT(count == 2);
+	}
+	// Null attributes are skipped
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"rect":{"@x":"10","@y":null,"@width":"100"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("x=\"10\"") != std::string::npos);
+		ASSERT(svg.find("width=\"100\"") != std::string::npos);
+		// y should not appear since null is skipped
+		size_t rectPos = svg.find("<rect");
+		size_t closePos = svg.find("/>", rectPos);
+		std::string rectLine = svg.substr(rectPos, closePos - rectPos + 2);
+		ASSERT(rectLine.find("y=") == std::string::npos);
+	}
+	// asvJSONValue::toSVG direct call
+	{
+		auto v = asvJSONValue::makeString("test", 4);
+		std::string out;
+		v->toSVG(out);
+		ASSERT(!out.empty());
+	}
+	// XML special chars escaped in text content
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"text":{"@x":"0","#text":"a & b < c > d"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("&amp;") != std::string::npos);
+		ASSERT(svg.find("&lt;") != std::string::npos);
+		ASSERT(svg.find("&gt;") != std::string::npos);
+	}
+	// Numeric attributes (int and double)
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"rect":{"@x":10,"@y":20.5}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("x=\"10\"") != std::string::npos);
+		ASSERT(svg.find("y=\"20.5\"") != std::string::npos);
+	}
+}
+
+TEST(testFromSVG) {
+	// Basic SVG with rect and circle parsed via XML path
+	{
+		asvJSON json;
+		std::string svg = R"(<svg xmlns="http://www.w3.org/2000/svg"><rect x="10" y="20" width="100" height="50" fill="red"/><circle cx="50" cy="50" r="40"/></svg>)";
+		ASSERT(json.fromSVG(svg));
+		auto* rect = json.getRoot()->get("svg")->get("rect");
+	 ASSERT(rect != nullptr);
+	 ASSERT_EQ(std::string(rect->get("@x")->getString()), "10");
+		ASSERT_EQ(std::string(rect->get("@y")->getString()), "20");
+		ASSERT_EQ(std::string(rect->get("@fill")->getString()), "red");
+		auto* circle = json.getRoot()->get("svg")->get("circle");
+		ASSERT(circle != nullptr);
+	 ASSERT_EQ(std::string(circle->get("@cx")->getString()), "50");
+	}
+	// SVG with text content
+	{
+		asvJSON json;
+		std::string svg = R"(<svg><text x="10" y="30">Hello World</text></svg>)";
+		ASSERT(json.fromSVG(svg));
+		auto* t = json.getRoot()->get("svg")->get("text");
+	 ASSERT(t != nullptr);
+	 ASSERT_EQ(std::string(t->get("#text")->getString()), "Hello World");
+	}
+	// SVG with nested groups
+	{
+		asvJSON json;
+		std::string svg = "<svg><g transform=\"translate(1,2)\"><rect x=\"3\" y=\"4\"/></g></svg>";
+		ASSERT(json.fromSVG(svg));
+		auto* g = json.getRoot()->get("svg")->get("g");
+	 ASSERT(g != nullptr);
+	 ASSERT_EQ(std::string(g->get("@transform")->getString()), "translate(1,2)");
+	 auto* rect = g->get("rect");
+	 ASSERT(rect != nullptr);
+	 ASSERT_EQ(std::string(rect->get("@x")->getString()), "3");
+	}
+	// BOM stripping
+	{
+		asvJSON json;
+		std::string svg = "\xEF\xBB\xBF<svg><rect/></svg>";
+		ASSERT(json.fromSVG(svg));
+		ASSERT(json.getRoot() != nullptr);
+	}
+	// Empty SVG
+	{
+		asvJSON json;
+		ASSERT(json.fromSVG("<svg/>"));
+	}
+	// fromSVG returns false on invalid input
+	{
+		asvJSON json;
+		ASSERT(!json.fromSVG("not svg at all <><>"));
+	}
+}
+
+TEST(testSVGReviewFixes) {
+	// Round-trip: JSON -> SVG -> JSON preserves structure
+	{
+		asvJSON j, j2;
+		std::string jsonIn = R"({"svg":{"@xmlns":"http://www.w3.org/2000/svg","rect":{"@x":"5","@y":"5","@width":"10","@height":"10","@fill":"blue"},"circle":{"@cx":"50","@cy":"50","@r":"25"}}})";
+		ASSERT(j.parse(jsonIn));
+		std::string svg = j.toSVG();
+	 ASSERT(j2.fromSVG(svg));
+		auto* rect = j2.getRoot()->get("svg")->get("rect");
+		ASSERT(rect != nullptr);
+	 ASSERT_EQ(std::string(rect->get("@x")->getString()), "5");
+	 ASSERT_EQ(std::string(rect->get("@fill")->getString()), "blue");
+	}
+	// Self-closing elements: rect, circle, line etc. must close with />
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"rect":{"@x":"0","@y":"0"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<rect") != std::string::npos);
+		ASSERT(svg.find("/>") != std::string::npos);
+	}
+	// Non-self-closing text element with content
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"text":{"@x":"0","#text":"Hi"}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find(">Hi</text>") != std::string::npos);
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -34068,7 +34251,12 @@ RUN(testCBORFloat16);
 	RUN(testXMLAuditFixes);
 	RUN(testXMLAuditFixes2);
 	RUN(testXMLTextAndRegexFidelity);
-	
+
+	std::cout << "\n--- SVG Serialization Tests ---\n";
+	RUN(testToSVG);
+	RUN(testFromSVG);
+	RUN(testSVGReviewFixes);
+
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
 	RUN(testFromYAML);

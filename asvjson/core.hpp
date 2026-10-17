@@ -22,7 +22,7 @@
 //   - unique_ptr for internal containers (obj/arr) and factory methods
 //   - Factory methods return std::unique_ptr - automatic lifetime management
 //
-// Include individual format headers for MessagePack, BSON, TOON, TRON, GOON, XML, YAML, CSV, TOML.
+// Include individual format headers for MessagePack, BSON, TOON, TRON, GOON, XML, SVG, YAML, CSV, TOML.
 //
 // Important: string_view lifetime
 //   - getStringView() returns string_view valid only until next parse() or destruction
@@ -794,6 +794,8 @@ struct asvJSONValue {
 	void toUBJSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
 	void toXML(std::string& out, const std::string& name, int indent) const;
+	void toSVG(std::string& out) const;
+	void toSVG(std::string& out, const std::string& name, int indent) const;
 	void toYAML(std::string& out, bool pretty = true) const;
 	void toYAML(std::string& out, int indent, const std::string& key, bool isArrayItem, bool pretty) const;
 	void toYAML(std::string& out, const YamlWriteOptions& opts) const;
@@ -1103,6 +1105,7 @@ enum class FormatType {
   UBJSON,
   JavaProp,
   Plist,
+  SVG,
 };
 
 /// Thread safety:
@@ -2086,16 +2089,19 @@ public:
 	[[nodiscard]] asvJSON diff(const asvJSON& other) const {
 		asvJSON result;
 		auto patch = asvJSONValue::makeArray();
+		if (!patch) return result;
 		if (root && other.root) {
 			diffImpl(*root, *other.root, "", *patch);
 		} else if (!root && other.root) {
 			auto op = asvJSONValue::makeObject();
+			if (!op) return result;
 			op->emplace("op", asvJSONValue::makeStringView("add"));
 			op->emplace("path", asvJSONValue::makeStringView(""));
 			op->emplace("value", cloneValue(other.root.get()));
 			patch->push(std::move(op));
 		} else if (root && !other.root) {
 			auto op = asvJSONValue::makeObject();
+			if (!op) return result;
 			op->emplace("op", asvJSONValue::makeStringView("remove"));
 			op->emplace("path", asvJSONValue::makeStringView(""));
 			patch->push(std::move(op));
@@ -2203,7 +2209,9 @@ public:
 
 	asvJSONValue* getObject() {
 		if (!root || root->type != asvJSONValue::OBJECT) {
-			root = asvJSONValue::makeObject();
+			auto o = asvJSONValue::makeObject();
+			if (!o) return nullptr;
+			root = std::move(o);
 		}
 		return root.get();
 	}
@@ -2455,6 +2463,8 @@ public:
 	bool fromProtobufText(const std::string& text);
 	std::string toXML() const;
 	bool fromXML(std::string_view input);
+	std::string toSVG() const;
+	bool fromSVG(std::string_view input);
 	std::string toYAML(bool pretty = true) const;
 	std::string toYAML(const YamlWriteOptions& opts) const;
 	bool fromYAML(std::string_view input);
@@ -2877,6 +2887,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 			if (it == b.obj->end()) {
 				std::string removePath = path + "/" + jsonPointerEscaped(k);
 				auto op = asvJSONValue::makeObject();
+				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("remove"));
 				op->emplace("path", asvJSONValue::makeString(removePath.data(), removePath.size()));
 				patch.push(std::move(op));
@@ -2889,6 +2900,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 			std::string childPath = path + "/" + jsonPointerEscaped(k);
 			if (it == a.obj->end() || !it->second) {
 				auto op = asvJSONValue::makeObject();
+				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("add"));
 				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
 				op->emplace("value", cloneValue(v.get()));
@@ -2897,6 +2909,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				diffImpl(*it->second, *v, childPath, patch);
 			} else if (*it->second != *v) {
 				auto op = asvJSONValue::makeObject();
+				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("replace"));
 				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
 				op->emplace("value", cloneValue(v.get()));
@@ -2917,6 +2930,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 					diffImpl(*(*a.arr)[i], *(*b.arr)[i], idxPath, patch);
 				} else if (*(*a.arr)[i] != *(*b.arr)[i]) {
 					auto op = asvJSONValue::makeObject();
+					if (!op) return;
 					op->emplace("op", asvJSONValue::makeStringView("replace"));
 					op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
 					op->emplace("value", cloneValue((*b.arr)[i].get()));
@@ -2924,12 +2938,14 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				}
 			} else if (!aHas && bHas) {
 				auto op = asvJSONValue::makeObject();
+				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("add"));
 				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
 				op->emplace("value", cloneValue((*b.arr)[i].get()));
 				patch.push(std::move(op));
 			} else if (aHas && !bHas) {
 				auto op = asvJSONValue::makeObject();
+				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("remove"));
 				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
 				patch.push(std::move(op));
@@ -2940,6 +2956,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 	// Different types or scalars  ->  replace
 	{
 		auto op = asvJSONValue::makeObject();
+		if (!op) return;
 		op->emplace("op", asvJSONValue::makeStringView("replace"));
 		op->emplace("path", asvJSONValue::makeString(path.data(), path.size()));
 		op->emplace("value", cloneValue(&b));
@@ -3199,7 +3216,9 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 		return result;
 	}
 	if (!result.root || result.root->type != asvJSONValue::OBJECT || !result.root->obj) {
-		result.root = asvJSONValue::makeObject();
+		auto o = asvJSONValue::makeObject();
+		if (!o) return result;
+		result.root = std::move(o);
 	}
 	for (const auto& [k, v] : *p->obj) {
 		if (v->type == asvJSONValue::NULL_VAL) {
@@ -3434,6 +3453,50 @@ inline std::string asvJSON::toXML() const {
 	return out;
 }
 
+// Serializes the document as SVG (XML-based).
+//
+// Root handling:
+//   - null / non-OBJECT root: outputs empty <svg xmlns="..."></svg> (data lost).
+//   - empty OBJECT {}: outputs empty <svg xmlns="..."></svg> (valid minimal doc).
+//   - single key "svg": emits directly — no double-wrap.
+//   - single non-"svg" key: wraps in <svg> to guarantee a single XML root.
+//   - multi-key root: wraps in <svg> to avoid multiple root elements (invalid XML).
+//   - empty-string key (""): renders as <element> (fallback name, not valid SVG).
+//   - @-only keys render invalid markup like <@x>...</@x>.
+//
+// Known limitations (see svg.hpp for details): NaN/Inf in text/scalar children are
+// skipped; non-scalar child types (OBJECT, ARRAY, DATETIME, BINARY, etc.) are dropped.
+inline std::string asvJSON::toSVG() const {
+	std::string out;
+	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+	if (!root || root->type != asvJSONValue::OBJECT || !root->obj) {
+		// Non-OBJECT, null: wrap in minimal <svg> so output stays XML-well-formed.
+		// Data is silently lost (documented limitation — use an object root).
+		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
+	} else if (root->obj->empty()) {
+		// Empty object: valid minimal SVG document.
+		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
+	} else if (root->obj->size() == 1) {
+		auto it = root->obj->begin();
+		if (it->first == "svg") {
+			// Single "svg" key: emit directly (no double-wrap).
+			it->second->toSVG(out, "svg", 0);
+		} else {
+			// Single non-svg key: wrap in <svg> to guarantee a single root.
+			out += "<svg xmlns=\"http://www.w3.org/2000/svg\">\n";
+			it->second->toSVG(out, it->first, 2);
+			out += "</svg>\n";
+		}
+	} else {
+		// Multi-key root: wrap in <svg> to guarantee a single XML root element.
+		out += "<svg xmlns=\"http://www.w3.org/2000/svg\">\n";
+		for (const auto& [k, v] : *(root->obj))
+			v->toSVG(out, k, 2);
+		out += "</svg>\n";
+	}
+	return out;
+}
+
 inline std::string asvJSON::toYAML(bool pretty) const {
 	std::string out;
 	if (root) {
@@ -3481,10 +3544,12 @@ inline std::string asvJSON::toJSONLines() const {
 }
 
 inline bool asvJSON::fromJSONLines(std::string_view input) {
+	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
 		auto arr = asvJSONValue::makeArray();
+		if (!arr) { lastError = "out of memory"; return false; }
 		size_t pos = 0;
 		while (pos < input.size()) {
 			size_t end = input.find('\n', pos);

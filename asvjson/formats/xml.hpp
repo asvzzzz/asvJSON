@@ -638,7 +638,9 @@ inline bool xmlNeedsStringType(std::string_view s) {
 inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<std::string, std::string>& attrs, bool forceMixed) {
 	if (forceMixed) {
 		auto xobj = asvJSONValue::makeObject();
+		if (!xobj) return nullptr;
 		auto xarr = asvJSONValue::makeArray();
+		if (!xarr) return nullptr;
 		xobj->obj->emplace("#content", std::move(xarr));
 		for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 		return xobj;
@@ -670,6 +672,7 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 	}
 	if (attrs.empty()) return asvJSONValue::makeString("", 0);
 	auto obj = asvJSONValue::makeObject();
+	if (!obj) return nullptr;
 	for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 	return obj;
 }
@@ -1027,6 +1030,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// rule. Whitespace-only text segments (encoder indentation) carry no items.
 	if (forceArray) {
 		auto arr = asvJSONValue::makeArray();
+		if (!arr) return nullptr;
 		for (auto& seg : segments)
 			if (seg.isElement) arr->arr->push_back(std::move(seg.childVal));
 		return arr;
@@ -1038,7 +1042,9 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			// <x asv:xc="1">text</x>: pure-text marker -- restore the original
 			// #content array of strings (do not value-detect).
 			auto xobj = asvJSONValue::makeObject();
+			if (!xobj) return nullptr;
 			auto xarr = asvJSONValue::makeArray();
+			if (!xarr) return nullptr;
 			for (size_t i = 0; i < segments.size(); i++)
 				if (!segments[i].isElement && !segments[i].text.empty())
 					xarr->arr->push_back(asvJSONValue::makeString(segments[i].text.data(), segments[i].text.size()));
@@ -1064,6 +1070,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				// is what toXML emits for #text-bearing objects).
 				if (attrs.size() == 1) return asvJSONValue::makeString(combinedText.data(), combinedText.size());
 				auto sobj = asvJSONValue::makeObject();
+				if (!sobj) return nullptr;
 				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 				sobj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
 				return sobj;
@@ -1129,14 +1136,15 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 		// Has attributes - object with #text + @attr
 		auto obj = asvJSONValue::makeObject();
+		if (!obj) return nullptr;
 		for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
 		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
-		if (obj->obj->empty()) return asvJSONValue::makeString("", 0);
 		return obj;
 	}
 
 	// Has child elements (possibly interleaved with text)
 	auto obj = asvJSONValue::makeObject();
+	if (!obj) return nullptr;
 
 	// type="string" pins the element's own text as a STRING. The encoder emits
 	// it for a #text that would otherwise re-detect as a number/bool/null, and
@@ -1168,6 +1176,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	if (hasInterleaving || forceMixed) {
 		// Mixed content: preserve interleaved order as #content array
 		auto arr = asvJSONValue::makeArray();
+		if (!arr) return nullptr;
 		for (auto& seg : segments) {
 			if (seg.isElement) {
 				// Internal empty-marker element (<asv:s/>) between adjacent
@@ -1179,6 +1188,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				    seg.childVal->str_data.empty())
 					continue;
 				auto wrapper = asvJSONValue::makeObject();
+				if (!wrapper) return nullptr;
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
 				arr->arr->push_back(std::move(wrapper));
 			} else {
@@ -1219,6 +1229,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				auto it = obj->obj->find(seg.childName);
 				if (it == obj->obj->end()) {
 					auto arr = asvJSONValue::makeArray();
+					if (!arr) return nullptr;
 					obj->obj->emplace(seg.childName, std::move(arr));
 					it = obj->obj->find(seg.childName);
 				}
@@ -1251,6 +1262,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 }
 
 inline bool asvJSON::fromXML(std::string_view input) {
+	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
@@ -1304,6 +1316,7 @@ inline bool asvJSON::fromXML(std::string_view input) {
 		// single root only; repeated roots (tolerated as an extension) merge
 		// last-wins so the final element for a name is the surviving value.
 		auto obj = asvJSONValue::makeObject();
+		if (!obj) { lastError = "out of memory"; return false; }
 		std::unordered_map<std::string, std::string> nsMap;
 		int count = 0;
 		while (pos < input.size()) {
