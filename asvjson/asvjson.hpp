@@ -42,6 +42,9 @@
 #include "formats/xml.hpp"
 #endif
 
+#if !defined(ASVJSON_DISABLE_SVG) && defined(ASVJSON_DISABLE_XML)
+#error "SVG requires XML support; define neither ASVJSON_DISABLE_XML nor ASVJSON_DISABLE_SVG, or disable both"
+#endif
 #ifndef ASVJSON_DISABLE_SVG
 #include "formats/svg.hpp"
 #endif

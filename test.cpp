@@ -7028,6 +7028,27 @@ TEST(testToSVG) {
 		ASSERT(svg.find("x=\"10\"") != std::string::npos);
 		ASSERT(svg.find("y=\"20.5\"") != std::string::npos);
 	}
+	// Array of siblings: each element becomes its own <tag> with @attrs preserved.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"defs":{"clipPath":[{"@id":"a","rect":{"@x":"0"}},{"@id":"b","path":{"@d":"M0,0"}}]}})")));
+		std::string svg = json.toSVG();
+		int clipCount = 0;
+		size_t p = 0;
+		while ((p = svg.find("<clipPath ", p)) != std::string::npos) { ++clipCount; ++p; }
+		ASSERT_EQ(clipCount, 2);
+		ASSERT(svg.find("<@") == std::string::npos);
+		ASSERT(svg.find("id=\"a\"") != std::string::npos);
+		ASSERT(svg.find("id=\"b\"") != std::string::npos);
+	}
+	// Scalar children are emitted as text content with their own opening tag.
+	{
+		asvJSON json;
+		ASSERT(json.parse(std::string(R"({"g":{"count":42,"flag":true}})")));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<count>42</count>") != std::string::npos);
+		ASSERT(svg.find("<flag>true</flag>") != std::string::npos);
+	}
 }
 
 TEST(testFromSVG) {
@@ -7092,11 +7113,11 @@ TEST(testSVGReviewFixes) {
 		std::string jsonIn = R"({"svg":{"@xmlns":"http://www.w3.org/2000/svg","rect":{"@x":"5","@y":"5","@width":"10","@height":"10","@fill":"blue"},"circle":{"@cx":"50","@cy":"50","@r":"25"}}})";
 		ASSERT(j.parse(jsonIn));
 		std::string svg = j.toSVG();
-	 ASSERT(j2.fromSVG(svg));
+		ASSERT(j2.fromSVG(svg));
 		auto* rect = j2.getRoot()->get("svg")->get("rect");
 		ASSERT(rect != nullptr);
-	 ASSERT_EQ(std::string(rect->get("@x")->getString()), "5");
-	 ASSERT_EQ(std::string(rect->get("@fill")->getString()), "blue");
+		ASSERT_EQ(std::string(rect->get("@x")->getString()), "5");
+		ASSERT_EQ(std::string(rect->get("@fill")->getString()), "blue");
 	}
 	// Self-closing elements: rect, circle, line etc. must close with />
 	{
@@ -7112,6 +7133,51 @@ TEST(testSVGReviewFixes) {
 		json.parse(std::string(R"({"text":{"@x":"0","#text":"Hi"}})"));
 		std::string svg = json.toSVG();
 		ASSERT(svg.find(">Hi</text>") != std::string::npos);
+	}
+
+	// Round-trip: multiple same-named siblings with @attrs survive JSON→SVG→JSON.
+	{
+		asvJSON j, j2;
+		std::string jsonIn = R"({"svg":{"defs":{"clipPath":[{"@id":"x1","rect":{"@x":"1"}},{"@id":"x2","circle":{"@r":"2"}}]}}})";
+		ASSERT(j.parse(jsonIn));
+		std::string svg = j.toSVG();
+		ASSERT(j2.fromSVG(svg));
+		auto* defs = j2.getRoot()->get("svg")->get("defs");
+		ASSERT(defs != nullptr);
+		auto* clips = defs->get("clipPath");
+		ASSERT(clips != nullptr && clips->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(clips->arr->size(), size_t(2));
+	 ASSERT_EQ(std::string((*clips->arr)[0]->get("@id")->getString()), "x1");
+	 ASSERT_EQ(std::string((*clips->arr)[1]->get("@id")->getString()), "x2");
+	}
+	// Empty array: key must not be silently dropped — emits empty self-closing tag.
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"items":[]})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<items/>") != std::string::npos);
+	}
+	// Empty object: emits self-closing tag (not <tag></tag>) when no attrs/text/children.
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"g":{}})"));
+		std::string svg = json.toSVG();
+		ASSERT(svg.find("<g/>") != std::string::npos);
+	}
+	// Empty object WITH attributes: self-closing is valid XML/SVG (<g class="foo"/>).
+	{
+		asvJSON json;
+		json.parse(std::string(R"({"g":{"@class":"foo"}})"));
+		std::string svg = json.toSVG();
+		// Must contain the opening tag with attribute.
+		ASSERT(svg.find("class=\"foo\"") != std::string::npos);
+		// Either self-close (<g class="foo"/>) or open+close (<g></g>) is acceptable.
+		bool hasSelfClose = svg.find("<g ") != std::string::npos &&
+		                    svg.find("/>") != std::string::npos;
+		bool hasOpenClose = svg.find("<g>") != std::string::npos ||
+		                    (svg.find("<g ") != std::string::npos &&
+		                     svg.find("</g>") != std::string::npos);
+		ASSERT(hasSelfClose || hasOpenClose);
 	}
 }
 
