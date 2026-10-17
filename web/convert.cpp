@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
 "Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, JavaProp, Plist, Bencode, UBJSON, UDE, JSONLines,\n"
-            "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, MessagePack, BSON, CBOR, Protobuf\n"
+            "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, SVG, MessagePack, BSON, CBOR, Protobuf\n"
             "Outputs: ... plus CPP (C++ structs/enums) and CPP_C (C structs/enums)\n"
            "         (empty from=JSON, to=JSON)\n";
       return 0;
@@ -185,7 +185,8 @@ int main(int argc, char** argv) {
       else if (fromFmt == "Protobuf") { ok = j.fromProtobuf(bin.data(), bin.size()); }
       else if (fromFmt == "UBJSON") { ok = j.fromUBJSON(bin.data(), bin.size()); }
       else if (fromFmt == "CPP" || fromFmt == "CPP_C") ok = j.fromCpp(text);
-      else { std::cout << jsonError("Unknown input format: " + fromFmt); return 1; }
+       else if (fromFmt == "SVG") ok = j.fromSVG(text);
+       else { std::cout << jsonError("Unknown input format: " + fromFmt); return 1; }
 
       if (!ok) {
         if (rawMode) { std::cerr << "Error: " << j.getLastError() << "\n"; }
@@ -233,7 +234,8 @@ int main(int argc, char** argv) {
         co.style = CppWriteOptions::Style::C;
         result = j.toCpp(co);
       }
-      else { std::cout << jsonError("Unknown output format: " + toFmt); return 1; }
+       else if (toFmt == "SVG") result = j.toSVG();
+       else { std::cout << jsonError("Unknown output format: " + toFmt); return 1; }
 
       if (rawMode) { std::cout << result; }
       else { std::cout << jsonSuccess(result, false); }
