@@ -429,7 +429,7 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
         // A double with an integral value must round-trip as a float
         // (otherwise "100000" would re-decode as an INT on compilers whose
         // fmtDoubleVal falls back to %g; to_chars already emits "1e+05" there).
-        // Mirror the UDE convention of appending ".0" to a plain integer literal.
+        // Mirror the ADE convention of appending ".0" to a plain integer literal.
         std::string tmp;
         fmtDoubleVal(v->dbl, tmp);
         if (tmp.find('.') == std::string::npos && tmp.find('e') == std::string::npos &&
@@ -574,7 +574,7 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     if (end && *end == 0 && end == s.c_str() + s.size()) {
       if (errno == ERANGE) {
         // Out-of-range integer: preserve the exact literal so the round-trip is
-        // lossless (same convention as core JSON and UDE) instead of silently
+        // lossless (same convention as core JSON and ADE) instead of silently
         // clamping to LLONG_MAX.
         auto v = asvJSONValue::makeStringView(std::string_view(s));
         if (v) v->raw_number = true;

@@ -1,4 +1,4 @@
-# Unified Data Exchange (ADE)
+# Advanced Data Exchange (ADE)
 
 ## Overview
 ADE is a human-readable, machine-efficient format that combines features of JSON, YAML, INI, TOML and binary formats such as BSON or MessagePack. It aims to be:

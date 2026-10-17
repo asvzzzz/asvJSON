@@ -101,7 +101,7 @@ inline std::string plistUnescape(std::string_view raw) {
       }
       if (!ok || cp == 0 || cp > 0x10FFFF) { out += c; i++; continue; }
       // A surrogate code point is not a valid Unicode scalar value: encoding it
-      // would emit ill-formed UTF-8 (WTF-8). Substitute U+FFFD, as UDE does.
+      // would emit ill-formed UTF-8 (WTF-8). Substitute U+FFFD, as ADE does.
       if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
       std::string utf8;
       appendUtf8Codepoint(utf8, cp);

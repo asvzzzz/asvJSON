@@ -366,7 +366,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) return "null";
 				std::string s; fmtDoubleVal(v->dbl, s);
 				// An integral double must round-trip as a float, otherwise
-				// "1" would re-decode as an INT (mirror the UDE/INI convention).
+				// "1" would re-decode as an INT (mirror the ADE/INI convention).
 				if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
 				    s.find('E') == std::string::npos)
 					s += ".0";

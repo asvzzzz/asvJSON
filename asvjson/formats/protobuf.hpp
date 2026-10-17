@@ -1283,7 +1283,7 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
     auto [ip, iec] = std::from_chars(num.c_str(), num.c_str() + num.size(), l);
     if (iec == std::errc() && ip == num.c_str() + num.size()) return asvJSONValue::makeInt(l);
     // Out-of-range integer: preserve the exact literal so the round-trip is lossless
-    // (same convention as core JSON and UDE).
+    // (same convention as core JSON and ADE).
     auto v = asvJSONValue::makeString(std::move(num));
     if (v) v->raw_number = true;
     return v;

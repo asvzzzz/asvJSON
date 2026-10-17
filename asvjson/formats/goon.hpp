@@ -1177,7 +1177,7 @@ inline std::string goonToJson(std::string_view input) {
           // The extension type is an int8_t, so only [-128, 127] is
           // representable. A bare strtol + & 0xFF mask used to silently wrap a
           // hand-written __EXT__300_... to 0x2c (44), losing the intended type
-          // -- the same no-silent-data-loss rule enforced in TRON/UDE. Reject an
+          // -- the same no-silent-data-loss rule enforced in TRON/ADE. Reject an
           // out-of-range or overflowing field instead (errno == ERANGE, plus the
           // end-pointer check, also catches trailing garbage).
           const std::string num = rest.substr(0, us);
