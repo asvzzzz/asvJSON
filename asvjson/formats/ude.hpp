@@ -1939,6 +1939,7 @@ inline void udeWriteIndent(std::ostream& os, int indent) {
 // preserved exactly) are likewise written as quoted strings by the caller.
 inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
+  if (s.find('\r') != std::string_view::npos) return false;
   // Any number of trailing newlines round-trips via a '|+' header that keeps
   // all of them, and blank lines (including repeats) become paragraph breaks.
   bool seenContent = false;
