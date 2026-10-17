@@ -24,6 +24,12 @@
 //   - Mixed content ordering: "#text" nodes are always emitted BEFORE child
 //     elements, not interleaved. Pure-text and pure-element parents are fine;
 //     true mixed-order round-trip is not supported.
+//   - Single- or empty-element arrays lose their array-ness on round-trip: the
+//     encoder emits one <key> element (indistinguishable from an object value)
+//     and the SVG side has no asv:arr-style marker to recover it (only the top-level
+//     XML encoder emits one). Multi-element arrays round-trip via the repeated
+//     sibling elements plus the no-collapse decode (see Decoder below).
+//     An empty array decodes back as an empty STRING ("") rather than null.
 //   - Non-OBJECT root: scalar/null/ARRAY roots are replaced by an empty
 //     <svg xmlns="..."></svg> — data is silently lost. Use an object root.
 //   - Multi-key root objects are wrapped in <svg> (guarantees single XML root).
@@ -31,11 +37,18 @@
 //     @-only root objects produce invalid SVG with "@<attrname>" as element tag
 //     (e.g. {"@x":"1"} -> <@x>...</@x>). Neither is valid SVG markup.
 //   - Non-serializable children of elements (DATETIME, BINARY, OBJECTID, REGEX,
-//     TIMESTAMP, EXTENSION, CUSTOM_TAG) are silently dropped — the element emits
-//     empty tags <tag></tag>. OBJECT and ARRAY children are recursively serialized.
+//     TIMESTAMP, EXTENSION, CUSTOM_TAG): the value is lost, the element is emitted
+//     as an empty <tag></tag>. OBJECT and ARRAY children are recursively serialized.
 //   - Scalar root values are wrapped in <root>...</root> (free toSVG(const asvJSONValue*)).
 //
-// Decoder: since SVG is XML, fromSVG reuses fromXML directly.
+// Decoder: since SVG is XML, fromSVG reuses the shared XML document parser
+// (xmlParseDocument) but with collapseSameNamed=false. XML needs the collapse
+// rule ({"bin":[a,b]} is written as <bin><item/>x2</bin>, so an element whose
+// only children share a name must fold back to a bare array); SVG must not use
+// it, because this encoder names the repeated elements after the JSON key
+// ({"defs":{"clipPath":[a,b]}} -> <defs><clipPath/>x2</defs>), so keeping the
+// children grouped under their name preserves the key. Without that flag the
+// round-trip dropped the key ({"defs":[{...},{...}]}).
 
 #include <string>
 #include <string_view>
@@ -44,7 +57,7 @@
 
 namespace asvJSONInternal {
 
-class asvJSONValue;
+struct asvJSONValue;
 
 inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSONValue* v);
 inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent);
@@ -140,21 +153,15 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		if (*p == tag) { isSelfClosing = true; break; }
 	}
 
-	out += std::string((size_t)indent, ' ');
-	out += '<';
-	out += tag;
-
 	if (v && v->type == asvJSONValue::OBJECT && v->obj) {
+		out += std::string((size_t)indent, ' ');
+		out += '<';
+		out += tag;
 		// Emit attributes first (@ prefixed keys)
 		for (const auto& [k, val] : *(v->obj)) {
 			appendSvgAttr(out, k, val.get());
 		}
 
-		// Self-closing: always close, ignore children
-		if (isSelfClosing) {
-			out += "/>\n";
-			return;
-		}
 		// First pass: collect text content and check for element children
 		std::string textContent;
 		bool hasElementChildren = false;
@@ -176,6 +183,15 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 				continue;
 			}
 			hasElementChildren = true;
+		}
+
+		// Self-closing: void elements, or empty containers with no text/children.
+		// Attributes don't require a body — <g class="foo"/> is valid XML/SVG.
+		bool isEmptyLeaf = !isSelfClosing && !hasElementChildren && textContent.empty();
+
+		if (isSelfClosing || isEmptyLeaf) {
+			out += "/>\n";
+			return;
 		}
 
 		// Close opening tag: with newline if element children exist, inline otherwise
@@ -223,25 +239,33 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 	} else if (v && v->type == asvJSONValue::ARRAY && v->arr) {
 		if (isSelfClosing) {
 			// Void element with array children: ignore children, emit self-closing
+			out += std::string((size_t)indent, ' ');
+			out += '<';
+			out += tag;
 			out += "/>\n";
 			return;
 		}
-		// Arrays: close opening tag, emit children from each object element, then close
-		out += ">\n";
+		// Empty array -> emit empty element so the key is not silently dropped.
+		if (v->arr->empty()) {
+			out += std::string((size_t)indent, ' ');
+			out += '<';
+			out += tag;
+			out += "/>\n";
+			return;
+		}
+		// Each array element represents a sibling with the same tag name.
+		// Delegate to svgSerializeElement so @-attributes and #text are handled
+		// correctly (the OBJECT branch knows how to skip @/emit as attrs,
+		// and emit #text as element content). Pass indent unchanged — each
+		// element writes its own opening/closing tag at this level.
 		for (const auto& elem : *(v->arr)) {
 			if (!elem) continue;
-			if (elem->type == asvJSONValue::OBJECT && elem->obj) {
-				for (const auto& [k, val] : *(elem->obj)) {
-					svgSerializeElement(out, k, val.get(), indent + 2);
-				}
-			}
+			svgSerializeElement(out, tag, elem.get(), indent);
 		}
-		out += std::string((size_t)indent, ' ');
-		out += "</";
-		out += tag;
-		out += '>';
-		out += '\n';
 	} else if (v && v->type == asvJSONValue::STRING) {
+		out += std::string((size_t)indent, ' ');
+		out += '<';
+		out += tag;
 		if (isSelfClosing) {
 			out += "/>\n";
 			return;
@@ -261,6 +285,9 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		out += '\n';
 	} else if (v && (v->type == asvJSONValue::INT || v->type == asvJSONValue::DOUBLE || v->type == asvJSONValue::BOOL_VAL)) {
 		// Scalar child values are emitted as text content (like #text)
+		out += std::string((size_t)indent, ' ');
+		out += '<';
+		out += tag;
 		if (isSelfClosing) {
 			out += "/>\n";
 			return;
@@ -280,8 +307,14 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		out += '>';
 		out += '\n';
 	} else if (isSelfClosing) {
+		out += std::string((size_t)indent, ' ');
+		out += '<';
+		out += tag;
 		out += "/>\n";
 	} else {
+		out += std::string((size_t)indent, ' ');
+		out += '<';
+		out += tag;
 		out += '>';
 		out += "</";
 		out += tag;
@@ -336,25 +369,26 @@ inline void asvJSONValue::toSVG(std::string& out, const std::string& name, int i
 
 namespace asvJSONInternal {
 
-// SVG is XML-based: fromSVG delegates to the existing XML parser after BOM strip.
-// Point 9: remove redundant catch(asvJSONError) { throw; }
+// SVG is XML-based: fromSVG delegates to the shared XML document parser after
+// BOM strip. collapseSameNamed=false: the SVG encoder names repeated elements
+// after the JSON key ({"defs":{"clipPath":[a,b]}} -> <defs><clipPath/>x2</defs>),
+// so XML's same-named-only collapse would drop the key on the way back.
 inline bool asvJSON::fromSVG(std::string_view input) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
-		std::string data(input);
-		if (data.size() >= 3 &&
-			static_cast<uint8_t>(data[0]) == 0xEF &&
-			static_cast<uint8_t>(data[1]) == 0xBB &&
-			static_cast<uint8_t>(data[2]) == 0xBF) {
-			data.erase(0, 3); // strip UTF-8 BOM
-		}
-		bool ok = fromXML(std::string_view(data));
-		if (ok) formatType = FormatType::SVG;
-		return ok;
+		auto obj = xmlParseDocument(input, /*collapseSameNamed=*/false);
+		root = std::move(obj);
+		formatType = FormatType::SVG;
+		return true;
+	} catch (const asvJSONError& e) {
+		lastError = e.what();
+		root = nullptr;
+		return false;
 	} catch (const std::exception& e) {
 		lastError = e.what();
+		root = nullptr;
 		return false;
 	}
 }
