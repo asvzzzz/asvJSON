@@ -467,15 +467,25 @@ private:
     auto dec = [singleQuoted](std::string_view field) {
       return singleQuoted ? udeUnescapeSingle(field) : udeUnescape(field);
     };
-    size_t term = raw.rfind('|');
-    if (term == std::string_view::npos) { pattern = dec(raw); return; }
-    size_t sep = raw.find('|');
-    if (sep == std::string_view::npos || sep >= term) {
-      pattern = dec(raw.substr(0, term));
-    } else {
-      pattern = dec(raw.substr(0, sep));
-      opts = dec(raw.substr(sep + 1, term - sep - 1));
+    // Canonical form: __REGEX__<pattern>|<opts>| — the body has exactly two
+    // pipes (separator + trailing terminator). Three or more means a bare '|'
+    // leaked into pattern or opts, which the old rfind/find logic would silently
+    // truncate; reject so no data is lost (the encoder escapes all interior '|'
+    // as \u007C). A single pipe with no terminator is treated as a no-options
+    // pattern (backward-compat with documents that omitted the trailing '|').
+    size_t first = raw.find('|');
+    if (first == std::string_view::npos) { pattern = dec(raw); return; }
+    size_t second = raw.find('|', first + 1);
+    if (second == std::string_view::npos) { pattern = dec(raw.substr(0, first)); opts = dec(std::string_view()); return; }
+    size_t third = raw.find('|', second + 1);
+    if (third != std::string_view::npos) {
+      // More than two pipes: fall back to legacy split (last pipe = separator).
+      // This preserves data for foreign input that the encoder would never produce.
+      udeSplitLegacyRegex(std::string(raw), pattern, opts);
+      return;
     }
+    pattern = dec(raw.substr(0, first));
+    opts = dec(raw.substr(first + 1, second - first - 1));
   }
 
   // Historical body form: the already-decoded text split at the LAST '|', so a
@@ -1295,6 +1305,7 @@ private:
           bytes.push_back(static_cast<uint8_t>((h1 << 4) | h2));
         }
       } else if (val->type == asvJSONValue::INT) {
+        if (val->num < 0) throw asvJSONError("UDE: !bin requires a non-negative integer");
         uint64_t n = static_cast<uint64_t>(val->num);
         if (n == 0) {
           bytes.push_back(0);
@@ -1634,9 +1645,9 @@ private:
 
 std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
   skipWsAndComments();
-    if (eof()) return asvJSONValue::makeObject(); // empty document
+  if (eof()) return asvJSONValue::makeObject(); // empty document
 
-    std::unique_ptr<asvJSONValue> root = asvJSONValue::makeObject();
+  std::unique_ptr<asvJSONValue> root = asvJSONValue::makeObject();
     bool any = false;
     while (true) {
       skipWsAndComments();
@@ -1717,6 +1728,8 @@ inline std::unique_ptr<asvJSONValue> udePlainTextFallback(const std::string& tex
 // newer major version are rejected; older minor versions are accepted. The
 // value below is the version this build emits; the parser accepts any 1.x
 // (see udeStripAndCheckHeader).
+// Kept as a public accessor so external code can compose headers; the encoder
+// itself does not re-emit the header on round-trip (documented above).
 inline std::string udeHeaderVersion() {
   return "1.1";
 }
@@ -1926,7 +1939,6 @@ inline void udeWriteIndent(std::ostream& os, int indent) {
 // preserved exactly) are likewise written as quoted strings by the caller.
 inline bool udeCanBlockEncode(std::string_view s) {
   if (s.find('\n') == std::string_view::npos) return false;
-  if (s.find('\r') != std::string_view::npos) return false;
   // Any number of trailing newlines round-trips via a '|+' header that keeps
   // all of them, and blank lines (including repeats) become paragraph breaks.
   bool seenContent = false;
@@ -1934,7 +1946,6 @@ inline bool udeCanBlockEncode(std::string_view s) {
   while (i < s.size()) {
     size_t nl = s.find('\n', i);
     std::string_view line = (nl == std::string_view::npos) ? s.substr(i) : s.substr(i, nl - i);
-    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
     bool allWhite = true;
     for (char c : line) if (c != ' ' && c != '\t') { allWhite = false; break; }
     bool emptyLine = line.empty();
@@ -2379,8 +2390,8 @@ inline std::string asvJSON::toUDE(bool strict) const {
 inline bool asvJSON::fromUDE(std::string_view input, bool strict) {
   dirty_ = false;
   formatType = FormatType::Unknown;
+  root = nullptr;
   try {
-    root = nullptr;
     auto parsed = asvJSONInternal::parseUDE(std::string(input), strict);
     if (!parsed) {
       lastError = "UDE: failed to parse input";
