@@ -1999,7 +1999,44 @@ int main() {
 	example_jsonpath();
 	example_json_sax();
 	example_read_write_file_any();
-	
+
+	// SVG example
+	{
+		std::cout << "\n=== SVG Example ===" << std::endl;
+		asvJSON svgDoc;
+		svgDoc.parse(std::string(R"({
+			"svg": {
+				"@xmlns": "http://www.w3.org/2000/svg",
+				"@viewBox": "0 0 200 150",
+				"rect": {"@x": "10", "@y": "10", "@width": "80", "@height": "60", "@fill": "red"},
+				"circle": {"@cx": "130", "@cy": "40", "@r": "30", "@stroke": "blue", "@fill": "none"},
+				"text": {"@x": "10", "@y": "120", "#text": "Hello SVG!"}
+			}
+		})"));
+
+		std::string svg = svgDoc.toSVG();
+		std::cout << "Generated SVG:\n" << svg << std::endl;
+
+		// Parse it back via fromSVG (delegates to XML parser)
+		asvJSON parsed;
+		if (parsed.fromSVG(svg)) {
+			auto* svgRoot = parsed.getRoot();
+			auto* svgEl   = svgRoot ? svgRoot->get("svg") : nullptr;
+			auto* rect    = svgEl  ? svgEl->get("rect")   : nullptr;
+			auto* fill    = rect   ? rect->get("@fill")    : nullptr;
+			auto* textEl  = svgEl  ? svgEl->get("text")    : nullptr;
+			auto* txt     = textEl ? textEl->get("#text")  : nullptr;
+			if (fill)
+				std::cout << "Round-trip OK: rect fill = " << fill->getString() << std::endl;
+			else
+				std::cout << "Round-trip: fill attribute not found" << std::endl;
+			if (txt)
+				std::cout << "Text content = " << txt->getString() << std::endl;
+			else
+				std::cout << "Round-trip: #text node not found" << std::endl;
+		}
+	}
+
 	std::cout << "========================================" << std::endl;
 	std::cout << "   All examples completed!" << std::endl;
 	std::cout << "========================================" << std::endl;

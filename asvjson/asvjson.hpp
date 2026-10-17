@@ -42,6 +42,10 @@
 #include "formats/xml.hpp"
 #endif
 
+#ifndef ASVJSON_DISABLE_SVG
+#include "formats/svg.hpp"
+#endif
+
 #ifndef ASVJSON_DISABLE_YAML
 #include "formats/yaml.hpp"
 #endif
