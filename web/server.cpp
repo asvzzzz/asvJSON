@@ -245,7 +245,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
           ok = j.fromBencode(textData);
         }
       }
-      else if (fromFmt == "UDE") ok = j.fromUDE(textData);
+      else if (fromFmt == "ADE") ok = j.fromADE(textData);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(textData);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(textData);
       else if (fromFmt == "RON") ok = j.fromRON(textData);
@@ -289,7 +289,7 @@ static std::string doConvert(const std::string& fromFmt, const std::string& toFm
     else if (toFmt == "JavaProp") result = j.toJavaProp();
     else if (toFmt == "Plist") result = j.toPlist();
     else if (toFmt == "Bencode") result = j.toBencode();
-    else if (toFmt == "UDE") result = j.toUDE();
+    else if (toFmt == "ADE") result = j.toADE();
     else if (toFmt == "JSONLines") result = j.toJSONLines();
     else if (toFmt == "Sexpr") result = j.toSexpr();
     else if (toFmt == "RON") result = j.toRON(pretty);

@@ -34,7 +34,7 @@
           <option value="JavaProp" title="Java .properties - #/! comments, =/: separators, \u escapes">JavaProp</option>
           <option value="Plist" title="Apple Property List - XML config used by macOS/iOS, +<data>/<date>">Plist</option>
           <option value="Bencode" title="Bencode - BitTorrent encoding (integers, byte strings, lists, dicts)">Bencode</option>
-          <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
+          <option value="ADE" title="Unified Data Exchange - header, multiple documents, anchors and tags">ADE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
           <option value="RON~pretty" title="RON - Rusty Object Notation, pretty aligned style">RON (pretty)</option>
@@ -58,7 +58,7 @@
       <button class="btn btn-sm" onclick="loadSample('input')">Sample</button>
       <button class="btn btn-sm" onclick="clearInput()">Clear</button>
       <span class="file-label">or <label class="file-link" for="fileInput">Upload file</label></span>
-      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.properties,.plist,.ude,.jsonl,.sexpr,.ron,.toon,.tron,.goon,.ubj,.ubjson,.msgpack,.bson,.cbor,.bin,.svg,.hpp,.h" onchange="loadFile(event)">
+      <input type="file" id="fileInput" accept=".json,.json5,.xml,.yaml,.yml,.csv,.toml,.ini,.properties,.plist,.ade,.jsonl,.sexpr,.ron,.toon,.tron,.goon,.ubj,.ubjson,.msgpack,.bson,.cbor,.bin,.svg,.hpp,.h" onchange="loadFile(event)">
     </div>
     <textarea id="inputArea" placeholder="Paste your data here..."></textarea>
     <div class="panel-status" id="inputStatus">Ready</div>
@@ -89,7 +89,7 @@
           <option value="JavaProp" title="Java .properties - #/! comments, =/: separators, \u escapes">JavaProp</option>
           <option value="Plist" title="Apple Property List - XML config used by macOS/iOS, +<data>/<date>">Plist</option>
           <option value="Bencode" title="Bencode - BitTorrent encoding (integers, byte strings, lists, dicts)">Bencode</option>
-          <option value="UDE" title="Unified Data Exchange - header, multiple documents, anchors and tags">UDE</option>
+          <option value="ADE" title="Unified Data Exchange - header, multiple documents, anchors and tags">ADE</option>
           <option value="JSONLines" title="One JSON value per line - streaming-friendly format">JSON Lines</option>
           <option value="Sexpr" title="S-expressions - Lisp-style parenthesized notation">S-expressions</option>
           <option value="RON~pretty" title="RON - Rusty Object Notation, pretty aligned style">RON (pretty)</option>

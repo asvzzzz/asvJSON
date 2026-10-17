@@ -422,7 +422,7 @@ public:
     // A scalar document must consume the whole input: "hello" extra is a parse
     // error, not a silently dropped suffix (matching how a mapping document
     // rejects trailing content after its last value).
-    if (!eof()) throw asvJSONError("UDE: trailing content after scalar at line " + std::to_string(lineNum_));
+    if (!eof()) throw asvJSONError("ADE: trailing content after scalar at line " + std::to_string(lineNum_));
     return v;
   }
 
@@ -532,7 +532,7 @@ private:
         if (text_[pos_] == '*' && text_[pos_ + 1] == '/') { pos_ += 2; return; }
         pos_++;
       }
-      throw asvJSONError("UDE: unterminated block comment at line " + std::to_string(lineNum_));
+      throw asvJSONError("ADE: unterminated block comment at line " + std::to_string(lineNum_));
     }
   }
 
@@ -572,7 +572,7 @@ private:
           j++;
         }
         if (!closed)
-          throw asvJSONError("UDE: unterminated block comment at line " + std::to_string(startLine));
+          throw asvJSONError("ADE: unterminated block comment at line " + std::to_string(startLine));
         i = j + 2;
         continue;
       }
@@ -592,13 +592,13 @@ private:
   }
 
   void expect(char c, const char* what) {
-    if (eof() || peek() != c) throw asvJSONError(std::string("UDE: expected '") + what + "' at line " + std::to_string(lineNum_));
+    if (eof() || peek() != c) throw asvJSONError(std::string("ADE: expected '") + what + "' at line " + std::to_string(lineNum_));
     pos_++;
   }
 
   ParsedKey parseKey() {
     skipWs();
-    if (eof()) throw asvJSONError("UDE: expected key at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError("ADE: expected key at line " + std::to_string(lineNum_));
     ParsedKey pk;
     // YAML-style merge key (Section: Merge Keys). '<' is not an unquoted
     // character, so the bare "<<" form is recognized explicitly here.
@@ -623,7 +623,7 @@ private:
       } else {
         size_t start = pos_;
         while (!eof() && udeIsUnquotedChar(text_[pos_]) && text_[pos_] != '.') pos_++;
-        if (pos_ == start) throw asvJSONError("UDE: invalid key at line " + std::to_string(lineNum_));
+        if (pos_ == start) throw asvJSONError("ADE: invalid key at line " + std::to_string(lineNum_));
         seg = { std::string(text_.data() + start, pos_ - start), false };
       }
       segs.push_back(std::move(seg));
@@ -633,7 +633,7 @@ private:
     if (strict_) {
       // The spec (Section 3) requires all keys to be quoted in strict mode.
       for (const auto& s : segs) {
-        if (!s.second) throw asvJSONError("UDE: strict mode requires all keys to be quoted (key: " + s.first + ")");
+        if (!s.second) throw asvJSONError("ADE: strict mode requires all keys to be quoted (key: " + s.first + ")");
       }
     }
     for (const auto& s : segs) {
@@ -666,9 +666,9 @@ private:
 
   std::unique_ptr<asvJSONValue> parseValue(int depth) {
     skipWsAndComments();
-    if (eof()) throw asvJSONError("UDE: expected value at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError("ADE: expected value at line " + std::to_string(lineNum_));
     if (!asvJSONValue::checkNestingDepth(depth))
-      throw asvJSONError("UDE: nesting too deep at line " + std::to_string(lineNum_));
+      throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
     char c = peek();
     if (c == '"') return parseQuotedString();
     if (c == '\'') return parseSingleQuotedString();
@@ -693,7 +693,7 @@ private:
     for (size_t i = 0; i < raw.size(); ++i) {
       char c = raw[i];
       if (c == '\\') {
-        if (i + 1 >= raw.size()) throw asvJSONError("UDE: invalid escape at end of string");
+        if (i + 1 >= raw.size()) throw asvJSONError("ADE: invalid escape at end of string");
         char e = raw[++i];
         // Line continuation: '\' immediately before a line break joins the next
         // line and strips its leading whitespace (INI-style).
@@ -715,10 +715,10 @@ private:
           case '"': out.push_back('"'); break;
           case 'x': {
             // Byte escape \xHH -- exactly two hex digits (Section 3.1).
-            if (i + 2 >= raw.size()) throw asvJSONError("UDE: invalid \\x escape in string");
+            if (i + 2 >= raw.size()) throw asvJSONError("ADE: invalid \\x escape in string");
             int hi = udeHexDigit(raw[i + 1]);
             int lo = udeHexDigit(raw[i + 2]);
-            if (hi < 0 || lo < 0) throw asvJSONError("UDE: invalid \\x escape in string");
+            if (hi < 0 || lo < 0) throw asvJSONError("ADE: invalid \\x escape in string");
             out.push_back(static_cast<char>((hi << 4) | lo));
             i += 2;
             break;
@@ -733,23 +733,23 @@ private:
               bool any = false;
               while (j < raw.size() && raw[j] != '}') {
                 int d = udeHexDigit(raw[j]);
-                if (d < 0) throw asvJSONError("UDE: invalid \\u{...} escape in string");
+                if (d < 0) throw asvJSONError("ADE: invalid \\u{...} escape in string");
                 cp = cp * 16u + static_cast<unsigned int>(d);
-                if (cp > 0x10FFFFu) throw asvJSONError("UDE: code point out of range in string");
+                if (cp > 0x10FFFFu) throw asvJSONError("ADE: code point out of range in string");
                 any = true;
                 j++;
               }
-              if (!any || j >= raw.size()) throw asvJSONError("UDE: unterminated \\u{...} escape in string");
+              if (!any || j >= raw.size()) throw asvJSONError("ADE: unterminated \\u{...} escape in string");
               i = j; // consume '}'
               appendUtf8Codepoint(out, cp);
               break;
             }
             size_t need = (e == 'u') ? 4 : 8;
-            if (i + need >= raw.size()) throw asvJSONError("UDE: invalid \\u/\\U escape in string");
+            if (i + need >= raw.size()) throw asvJSONError("ADE: invalid \\u/\\U escape in string");
             unsigned int cp = 0;
             for (size_t k = 1; k <= need; k++) {
               int d = udeHexDigit(raw[i + k]);
-              if (d < 0) throw asvJSONError("UDE: invalid \\u/\\U escape in string");
+              if (d < 0) throw asvJSONError("ADE: invalid \\u/\\U escape in string");
               cp = (cp << 4) | static_cast<unsigned int>(d);
             }
             i += need;
@@ -770,11 +770,11 @@ private:
               }
             }
             if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu))
-              throw asvJSONError("UDE: invalid code point in string");
+              throw asvJSONError("ADE: invalid code point in string");
             appendUtf8Codepoint(out, cp);
             break;
           }
-          default: throw asvJSONError(std::string("UDE: invalid escape sequence \\" ) + e + " in string");
+          default: throw asvJSONError(std::string("ADE: invalid escape sequence \\" ) + e + " in string");
         }
       } else if (c == '\r') {
         // Normalize literal \r\n and lone \r to \n (YAML line-break semantics).
@@ -810,9 +810,9 @@ private:
   // dereference rather than a parse error.
   std::unique_ptr<asvJSONValue> makeUdeString(std::string&& s) {
     if (!asvJSONValue::checkStringLen(s.size()))
-      throw asvJSONError("UDE: string too long");
+      throw asvJSONError("ADE: string too long");
     auto v = asvJSONValue::makeStringView(std::move(s));
-    if (!v) throw asvJSONError("UDE: string too long");
+    if (!v) throw asvJSONError("ADE: string too long");
     return v;
   }
 
@@ -828,14 +828,14 @@ private:
       if (c == '\n') lineNum_++;
       pos_++;
     }
-    if (eof()) throw asvJSONError("UDE: unterminated string at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError("ADE: unterminated string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume '"'
     std::string decoded;
     try {
       decoded = udeUnescape(raw);
     } catch (const std::exception& e) {
-      // udeUnescape already names the offending escape ("UDE: invalid \x
+      // udeUnescape already names the offending escape ("ADE: invalid \x
       // escape in string", ...). Keep that text and only add the position:
       // collapsing every failure into one generic message would make the
       // detailed list in Section 13 unreachable and leave the user guessing
@@ -870,7 +870,7 @@ private:
       if (c == '\n') lineNum_++;
       pos_++;
     }
-    if (eof()) throw asvJSONError(std::string("UDE: unterminated ") + (q == '"' ? "" : "single-quoted ") + "string at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError(std::string("ADE: unterminated ") + (q == '"' ? "" : "single-quoted ") + "string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume the closing quote
     return raw;
@@ -889,7 +889,7 @@ private:
       if (c == '\n') lineNum_++;
       pos_++;
     }
-    if (eof()) throw asvJSONError("UDE: unterminated single-quoted string at line " + std::to_string(lineNum_));
+    if (eof()) throw asvJSONError("ADE: unterminated single-quoted string at line " + std::to_string(lineNum_));
     std::string_view raw(text_.data() + start, pos_ - start);
     pos_++; // consume '\''
     return makeUdeString(udeUnescapeSingle(raw));
@@ -900,14 +900,14 @@ private:
     auto arr = asvJSONValue::makeArray();
     while (true) {
       skipWsAndComments();
-      if (eof()) throw asvJSONError("UDE: unterminated array at line " + std::to_string(lineNum_));
+      if (eof()) throw asvJSONError("ADE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ']') { pos_++; break; }
       if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
-        throw asvJSONError("UDE: array too large");
+        throw asvJSONError("ADE: array too large");
       arr->arr->push_back(parseValue(depth));
       skipWsAndComments();
-      if (eof()) throw asvJSONError("UDE: unterminated array at line " + std::to_string(lineNum_));
+      if (eof()) throw asvJSONError("ADE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
       if (peek() == ']') { pos_++; break; }
       // A single space between elements on the same line ("[1 2]") is
@@ -923,7 +923,7 @@ private:
     auto obj = asvJSONValue::makeObject();
     while (true) {
       skipWsAndComments();
-      if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
+      if (eof()) throw asvJSONError("ADE: unterminated object at line " + std::to_string(lineNum_));
       if (peek() == '}') { pos_++; break; }
       if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       ParsedKey pk = parseKey();
@@ -931,7 +931,7 @@ private:
       expect(':', ":");
       std::unique_ptr<asvJSONValue> val;
       if (atLineEndSkipping()) {
-        if (strict_) throw asvJSONError("UDE: missing value after ':' at line " + std::to_string(lineNum_));
+        if (strict_) throw asvJSONError("ADE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
         val = parseValue(depth);
@@ -943,7 +943,7 @@ private:
         insertKey(obj.get(), std::move(pk), std::move(val), depth);
       }
       skipWsAndComments();
-      if (eof()) throw asvJSONError("UDE: unterminated object at line " + std::to_string(lineNum_));
+      if (eof()) throw asvJSONError("ADE: unterminated object at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
       if (peek() == '}') { pos_++; break; }
       // A single space between "key: value" pairs on the same line
@@ -997,10 +997,10 @@ private:
       size_t cend = text_.find("*/", pos_ + 2);
       size_t nl = text_.find('\n', pos_);
       if (cend == std::string::npos || (nl != std::string::npos && nl < cend))
-        throw asvJSONError("UDE: unterminated comment after block scalar header at line " + std::to_string(lineNum_));
+        throw asvJSONError("ADE: unterminated comment after block scalar header at line " + std::to_string(lineNum_));
       pos_ = cend + 2;
     } else if (!eof() && text_[pos_] != '\n' && text_[pos_] != '\r') {
-      throw asvJSONError("UDE: unexpected content after block scalar header at line " + std::to_string(lineNum_));
+      throw asvJSONError("ADE: unexpected content after block scalar header at line " + std::to_string(lineNum_));
     }
     // consume the rest of the header line (newline)
     while (!eof() && text_[pos_] != '\n') pos_++;
@@ -1030,7 +1030,7 @@ private:
       if (!blank) {
         for (size_t i = 0; i < indent; i++) {
           if (line[i] == '\t')
-            throw asvJSONError("UDE: tab used as indentation in block scalar at line " + std::to_string(lineNum_));
+            throw asvJSONError("ADE: tab used as indentation in block scalar at line " + std::to_string(lineNum_));
         }
       }
 
@@ -1119,7 +1119,7 @@ private:
   std::unique_ptr<asvJSONValue> parseScalar() {
     size_t start = pos_;
     while (!eof() && udeIsUnquotedChar(text_[pos_])) pos_++;
-    if (pos_ == start) throw asvJSONError("UDE: expected value at line " + std::to_string(lineNum_));
+    if (pos_ == start) throw asvJSONError("ADE: expected value at line " + std::to_string(lineNum_));
     std::string tok(text_.substr(start, pos_ - start));
 
     std::string lower = udeToLower(tok);
@@ -1140,7 +1140,7 @@ private:
       for (char c : tok) {
         unsigned char u = static_cast<unsigned char>(c);
         if (!((u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9')))
-          throw asvJSONError("UDE: strict mode requires quoting value: " + tok);
+          throw asvJSONError("ADE: strict mode requires quoting value: " + tok);
       }
     }
     return makeUdeString(std::move(tok));
@@ -1150,21 +1150,21 @@ private:
     pos_++; // consume '&' or '*'
     size_t start = pos_;
     while (!eof() && udeIsIdentCont(text_[pos_])) pos_++;
-    if (pos_ == start) throw asvJSONError("UDE: expected anchor name at line " + std::to_string(lineNum_));
+    if (pos_ == start) throw asvJSONError("ADE: expected anchor name at line " + std::to_string(lineNum_));
     // ANCHOR/ALIAS ::= '&'/'*' IDENTIFIER, and IDENTIFIER is
     // [A-Za-z_][A-Za-z0-9_-]* -- the first character must be a letter or '_'.
     // udeIsIdentCont above is permissive so the scan can find the name's end;
     // the shape is validated here, so "&1abc" is rejected instead of silently
     // accepted as an anchor named "1abc".
     if (!udeIsIdentStart(text_[start]))
-      throw asvJSONError("UDE: anchor name must start with a letter or '_' at line " + std::to_string(lineNum_));
+      throw asvJSONError("ADE: anchor name must start with a letter or '_' at line " + std::to_string(lineNum_));
     return std::string(text_.substr(start, pos_ - start));
   }
 
   void registerAnchor(const std::string& name, const asvJSONValue* v) {
-    if (anchors_.size() >= kMaxAnchors) throw asvJSONError("UDE: too many anchors");
+    if (anchors_.size() >= kMaxAnchors) throw asvJSONError("ADE: too many anchors");
     auto c = cloneValue(v);
-    if (!c) throw asvJSONError("UDE: failed to store anchor &" + name);
+    if (!c) throw asvJSONError("ADE: failed to store anchor &" + name);
     anchors_[name] = std::move(c);
   }
 
@@ -1179,7 +1179,7 @@ private:
   std::unique_ptr<asvJSONValue> parseAlias() {
     std::string name = parseAnchorName();
     auto it = anchors_.find(name);
-    if (it == anchors_.end()) throw asvJSONError("UDE: undefined alias *" + name);
+    if (it == anchors_.end()) throw asvJSONError("ADE: undefined alias *" + name);
     // An anchor is registered only after its value is fully parsed, so a value
     // can never refer to itself or to an anchor defined later in the document:
     // both are caught above as an undefined alias. Resolving an alias is a
@@ -1187,7 +1187,7 @@ private:
     // MAX_CLONE_NODES) and never recurses into further anchor resolution, so
     // there is no cycle to detect and no resolution-depth chain to bound.
     auto res = cloneValue(it->second.get());
-    if (!res) throw asvJSONError("UDE: failed to resolve alias *" + name);
+    if (!res) throw asvJSONError("ADE: failed to resolve alias *" + name);
     return res;
   }
 
@@ -1198,22 +1198,22 @@ private:
       if (val->type == asvJSONValue::DOUBLE) {
         if (val->dbl < static_cast<double>(INT64_MIN) || val->dbl > static_cast<double>(INT64_MAX) ||
             val->dbl != std::floor(val->dbl))
-          throw asvJSONError("UDE: !int requires an integral value");
+          throw asvJSONError("ADE: !int requires an integral value");
         return asvJSONValue::makeInt(static_cast<int64_t>(val->dbl));
       }
       if (val->type == asvJSONValue::STRING) {
         auto n = udeTryParseNumber(val->str_data);
-        if (!n || n->type != asvJSONValue::INT) throw asvJSONError("UDE: !int requires an integer literal");
+        if (!n || n->type != asvJSONValue::INT) throw asvJSONError("ADE: !int requires an integer literal");
         return n;
       }
-      throw asvJSONError("UDE: !int requires a numeric value");
+      throw asvJSONError("ADE: !int requires a numeric value");
     }
     if (tag == "float") {
       if (val->type == asvJSONValue::DOUBLE) return val;
       if (val->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(val->num));
       if (val->type == asvJSONValue::STRING) {
         auto n = udeTryParseNumber(val->str_data);
-        if (!n) throw asvJSONError("UDE: !float requires a numeric literal");
+        if (!n) throw asvJSONError("ADE: !float requires a numeric literal");
         if (n->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(n->num));
         // udeTryParseNumber returns a raw_number STRING for a literal no double
         // holds exactly (int64 overflow, or more significant digits than
@@ -1225,10 +1225,10 @@ private:
         // text is still preserved by writing it unquoted, where the same
         // raw_number STRING is the documented representation.
         if (n->type != asvJSONValue::DOUBLE)
-          throw asvJSONError("UDE: !float requires a literal representable as a double");
+          throw asvJSONError("ADE: !float requires a literal representable as a double");
         return n;
       }
-      throw asvJSONError("UDE: !float requires a numeric value");
+      throw asvJSONError("ADE: !float requires a numeric value");
     }
     if (tag == "string") {
       if (val->type == asvJSONValue::STRING) return val;
@@ -1242,7 +1242,7 @@ private:
       if (val->type == asvJSONValue::INT) {
         char buf[32];
         auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val->num);
-        if (ec != std::errc()) throw asvJSONError("UDE: !string conversion failed");
+        if (ec != std::errc()) throw asvJSONError("ADE: !string conversion failed");
         return makeUdeString(std::string(buf, ptr - buf));
       }
       if (val->type == asvJSONValue::DOUBLE) {
@@ -1253,7 +1253,7 @@ private:
       if (val->type == asvJSONValue::BOOL_VAL) {
         return makeUdeString(std::string(val->flag ? "true" : "false"));
       }
-      throw asvJSONError("UDE: !string cannot convert this value");
+      throw asvJSONError("ADE: !string cannot convert this value");
     }
     if (tag == "bool") {
       if (val->type == asvJSONValue::BOOL_VAL) return val;
@@ -1263,9 +1263,9 @@ private:
         std::string lower = udeToLower(val->str_data);
         if (lower == "true" || lower == "yes" || lower == "on" || lower == "1") return asvJSONValue::makeBool(true);
         if (lower == "false" || lower == "no" || lower == "off" || lower == "0") return asvJSONValue::makeBool(false);
-        throw asvJSONError("UDE: !bool requires true/false");
+        throw asvJSONError("ADE: !bool requires true/false");
       }
-      throw asvJSONError("UDE: !bool requires a boolean value");
+      throw asvJSONError("ADE: !bool requires a boolean value");
     }
     if (tag == "null") {
       // Explicit null (useful for merge patch semantics): value is discarded.
@@ -1282,15 +1282,15 @@ private:
         custom->custom_value = std::move(val);
         return custom;
       }
-      throw asvJSONError("UDE: !schema requires a string or object");
+      throw asvJSONError("ADE: !schema requires a string or object");
     }
     if (tag == "base64") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !base64 requires a string value");
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !base64 requires a string value");
       bool err = false;
       auto bytes = decodeBase64Fast(val->str_data.data(), val->str_data.size(), &err);
-      if (err) throw asvJSONError("UDE: invalid base64 data");
+      if (err) throw asvJSONError("ADE: invalid base64 data");
       auto b = asvJSONValue::makeBinary(bytes.data(), bytes.size());
-      if (!b) throw asvJSONError("UDE: binary data too large");
+      if (!b) throw asvJSONError("ADE: binary data too large");
       return b;
     }
     if (tag == "bin") {
@@ -1298,14 +1298,14 @@ private:
       if (val->type == asvJSONValue::STRING) {
         std::string hex = val->str_data;
         if (hex.size() >= 2 && hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) hex = hex.substr(2);
-        if (hex.empty() || hex.size() % 2 != 0) throw asvJSONError("UDE: !bin requires even-length hex string");
+        if (hex.empty() || hex.size() % 2 != 0) throw asvJSONError("ADE: !bin requires even-length hex string");
         for (size_t i = 0; i < hex.size(); i += 2) {
           int h1 = udeHexDigit(hex[i]), h2 = udeHexDigit(hex[i + 1]);
-          if (h1 < 0 || h2 < 0) throw asvJSONError("UDE: invalid hex in !bin");
+          if (h1 < 0 || h2 < 0) throw asvJSONError("ADE: invalid hex in !bin");
           bytes.push_back(static_cast<uint8_t>((h1 << 4) | h2));
         }
       } else if (val->type == asvJSONValue::INT) {
-        if (val->num < 0) throw asvJSONError("UDE: !bin requires a non-negative integer");
+        if (val->num < 0) throw asvJSONError("ADE: !bin requires a non-negative integer");
         uint64_t n = static_cast<uint64_t>(val->num);
         if (n == 0) {
           bytes.push_back(0);
@@ -1316,23 +1316,23 @@ private:
           for (int i = cnt - 1; i >= 0; i--) bytes.push_back(tmp[i]);
         }
       } else {
-        throw asvJSONError("UDE: !bin requires a hex literal or string");
+        throw asvJSONError("ADE: !bin requires a hex literal or string");
       }
       auto b = asvJSONValue::makeBinary(bytes.data(), bytes.size());
-      if (!b) throw asvJSONError("UDE: binary data too large");
+      if (!b) throw asvJSONError("ADE: binary data too large");
       return b;
     }
     if (tag == "datetime") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !datetime requires a string value");
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !datetime requires a string value");
       time_t ts = 0;
       int ms = 0;
       int tz = 0;
       if (!udeTryParseDateTime(val->str_data, ts, &ms, &tz))
-        throw asvJSONError("UDE: invalid datetime: " + val->str_data);
+        throw asvJSONError("ADE: invalid datetime: " + val->str_data);
       return asvJSONValue::makeDateTime(ts, ms, tz);
     }
     if (tag == "regex") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !regex requires a string value");
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !regex requires a string value");
       // Two wire forms are accepted.
       //
       // Canonical: !regex "__REGEX__<pattern>|<opts>|" (marker + trailing
@@ -1356,19 +1356,19 @@ private:
           udeSplitLegacyRegex(val->str_data, pattern, opts);
       }
       auto r = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
-      if (!r) throw asvJSONError("UDE: invalid regex");
+      if (!r) throw asvJSONError("ADE: invalid regex");
       return r;
     }
     if (tag == "objectid") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !objectid requires a string value");
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !objectid requires a string value");
       // The encoder emits a 24-char hex string (fmtObjectIdHexVal). Restore it
       // to the 12 raw bytes that makeObjectId requires.
-      if (val->str_data.empty() || val->str_data.size() != 24) throw asvJSONError("UDE: invalid !objectid value");
+      if (val->str_data.empty() || val->str_data.size() != 24) throw asvJSONError("ADE: invalid !objectid value");
       uint8_t bytes[12];
       for (int i = 0; i < 12; i++) {
         int hi = udeHexDigit(val->str_data[i * 2]);
         int lo = udeHexDigit(val->str_data[i * 2 + 1]);
-        if (hi < 0 || lo < 0) throw asvJSONError("UDE: invalid !objectid value");
+        if (hi < 0 || lo < 0) throw asvJSONError("ADE: invalid !objectid value");
         bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
       }
       return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(bytes), 12));
@@ -1387,31 +1387,31 @@ private:
         time_t t = 0;
         int ms = 0;
         if (!udeTryParseDateTime(val->str_data, t, &ms))
-          throw asvJSONError("UDE: invalid timestamp: " + val->str_data);
+          throw asvJSONError("ADE: invalid timestamp: " + val->str_data);
         return asvJSONValue::makeTimestamp(static_cast<int64_t>(t));
       }
-      throw asvJSONError("UDE: !timestamp requires an integer or string value");
+      throw asvJSONError("ADE: !timestamp requires an integer or string value");
     }
     if (tag == "ext" || tag == "extension") {
-      if (val->type != asvJSONValue::STRING) throw asvJSONError("UDE: !ext requires a string value");
+      if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !ext requires a string value");
       const std::string& s = val->str_data;
       size_t colon = s.find(':');
-      if (colon == std::string::npos) throw asvJSONError("UDE: !ext requires \"type:data\"");
+      if (colon == std::string::npos) throw asvJSONError("ADE: !ext requires \"type:data\"");
       errno = 0;
       char* end = nullptr;
       long type = std::strtol(s.c_str(), &end, 10);
       if (errno == ERANGE || !end || end != s.c_str() + static_cast<long>(colon))
-        throw asvJSONError("UDE: invalid extension type");
+        throw asvJSONError("ADE: invalid extension type");
       // strtol reports only long-range overflow. The stored type is int8_t
       // (Section 8), so a value outside [-128, 127] must be rejected here:
       // static_cast<int8_t>(300) silently wrapped to 44.
       if (type < -128 || type > 127)
-        throw asvJSONError("UDE: extension type out of range [-128, 127]");
+        throw asvJSONError("ADE: extension type out of range [-128, 127]");
       bool err = false;
       auto bytes = decodeBase64Fast(s.data() + colon + 1, s.size() - colon - 1, &err);
-      if (err) throw asvJSONError("UDE: invalid base64 in !ext");
+      if (err) throw asvJSONError("ADE: invalid base64 in !ext");
       auto e = asvJSONValue::makeExtension(static_cast<int8_t>(type), bytes.data(), bytes.size());
-      if (!e) throw asvJSONError("UDE: extension data too large");
+      if (!e) throw asvJSONError("ADE: extension data too large");
       return e;
     }
     // Preserve unknown tags using CUSTOM_TAG type. The tag name is stored
@@ -1434,7 +1434,7 @@ private:
       pos_++;
       size_t start = pos_;
       while (!eof() && text_[pos_] != '>') pos_++;
-      if (eof()) throw asvJSONError("UDE: unterminated tag URI at line " + std::to_string(lineNum_));
+      if (eof()) throw asvJSONError("ADE: unterminated tag URI at line " + std::to_string(lineNum_));
       // An empty body is accepted on purpose: a CUSTOM_TAG may carry an empty
       // name, and the encoder writes such a name as "!<>" so the round-trip
       // stays total. "!<" is unambiguous -- the '<' cannot open a simple name.
@@ -1453,14 +1453,14 @@ private:
     } else {
       size_t start = pos_;
       while (!eof() && udeIsTagChar(text_[pos_])) pos_++;
-      if (pos_ == start) throw asvJSONError("UDE: expected tag name at line " + std::to_string(lineNum_));
+      if (pos_ == start) throw asvJSONError("ADE: expected tag name at line " + std::to_string(lineNum_));
       tag = std::string(text_.substr(start, pos_ - start));
       // udeIsTagChar is deliberately permissive about the FIRST character so
       // the scan above can find where the name ends; validate the shape now.
       // A name that is not identifier-like has no !name spelling and must be
       // written as the verbatim !<name> form, so it is rejected here.
       if (!udeIsSimpleTagName(tag))
-        throw asvJSONError("UDE: invalid tag name '!" + tag + "' at line " + std::to_string(lineNum_));
+        throw asvJSONError("ADE: invalid tag name '!" + tag + "' at line " + std::to_string(lineNum_));
     }
     // A bare tag with no value. The end-of-line test MUST run before
     // skipWsAndComments(), which also crosses line breaks: with it first, the
@@ -1474,7 +1474,7 @@ private:
       // the verbatim !<null> is a custom tag, so it keeps the standard
       // "requires a value" rule.
       if (!verbatim && tag == "null") return asvJSONValue::makeNull();
-      throw asvJSONError("UDE: !" + tag + " requires a value");
+      throw asvJSONError("ADE: !" + tag + " requires a value");
     }
     skipWsAndComments();
     std::string anchor;
@@ -1493,7 +1493,7 @@ private:
           registerAnchor(anchor, n.get());
           return n;
         }
-        throw asvJSONError("UDE: !" + tag + " requires a value");
+        throw asvJSONError("ADE: !" + tag + " requires a value");
       }
       skipWsAndComments();
     }
@@ -1558,19 +1558,19 @@ private:
     for (const auto& [k, v] : *src->obj) {
       if (obj->obj->find(k) == obj->obj->end()) {
         if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
-          throw asvJSONError("UDE: object too large");
+          throw asvJSONError("ADE: object too large");
         auto copy = cloneValue(v.get());
         // A failed clone (clone budget exhausted) must not be swallowed: that
         // would drop a key from the merge with no error, unlike registerAnchor/
         // parseAlias, which both turn the same failure into a throw.
-        if (!copy) throw asvJSONError("UDE: failed to clone merged key " + k);
+        if (!copy) throw asvJSONError("ADE: failed to clone merged key " + k);
         obj->obj->emplace(k, std::move(copy));
       }
     }
   }
 
   void applyMergeKey(asvJSONValue* obj, std::unique_ptr<asvJSONValue> val) {
-    if (!val) throw asvJSONError("UDE: merge key requires an object or sequence of objects");
+    if (!val) throw asvJSONError("ADE: merge key requires an object or sequence of objects");
     if (val->type == asvJSONValue::OBJECT) {
       udeMergeInto(obj, val.get());
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
@@ -1579,17 +1579,17 @@ private:
       // earlier sources only fill in the gaps.
       for (auto it = val->arr->rbegin(); it != val->arr->rend(); ++it) {
         if ((*it)->type != asvJSONValue::OBJECT)
-          throw asvJSONError("UDE: merge key sequence must contain only objects");
+          throw asvJSONError("ADE: merge key sequence must contain only objects");
         udeMergeInto(obj, it->get());
       }
     } else {
-      throw asvJSONError("UDE: merge key requires an object or sequence of objects");
+      throw asvJSONError("ADE: merge key requires an object or sequence of objects");
     }
   }
 
   void insertKey(asvJSONValue* obj, ParsedKey pk, std::unique_ptr<asvJSONValue> val, int depth = 1) {
     if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) {
-      throw asvJSONError("UDE: cannot insert key into non-object");
+      throw asvJSONError("ADE: cannot insert key into non-object");
     }
     // Multi-segment (dotted) keys expand into nested objects; a fully quoted
     // key (single segment) is always a literal key (Section 3).
@@ -1603,9 +1603,9 @@ private:
         auto it = cur->obj->find(seg);
         if (it == cur->obj->end()) {
           if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
-            throw asvJSONError("UDE: object too large");
+            throw asvJSONError("ADE: object too large");
           if (prefixDepth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
-            throw asvJSONError("UDE: nesting too deep");
+            throw asvJSONError("ADE: nesting too deep");
           prefixDepth++;
           auto no = asvJSONValue::makeObject();
           auto* raw = no.get();
@@ -1615,27 +1615,27 @@ private:
           cur = it->second.get();
         } else {
           // Existing key is not an object - cannot expand dotted key further.
-          throw asvJSONError("UDE: key conflict - intermediate key '" + seg + "' is not an object");
+          throw asvJSONError("ADE: key conflict - intermediate key '" + seg + "' is not an object");
         }
       }
       const std::string& leaf = pk.segs.back().first;
       auto it = cur->obj->find(leaf);
       if (it != cur->obj->end()) {
-        if (strict_) throw asvJSONError("UDE: duplicate key '" + leaf + "' in strict mode");
+        if (strict_) throw asvJSONError("ADE: duplicate key '" + leaf + "' in strict mode");
         cur->obj->insert_or_assign(leaf, std::move(val));
       } else {
         if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
-          throw asvJSONError("UDE: object too large");
+          throw asvJSONError("ADE: object too large");
         cur->obj->emplace(leaf, std::move(val));
       }
     } else {
       auto it = obj->obj->find(pk.name);
       if (it != obj->obj->end()) {
-        if (strict_) throw asvJSONError("UDE: duplicate key '" + pk.name + "' in strict mode");
+        if (strict_) throw asvJSONError("ADE: duplicate key '" + pk.name + "' in strict mode");
         obj->obj->insert_or_assign(std::move(pk.name), std::move(val));
       } else {
         if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
-          throw asvJSONError("UDE: object too large");
+          throw asvJSONError("ADE: object too large");
         obj->obj->emplace(std::move(pk.name), std::move(val));
       }
     }
@@ -1654,26 +1654,26 @@ std::unique_ptr<asvJSONValue> UDEParser::parseDocument() {
       if (eof()) break;
       char c = peek();
       if (c == '[' || c == '{') {
-        if (any) throw asvJSONError("UDE: unexpected top-level collection at line " + std::to_string(lineNum_));
+        if (any) throw asvJSONError("ADE: unexpected top-level collection at line " + std::to_string(lineNum_));
         auto coll = (c == '[') ? parseArray(2) : parseObject(2);
         skipWsAndComments();
-        if (!eof()) throw asvJSONError("UDE: trailing content after top-level collection");
+        if (!eof()) throw asvJSONError("ADE: trailing content after top-level collection");
         return coll;
       }
       if (c == '|' || c == '>') {
         auto val = parseBlockScalar();
         skipWsAndComments();
-        if (!eof()) throw asvJSONError("UDE: trailing content after block scalar");
+        if (!eof()) throw asvJSONError("ADE: trailing content after block scalar");
         return val;
       }
       ParsedKey key = parseKey();
-      if (key.name.empty()) throw asvJSONError("UDE: expected key at line " + std::to_string(lineNum_));
+      if (key.name.empty()) throw asvJSONError("ADE: expected key at line " + std::to_string(lineNum_));
       skipWs();
-      if (eof() || peek() != ':') throw asvJSONError("UDE: expected ':' after key '" + key.name + "' at line " + std::to_string(lineNum_));
+      if (eof() || peek() != ':') throw asvJSONError("ADE: expected ':' after key '" + key.name + "' at line " + std::to_string(lineNum_));
       pos_++;
       std::unique_ptr<asvJSONValue> val;
       if (atLineEndSkipping()) {
-        if (strict_) throw asvJSONError("UDE: missing value after ':' at line " + std::to_string(lineNum_));
+        if (strict_) throw asvJSONError("ADE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
         val = parseValue(1);
@@ -1734,13 +1734,13 @@ inline std::string udeHeaderVersion() {
   return "1.1";
 }
 
-// Detect and validate an optional "# UDE vX.Y [flags]" header on the first
+// Detect and validate an optional "# ADE vX.Y [flags]" header on the first
 // non-empty line. The header is stripped from the returned document text and
 // recognized flags (currently "strict") update `strict`. Unknown flags are
 // ignored so that forward-compatible minor versions keep working.
 inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict) {
   std::string_view sv(text);
-  // Sec. 2.1: the first non-empty line may be an optional "# UDE vX.Y" header.
+  // Sec. 2.1: the first non-empty line may be an optional "# ADE vX.Y" header.
   size_t scan = 0;
   size_t headEnd = std::string_view::npos;
   std::string_view t;
@@ -1750,7 +1750,7 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
       ? sv.substr(scan) : sv.substr(scan, eol - scan);
     std::string_view lt = udeTrim(line);
     if (!lt.empty()) {
-      if (lt.size() < 6 || lt.substr(0, 6) != "# UDE ") return text;
+      if (lt.size() < 6 || lt.substr(0, 6) != "# ADE ") return text;
       t = lt;
       headEnd = (eol == std::string_view::npos) ? sv.size() : eol + 1;
       break;
@@ -1765,17 +1765,17 @@ inline std::string udeStripAndCheckHeader(const std::string& text, bool& strict)
   rest.remove_prefix(1);
   size_t i = 0;
   while (i < rest.size() && rest[i] >= '0' && rest[i] <= '9') i++;
-  if (i == 0) throw asvJSONError("UDE: malformed version header");
+  if (i == 0) throw asvJSONError("ADE: malformed version header");
   int major = 0;
   for (size_t k = 0; k < i; k++) major = major * 10 + (rest[k] - '0');
-  if (i >= rest.size() || rest[i] != '.') throw asvJSONError("UDE: malformed version header");
+  if (i >= rest.size() || rest[i] != '.') throw asvJSONError("ADE: malformed version header");
   i++;
   size_t j = i;
   while (j < rest.size() && rest[j] >= '0' && rest[j] <= '9') j++;
-  if (j == i) throw asvJSONError("UDE: malformed version header");
+  if (j == i) throw asvJSONError("ADE: malformed version header");
   int minor = 0;
   for (size_t k = i; k < j; k++) minor = minor * 10 + (rest[k] - '0');
-  if (major != 1) throw asvJSONError("UDE: unsupported UDE version v" + std::to_string(major) + "." + std::to_string(minor));
+  if (major != 1) throw asvJSONError("ADE: unsupported UDE version v" + std::to_string(major) + "." + std::to_string(minor));
   (void)minor;
   // Optional flags after the version number.
   size_t k = j;
@@ -1810,7 +1810,7 @@ inline std::unique_ptr<asvJSONValue> parseUDE(const std::string& text, bool stri
         if (!v) throw;
       }
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
-        throw asvJSONError("UDE: too many documents");
+        throw asvJSONError("ADE: too many documents");
       arr->arr->push_back(std::move(v));
     }
     return arr;
@@ -2304,7 +2304,7 @@ inline void udeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       // rather than emit a document we cannot read back. A name built through
       // the public API can hold a '>'; the parser never accepts one.
       if (v->str_data.find('>') != std::string::npos)
-        throw asvJSONError("UDE: CUSTOM_TAG name must not contain '>'");
+        throw asvJSONError("ADE: CUSTOM_TAG name must not contain '>'");
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
       if (v->custom_value) udeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
@@ -2382,24 +2382,24 @@ inline void serializeUDE(std::ostream& os, const asvJSONValue& val, int indent, 
 
 // ====================== asvJSON member methods ======================
 
-inline std::string asvJSON::toUDE(bool strict) const {
+inline std::string asvJSON::toADE(bool strict) const {
   std::ostringstream os;
   if (root) asvJSONInternal::serializeUDE(os, *root, 0, strict);
   return os.str();
 }
 
-inline bool asvJSON::fromUDE(std::string_view input, bool strict) {
+inline bool asvJSON::fromADE(std::string_view input, bool strict) {
   dirty_ = false;
   formatType = FormatType::Unknown;
   root = nullptr;
   try {
     auto parsed = asvJSONInternal::parseUDE(std::string(input), strict);
     if (!parsed) {
-      lastError = "UDE: failed to parse input";
+      lastError = "ADE: failed to parse input";
       return false;
     }
     root = std::move(parsed);
-    formatType = FormatType::UDE;
+    formatType = FormatType::ADE;
     return true;
   } catch (const std::exception& e) {
     lastError = e.what();

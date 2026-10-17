@@ -1244,7 +1244,7 @@ void example_to_ron() {
 	}
 	std::cout << std::endl;
 
-	// Comment round-trip: RON -> RON, then converted into JSON5 / YAML / UDE
+	// Comment round-trip: RON -> RON, then converted into JSON5 / YAML / ADE
 	// (each keeps the comments in its own syntax).
 	asvJSON j5;
 	j5.fromRON(std::string_view("// optional struct name\n"
@@ -1257,7 +1257,7 @@ void example_to_ron() {
 	std::cout << "RON with comments (round-trip):" << std::endl << ronC << std::endl;
 	std::cout << "Comments -> JSON5:" << std::endl << j5.toJSON5() << std::endl;
 	std::cout << "Comments -> YAML:" << std::endl << j5.toYAML(true) << std::endl;
-	std::cout << "Comments -> UDE:" << std::endl << j5.toUDE() << std::endl;
+	std::cout << "Comments -> ADE:" << std::endl << j5.toADE() << std::endl;
 	asvJSON j6;
 	j6.fromRON(std::string_view(ronC));
 	std::cout << "RON->RON comment round-trip idempotent: "
@@ -1587,7 +1587,7 @@ void example_from_plist() {
 }
 
 void example_ude_strings() {
-	std::cout << "=== UDE String Escapes ===" << std::endl;
+	std::cout << "=== ADE String Escapes ===" << std::endl;
 
 	asvJSON json;
 	std::string_view input =
@@ -1595,7 +1595,7 @@ void example_ude_strings() {
 		"path: 'C:\\Program Files\\app'\n"
 		"multiline: \"line one \\\n"
 		"            and line two\"\n";
-	if (json.fromUDE(input)) {
+	if (json.fromADE(input)) {
 		std::string g = json.getString("greeting");
 		// escape newlines for clean display
 		std::string display;
@@ -1608,11 +1608,11 @@ void example_ude_strings() {
 }
 
 void example_to_ude() {
-	std::cout << "=== UDE Output ===" << std::endl;
+	std::cout << "=== ADE Output ===" << std::endl;
 
 	asvJSON json;
 	json.parse(std::string(R"({"name":"John","age":30,"active":true,"address":{"city":"NYC","zip":"10001"},"tags":["admin","user"]})"));
-	std::cout << json.toUDE() << std::endl;
+	std::cout << json.toADE() << std::endl;
 }
 
 void example_from_any() {
@@ -1766,11 +1766,11 @@ void example_jsonpath() {
 }
 
 void example_from_ude() {
-	std::cout << "=== UDE Input ===" << std::endl;
+	std::cout << "=== ADE Input ===" << std::endl;
 
 	asvJSON json;
-	std::string_view input = "# UDE v1.0\nname: John\nage: 30\nactive: true\ntags: [admin, user]\n";
-	if (json.fromUDE(input)) {
+	std::string_view input = "# ADE v1.0\nname: John\nage: 30\nactive: true\ntags: [admin, user]\n";
+	if (json.fromADE(input)) {
 		std::cout << "  name=" << json.getString("name")
 		          << " age=" << json.getInt("age")
 		          << " active=" << json.getBool("active")

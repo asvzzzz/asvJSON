@@ -1,7 +1,7 @@
-# Unified Data Exchange (UDE)
+# Unified Data Exchange (ADE)
 
 ## Overview
-UDE is a human-readable, machine-efficient format that combines features of JSON, YAML, INI, TOML and binary formats such as BSON or MessagePack. It aims to be:
+ADE is a human-readable, machine-efficient format that combines features of JSON, YAML, INI, TOML and binary formats such as BSON or MessagePack. It aims to be:
 
 - **Self-describing**  -  type information is embedded inline.
 - **Extensible**  -  custom tags are supported without breaking compatibility.
@@ -11,7 +11,7 @@ UDE is a human-readable, machine-efficient format that combines features of JSON
 ---
 
 ## 2. File Structure
-A UDE file may contain one or more **documents** separated by a document separator line:
+A ADE file may contain one or more **documents** separated by a document separator line:
 
 ```text
 ---
@@ -20,7 +20,7 @@ A UDE file may contain one or more **documents** separated by a document separat
 or the legacy comment-style separators (still accepted for backward compatibility):
 
 ```text
-// UDE document separator
+// ADE document separator
 // --- End of Document ---
 ```
 
@@ -37,11 +37,11 @@ Because a multi-document stream decodes to a single root array, re-encoding it w
 The first non-empty line can be an optional header that identifies the format and may include flags:
 
 ```text
-# UDE v1.1
+# ADE v1.1
 
 ```
-* `UDE`  -  literal marker.
-* `v1.0`  -  version of the UDE specification. The major digit is a breaking change: documents declaring a major version other than `1` are rejected with an error. Minor versions are backward compatible, so older minor versions (e.g. `v1.0`) are accepted by a newer implementation.
+* `ADE`  -  literal marker.
+* `v1.0`  -  version of the ADE specification. The major digit is a breaking change: documents declaring a major version other than `1` are rejected with an error. Minor versions are backward compatible, so older minor versions (e.g. `v1.0`) are accepted by a newer implementation.
 * `strict`  -  optional flag that enables strict mode for the whole stream.
 * Unknown flags are ignored so that forward-compatible minor versions keep working.
 
@@ -95,7 +95,7 @@ Inside double-quoted strings (`DQ_STRING`) the following escape sequences are re
 
 Single-quoted strings (`SQ_STRING`) are fully literal: the only escape is `''`, which represents a literal single quote; no other backslash processing occurs.
 
-A code point above U+10FFFF, an invalid surrogate pair, or a malformed escape (e.g. `\x` without two hex digits, a truncated `\u`/`\U`, or an unknown escape letter) is a parse error reported with the line number, e.g. `UDE: invalid escape sequence in string at line N`.
+A code point above U+10FFFF, an invalid surrogate pair, or a malformed escape (e.g. `\x` without two hex digits, a truncated `\u`/`\U`, or an unknown escape letter) is a parse error reported with the line number, e.g. `ADE: invalid escape sequence in string at line N`.
 
 **Encoded documents** (Section 2) are decoded before parsing. If the byte content cannot represent a code point, the decoder substitutes U+FFFD REPLACEMENT CHARACTER rather than emitting an invalid UTF-8 sequence: an unpaired UTF-16 surrogate (a lone high or low surrogate) and a UTF-32 value above U+10FFFF all become U+FFFD. A surrogate *pair* still joins into the real character. This is the only lossy step in decoding, and it is deliberate  -  a lone surrogate has no UTF-8 encoding, so passing it through would produce bytes no consumer can read.
 
@@ -103,7 +103,7 @@ A code point above U+10FFFF, an invalid surrogate pair, or a malformed escape (e
 
 
 ## 4. Data Types
-UDE supports the following scalar types:
+ADE supports the following scalar types:
 
 | Type | Representation | Example |
 |------|----------------|---------|
@@ -117,14 +117,14 @@ UDE supports the following scalar types:
 | **Array** | `[elem1, elem2]` or multi-line block | `list: [1, 2, 3]` |
 | **Object** | `{key: value}` or explicit braces | `person: {name: Alice, age: 30}` |
 
-JSON has no literal for a non-finite value, so one projects to `null` in JSON output; the spellings above are the UDE way of keeping it. A UDE round-trip of `.inf` gives a `DOUBLE` holding infinity, not the integer or string it started as.
+JSON has no literal for a non-finite value, so one projects to `null` in JSON output; the spellings above are the ADE way of keeping it. A ADE round-trip of `.inf` gives a `DOUBLE` holding infinity, not the integer or string it started as.
 
 A `_` digit separator is only legal *between* two digits, in all bases: `1_000` and `0b1010_1010` are numbers, `1_` and `_1` are plain strings. A number that overflows the destination type is not an error  -  it is kept as its original text in a STRING, so nothing is lost.
 
 ---
 
 ## 5. Arrays of Objects & Tabular Data
-UDE allows arrays to contain objects that share the same set of keys. When an array contains only objects with identical key sets, it is treated as a *tabular* representation and can be printed in CSV-like form for human readability:
+ADE allows arrays to contain objects that share the same set of keys. When an array contains only objects with identical key sets, it is treated as a *tabular* representation and can be printed in CSV-like form for human readability:
 
 ```text
 people: [
@@ -164,12 +164,12 @@ takes a body indented by exactly 2 spaces, and `    key: |2` still takes a body
 indented by exactly 2  -  the four extra spaces of the header line are not
 added to it, and a body indented 6 spaces keeps the remaining 4 as value
 prefix. Note that a conformant YAML reader counts the indicator *relative to
-the parent node*, so it would read that last document as `data` where UDE reads
+the parent node*, so it would read that last document as `data` where ADE reads
 `    data`. The two agree only when the header sits at column 0, which is the
 common case and the only one the encoder produces: the encoder never emits a
-digit at all (it lets the base indent be auto-detected), so no UDE round-trip
+digit at all (it lets the base indent be auto-detected), so no ADE round-trip
 depends on this reading. Prefer the implicit form when the value has to be
-portable between UDE and YAML.
+portable between ADE and YAML.
 
 A `0` indicator (`key: |0`) is degenerate: with base indentation 0 the parser
 strips **no** indentation from the body, and a body line at or above the
@@ -179,11 +179,11 @@ and a separate `next`; a deeper body line keeps its full leading whitespace
 (`key: |0` over `"  hello"` yields a value of two leading spaces + `hello`).
 The parser accepts it (it is legal, just avoids stripping), but prefer any
 positive indicator or the implicit form when the value has to be portable
-between UDE and YAML.
+between ADE and YAML.
 
 `|` and `>` fold identically as far as chomping is concerned, so for the same body text they yield the same trailing breaks; they differ only in how the body's interior line breaks are treated (`>` turns a lone break between two non-empty lines into a space and keeps a run of k blank lines as k breaks).
 
-Only whitespace, a comment, or the end of the line may follow the indicators, and all three comment forms are accepted there -  `key: | # note`, `key: > // note` and `key: | /* note */` are all valid. Accepting only two of them made `/* */` the single place in the grammar where a block comment was a syntax error. A block comment opened on the header line must close on that same line: one that would need to cross the line break is rejected with `UDE: unterminated comment after block scalar header at line N` rather than being allowed to swallow the body. Anything else after the indicators is `UDE: unexpected content after block scalar header at line N`.
+Only whitespace, a comment, or the end of the line may follow the indicators, and all three comment forms are accepted there -  `key: | # note`, `key: > // note` and `key: | /* note */` are all valid. Accepting only two of them made `/* */` the single place in the grammar where a block comment was a syntax error. A block comment opened on the header line must close on that same line: one that would need to cross the line break is rejected with `ADE: unterminated comment after block scalar header at line N` rather than being allowed to swallow the body. Anything else after the indicators is `ADE: unexpected content after block scalar header at line N`.
 
 Block scalar termination: the base indentation is the number of leading spaces
 on the first non-empty line of the block. Every subsequent line must have at
@@ -205,11 +205,11 @@ indented body. An explicit indentation indicator is bound by the same floor.
 Blank lines may still precede the body: they are content, not indentation.
 
 The floor counts **spaces** on the header line. A header indented with a tab
-has no structural indentation at all in UDE (Section 12: tabs are never
+has no structural indentation at all in ADE (Section 12: tabs are never
 structural), so its floor is column 0 and any indented body is accepted. This is
 not a hole in the tab rule: that rule governs the body's indentation margin,
 which is checked separately and does reject a tab there
-(`UDE: tab used as indentation in block scalar at line N`).
+(`ADE: tab used as indentation in block scalar at line N`).
 
 Tabs (Section 12): a tab is not allowed in the indentation margin of a block
 scalar  -  the margin must consist of spaces only (YAML rule). A tab after the
@@ -231,11 +231,11 @@ default: &def {x: 1, y: 2}
 point1: *def
 point2: {x: 3, y: 4}
 ```
-Aliases (`*name`) are replaced with a deep copy of the anchored value during parsing. An alias that has no matching anchor  -  whether it is a forward reference (referenced before the `&anchor` is defined) or a typo  -  is a hard error in **all** modes: the parser raises `UDE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Because an anchor is registered only after its value has fully parsed, a value can never refer to itself or to an anchor defined later in the document, so genuine cycles are impossible: `a: &x *y` together with `b: &y *x` is caught as an `undefined alias`. Resolving an alias is a single deep copy of the anchored value (bounded by the clone node budget in Section 12) and never recurses into further anchor resolution, so there is no alias-chain depth limit.
+Aliases (`*name`) are replaced with a deep copy of the anchored value during parsing. An alias that has no matching anchor  -  whether it is a forward reference (referenced before the `&anchor` is defined) or a typo  -  is a hard error in **all** modes: the parser raises `ADE: undefined alias *<name>` and aborts. Anchor definition is therefore not deferred; the anchor must be present in the document. Because an anchor is registered only after its value has fully parsed, a value can never refer to itself or to an anchor defined later in the document, so genuine cycles are impossible: `a: &x *y` together with `b: &y *x` is caught as an `undefined alias`. Resolving an alias is a single deep copy of the anchored value (bounded by the clone node budget in Section 12) and never recurses into further anchor resolution, so there is no alias-chain depth limit.
 
 ### 7.1 Merge Keys
 
-UDE supports the YAML-style merge key `<<`. A mapping may contain `<<: *anchor` (or `<<: [*a, *b]`) to inline the anchored object's members into the current object. Only the unquoted form `<<` merges. The anchored value must be an object or a sequence of objects; existing keys in the target object take precedence over merged keys, and for a sequence of objects later entries win. A non-object anchor or a sequence containing a non-object is a parse error (`UDE: merge key requires an object or sequence of objects`).
+ADE supports the YAML-style merge key `<<`. A mapping may contain `<<: *anchor` (or `<<: [*a, *b]`) to inline the anchored object's members into the current object. Only the unquoted form `<<` merges. The anchored value must be an object or a sequence of objects; existing keys in the target object take precedence over merged keys, and for a sequence of objects later entries win. A non-object anchor or a sequence containing a non-object is a parse error (`ADE: merge key requires an object or sequence of objects`).
 
 ---
 
@@ -244,7 +244,7 @@ Tags allow custom data types to be represented in a type-safe way:
 
 | Tag | Syntax | Meaning |
 |-----|--------|---------|
-| `!int` | `!int <number>` | Coerces/validates the value as an integer; a non-integral numeric is rejected (`UDE: !int requires an integral value`). |
+| `!int` | `!int <number>` | Coerces/validates the value as an integer; a non-integral numeric is rejected (`ADE: !int requires an integral value`). |
 | `!float` | `!float <number>` | Coerces/validates the value as a floating-point number. |
 | `!string` | `!string <value>` | Coerces the value to a string (e.g. `!string 42`  ->  `"42"`). |
 | `!bool` | `!bool <true\|false>` | Coerces/validates a boolean value. |
@@ -252,11 +252,11 @@ Tags allow custom data types to be represented in a type-safe way:
 | `!base64` | `!base64 "<data>"` | Decoded binary data from base64 string. |
 | `!bin` | `!bin 0x<hex>` | Binary data represented as hex literal. |
 | `!datetime` | `!datetime "2026-07-30T14:45:00Z"` | ISO-8601 timestamp. |
-| `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two-token form like `!ext image/png "..."` would not parse. `<type>` is a signed byte and must be within `[-128, 127]`; anything else is rejected with `UDE: extension type out of range [-128, 127]`. |
+| `!ext` | `!ext "<type>:<data>"` | Extension type with arbitrary payload. Type and data are combined into a single quoted value, because a tag takes exactly one VALUE (`TAGGED_VALUE ::= TAG WS? ANCHOR? WS? VALUE`); a two-token form like `!ext image/png "..."` would not parse. `<type>` is a signed byte and must be within `[-128, 127]`; anything else is rejected with `ADE: extension type out of range [-128, 127]`. |
 | `!regex` | `!regex "__REGEX__<pattern>\|<opts>\|"` | Regular expression with optional flags. The canonical body is described below; the historical `!regex "<pattern>\|<opts>"` form is still accepted. |
 | `!schema` | `!schema <string\|object>` | Schema reference or inline schema; stored as a custom tag with name `schema` (see 8.1). |
 
-These **explicit type-cast tags** (`!int`, `!float`, `!string`, `!bool`, `!null`) force a specific runtime type on the following value and validate it; a value of the wrong type is a parse error. They are the UDE equivalent of YAML's explicit type tags.
+These **explicit type-cast tags** (`!int`, `!float`, `!string`, `!bool`, `!null`) force a specific runtime type on the following value and validate it; a value of the wrong type is a parse error. They are the ADE equivalent of YAML's explicit type tags.
 
 **`!null` needs no value.** A tag's value may not live on a later line (`WS` is `[ \t]*` and does not include a line break), so `!null` is recognised before any whitespace/comment skipping that could cross the line end. A bare `!null` is valid at the end of a line, at the end of the input, and directly before a flow delimiter, which is what makes `[!null, 1]` and `{y: !null, z: 1}` work:
 
@@ -266,9 +266,9 @@ a: !null          # end of line
 {y: !null}        # before '}'
 ```
 
-Every other tag still requires a value; a bare `!int` is rejected with `UDE: !int requires a value`. The anchored spelling `!null &a` is accepted the same way, as a deliberate extension beyond Appendix A, whose `VALUE` is mandatory: a bare `!null` already carries no value, so this is the consistent reading, and an anchor with nothing to point at would otherwise be unrepresentable. Every other tag still requires one after an anchor (`!int &a` is rejected).
+Every other tag still requires a value; a bare `!int` is rejected with `ADE: !int requires a value`. The anchored spelling `!null &a` is accepted the same way, as a deliberate extension beyond Appendix A, whose `VALUE` is mandatory: a bare `!null` already carries no value, so this is the consistent reading, and an anchor with nothing to point at would otherwise be unrepresentable. Every other tag still requires one after an anchor (`!int &a` is rejected).
 
-`!float` additionally rejects a numeric literal that no `double` can hold exactly (an out-of-`int64` integer, or more significant digits than a double preserves) with `UDE: !float requires a literal representable as a double`. `!int` rejects the same input with `!int requires an integer literal`, so `!float` is not laxer than the integer path. A DOUBLE that is NaN or Inf, and a `DATETIME` the platform cannot convert, both serialize as `null` (see [Non-JSON types](#non-json-types)) and come back as a null value / the string `"null"` rather than as a DOUBLE / DATETIME -  unavoidable, since UDE has no encoding for either.
+`!float` additionally rejects a numeric literal that no `double` can hold exactly (an out-of-`int64` integer, or more significant digits than a double preserves) with `ADE: !float requires a literal representable as a double`. `!int` rejects the same input with `!int requires an integer literal`, so `!float` is not laxer than the integer path. A DOUBLE that is NaN or Inf, and a `DATETIME` the platform cannot convert, both serialize as `null` (see [Non-JSON types](#non-json-types)) and come back as a null value / the string `"null"` rather than as a DOUBLE / DATETIME -  unavoidable, since ADE has no encoding for either.
 
 #### `!regex` body forms
 
@@ -303,7 +303,7 @@ last-`|` rule and reads as options, e.g. `!regex 'a|b'` is pattern `a`, options
 double-quoted canonical form for a pattern that contains a pipe. The encoder
 always writes the double-quoted form.
 
-> **Note on `!!value`:** UDE does **not** support the YAML `!!value` / `!!yaml` core-schema tags. UDE tags are always single-token `!name` forms or verbatim `!<uri>` forms (Section 8.1). The absence of `!!value` is intentional and is **not** a specification discrepancy.
+> **Note on `!!value`:** ADE does **not** support the YAML `!!value` / `!!yaml` core-schema tags. ADE tags are always single-token `!name` forms or verbatim `!<uri>` forms (Section 8.1). The absence of `!!value` is intentional and is **not** a specification discrepancy.
 
 The library provides handlers for the standard tags. **Unknown tags** follow the *save* policy (the default of the three possible behaviors *error / save / ignore*): the tag and its value are preserved without data loss.
 
@@ -315,8 +315,8 @@ An unknown tag stores its **name separately from its value**:
 ```
 
 * The name is a plain identifier, an optional namespace form `!ns:tag` / `!a.b`, or a verbatim URI in angle brackets `!<tag:example.com,2026:type>`.
-* Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `UDE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name. `>` is the one character with no spelling in either form: the verbatim form scans to the *first* `>`, so a name containing one cannot be read back, and the encoder rejects it with `UDE: CUSTOM_TAG name must not contain '>'`. (A `<` is fine  -  `!<a<b>` scans to the first `>` and reads the name `a<b` correctly.)
-* The value is any UDE value (string, number, object, array, ...), not flattened text  -  `!point {x: 1, y: 2}` keeps the object intact.
+* Every `.`/`:`-separated component of a non-verbatim name must start with an identifier character, so `!x`, `!_x`, `!ns:tag` and `!a.b` are valid while `!1x`, `!-x`, `!.a` and `!a.` are rejected with `ADE: invalid tag name`. A name the grammar cannot spell has no `!name` form, which is exactly what the verbatim form is for: the encoder writes such a name as `!<name>` so it still round-trips. The verbatim body may be empty (`!<>`), which is how an empty tag name is represented; `!<` cannot be confused with a simple name. `>` is the one character with no spelling in either form: the verbatim form scans to the *first* `>`, so a name containing one cannot be read back, and the encoder rejects it with `ADE: CUSTOM_TAG name must not contain '>'`. (A `<` is fine  -  `!<a<b>` scans to the first `>` and reads the name `a<b` correctly.)
+* The value is any ADE value (string, number, object, array, ...), not flattened text  -  `!point {x: 1, y: 2}` keeps the object intact.
 * **The angle brackets mean "this name is a literal custom-tag name", not "a synonym for the simple form".** That is what lets a custom tag whose name collides with a built-in be expressed at all:
 
 ```text
@@ -324,7 +324,7 @@ An unknown tag stores its **name separately from its value**:
 !<regex> "^(a|b)$"    # a CUSTOM_TAG whose name happens to be "regex"
 ```
 
-The decoder dispatches on the tag name, so a custom tag named after a built-in is unreachable through `!name`; the encoder therefore emits the verbatim form for such a name, and the verbatim form suppresses the dispatch. `!<null>` with no value is consequently rejected like any other tag (`UDE: !<null> requires a value`)  -  only the simple `!null` is value-less. `CUSTOM_TAG` is a type in the JSON convention, so a document that wants a genuine `null` there uses `{"name":"null","value":null}`.
+The decoder dispatches on the tag name, so a custom tag named after a built-in is unreachable through `!name`; the encoder therefore emits the verbatim form for such a name, and the verbatim form suppresses the dispatch. `!<null>` with no value is consequently rejected like any other tag (`ADE: !<null> requires a value`)  -  only the simple `!null` is value-less. `CUSTOM_TAG` is a type in the JSON convention, so a document that wants a genuine `null` there uses `{"name":"null","value":null}`.
 * In JSON (Extended JSON convention) a custom tag is represented as:
 
 ```json
@@ -358,7 +358,7 @@ Strict mode is useful when data integrity is critical; the default permissive mo
 
 ## 10. Example Document
 ```text
-# UDE v1.1
+# ADE v1.1
 
 name: "Example Document"
 created_at: !datetime "2026-07-30T14:45:00Z"
@@ -379,8 +379,8 @@ people: [
 ---
 
 ## 11. Compatibility Notes
-* **JSON**  ->  valid UDE (no comments or tags).
-* **YAML**  ->  Simple YAML files are often valid UDE. Complex YAML features (implicit typing like ~ for null, or complex keys) require manual adaptation.
+* **JSON**  ->  valid ADE (no comments or tags).
+* **YAML**  ->  Simple YAML files are often valid ADE. Complex YAML features (implicit typing like ~ for null, or complex keys) require manual adaptation.
 * **INI**  ->  converted to flat objects; nested sections become dot-notation keys.
 * **BSON/MessagePack**  ->  represented via `!bin` or `!base64` tags.
 
@@ -393,11 +393,11 @@ The parser enforces documented resource limits:
 |-------|-------|-------|
 | Anchor resolution | single deep copy | An alias is resolved by copying the anchored value (bounded by the clone node budget); it never recurses into further alias resolution, so there is no alias-chain depth limit (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
-| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser, including the counting convention: the root container is level 1 and scalars do not count, so the same tree the JSON parser accepts is one `toUDE()` serializes. A tree built past the limit by hand makes `toUDE()` throw `UDE: maximum nesting depth exceeded` rather than emit a truncated document. |
-| String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `UDE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
+| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser, including the counting convention: the root container is level 1 and scalars do not count, so the same tree the JSON parser accepts is one `toADE()` serializes. A tree built past the limit by hand makes `toADE()` throw `ADE: maximum nesting depth exceeded` rather than emit a truncated document. |
+| String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `ADE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
 | Object/array size | 1,000,000 entries | Shared core limit. |
 
-Tabs are **not** structural indentation anywhere in UDE (YAML rule). They are
+Tabs are **not** structural indentation anywhere in ADE (YAML rule). They are
 accepted as ordinary whitespace separators between tokens; inside a block
 scalar a tab in the indentation margin is an error (Section 6), while tabs
 after the margin are content.
@@ -406,20 +406,20 @@ after the margin are content.
 
 ## 13. Error Handling
 
-UDE parsing is fail-fast: the parser reports a problem by throwing a C++ exception of type `asvJSONError`. The message always begins with the prefix `UDE: ` and, where the position is known, ends with ` at line <N>` giving the 1-based line number in the source document. Column information is **not** tracked, and there is no numeric error-code enumeration  -  the message text itself is the diagnostic.
+ADE parsing is fail-fast: the parser reports a problem by throwing a C++ exception of type `asvJSONError`. The message always begins with the prefix `ADE: ` and, where the position is known, ends with ` at line <N>` giving the 1-based line number in the source document. Column information is **not** tracked, and there is no numeric error-code enumeration  -  the message text itself is the diagnostic.
 
 The following conditions raise an error (non-exhaustive; messages are verbatim):
 
-* **Syntax / structure**  -  `UDE: expected ':' after key ...`, `UDE: expected key at line N`, `UDE: expected value at line N`, `UDE: unterminated object/array/string/single-quoted string/tag URI/block comment at line N`, `UDE: unexpected top-level collection at line N`, `UDE: trailing content after block scalar`, `UDE: trailing content after top-level collection`.
-* **Comments**  -  `UDE: unterminated block comment at line N` is raised wherever an unclosed `/*` appears, including inside the lookahead that decides whether a tag is followed by a value. Answering "the line ends here" for an unclosed comment would turn the real fault into a misleading `UDE: !null requires a value` (or a silent plain `null` for a bare `!null`).
-* **Block scalar**  -  `UDE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
-* **Numbers / escapes**  -  `UDE: invalid \x escape in string`, `UDE: invalid \u/\U escape in string`, `UDE: code point out of range in string`, `UDE: unterminated \u{...} escape in string`, `UDE: invalid \u{...} escape in string`, `UDE: invalid code point in string`, `UDE: invalid escape sequence \<c> in string`, `UDE: invalid escape at end of string`. These are raised by the escape decoder, which names the escape it rejected; the parser that called it appends ` at line <N>` and re-throws it as an `asvJSONError`, so the decoder's text reaches the user intact. A length failure (`UDE: string too long`, Section 12) is raised by the string factory, deliberately outside that wrapper, so it is never relabelled as a bad escape.
-* **Anchors / aliases**  -  `UDE: undefined alias *<name>`, `UDE: too many anchors`, `UDE: failed to store anchor &<name>`, `UDE: merge key requires an object or sequence of objects`.
-* **Duplicate keys**  -  `UDE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
-* **Strict mode**  -  `UDE: strict mode requires all keys to be quoted (key: ...)`, `UDE: strict mode requires quoting value: <tok>`, `UDE: missing value after ':' at line N`.
-* **Tags**  -  e.g. `UDE: !int requires an integral value`, `UDE: !base64 requires a string value`, `UDE: !datetime requires a string value`, `UDE: !ext requires "type:data"`, `UDE: extension type out of range [-128, 127]`, `UDE: invalid base64 data`, `UDE: invalid regex`, `UDE: invalid tag name '!<name>' at line N`, `UDE: <tag> requires a value` (a tag written without a value other than `!null`), `UDE: unterminated tag URI at line N`.
-* **Resource limits**  -  `UDE: array too large`, `UDE: binary data too large`, `UDE: extension data too large`, `UDE: string too long`, `UDE: too many documents` (see Sec. 12).
-* **Header / version**  -  `UDE: malformed version header`, `UDE: unsupported UDE version vX.Y` (a major version other than `1` is rejected).
+* **Syntax / structure**  -  `ADE: expected ':' after key ...`, `ADE: expected key at line N`, `ADE: expected value at line N`, `ADE: unterminated object/array/string/single-quoted string/tag URI/block comment at line N`, `ADE: unexpected top-level collection at line N`, `ADE: trailing content after block scalar`, `ADE: trailing content after top-level collection`.
+* **Comments**  -  `ADE: unterminated block comment at line N` is raised wherever an unclosed `/*` appears, including inside the lookahead that decides whether a tag is followed by a value. Answering "the line ends here" for an unclosed comment would turn the real fault into a misleading `ADE: !null requires a value` (or a silent plain `null` for a bare `!null`).
+* **Block scalar**  -  `ADE: tab used as indentation in block scalar at line N` (a tab in the indentation margin; spaces only are allowed).
+* **Numbers / escapes**  -  `ADE: invalid \x escape in string`, `ADE: invalid \u/\U escape in string`, `ADE: code point out of range in string`, `ADE: unterminated \u{...} escape in string`, `ADE: invalid \u{...} escape in string`, `ADE: invalid code point in string`, `ADE: invalid escape sequence \<c> in string`, `ADE: invalid escape at end of string`. These are raised by the escape decoder, which names the escape it rejected; the parser that called it appends ` at line <N>` and re-throws it as an `asvJSONError`, so the decoder's text reaches the user intact. A length failure (`ADE: string too long`, Section 12) is raised by the string factory, deliberately outside that wrapper, so it is never relabelled as a bad escape.
+* **Anchors / aliases**  -  `ADE: undefined alias *<name>`, `ADE: too many anchors`, `ADE: failed to store anchor &<name>`, `ADE: merge key requires an object or sequence of objects`.
+* **Duplicate keys**  -  `ADE: duplicate key '<key>' in strict mode` (default mode keeps the last value silently).
+* **Strict mode**  -  `ADE: strict mode requires all keys to be quoted (key: ...)`, `ADE: strict mode requires quoting value: <tok>`, `ADE: missing value after ':' at line N`.
+* **Tags**  -  e.g. `ADE: !int requires an integral value`, `ADE: !base64 requires a string value`, `ADE: !datetime requires a string value`, `ADE: !ext requires "type:data"`, `ADE: extension type out of range [-128, 127]`, `ADE: invalid base64 data`, `ADE: invalid regex`, `ADE: invalid tag name '!<name>' at line N`, `ADE: <tag> requires a value` (a tag written without a value other than `!null`), `ADE: unterminated tag URI at line N`.
+* **Resource limits**  -  `ADE: array too large`, `ADE: binary data too large`, `ADE: extension data too large`, `ADE: string too long`, `ADE: too many documents` (see Sec. 12).
+* **Header / version**  -  `ADE: malformed version header`, `ADE: unsupported ADE version vX.Y` (a major version other than `1` is rejected).
 
 There is no error-recovery mode: the first error aborts parsing. Callers that need partial results must catch the exception; the partially built DOM is not returned.
 
@@ -436,7 +436,7 @@ There is no error-recovery mode: the first error aborts parsing. Callers that ne
 ---
 
 ## Appendix A  -  Formal Grammar
-The following EBNF describes the lexical and syntactic rules of UDE.  It is intended to be unambiguous and suitable as a reference for implementation writers.
+The following EBNF describes the lexical and syntactic rules of ADE.  It is intended to be unambiguous and suitable as a reference for implementation writers.
 
 ### Tokens
 
@@ -477,8 +477,8 @@ DIGITS            ::= '0' | [1-9][0-9]* ( '_' [0-9]+ )*
 # numbers. The same rule applies inside HEX, OCTAL and BINARY.
 NON_FINITE        ::= '-'? ( '.nan' | '.inf' | '.infinity' )
 # Note: JSON has no literal for these, so a DOUBLE holding a non-finite value
-# projects to null in JSON output. UDE therefore gives them a first-class
-# spelling, and a non-finite DOUBLE survives a UDE round-trip (its type is still
+# projects to null in JSON output. ADE therefore gives them a first-class
+# spelling, and a non-finite DOUBLE survives a ADE round-trip (its type is still
 # DOUBLE afterwards). ".nan" without the dot is an ordinary unquoted string.
 HEX               ::= '-'? "0x" DIGITS
 OCTAL             ::= '-'? "0o" DIGITS
@@ -513,7 +513,7 @@ PLAIN_TEXT          ::= ~[\n]*
 # parse as DOC_LINE (e.g. "hello world" with no colon) MUST fall through to
 # PLAIN_TEXT rather than being accepted as an empty document with dangling text.
 DOC_LINE          ::= WS? (LINE | BLOCK_COMMENT | COMMENT)
-HEADER            ::= '# UDE v' VERSION_STRING
+HEADER            ::= '# ADE v' VERSION_STRING
 LINE              ::= WS (KEY COLON VALUE | BLOCK_SCALAR | COLLECTION)
 COLLECTION        ::= OBJECT | ARRAY
 OBJECT            ::= '{' WS (PAIRS)? WS '}'
@@ -564,7 +564,7 @@ BLOCK_SCALAR     ::= SCALAR_INDICATOR INDENT_DIGIT? CHOMP_INDICATOR? WS? NEWLINE
 #   '>' disagree with '|' for the same text.
 # * The resulting string may be further processed by the tag handlers if present.
 # These semantics are identical to YAML's folded scalar rules and allow
-# multi-line values to be stored as a single logical line in UDE.
+# multi-line values to be stored as a single logical line in ADE.
 SCALAR_INDICATOR  ::= '|' | '>'
 CHOMP_INDICATOR   ::= '+' | '-'
 INDENT_DIGIT      ::= [0-9]
@@ -604,13 +604,13 @@ NULL              ::= [nN][uU][lL][lL]
 ```
 ### Security constraints
 * Alias resolution is a single deep copy of the anchored value (bounded by the clone node budget); it cannot recurse, so there is no alias-chain depth limit.
-* Genuine cycles are impossible: an anchor is registered only after its value has fully parsed, so a value can never refer to itself or to an anchor defined later - `a: &x *y` together with `b: &y *x` is reported as `UDE: undefined alias *<name>`, never recursed.
+* Genuine cycles are impossible: an anchor is registered only after its value has fully parsed, so a value can never refer to itself or to an anchor defined later - `a: &x *y` together with `b: &y *x` is reported as `ADE: undefined alias *<name>`, never recursed.
 
 ---
 
 ## 15. License
-UDE is released under the MIT license. The specification text itself is public domain.
+ADE is released under the MIT license. The specification text itself is public domain.
 
 ---
 
-End of UDE Specification.
+End of ADE Specification.

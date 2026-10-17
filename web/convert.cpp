@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
            "\n"
            "  --raw    print converted content directly, no JSON wrapper\n"
            "\n"
-"Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, JavaProp, Plist, Bencode, UBJSON, UDE, JSONLines,\n"
+"Formats: JSON, JSON5, XML, YAML, CSV, TOML, INI, Dotenv, JavaProp, Plist, Bencode, UBJSON, ADE, JSONLines,\n"
             "         Sexpr, RON, TOON, TRON, GOON, ProtobufText, SVG, MessagePack, BSON, CBOR, Protobuf\n"
             "Outputs: ... plus CPP (C++ structs/enums) and CPP_C (C structs/enums)\n"
            "         (empty from=JSON, to=JSON)\n";
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
           ok = j.fromBencode(text);
         }
       }
-      else if (fromFmt == "UDE") ok = j.fromUDE(text);
+      else if (fromFmt == "ADE") ok = j.fromADE(text);
       else if (fromFmt == "JSONLines") ok = j.fromJSONLines(text);
       else if (fromFmt == "Sexpr") ok = j.fromSexpr(text);
       else if (fromFmt == "RON") ok = j.fromRON(text);
@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
       else if (toFmt == "JavaProp") result = j.toJavaProp();
       else if (toFmt == "Plist") result = j.toPlist();
       else if (toFmt == "Bencode") result = j.toBencode();
-      else if (toFmt == "UDE") result = j.toUDE();
+      else if (toFmt == "ADE") result = j.toADE();
       else if (toFmt == "JSONLines") result = j.toJSONLines();
       else if (toFmt == "Sexpr") result = j.toSexpr();
       else if (toFmt == "RON") result = j.toRON(req.optBool("pretty", true));

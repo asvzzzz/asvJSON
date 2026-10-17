@@ -78,7 +78,7 @@
 #endif
 
 #ifndef ASVJSON_DISABLE_UDE
-#include "formats/ude.hpp"
+#include "formats/ade.hpp"
 #endif
 
 #ifndef ASVJSON_DISABLE_RON
@@ -281,9 +281,9 @@ inline bool asvJSON::fromAny(std::string_view input) {
       if (fromYAML(s)) return true;
     }
 
-    // UDE: "# UDE" header
-    if (s.size() >= 5 && s.compare(0, 5, "# UDE") == 0) {
-      if (fromUDE(s)) return true;
+    // ADE: "# ADE" header
+    if (s.size() >= 5 && s.compare(0, 5, "# ADE") == 0) {
+      if (fromADE(s)) return true;
     }
 
     // TRON: first non-ws line starts with "class "
@@ -438,7 +438,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
     if (ext == "toon") { formatType = FormatType::TOON;     return fromTOON(content); }
     if (ext == "tron") { formatType = FormatType::TRON;     return fromTRON(content); }
     if (ext == "goon") { formatType = FormatType::GOON;     return fromGOON(content); }
-    if (ext == "ude")  { formatType = FormatType::UDE;      return fromUDE(content); }
+    if (ext == "ade")  { formatType = FormatType::ADE;      return fromADE(content); }
     if (ext == "ron")  { formatType = FormatType::RON;      return fromRON(content); }
     if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") { formatType = FormatType::CPP; return fromCpp(content); }
     if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
@@ -519,7 +519,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
     else if (ext == "toon") content = toTOON();
     else if (ext == "tron") content = toTRON();
     else if (ext == "goon") content = toGOON();
-    else if (ext == "ude")  content = toUDE();
+    else if (ext == "ade")  content = toADE();
     else if (ext == "ron") content = toRON(pretty);
     else if (ext == "hpp" || ext == "h") content = toCpp();
     else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
