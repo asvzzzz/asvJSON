@@ -1092,7 +1092,7 @@ enum class FormatType {
   TOON,
   TRON,
   GOON,
-  UDE,
+  ADE,
   MessagePack,
   CBOR,
   BSON,
@@ -1135,7 +1135,7 @@ public:
 	// Optional user hook that transforms custom-tag annotations
 	// ({"$customTag":{"name":...,"value":...}}) into other value types at parse
 	// time. It is invoked whenever the parser recognizes such an annotation
-	// (YAML, GOON, UDE, and plain JSON all funnel through the same JSON object
+	// (YAML, GOON, ADE, and plain JSON all funnel through the same JSON object
 	// parser). The callback receives the resolved tag name and the tag's value
 	// (read-only); return a replacement value to substitute for the default
 	// CUSTOM_TAG node, or nullptr to keep the default CUSTOM_TAG.
@@ -1655,8 +1655,8 @@ public:
 	bool fromSexpr(std::string_view input);
 	std::string toJSON5(bool pretty = false) const;
 	bool fromJSON5(std::string_view input);
-	std::string toUDE(bool strict = false) const;
-	bool fromUDE(std::string_view input, bool strict = false);
+	std::string toADE(bool strict = false) const;
+	bool fromADE(std::string_view input, bool strict = false);
 	std::string toRON(bool pretty = true) const;
 	bool fromRON(std::string_view input);
 	std::string toCpp(const CppWriteOptions& opts = {}) const;
@@ -2561,7 +2561,7 @@ inline void fmtDoubleVal(double d, std::string& out) {
 // form); a bare integer literal re-decodes as INT and "-0" loses its sign.
 // Text formats that feed their output back through a number parser use this
 // wrapper: it appends ".0" whenever the rendered literal has no '.', 'e' or
-// 'E' -- the convention TOML/YAML/CSV/TRON/sexpr/TOON/UDE/INI/dotenv/core-JSON
+// 'E' -- the convention TOML/YAML/CSV/TRON/sexpr/TOON/ADE/INI/dotenv/core-JSON
 // already follow (an exponent form such as "1e+05" needs no suffix). Finite
 // values only: callers guard NaN/Inf first (fmtNaNInfVal).
 inline void fmtDoubleValDot0(double d, std::string& out) {
