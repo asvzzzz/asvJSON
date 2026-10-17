@@ -2017,7 +2017,7 @@ int main() {
 		std::string svg = svgDoc.toSVG();
 		std::cout << "Generated SVG:\n" << svg << std::endl;
 
-		// Parse it back via fromSVG (delegates to XML parser)
+		// Parse it back via fromSVG (shared XML parser, same-named collapse off)
 		asvJSON parsed;
 		if (parsed.fromSVG(svg)) {
 			auto* svgRoot = parsed.getRoot();

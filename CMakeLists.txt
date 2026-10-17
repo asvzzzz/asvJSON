@@ -40,4 +40,3 @@ if(MSVC)
     target_compile_options(${tgt} PRIVATE /MT$<$<CONFIG:Debug>:d>)
   endforeach()
 endif()
-
