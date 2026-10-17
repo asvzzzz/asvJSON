@@ -785,7 +785,13 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 }
 
 // Forward declaration
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap);
+// collapseSameNamed toggles XML's "element whose only children share a name
+// collapses to a bare array" rule. XML needs it ({"bin":[a,b]} is encoded as
+// <bin><item/>x2</bin>); SVG must NOT collapse, because its encoder names the
+// repeated elements after the JSON key ({"defs":{"clipPath":[a,b]}} ->
+// <defs><clipPath/>x2</defs>), so the key is recoverable only when the
+// children stay grouped under it.
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed);
 
 // Segment for interleaved mixed content tracking
 struct XmlSegment {
@@ -799,7 +805,7 @@ struct XmlSegment {
 // Parse a single element's children into segments (preserving interleaved order)
 inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 	std::vector<XmlSegment>& segments, int depth,
-	std::unordered_map<std::string, std::string>& nsMap)
+	std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed)
 {
 	while (pos < s.size()) {
 		if (s[pos] == '<') {
@@ -841,7 +847,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 				pos = end + 2; continue;
 			}
 			std::string childName;
-			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap);
+			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap, collapseSameNamed);
 			if (childVal) segments.push_back({true, false, "", std::move(childName), std::move(childVal)});
 		} else {
 			size_t start = pos;
@@ -857,7 +863,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 }
 
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap) {
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed) {
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("XML nesting too deep");
 	// Namespace declarations are element-scoped: copy the inherited bindings,
 	// accumulate this element's own xmlns declarations into the copy, and hand
@@ -959,7 +965,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
-	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs);
+	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs, collapseSameNamed);
 
 	// asv:arr marker (from toXML) pins a SINGLE-element array so it re-parses
 	// as an array rather than a plain {item: value} object. Consumed here;
@@ -1241,8 +1247,9 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	}
 
 	// Collapse: if element has only children (no attrs, no text, no #content),
-	// and all children are same-named, return the array directly.
-	if (attrs.empty() && combinedText.empty() && !hasInterleaving) {
+	// and all children are same-named, return the array directly. Skipped for
+	// SVG (fromSVG passes collapseSameNamed=false) so the JSON key survives.
+	if (collapseSameNamed && attrs.empty() && combinedText.empty() && !hasInterleaving) {
 		std::unordered_map<std::string, size_t> nameCounts2;
 		for (auto& seg : segments) {
 			if (seg.isElement) nameCounts2[seg.childName]++;
@@ -1261,74 +1268,82 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	return obj;
 }
 
+// Parse an XML document into a root object. Throws asvJSONError on failure.
+// Shared by asvJSON::fromXML (collapseSameNamed=true) and asvJSON::fromSVG
+// (collapseSameNamed=false, see the forward declaration above).
+inline std::unique_ptr<asvJSONValue> xmlParseDocument(std::string_view input, bool collapseSameNamed) {
+	if (input.empty()) throw asvJSONError("empty input");
+
+	// Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
+	if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+		input = input.substr(3);
+
+	size_t pos = 0;
+
+	// Skip XML declaration <?xml ...?>
+	xmlSkipSpaces(input, pos);
+	if (pos + 5 <= input.size() && input.substr(pos, 5) == "<?xml") {
+		size_t end = input.find("?>", pos + 2);
+		if (end == std::string_view::npos) throw asvJSONError("unclosed XML declaration");
+		pos = end + 2;
+	}
+
+	// Skip comments and DOCTYPE before root element
+	auto skipProlog = [&]() -> bool {
+		while (pos < input.size()) {
+			xmlSkipSpaces(input, pos);
+			if (pos + 4 < input.size() && input.substr(pos, 4) == "<!--") {
+				size_t end = input.find("-->", pos + 4);
+				if (end == std::string_view::npos) throw asvJSONError("unclosed comment");
+				pos = end + 3;
+				continue;
+			}
+			if (pos + 9 < input.size() && input.substr(pos, 9) == "<!DOCTYPE") {
+				size_t scan = pos + 9;
+				int bracketDepth = 0;
+				while (scan < input.size()) {
+					if (input[scan] == '[') bracketDepth++;
+					else if (input[scan] == ']') bracketDepth--;
+					else if (input[scan] == '>' && bracketDepth <= 0) break;
+					scan++;
+				}
+				if (scan >= input.size()) throw asvJSONError("unclosed DOCTYPE");
+				pos = scan + 1;
+				continue;
+			}
+			break;
+		}
+		return pos < input.size() && input[pos] == '<';
+	};
+
+	if (!skipProlog()) throw asvJSONError("expected '<'");
+
+	// Parse all top-level elements, combining into one object. XML allows a
+	// single root only; repeated roots (tolerated as an extension) merge
+	// last-wins so the final element for a name is the surviving value.
+	auto obj = asvJSONValue::makeObject();
+	if (!obj) throw asvJSONError("out of memory");
+	std::unordered_map<std::string, std::string> nsMap;
+	int count = 0;
+	while (pos < input.size()) {
+		if (!skipProlog()) break;
+		std::string name;
+		auto val = xmlParseElement(input, pos, name, 0, nsMap, collapseSameNamed);
+		if (!val) break;
+		obj->obj->insert_or_assign(std::move(name), std::move(val));
+		count++;
+	}
+	if (count == 0) throw asvJSONError("failed to parse root element");
+
+	return obj;
+}
+
 inline bool asvJSON::fromXML(std::string_view input) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
 	try {
-		if (input.empty()) throw asvJSONError("empty input");
-
-		// Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
-		if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
-			input = input.substr(3);
-
-		size_t pos = 0;
-
-		// Skip XML declaration <?xml ...?>
-		xmlSkipSpaces(input, pos);
-		if (pos + 5 <= input.size() && input.substr(pos, 5) == "<?xml") {
-			size_t end = input.find("?>", pos + 2);
-			if (end == std::string_view::npos) throw asvJSONError("unclosed XML declaration");
-			pos = end + 2;
-		}
-
-		// Skip comments and DOCTYPE before root element
-		auto skipProlog = [&]() -> bool {
-			while (pos < input.size()) {
-				xmlSkipSpaces(input, pos);
-				if (pos + 4 < input.size() && input.substr(pos, 4) == "<!--") {
-					size_t end = input.find("-->", pos + 4);
-					if (end == std::string_view::npos) throw asvJSONError("unclosed comment");
-					pos = end + 3;
-					continue;
-				}
-				if (pos + 9 < input.size() && input.substr(pos, 9) == "<!DOCTYPE") {
-					size_t scan = pos + 9;
-					int bracketDepth = 0;
-					while (scan < input.size()) {
-						if (input[scan] == '[') bracketDepth++;
-						else if (input[scan] == ']') bracketDepth--;
-						else if (input[scan] == '>' && bracketDepth <= 0) break;
-						scan++;
-					}
-					if (scan >= input.size()) throw asvJSONError("unclosed DOCTYPE");
-					pos = scan + 1;
-					continue;
-				}
-				break;
-			}
-			return pos < input.size() && input[pos] == '<';
-		};
-
-		if (!skipProlog()) throw asvJSONError("expected '<'");
-
-		// Parse all top-level elements, combining into one object. XML allows a
-		// single root only; repeated roots (tolerated as an extension) merge
-		// last-wins so the final element for a name is the surviving value.
-		auto obj = asvJSONValue::makeObject();
-		if (!obj) { lastError = "out of memory"; return false; }
-		std::unordered_map<std::string, std::string> nsMap;
-		int count = 0;
-		while (pos < input.size()) {
-			if (!skipProlog()) break;
-			std::string name;
-			auto val = xmlParseElement(input, pos, name, 0, nsMap);
-			if (!val) break;
-			obj->obj->insert_or_assign(std::move(name), std::move(val));
-			count++;
-		}
-		if (count == 0) throw asvJSONError("failed to parse root element");
-
+		auto obj = xmlParseDocument(input, /*collapseSameNamed=*/true);
 		root = std::move(obj);
 		formatType = FormatType::XML;
 		return true;
