@@ -1,12 +1,12 @@
 # asvJSON++
 
-A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), S-Expressions, JSON Schema validation, JSONPath (RFC 9535), JSON SAX/streaming parsing, and C++ struct/enum code generation.
+A C++17 JSON library supporting binary data, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, UDE, Protobuf, TOML, JSON Lines (NDJSON), S-Expressions, SVG, JSON Schema validation, JSONPath (RFC 9535), JSON SAX/streaming parsing, and C++ struct/enum code generation.
 
 **Author:** Sergey Andyk  asvzzz@narod.ru
 
 ## Online Converter
 
-Try it online: **https://jx8.ru/**  -  browser-based converter supporting all 18 formats, with file upload/download.
+Try it online: **https://jx8.ru/**  -  browser-based converter supporting all 26 formats, with file upload/download.
 
 ## License
 
@@ -67,6 +67,7 @@ MIT license - see the `LICENSE` file for details.
 - UDE - `toUDE()` / `fromUDE()` - Unified Data Exchange with a `# UDE` header, multiple documents (`// --- End of Document ---`), `#`/`//`/`/* */` comments, anchors/aliases, block scalars `|`/`>`, and type tags (`!int`, `!float`, `!string`, `!bool`, `!null`, `!schema`, `!base64`, `!bin`, `!datetime`, `!ext`, `!regex`); explicit tags preserve type info (a `!float` integral value round-trips as a float), digit separators (`1_000_000`, `0xFF_FF`), YAML-style non-finite floats (`.nan`, `.inf`, `-.inf`), big integers stored as exact raw literals, and `!datetime` with timezone offsets; strict mode rejects duplicate keys and special characters in bare tokens. Full specification: [UDE.md](UDE.md)
 - RON - `toRON()` / `fromRON()` - Rusty Object Notation (the `ron` crate format) with structs, tuples, maps, named types, `Some`/`None` optionals, enum unit variants and variants with data (`Type::Variant(data)`), lists, bare idents, radix/separable/suffixed numbers (`0xFF`, `1_000`, `42u32`), floats (`.5`, `5.`, `5.e3`, `inf`, `-inf`, `NaN`), quoted strings with escapes and line continuation, raw strings (`r"..."`/`r#"..."#`), byte strings/chars (`b"..."`, `b'c'`), chars (`'a'`), ranges (`3..5`, `..=7`, `3..`, `..`, `..=`), `//`/nested `/* */` comments, `#![enable(...)]` headers, and trailing commas. `None` maps to `null`, `Some(x)` unfolds to `x`, empty `()` maps to an empty object; unit variants and bare idents become strings; ranges round-trip as `{"$range":{"start":...,"end":...,"inclusive":...}}` objects; special types (binary/objectid/regex/timestamp/extension/datetime/custom tags/YAML sets) round-trip through their Extended JSON marker objects
 - C++ codegen - `toCpp()` / `fromCpp()` - generate C++17 `struct`/`enum` declarations from a parsed value tree, and parse C++ declarations back into a value tree: nested structs per object, `std::array<T,N>` (or `std::vector<T>`) for homogeneous arrays, `std::vector<std::variant<...>>` for mixed arrays, and enums inferred from identifier-string arrays (object-map enums via `enumPaths`/`enumNames`); a C-style output mode emits `typedef struct` / C arrays / `enum`; comments carry over as `//` / `/* */`
+- SVG - `toSVG()` / `fromSVG()` - Scalable Vector Graphics, XML-based vector graphics format; delegates to the XML parser for decode and produces well-formed `<svg>` documents with proper namespacing on encode
 
 #### Format Specifications
 
@@ -96,6 +97,7 @@ MIT license - see the `LICENSE` file for details.
 | Config / env formats | TRON | [tron-format.github.io](https://tron-format.github.io/) |
 | Config / env formats | GOON | [GOON-format/SPEC.md](https://github.com/GOON-format/goon/blob/main/SPEC.md) |
 | Platform / copyright formats | C++ codegen | Internal (asvJSON++) |
+| Graphics / markup formats | SVG | [W3C SVG](https://www.w3.org/TR/SVG2/) |
 
 ### Standards
 - JSON Pointer (RFC 6901)
