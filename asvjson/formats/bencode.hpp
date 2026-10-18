@@ -32,8 +32,9 @@
 // programmatically throws "nesting too deep" instead of overflowing the stack.
 // Container sizes (ARRAY/OBJECT) are also enforced on encode; STRING/BINARY/
 // OBJECTID/REGEX/EXTENSION payloads are checked against MAX_STRING_LEN at their
-// respective emit sites — an oversized programmatic tree is rejected before
-// emission begins, matching the parser's behavior.
+// respective emit sites — an oversized value is rejected at its own emit site
+// during traversal, matching the parser's behavior. Partial output from earlier
+// siblings may remain in the buffer on throw.
 //
 // Dictionary keys are emitted in ascending byte order, as the specification
 // requires. On input the order is NOT checked and duplicate keys are accepted
@@ -254,6 +255,8 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       size_t sep = v->str_data.rfind('\0');
       std::string_view pat = (sep != std::string::npos) ? std::string_view(v->str_data).substr(0, sep)
                                                         : std::string_view(v->str_data);
+      if (!asvJSONValue::checkStringLen(pat.size()))
+        throw asvJSONError("bencode: string too long");
       out += std::to_string(pat.size());
       out += ':';
       out.append(pat.data(), pat.size());
