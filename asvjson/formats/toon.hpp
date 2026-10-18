@@ -473,12 +473,12 @@ inline bool toonParseListArrayHeader(std::string_view val, size_t& len) {
     n = 0; i++;
   } else {
     while (i < val.size() && val[i] >= '0' && val[i] <= '9') {
-      // Pre-multiply guard keeps n from overflowing; past 1e9 the declared
-      // length fails with the same "array too large" error as the key[N]:
-      // header in toonToJson (which uses this exact cap).
-      if (n > 1000000000ULL / 10) { tooLarge = true; i++; continue; }
+      // Pre-multiply guard keeps n from overflowing; past MAX_ARRAY_SIZE the
+      // declared length fails with "array too large", consistent with the cap
+      // in toonToJson and the parser's own MAX_ARRAY_SIZE check.
+      if (n > asvJSONValue::MAX_ARRAY_SIZE / 10) { tooLarge = true; i++; continue; }
       n = n * 10 + static_cast<size_t>(val[i] - '0');
-      if (n > 1000000000) tooLarge = true;
+      if (n > asvJSONValue::MAX_ARRAY_SIZE) tooLarge = true;
       i++;
     }
   }
@@ -666,9 +666,9 @@ inline std::string toonToJson(std::string_view input) {
             // Past the cap keep SCANNING the rest of the token as digits: a huge
             // digit prefix must still let a later non-digit ("99999999999x")
             // clear `digits` and keep the old degrade-to-key:value path.
-            if (acc > 1000000000) { tooLarge = true; continue; }
+            if (acc > asvJSONValue::MAX_ARRAY_SIZE) { tooLarge = true; continue; }
             acc = acc * 10 + static_cast<size_t>(c - '0');
-            if (acc > 1000000000) tooLarge = true;
+            if (acc > asvJSONValue::MAX_ARRAY_SIZE) tooLarge = true;
           }
           // A pure all-digit header past the cap used to degrade silently into a
           // "key:value" line whose key was the whole mangled header. Fail loudly.
