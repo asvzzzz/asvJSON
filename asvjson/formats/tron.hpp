@@ -824,14 +824,15 @@ asvJSONValue* TronParseState::parseValue(int depth) {
         return v.release();
       }
     }
-    case TronTokType::TRUE: advance(); { auto v = asvJSONValue::makeBool(true); return v.release(); }
-    case TronTokType::FALSE: advance(); { auto v = asvJSONValue::makeBool(false); return v.release(); }
-    case TronTokType::NUL: advance(); { auto v = asvJSONValue::makeNull(); return v.release(); }
-    case TronTokType::NAN_VAL: advance(); { auto v = asvJSONValue::makeDouble(tronNaN); return v.release(); }
+    case TronTokType::TRUE: advance(); { auto v = asvJSONValue::makeBool(true); if (!v) throw asvJSONError("out of memory"); return v.release(); }
+    case TronTokType::FALSE: advance(); { auto v = asvJSONValue::makeBool(false); if (!v) throw asvJSONError("out of memory"); return v.release(); }
+    case TronTokType::NUL: advance(); { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("out of memory"); return v.release(); }
+    case TronTokType::NAN_VAL: advance(); { auto v = asvJSONValue::makeDouble(tronNaN); if (!v) throw asvJSONError("out of memory"); return v.release(); }
     case TronTokType::INF_VAL: {
       bool isNeg = tok.text.size() > 0 && tok.text[0] == '-';
       advance();
       auto v = asvJSONValue::makeDouble(isNeg ? -tronInf : tronInf);
+      if (!v) throw asvJSONError("out of memory");
       return v.release();
     }
     case TronTokType::IDENT: {
