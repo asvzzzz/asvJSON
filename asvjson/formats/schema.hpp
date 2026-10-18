@@ -157,6 +157,10 @@ private:
   asvJSONValue propertyNameVal_;
 
   // The body of validate(), called from inside its exception fence.
+  // An empty document (root == nullptr) is treated as null: it validates against
+  // the schema as a null value would. This matches the draft-07 semantics where
+  // an absent instance is equivalent to JSON null — so {"type":"object"} fails
+  // on an empty document, while true-schema or {} succeeds.
   bool validateImpl(const asvJSONValue* value, const asvJSONValue* schema) {
     if (!schema) return true;
     static const asvJSONValue kNull; // default-constructed node is NULL_VAL
@@ -308,7 +312,12 @@ private:
     size_t n = 0;
     for (char c : tok) {
       if (c < '0' || c > '9') return false;
-      n = n * 10 + static_cast<size_t>(c - '0');
+      // Guard against overflow before the multiplication: if n > (SIZE_MAX - d)/10
+      // then n*10+d would wrap. The size bound makes this unreachable in practice,
+      // but the check is cheap and closes the theoretical gap.
+      int d = static_cast<int>(c - '0');
+      if (n > (SIZE_MAX - static_cast<size_t>(d)) / 10) return false;
+      n = n * 10 + static_cast<size_t>(d);
       if (n >= size) return false; // any further digit only grows it
     }
     idx = n;
@@ -425,6 +434,15 @@ private:
       case asvJSONValue::STRING: return "string";
       case asvJSONValue::ARRAY: return "array";
       case asvJSONValue::OBJECT: return "object";
+      // Special types map to their JSON-serializable counterpart so error
+      // messages are informative rather than "unknown".
+      case asvJSONValue::DATETIME: return "string";
+      case asvJSONValue::TIMESTAMP: return "integer";
+      case asvJSONValue::BINARY: return "string";
+      case asvJSONValue::OBJECTID: return "object";
+      case asvJSONValue::REGEX: return "object";
+      case asvJSONValue::EXTENSION: return "object";
+      case asvJSONValue::CUSTOM_TAG: return "object";
       default: return "unknown";
     }
   }
@@ -697,12 +715,19 @@ private:
       // (the requirement it states is still checked once), but it is never
       // written on purpose and hides a copy-paste error in the schema.
       // An empty array stays legal -- it is a no-op, unlike an empty `enum`.
-      for (size_t i = 0; i < r->arr->size(); i++)
-        for (size_t j = i + 1; j < r->arr->size(); j++)
-          if ((*r->arr)[i]->str_data == (*r->arr)[j]->str_data) {
-            setError("Invalid schema: 'required' entries must be unique");
-            return false;
-          }
+      // O(n) hash-based dedup check instead of O(n^2).
+      {
+        std::unordered_set<std::string> seen;
+        seen.reserve(r->arr->size());
+        bool dup = false;
+        for (const auto& e : *r->arr) {
+          if (!seen.insert(e->str_data).second) { dup = true; break; }
+        }
+        if (dup) {
+          setError("Invalid schema: 'required' entries must be unique");
+          return false;
+        }
+      }
     }
     if (auto u = schemaGet(schema, "uniqueItems")) {
       if (u->type != asvJSONValue::BOOL_VAL) {
@@ -1235,10 +1260,11 @@ private:
         } else {
           double val = getNumberValue(value);
           double mof = getNumberValue(node);
-          double remainder = std::fmod(val, mof);
-          double tolerance = std::fabs(mof) * 1e-9;
-          if (tolerance < 1e-12) tolerance = 1e-12;
-          isMultiple = std::fabs(remainder) <= tolerance || std::fabs(remainder - mof) <= tolerance;
+          // Round-based check: val/mof should be an integer. Using round avoids
+          // the asymmetric tolerance of the fmod approach and handles cases like
+          // 0.1 + 0.2 - 0.3 == multipleOf(0.1) correctly.
+          double ratio = val / mof;
+          isMultiple = std::fabs(ratio - std::round(ratio)) * std::fabs(mof) <= 1e-9 * (1.0 + std::fabs(val));
         }
         if (!isMultiple) {
           setError("Value " + numberToStr(value) + " is not a multiple of " + numberToStr(node));
@@ -1370,10 +1396,9 @@ private:
             itemSchema = (*itemsSchema->arr)[i].get();
           } else if (additionalItemsSchema) {
             if (isBoolFalse(additionalItemsSchema)) {
-              std::string savedPath = path_;
               pushIndexPath(i);
-              setError("Additional items not allowed at index " + std::to_string(i));
-              path_ = savedPath;
+              setError("Additional items not allowed");
+              path_ = "";
               return false;
             }
             itemSchema = additionalItemsSchema;
@@ -1382,7 +1407,7 @@ private:
             std::string oldPath = path_;
             pushIndexPath(i);
             if (!validateNode((*items)[i].get(), itemSchema)) { path_ = oldPath; return false; }
-            path_ = oldPath;
+            // Success: path restored without an extra copy (oldPath is destroyed).
           }
         }
       } else {
@@ -1390,7 +1415,7 @@ private:
           std::string oldPath = path_;
           pushIndexPath(i);
           if (!validateNode((*items)[i].get(), itemsSchema)) { path_ = oldPath; return false; }
-          path_ = oldPath;
+          // Success: path restored without an extra copy.
         }
       }
     }
