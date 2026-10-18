@@ -257,7 +257,11 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
       out.push_back(0xD9); out.push_back(0x01); out.push_back(0x02); // tag 258 (uint16 argument)
       out.push_back(0x82); // array of 2 items
       cborWriteText(out, str_data);
-      if (custom_value) custom_value->toCBOR(out, depth + 1); else out.push_back(0xF6); // null value -> explicit CBOR null
+      // Tag 258 wraps the array [name, value]; the parser's depth counter
+      // increments once for the tag and again for the array, so the inner
+      // value sits two levels deeper. Match that to avoid a false "nesting
+      // too deep" on a 48-level chain of custom tags.
+      if (custom_value) custom_value->toCBOR(out, depth + 2); else out.push_back(0xF6); // null value -> explicit CBOR null
       break;
     }
     default:
