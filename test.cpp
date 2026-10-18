@@ -21358,14 +21358,14 @@ TEST(testININullInValue) {
   // value ("42\0x" used to silently become INT 42). It stays text.
   {
     asvJSON j;
-    ASSERT(j.fromINI(std::string("k = 42\0x\n", 11)));
+    ASSERT(j.fromINI(std::string("k = 42\0x\n", 9)));
     auto* r = j.getRoot()->get("k");
     ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
     ASSERT_EQ(std::string(r->getString(), 4), std::string("42\0x", 4));
   }
   {
     asvJSON j;
-    ASSERT(j.fromINI(std::string("k = 1.5\0y\n", 11)));
+    ASSERT(j.fromINI(std::string("k = 1.5\0y\n", 9)));
     auto* r = j.getRoot()->get("k");
     ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
     ASSERT_EQ(std::string(r->getString(), 4), std::string("1.5\0y", 4));
@@ -21373,7 +21373,7 @@ TEST(testININullInValue) {
   // Round-trip preserves the NUL byte exactly
   {
     asvJSON j, j2;
-    ASSERT(j.fromINI(std::string("k = 42\0x\n", 11)));
+    ASSERT(j.fromINI(std::string("k = 42\0x\n", 9)));
     ASSERT(j2.fromINI(j.toINI()));
     auto* r = j2.getRoot()->get("k");
     ASSERT(r != nullptr && r->type == asvJSONValue::STRING);
