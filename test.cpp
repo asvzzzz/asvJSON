@@ -19599,6 +19599,15 @@ TEST(testFromCppAudit2) {
   }
 }
 
+TEST(testFromCppAudit3Debug) {
+  asvJSON b2;
+  bool ok = b2.fromCpp(std::string_view(
+    "struct Document { [[nodiscard]] int y = 5; int x [[deprecated(\"use y\")]]; };\n"));
+  std::cout << "DEBUG: fromCpp=" << (ok ? "true" : "false");
+  if (!ok) std::cout << " err=" << b2.getLastError();
+  std::cout << "\nDEBUG: serialize=" << b2.serialize() << "\n";
+}
+
 TEST(testFromCppAudit3) {
   // --- A. a comment in a #define body is REMOVED, not treated as the end ---
   // Truncating at the first comment start emptied the body of
@@ -26573,13 +26582,18 @@ TEST(testADEExtras) {
   {
     asvJSON j;
     ASSERT(j.fromADE("a: 1\n"));
-    // Build a tree that nests objects beyond MAX_NESTING_DEPTH levels deep
+    // Build a tree that nests objects beyond MAX_NESTING_DEPTH levels deep.
+    // Value-level emplace (insert-or-replace) is required: the map-level
+    // cur->obj->emplace keeps the existing entry on a duplicate key, so the
+    // root's "a": 1 (an INT with a null obj map) would survive the first
+    // iteration and the next cur->obj->emplace would run on a null map.
     auto* cur = j.getRoot();
     for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 5; i++) {
       auto no = asvJSONValue::makeObject();
       ASSERT(no != nullptr);
-      cur->obj->emplace("a", std::move(no));
+      ASSERT(cur->emplace("a", std::move(no)));
       cur = cur->get("a");
+      ASSERT(cur != nullptr);
     }
     // The encoder must throw rather than emit or crash
     bool threw = false;
