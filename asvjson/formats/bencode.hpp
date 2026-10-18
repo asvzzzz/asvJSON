@@ -30,6 +30,10 @@
 // cannot survive a round-trip. Like the parser, the encoder bounds recursion at
 // MAX_NESTING_DEPTH: a deeper tree cannot be built by parsing, but one built
 // programmatically throws "nesting too deep" instead of overflowing the stack.
+// Container sizes (ARRAY/OBJECT) are also enforced on encode; STRING/BINARY/
+// OBJECTID/REGEX/EXTENSION payloads are checked against MAX_STRING_LEN at their
+// respective emit sites — an oversized programmatic tree is rejected before
+// emission begins, matching the parser's behavior.
 //
 // Dictionary keys are emitted in ascending byte order, as the specification
 // requires. On input the order is NOT checked and duplicate keys are accepted
@@ -183,11 +187,15 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       out += 'e';
       break;
     case T::STRING:
+      if (!asvJSONValue::checkStringLen(v->str_data.size()))
+        throw asvJSONError("bencode: string too long");
       out += std::to_string(v->str_data.size());
       out += ':';
       out += v->str_data;
       break;
     case T::BINARY:
+      if (!asvJSONValue::checkStringLen(v->bin_data.size()))
+        throw asvJSONError("bencode: string too long");
       out += std::to_string(v->bin_data.size());
       out += ':';
       out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
@@ -232,6 +240,8 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       out += 'e';
       break;
     case T::OBJECTID:
+      if (!asvJSONValue::checkStringLen(v->str_data.size()))
+        throw asvJSONError("bencode: string too long");
       out += std::to_string(v->str_data.size());
       out += ':';
       out += v->str_data;
@@ -250,6 +260,8 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       break;
     }
     case T::EXTENSION:
+      if (!asvJSONValue::checkStringLen(v->bin_data.size()))
+        throw asvJSONError("bencode: string too long");
       out += std::to_string(v->bin_data.size());
       out += ':';
       out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
