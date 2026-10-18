@@ -2308,8 +2308,8 @@ struct Reader {
     size_t directInitPi = npos, directInitPc = npos;
     if (sawParen && !sawEq) {
       bool looksLikeDirectInit = false;
+      size_t pi = npos, pc = npos;
       {
-        size_t pi = npos, pc = npos;
         for (size_t k = start; k < t.size(); k++) {
           if (t[k].kind == Tok::Punct && t[k].text == "(") { pi = k; }
           else if (t[k].kind == Tok::Punct && t[k].text == ")") { pc = k; break; }
