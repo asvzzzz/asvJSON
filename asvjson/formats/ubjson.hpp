@@ -637,5 +637,5 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
 // BSON / CBOR string overloads in core.hpp -- the parse itself borrows the
 // caller's buffer either way, so there is nothing to gain from a view here.
 inline bool asvJSON::fromUBJSON(const std::string& data) {
-  return asvJSONInternal::asvJSON::fromUBJSON(data.data(), data.size());
+  return fromUBJSON(data.data(), data.size());
 }
