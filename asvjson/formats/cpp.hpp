@@ -32,8 +32,6 @@
 //     the size argument is not interpreted (container semantics differ: vector
 //     takes count, string takes count+char, map ignores). Use brace-init or
 //     explicit element listing for predictable output.
-//   - `int x(5), y(6);` — only the first declarator's paren-init is captured;
-//     subsequent ones are parsed but the init value falls back to default.
 
 #include "../core.hpp"
 
@@ -2549,10 +2547,9 @@ struct Reader {
         // direct-init cannot also have braces at this point.
         f.hasInit = true;
         for (size_t k = directInitPi; k <= directInitPc; k++) f.init.push_back(t[k]);
-      } else if (directInitPi == npos) {
-        // No paren-init was detected for this member at all — look for a local
-        // one in this segment. This handles `int x(5), y(6);` where the first
-        // segment captured pi/pc but subsequent segments need their own search.
+      } else {
+        // Global paren-init didn't span this segment (e.g. second declarator in
+        // `int x(5), y(6);`). Look for a local one.
         size_t lpi = npos, lpc = npos;
         for (size_t k = sb; k < se; k++) {
           if (t[k].kind == Tok::Punct && t[k].text == "(") { lpi = k; }
@@ -2562,7 +2559,8 @@ struct Reader {
           f.hasInit = true;
           for (size_t k = lpi; k <= lpc; k++) f.init.push_back(t[k]);
         }
-      } else if (biPos != npos) {
+      }
+      if (biPos != npos) {
         // Brace-init (`Foo bar{5};`, `Point p{1,2};`, `int arr[3]{1,2,3};`).
         // The braces ARE part of f.init: materialize() locates the group with
         // cppRdBraceGroup(), exactly as for `= {1,2,3}`.
