@@ -14,6 +14,11 @@
 //
 // Documented lossiness (none of it is a decode error -- the value survives, but
 // in a different shape):
+//   - Unassigned simple values (info 0..19) and undefined (info == 23 / 0xF7)
+//     decode to NULL. The encoder never emits these — null is always 0xF6. A
+//     round-trip through an external tool that writes 0xF7 or a simple value
+//     therefore loses identity: the decoder reads null, the encoder re-emits
+//     0xF6. Not a bug, but worth noting for interoperability.
 //   - DATETIME inherits float64's exact-integer range, because tag 1 carries it
 //     as seconds.ms in a float64: |timestamp| <= 2^53 is exact, and beyond that
 //     the seconds are rounded to the nearest representable double (up to +-512 s
@@ -35,6 +40,14 @@
 //     every other serializer in the library emits it as-is. Use BINARY (major
 //     type 2, deliberately unchecked) for arbitrary byte payloads.
 //
+// NaN / Infinity are encoded natively via float16 (0xFA), float32 (0xF9), and
+// float64 (0xFB) — no allowNaNInfinity flag is needed or used; the encoder
+// always emits them, and the decoder always accepts them. This matches CBOR's
+// native capability (RFC 8949 sec 3.4.3).
+//
+// Container sizes (ARRAY/OBJECT) are enforced on encode against MAX_ARRAY_SIZE
+// / MAX_OBJECT_SIZE; an oversized programmatic tree is rejected at its own
+// emit site during traversal — partial output from earlier siblings may remain.
 // The depth guard is `depth > MAX_NESTING_DEPTH` with the root item at depth 0,
 // and it is checked for EVERY item -- containers and scalars alike. The core JSON
 // parser instead increments before checking and checks only containers, so the
@@ -74,6 +87,9 @@ static_assert(sizeof(float) == 4 && sizeof(double) == 8,
               "CBOR needs IEEE 754 binary32/binary64 float and double");
 
 inline void cborWriteUint(std::vector<uint8_t>& out, uint8_t mt, uint64_t val) {
+  // mt > 7 would produce a major type outside the RFC-allowed range (0..7);
+  // public API never passes such a value, but catch it defensively.
+  if (mt > 7) throw asvJSONError("CBOR: invalid major type");
   uint8_t major = mt << 5;
   if (val <= 23) {
     out.push_back(major | static_cast<uint8_t>(val));
@@ -122,8 +138,9 @@ inline void cborWriteText(std::vector<uint8_t>& out, const std::string& s) {
 }
 
 
-inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
+inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
   using T = asvJSONValue::Type;
+  if (depth > MAX_NESTING_DEPTH) throw asvJSONError("CBOR nesting too deep");
   switch (type) {
     case T::NULL_VAL:
       out.push_back(0xF6); // RFC 8949: 0xF6 = null (0xF7 is undefined)
@@ -191,16 +208,18 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
     }
     case T::ARRAY: {
       if (!arr) { out.push_back(0x80); break; }
+      if (arr->size() > MAX_ARRAY_SIZE) throw asvJSONError("CBOR array too large");
       cborWriteUint(out, 4, arr->size());
-      for (const auto& v : *arr) v->toCBOR(out);
+      for (const auto& v : *arr) v->toCBOR(out, depth + 1);
       break;
     }
     case T::OBJECT: {
       if (!obj) { out.push_back(0xA0); break; }
+      if (obj->size() > MAX_OBJECT_SIZE) throw asvJSONError("CBOR map too large");
       cborWriteUint(out, 5, obj->size());
       for (const auto& [k, v] : *obj) {
         cborWriteText(out, k);
-        v->toCBOR(out);
+        v->toCBOR(out, depth + 1);
       }
       break;
     }
@@ -238,7 +257,7 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out) const {
       out.push_back(0xD9); out.push_back(0x01); out.push_back(0x02); // tag 258 (uint16 argument)
       out.push_back(0x82); // array of 2 items
       cborWriteText(out, str_data);
-      if (custom_value) custom_value->toCBOR(out); else out.push_back(0xF6); // null value -> explicit CBOR null
+      if (custom_value) custom_value->toCBOR(out, depth + 1); else out.push_back(0xF6); // null value -> explicit CBOR null
       break;
     }
     default:
@@ -609,7 +628,7 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         if (!v) throw asvJSONError("CBOR float alloc failed");
         return v;
       }
-      if (info >= 28 && info <= 31) throw asvJSONError("CBOR: reserved encoding (additional information 28-31 are reserved by RFC 8949 s3.2)");
+      if (info >= 28 && info <= 30) throw asvJSONError("CBOR: reserved encoding (additional information 28-30 are reserved by RFC 8949 s3.2)");
     }
     default:
       throw asvJSONError("CBOR: unknown major type");
