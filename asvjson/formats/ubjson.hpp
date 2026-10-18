@@ -72,6 +72,13 @@
 // so fromAny() does not auto-detect it; use fromUBJSON() or the `.ubj`
 // extension explicitly.
 //
+// Limitations:
+//   CUSTOM_TAG -> Z (null) on encode, type identity is lost — UBJSON has no
+//     tag marker and no payload form that preserves a custom name/value pair.
+//     DATETIME -> DOUBLE (fractional seconds survive as double precision, so
+//     about 10 microseconds of resolution, not exact ms); TIMESTAMP -> INT64;
+//     OBJECTID/EXTENSION -> BINARY (ext_type / type tag lost on round-trip).
+//
 // Encoder recursion is not depth-limited: a tree built programmatically with
 // many more than MAX_NESTING_DEPTH levels (the parser's own ceiling) can
 // exhaust the stack during toUBJSON(). This mirrors the CBOR, MessagePack and
@@ -225,6 +232,11 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
       break;
     }
     default:
+      // CUSTOM_TAG is the only core type not handled above. UBJSON has no
+      // extension-tag marker, so there is no lossless encoding path — degrade
+      // to null (Z) rather than emitting garbage. Documented in the header
+      // limitations; callers that need round-trip fidelity should convert to
+      // a supported form before calling toUBJSON().
       out.push_back('Z');
       break;
   }
@@ -625,5 +637,5 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
 // BSON / CBOR string overloads in core.hpp -- the parse itself borrows the
 // caller's buffer either way, so there is nothing to gain from a view here.
 inline bool asvJSON::fromUBJSON(const std::string& data) {
-  return fromUBJSON(data.data(), data.size());
+  return asvJSONInternal::asvJSON::fromUBJSON(data.data(), data.size());
 }
