@@ -2405,6 +2405,10 @@ inline bool asvJSON::fromADE(std::string_view input, bool strict) {
     root = std::move(parsed);
     formatType = FormatType::ADE;
     return true;
+  } catch (const asvJSONError& e) {
+    lastError = e.what();
+    root = nullptr;
+    return false;
   } catch (const std::exception& e) {
     lastError = e.what();
     root = nullptr;

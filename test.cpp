@@ -19599,14 +19599,7 @@ TEST(testFromCppAudit2) {
   }
 }
 
-TEST(testFromCppAudit3Debug) {
-  asvJSON b2;
-  bool ok = b2.fromCpp(std::string_view(
-    "struct Document { [[nodiscard]] int y = 5; int x [[deprecated(\"use y\")]]; };\n"));
-  std::cout << "DEBUG: fromCpp=" << (ok ? "true" : "false");
-  if (!ok) std::cout << " err=" << b2.getLastError();
-  std::cout << "\nDEBUG: serialize=" << b2.serialize() << "\n";
-}
+
 
 TEST(testFromCppAudit3) {
   // --- A. a comment in a #define body is REMOVED, not treated as the end ---
