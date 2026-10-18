@@ -8,7 +8,8 @@
 //   - Root object keys become SVG element names (svg, rect, circle, ellipse,
 //     line, polyline, polygon, path, text, g, defs, clipPath, etc.)
 //   - Object properties starting with '@' become SVG attributes
-//     (e.g. {"@x": "10", "y": "20"} -> <rect x="10" y="20"/>)
+//     (e.g. {"@x": "10", "@y": "20"} -> <rect x="10" y="20"/>; keys without
+//     '@' are child elements, not attributes)
 //   - The special key "#text" becomes element text content
 //   - Scalar children (INT/DOUBLE/BOOL_VAL) are also emitted as text content
 //     (e.g. {"text": 42} -> <text>42</text>)
@@ -39,7 +40,14 @@
 //   - Non-serializable children of elements (DATETIME, BINARY, OBJECTID, REGEX,
 //     TIMESTAMP, EXTENSION, CUSTOM_TAG): the value is lost, the element is emitted
 //     as an empty <tag></tag>. OBJECT and ARRAY children are recursively serialized.
-//   - Scalar root values are wrapped in <root>...</root> (free toSVG(const asvJSONValue*)).
+//   - Non-OBJECT root values (scalars, ARRAY, and special types) are wrapped in
+//     <root>...</root> by free toSVG(const asvJSONValue*); scalar content is
+//     preserved but ARRAY/special-type contents are lost — documented limitation.
+//   - Empty #text ("") on elements that round-trip as self-closing is silently
+//     dropped: {"g":{"@class":"x","#text":""}} -> <g class="x"/> -> {"g":{"@class":"x"}}.
+//     Semantically empty text ≡ absent, but the shape changes from {#text:""} to absent.
+//   - svgSerializeElement has no depth guard — deeply nested programmatic trees can
+//     overflow the stack. Consistent with other encoders (toXML/toUBJSON/etc.).
 //
 // Decoder: since SVG is XML, fromSVG reuses the shared XML document parser
 // (xmlParseDocument) but with collapseSameNamed=false. XML needs the collapse
