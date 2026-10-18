@@ -489,7 +489,7 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::OBJECT: {
       out += '(';
-      if (v->obj->empty()) {
+      if (!v->obj || v->obj->empty()) {
         // Empty object: encode as (() {}) so the decoder can tell it apart
         // from the empty array (). The bare {} symbol cannot be a quoted
         // string value, so this marker never collides with real data.
