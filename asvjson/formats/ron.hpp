@@ -528,13 +528,13 @@ struct RonParser {
       if (i + len > in.size()) len = static_cast<int>(in.size() - i);
       ch = std::string(in.data() + i, static_cast<size_t>(len));
       i += len;
-      // Reject truncated or otherwise invalid UTF-8: a bare continuation byte
-      // or an incomplete multi-byte sequence (e.g. '\xC3' with no follower) is
-      // not a valid char value. The string parser already enforces this via
-      // validateUTF8; the char path must do the same for consistency.
-      if (!isValidUTF8(reinterpret_cast<const uint8_t*>(ch.data()), ch.size()))
-        throw asvJSONError("RON: invalid UTF-8 in char literal");
     }
+    // Single guard after all paths: rejects bare continuation bytes, truncated
+    // multi-byte sequences, and surrogates (which ronAppendUtf8 encodes as
+    // invalid UTF-8 3-byte runs). Placed here rather than per-branch so every
+    // code path (raw, \x, \uXXXX, \u{...}, surrogate pair) is covered uniformly.
+    if (!isValidUTF8(reinterpret_cast<const uint8_t*>(ch.data()), ch.size()))
+      throw asvJSONError("RON: invalid UTF-8 in char literal");
     if (i >= in.size() || in[i] != '\'') throw asvJSONError("RON: unterminated char");
     ++i;
     return ronJsonStr(ch);
