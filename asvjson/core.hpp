@@ -789,7 +789,7 @@ struct asvJSONValue {
 	void serialize(std::string& out, bool allowNaNInfinity = false) const;
 	void serializePretty(std::string& out, int indent = 0, bool allowNaNInfinity = false) const;
 	void toMessagePack(std::vector<uint8_t>& out) const;
-	void toCBOR(std::vector<uint8_t>& out) const;
+	void toCBOR(std::vector<uint8_t>& out, int depth = 0) const;
 	void toBSON(std::vector<uint8_t>& out) const;
 	void toUBJSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
@@ -3333,7 +3333,7 @@ inline std::vector<uint8_t> asvJSON::toMessagePack() const {
 
 inline std::vector<uint8_t> asvJSON::toCBOR() const {
 	std::vector<uint8_t> out;
-	if (root) root->toCBOR(out);
+	if (root) root->toCBOR(out, 0);
 	return out;
 }
 
