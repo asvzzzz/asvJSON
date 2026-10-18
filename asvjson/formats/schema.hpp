@@ -1396,9 +1396,10 @@ private:
             itemSchema = (*itemsSchema->arr)[i].get();
           } else if (additionalItemsSchema) {
             if (isBoolFalse(additionalItemsSchema)) {
+              std::string savedPath = path_;
               pushIndexPath(i);
               setError("Additional items not allowed");
-              path_ = "";
+              path_ = savedPath;
               return false;
             }
             itemSchema = additionalItemsSchema;
@@ -1407,7 +1408,7 @@ private:
             std::string oldPath = path_;
             pushIndexPath(i);
             if (!validateNode((*items)[i].get(), itemSchema)) { path_ = oldPath; return false; }
-            // Success: path restored without an extra copy (oldPath is destroyed).
+            path_ = oldPath;
           }
         }
       } else {
@@ -1415,7 +1416,7 @@ private:
           std::string oldPath = path_;
           pushIndexPath(i);
           if (!validateNode((*items)[i].get(), itemsSchema)) { path_ = oldPath; return false; }
-          // Success: path restored without an extra copy.
+          path_ = oldPath;
         }
       }
     }
