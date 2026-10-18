@@ -2311,6 +2311,22 @@ struct Reader {
       size_t pi = npos, pc = npos;
       {
         for (size_t k = start; k < t.size(); k++) {
+          // Skip [[...]] attribute regions first: the parentheses of
+          // `int x [[deprecated("y")]](5);` belong to the attribute, while
+          // sawParen was set by the real (5) direct-init outside it.
+          if (t[k].kind == Tok::Punct && t[k].text == "[" &&
+              k + 1 < t.size() && t[k + 1].kind == Tok::Punct && t[k + 1].text == "[") {
+            int attrDepth = 0;
+            while (k < t.size()) {
+              if (t[k].kind == Tok::Punct && t[k].text == "[") attrDepth++;
+              else if (t[k].kind == Tok::Punct && t[k].text == "]") {
+                attrDepth--;
+                if (attrDepth == 0) break;
+              }
+              k++;
+            }
+            continue; // the loop's own k++ steps past the closing ']'
+          }
           if (t[k].kind == Tok::Punct && t[k].text == "(") { pi = k; }
           else if (t[k].kind == Tok::Punct && t[k].text == ")") { pc = k; break; }
         }
@@ -2552,6 +2568,14 @@ struct Reader {
         // `int x(5), y(6);`). Look for a local one.
         size_t lpi = npos, lpc = npos;
         for (size_t k = sb; k < se; k++) {
+          // Parentheses inside a [[...]] attribute belong to the attribute,
+          // not to an initializer: `int x [[deprecated("use y")]];` must not
+          // decode x as the string "use y" (it has no initializer at all).
+          bool inAttr = false;
+          for (const auto& a : attrs) {
+            if (k >= a.first && k < a.second) { inAttr = true; break; }
+          }
+          if (inAttr) continue;
           if (t[k].kind == Tok::Punct && t[k].text == "(") { lpi = k; }
           else if (t[k].kind == Tok::Punct && t[k].text == ")") { lpc = k; break; }
         }
