@@ -669,7 +669,9 @@ struct TronParseState {
         // namedArgs.size() >= props.size() with every named arg validated as a
         // known property and never colliding with a positional one, so each
         // props[i] is covered by posArgs or namedArgs.
-        obj->obj->emplace(props[i], asvJSONValue::makeNull());
+        auto nv = asvJSONValue::makeNull();
+        if (!nv) throw asvJSONError("out of memory");
+        obj->obj->emplace(props[i], std::move(nv));
       } else {
         obj->obj->emplace(props[i], std::move(valPtr));
       }

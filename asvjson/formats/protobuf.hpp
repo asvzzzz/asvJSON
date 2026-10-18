@@ -267,6 +267,7 @@ inline std::shared_ptr<ProtoSchema> protoParseSchema(const asvJSONValue* schemaV
 // Helper: set a field on a JSON value object by key
 inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
+  if (!val) return; // a null node would be dereferenced by every later tree walk
   auto it = obj->obj->find(key);
   if (it != obj->obj->end()) {
     // Repeated field -- convert to array if not already
@@ -830,11 +831,20 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
         auto arr = asvJSONValue::makeArray();
         if (arr) (*obj->obj)[fname] = std::move(arr);
       } else {
-        (*obj->obj)[fname] = asvJSONValue::makeNull();
+        auto nv = asvJSONValue::makeNull();
+        if (!nv) throw asvJSONError("Protobuf null field alloc failed");
+        (*obj->obj)[fname] = std::move(nv);
       }
     }
   }
   return obj;
+}
+
+// Push a nothrow-factory element into a packed-field array, rejecting a null
+// (OOM) result: a null element would be dereferenced by every later tree walk.
+inline void protoPushPacked(std::vector<std::unique_ptr<asvJSONValue>>& dst, std::unique_ptr<asvJSONValue> v) {
+  if (!v) throw asvJSONError("Protobuf packed field element alloc failed");
+  dst.push_back(std::move(v));
 }
 
 inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, size_t size, size_t& pos,
@@ -919,26 +929,26 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
             while (pos + 4 <= end) {
               uint32_t raw = 0;
               for (int i = 0; i < 4; i++) raw |= static_cast<uint32_t>(data[pos++]) << (i * 8);
-              if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); arr->arr->push_back(asvJSONValue::makeDouble(static_cast<double>(f))); }
-              else if (type == "sfixed32") { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)))); }
-              else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<uint64_t>(raw))); }
+              if (type == "float") { float f; std::memcpy(&f, &raw, sizeof(f)); protoPushPacked(*arr->arr, asvJSONValue::makeDouble(static_cast<double>(f))); }
+              else if (type == "sfixed32") { protoPushPacked(*arr->arr, asvJSONValue::makeInt(static_cast<int64_t>(static_cast<int32_t>(raw)))); }
+              else { protoPushPacked(*arr->arr, asvJSONValue::makeInt(static_cast<uint64_t>(raw))); }
             }
             if (pos != end) throw asvJSONError("Protobuf packed fixed-size field has trailing data");
           } else if (type == "double" || type == "fixed64" || type == "sfixed64") {
             while (pos + 8 <= end) {
               uint64_t raw = 0;
               for (int i = 0; i < 8; i++) raw |= static_cast<uint64_t>(data[pos++]) << (i * 8);
-              if (type == "double") { double d; std::memcpy(&d, &raw, sizeof(d)); arr->arr->push_back(asvJSONValue::makeDouble(d)); }
-              else { arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(raw))); }
+              if (type == "double") { double d; std::memcpy(&d, &raw, sizeof(d)); protoPushPacked(*arr->arr, asvJSONValue::makeDouble(d)); }
+              else { protoPushPacked(*arr->arr, asvJSONValue::makeInt(static_cast<int64_t>(raw))); }
             }
             if (pos != end) throw asvJSONError("Protobuf packed fixed-size field has trailing data");
           } else if (type == "sint32" || type == "sint64") {
-            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeInt(protoZigZagDecode(v))); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); protoPushPacked(*arr->arr, asvJSONValue::makeInt(protoZigZagDecode(v))); }
           } else if (type == "bool") {
-            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeBool(v != 0)); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); protoPushPacked(*arr->arr, asvJSONValue::makeBool(v != 0)); }
           } else {
             // int32, int64, uint32, uint64, enum, or unknown -- packed varint
-            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); arr->arr->push_back(asvJSONValue::makeInt(static_cast<int64_t>(v))); }
+            while (pos < end) { uint64_t v = protoReadVarint(data, end, pos); protoPushPacked(*arr->arr, asvJSONValue::makeInt(static_cast<int64_t>(v))); }
           }
         } else pos = end;
         return arr;

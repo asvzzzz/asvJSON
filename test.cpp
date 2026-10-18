@@ -34082,6 +34082,46 @@ TEST(testXMLStringTooLong) {
 	}
 }
 
+// Defense-in-depth: the batch of null-OOM guards. Only setByPointer is
+// reachable from a test without exhausting memory (the toml/protobuf/tron
+// sites are nothrow factories that fail only on OOM); it pins the convention
+// that a null node can never be planted, while a real JSON null still works.
+TEST(testCoreNullNodeGuards) {
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		// A null unique_ptr is "no value", not JSON null: reject it.
+		ASSERT(!j.setByPointer("/a", nullptr));
+		ASSERT(!j.setByPointer("/", nullptr));
+		ASSERT_EQ(j.serialize(), std::string("{}"));
+		// A real JSON null (makeNull) is still accepted.
+		ASSERT(j.setByPointer("/a", asvJSONValue::makeNull()));
+		ASSERT_EQ(j.serialize(), std::string("{\"a\":null}"));
+		// Nested insert with an explicit null pointer is rejected too.
+		ASSERT(!j.setByPointer("/a/b/c", std::unique_ptr<asvJSONValue>()));
+		ASSERT_EQ(j.serialize(), std::string("{\"a\":null}"));
+	}
+	// merge()/diff()/applyPatch() still behave (their cloneValue inserts are
+	// guarded against a null result only under OOM).
+	{
+		asvJSON a;
+		ASSERT(a.parse("{\"x\":1}"));
+		asvJSON b;
+		ASSERT(b.parse("{\"x\":1,\"y\":[1,2]}"));
+		a.merge(b);
+		ASSERT_EQ(a.serialize(), std::string("{\"x\":1,\"y\":[1,2]}"));
+
+		asvJSON p;
+		ASSERT(p.parse("[{\"op\":\"add\",\"path\":\"/z\",\"value\":9}]"));
+		ASSERT(a.applyPatch(p));
+		ASSERT_EQ(a.serialize(), std::string("{\"x\":1,\"y\":[1,2],\"z\":9}"));
+
+		asvJSON d = a.diff(b);
+		ASSERT(d.getRoot() != nullptr);
+		ASSERT(d.getRoot()->type == asvJSONValue::ARRAY);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34721,6 +34761,7 @@ RUN(testYamlAuditReview);
 	RUN(testAuditMedLow);
 	RUN(testAuditGoonTronSpec);
 	RUN(testArrayAddNullGuard);
+	RUN(testCoreNullNodeGuards);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
