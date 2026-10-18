@@ -33994,6 +33994,39 @@ TEST(testAuditGoonTronSpec) {
 	}
 }
 
+TEST(testArrayAddNullGuard) {
+	// Key-based arrayAddValue must reject a null value (an OOM/oversize factory
+	// result, or a caller-passed nullptr) instead of pushing it into the array:
+	// every serializer dereferences array elements without a null guard, so a
+	// null member crashed toJSON()/serialize(). The root-level overload always
+	// had this guard; the key-based one did not.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		ASSERT(j.arrayAddValue("k", nullptr) == nullptr);
+		// No null element entered the array -> serialization stays safe.
+		ASSERT(j.getRoot()->getConst("k") == nullptr);
+		ASSERT_EQ(j.serialize(), std::string("{}"));
+	}
+	// An oversize string (makeString returns null) must not create the array.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		std::string big(asvJSONValue::MAX_STRING_LEN + 1, 'x');
+		ASSERT(j.arrayAddString("k", big.c_str()) == nullptr);
+		ASSERT(j.getRoot()->getConst("k") == nullptr);
+		ASSERT_EQ(j.serialize(), std::string("{}"));
+	}
+	// Sanity: a non-null value still works and marks the document dirty.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		ASSERT(j.arrayAddInt("items", 7) != nullptr);
+		ASSERT(j.isChanged());
+		ASSERT_EQ(j.serialize(), std::string("{\"items\":[7]}"));
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34631,6 +34664,7 @@ RUN(testYamlAuditReview);
 	RUN(testReauditRegression2);
 	RUN(testAuditMedLow);
 	RUN(testAuditGoonTronSpec);
+	RUN(testArrayAddNullGuard);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
