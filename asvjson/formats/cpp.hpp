@@ -23,6 +23,17 @@
 //   - root {Name: {...}} -> `struct Name` (unwrapRootSingleKey).
 //
 // Comments are preserved as `//` / `/* */` lines and same-line trails.
+//
+// Known limitations:
+//   - Paren-init for struct types (`Foo f(1, 2);`) maps positional args to
+//     fields in order; the values are parsed but only scalar literals survive.
+//     Complex expressions fall back to field defaults.
+//   - Container paren-init (`std::vector<int> v(10);`) emits an empty array —
+//     the size argument is not interpreted (container semantics differ: vector
+//     takes count, string takes count+char, map ignores). Use brace-init or
+//     explicit element listing for predictable output.
+//   - `int x(5), y(6);` — only the first declarator's paren-init is captured;
+//     subsequent ones are parsed but the init value falls back to default.
 
 #include "../core.hpp"
 
@@ -1780,6 +1791,14 @@ inline bool cppRdBraceGroup(const std::vector<Tok>& init) {
          init[e - 1].kind == Tok::Punct && init[e - 1].text == "}";
 }
 
+inline bool cppRdParenGroup(const std::vector<Tok>& init) {
+  size_t b = 0, e = init.size();
+  while (b < e && init[b].kind == Tok::Comment) b++;
+  while (e > b && init[e - 1].kind == Tok::Comment) e--;
+  return e > b && init[b].kind == Tok::Punct && init[b].text == "(" &&
+         init[e - 1].kind == Tok::Punct && init[e - 1].text == ")";
+}
+
 // Split a brace-group body at top-level commas. Only ( ) [ ] { } depth is
 // tracked; angle brackets go through cppRdIsTemplateOpen, so a comparison in
 // an initializer (`{ 1 < 2, 3 }`) no longer swallows the separator while a
@@ -2530,6 +2549,19 @@ struct Reader {
         // direct-init cannot also have braces at this point.
         f.hasInit = true;
         for (size_t k = directInitPi; k <= directInitPc; k++) f.init.push_back(t[k]);
+      } else if (directInitPi == npos) {
+        // No paren-init was detected for this member at all — look for a local
+        // one in this segment. This handles `int x(5), y(6);` where the first
+        // segment captured pi/pc but subsequent segments need their own search.
+        size_t lpi = npos, lpc = npos;
+        for (size_t k = sb; k < se; k++) {
+          if (t[k].kind == Tok::Punct && t[k].text == "(") { lpi = k; }
+          else if (t[k].kind == Tok::Punct && t[k].text == ")") { lpc = k; break; }
+        }
+        if (lpi != npos && lpc != npos && lpc > lpi + 1) {
+          f.hasInit = true;
+          for (size_t k = lpi; k <= lpc; k++) f.init.push_back(t[k]);
+        }
       } else if (biPos != npos) {
         // Brace-init (`Foo bar{5};`, `Point p{1,2};`, `int arr[3]{1,2,3};`).
         // The braces ARE part of f.init: materialize() locates the group with
@@ -2769,12 +2801,17 @@ struct Reader {
     if (rt.kind == TypeRef::Struct) {
       auto o = asvJSONValue::makeObject();
       const StructDef* sd = findStruct(rt.name);
+      // Paren-init (`Foo f(1, 2);`) — positional args mapped to fields in order.
+      bool pgrp = hasInit && cppRdParenGroup(init);
+      std::vector<std::vector<Tok>> pgroups;
+      if (pgrp) pgroups = cppRdSplitTop({init.begin() + 1, init.end() - 1});
       if (sd) {
         for (size_t idx = 0; idx < sd->fields.size(); idx++) {
           const FieldDef& f = sd->fields[idx];
           std::vector<Tok> fi;
           bool hi = false;
           if (grp && idx < groups.size() && !groups[idx].empty()) { fi = groups[idx]; hi = true; }
+          else if (pgrp && idx < pgroups.size() && !pgroups[idx].empty()) { fi = pgroups[idx]; hi = true; }
           else { fi = f.init; hi = f.hasInit; }
           auto child = materialize(f.type, fi, hi, depth + 1);
           if (!child) continue;
