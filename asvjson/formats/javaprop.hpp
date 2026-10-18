@@ -65,9 +65,11 @@
 // Locale-sensitivity: double parsing uses std::from_chars when available
 // (locale-independent, spec-compliant); falls back to std::strtod which
 // honors LC_NUMERIC. A comma-decimal locale (de_DE, fr_FR) would read "1.5"
-// as STRING("1.5") instead of DOUBLE(1.5). Callers in such environments
-// should either call setlocale(LC_ALL, "C") before parsing or use the core
-// parser via fromJSON() with explicit quoting.
+// as STRING("1.5") instead of DOUBLE(1.5). The from_chars path is available
+// on C++17 toolchains with libc++ or libstdc++ >= 11; the strtod fallback
+// is used on older libstdc++ and some compilers lacking full to_chars support.
+// Callers in comma-decimal locales should either setlocale(LC_ALL, "C") before
+// parsing or use the core parser via fromJSON() with explicit quoting.
 //
 // fromAny() detection is a heuristic, not a parser: it needs a line with an '='
 // or an unspaced ':' before any whitespace on that line, an '!' comment or a \u
@@ -86,7 +88,7 @@
 #include <string_view>
 #include <vector>
 
-#if defined(__cpp_lib_to_chars) && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 #define ASVJSON_JAVAPROP_USE_FROM_CHARS 1
 #endif
 
@@ -110,18 +112,18 @@ inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
       return asvJSONValue::makeString(s.data(), s.size());
     if (s.size() > i0 + 1 && s[i0] == '0' && (s[i0 + 1] == 'x' || s[i0 + 1] == 'X'))
       return asvJSONValue::makeString(s.data(), s.size());
-    errno = 0;
-    char* end = nullptr;
-    long long ll = std::strtoll(s.c_str(), &end, 10);
-    if (end && *end == 0 && end == s.c_str() + s.size()) {
-      if (errno == ERANGE) {
-        auto v = asvJSONValue::makeStringView(std::string_view(s));
-        if (v) v->raw_number = true;
-        return v;
+    {
+      char* end = nullptr;
+      long long ll = std::strtoll(s.c_str(), &end, 10);
+      if (end && *end == 0 && end == s.c_str() + s.size()) {
+        if (errno == ERANGE) {
+          auto v = asvJSONValue::makeStringView(std::string_view(s));
+          if (v) v->raw_number = true;
+          return v;
+        }
+        return asvJSONValue::makeInt(static_cast<int64_t>(ll));
       }
-      return asvJSONValue::makeInt(static_cast<int64_t>(ll));
     }
-    errno = 0;
 #if defined(ASVJSON_JAVAPROP_USE_FROM_CHARS)
     {
       double d2 = 0;
@@ -302,7 +304,11 @@ inline std::string javapropEscapeVal(std::string_view s) {
       // matching what the JDK's own writer produces. The other whitespace
       // characters need no special case because they are always escaped above.
       case ' ':  out += (i + 1 == s.size()) ? "\\ " : " "; break;
-      default:   out += c; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20 || c == '\x7f') {
+          char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c)); out += buf;
+        } else out += c;
+        break;
     }
   }
   return out;
