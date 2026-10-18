@@ -24,10 +24,17 @@
 //     strings with an internal empty marker element (<asv:s/>) that the
 //     parser drops on a re-parse.
 //   - RESERVED internal keys (in mixed #content only): asv:s (separator
-//     marker), asv:xc ("1" = rich/mixed-content pin), asv:arr ("1" =
+//     marker), asv:xc (existence = rich/mixed-content pin; value is ignored —
+//     the encoder writes "1", but any value including "" triggers), asv:arr ("1" =
 //     single-element array pin). A user key equal to one of these is only
 //     affected inside a mixed #content (asv:xc/) array; elsewhere on the
-//     document the literal text round-trips as data.
+//     document the literal text round-trips as data. The asv:arr marker
+//     always wins — <x asv:arr="1"/> and <x asv:arr="1"></x> both parse as [],
+//     and <x asv:arr="1" foo="bar">...</x> parses as [] with @foo silently
+//     dropped. When both asv:xc and asv:arr are present (not emitted by the
+//     encoder), asv:arr wins — the element becomes [] with text dropped.
+//     Extracted before the self-closing split; the encoder never emits
+//     asv:arr on empty elements, so this is only reachable from hand-written XML.
 //   - A user "@type" key is written as the reserved attribute asv:ut, because
 //     a bare type="..." is the encoder's own annotation (empty-value pin and
 //     #text string pin) and would be consumed by the decoder, turning
@@ -315,6 +322,12 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			// Check for #content array (mixed content from fromXML)
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
+				// #text and #content cannot coexist — they are alternative
+				// representations of the same thing. A programmatic tree with
+				// both is malformed; reject it rather than silently dropping
+				// one side.
+				if (obj->find("#text") != obj->end())
+					throw asvJSONError("XML: #text and #content cannot coexist");
 				// Pin #content with an asv:xc marker so a re-parse routes back
 				// into the #content branch (raw strings, no type detect) and
 				// the element lists restore as {name: val} wrappers. Without
@@ -580,6 +593,10 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 			auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
 			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return asvJSONValue::makeDouble(d);
 #else
+			// Fallback for toolchains without locale-independent from_chars:
+			// strtod respects LC_NUMERIC, so a comma-decimal locale would
+			// read "3.14" as STRING instead of DOUBLE. Callers in such
+			// environments should setlocale(LC_ALL, "C") before parsing.
 			std::string tmp(s);
 			char* end; errno = 0;
 			d = std::strtod(tmp.c_str(), &end);
@@ -616,6 +633,9 @@ inline bool xmlNeedsStringType(std::string_view s) {
 			auto [ptr2, ec2] = std::from_chars(s.data(), s.data() + s.size(), d);
 			if (ec2 == std::errc() && ptr2 == s.data() + s.size()) return true; // DOUBLE
 #else
+			// Same LC_NUMERIC caveat as xmlDetectValue: strtod respects
+			// the current locale, so a comma-decimal environment would
+			// misclassify "3.14". Callers should setlocale(LC_ALL, "C").
 			std::string tmp(s);
 			char* end; errno = 0;
 			d = std::strtod(tmp.c_str(), &end);
@@ -894,6 +914,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				if (!attrs.emplace(attrName, xmlParseAttrValue(s, pos)).second)
 					throw asvJSONError("XML: duplicate attribute \"" + attrName + "\"");
 			}
+		} else {
+			// Bare attribute name without '=' is malformed XML; reject it
+			// instead of silently dropping the name.
+			throw asvJSONError("XML: attribute \"" + attrName + "\" has no value");
 		}
 	}
 
@@ -942,20 +966,23 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		}
 	}
 
-	// asv:xc marker (from toXML) pins an object as a #content array so pure
-	// text round-trips back to {"#content":[raw strings]} instead of being
-	// collapsed into a typed scalar. Extracted ONCE here, before the
-	// self-closing split, since both an empty and a populated element can carry
-	// it. Consumed here; never becomes an @attr.
+	// asv:xc / asv:arr markers (from toXML) pin mixed-content and single-element
+	// array shapes respectively. Both must be extracted before the self-closing
+	// split so they apply consistently to <x/> and <x></x>. Consumed here;
+	// never become @attrs.
 	bool forceMixed = false;
 	auto xcIt = attrs.find("asv:xc");
 	if (xcIt != attrs.end()) { attrs.erase(xcIt); forceMixed = true; }
+	bool forceArray = false;
+	auto arrIt = attrs.find("asv:arr");
+	if (arrIt != attrs.end()) { attrs.erase(arrIt); forceArray = true; }
 
 	// Self-closing tag
 	if (pos < s.size() && s[pos] == '/') {
 		pos++;
 		if (pos < s.size() && s[pos] == '>') pos++;
 		else throw asvJSONError("XML: malformed self-closing tag in <" + elemName + ">");
+		if (forceArray) return asvJSONValue::makeArray();
 		return xmlEmptyElement(attrs, forceMixed);
 	}
 
@@ -966,13 +993,6 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
 	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs, collapseSameNamed);
-
-	// asv:arr marker (from toXML) pins a SINGLE-element array so it re-parses
-	// as an array rather than a plain {item: value} object. Consumed here;
-	// never becomes a @attr.
-	bool forceArray = false;
-	auto arrIt = attrs.find("asv:arr");
-	if (arrIt != attrs.end()) { attrs.erase(arrIt); forceArray = true; }
 
 	// Closing tag
 	xmlSkipSpaces(s, pos);
