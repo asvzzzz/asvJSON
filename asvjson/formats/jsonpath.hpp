@@ -825,9 +825,13 @@ class JPFilterEval {
           // drop the whole path here too and let the filter not match.
           if (lex_.peek().type != TokType::RPAREN) { node = nullptr; break; }
           lex_.next();
-          auto r = jpApplyFunc(p.val, node);
-          if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
-          else node = nullptr;
+          // Apply the function only while the node exists: a dead path must
+          // stay Nothing, otherwise count() would turn it into INT 0.
+          if (node) {
+            auto r = jpApplyFunc(p.val, node);
+            if (r) { temp_vals_.push_back(std::move(r)); node = temp_vals_.back().get(); }
+            else node = nullptr;
+          }
         } else {
           node = jpGetProp(node, p.val);
           if (!node) node = nullptr;
@@ -876,7 +880,14 @@ class JPFilterEval {
       } else {
         break;
       }
-      if (!node) return nullptr;
+      // NOTE: no early `if (!node) return nullptr` here. A dead path must
+      // keep consuming its remaining segments (.length(), [0], [*]) so the
+      // lexer ends exactly at the filter's ']' -- the filterEnd check of the
+      // LAST child discards the results of ALL children when the evaluator
+      // stops mid-expression (e.g. `[{"s":"ab"},{"t":1}]` with
+      // `$[?(@.s.length() > 1)]` used to yield 0). jpGetProp/jpAllChildren/
+      // the index branch above are all null-safe, so evaluation is a no-op
+      // on a dead node and Nothing propagates to the end of the path.
     }
     // Trailing recursive-descent after a segment (e.g. @.a..b) must not be
     // silently ignored — the filter grammar has no descendant-segment, so
