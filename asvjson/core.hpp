@@ -2399,6 +2399,10 @@ public:
 
 	// Key-based overloads: find/create array under key, then add
 	asvJSONValue* arrayAddValue(std::string_view key, std::unique_ptr<asvJSONValue> val) {
+		// A null value (OOM/oversize factory result, or a caller-passed null)
+		// must not enter the array: every serializer walks elements without a
+		// null guard. Symmetric with the root-level overload above.
+		if (!val) return nullptr;
 		if (!root || root->type != asvJSONValue::OBJECT)
 			root = asvJSONValue::makeObject();
 		if (!root || !root->obj)
