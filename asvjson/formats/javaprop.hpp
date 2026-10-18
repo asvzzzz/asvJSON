@@ -62,6 +62,13 @@
 // IllegalArgumentException): "\uZZZZ" loads as the text `uZZZZ`, and a truncated
 // escape such as "\u00" as `u00`.
 //
+// Locale-sensitivity: double parsing uses std::from_chars when available
+// (locale-independent, spec-compliant); falls back to std::strtod which
+// honors LC_NUMERIC. A comma-decimal locale (de_DE, fr_FR) would read "1.5"
+// as STRING("1.5") instead of DOUBLE(1.5). Callers in such environments
+// should either call setlocale(LC_ALL, "C") before parsing or use the core
+// parser via fromJSON() with explicit quoting.
+//
 // fromAny() detection is a heuristic, not a parser: it needs a line with an '='
 // or an unspaced ':' before any whitespace on that line, an '!' comment or a \u
 // escape. So "name=My App" and "key:value" signal, while "name = My App" (the '='
@@ -78,6 +85,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__cpp_lib_to_chars) && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
+#define ASVJSON_JAVAPROP_USE_FROM_CHARS 1
+#endif
 
 namespace asvJSONInternal {
 
@@ -111,10 +122,23 @@ inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
       return asvJSONValue::makeInt(static_cast<int64_t>(ll));
     }
     errno = 0;
-    double d = std::strtod(s.c_str(), &end);
-    if (end && *end == 0 && end == s.c_str() + s.size()) {
-      if (errno == ERANGE) return asvJSONValue::makeStringView(std::string_view(s));
-      return asvJSONValue::makeDouble(d);
+#if defined(ASVJSON_JAVAPROP_USE_FROM_CHARS)
+    {
+      double d2 = 0;
+      auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), d2);
+      if (ec == std::errc() && ptr == s.data() + s.size()) return asvJSONValue::makeDouble(d2);
+    }
+#endif
+    {
+      double d = std::strtod(s.c_str(), &end);
+      if (end && *end == 0 && end == s.c_str() + s.size()) {
+        if (errno == ERANGE) {
+          auto v = asvJSONValue::makeStringView(std::string_view(s));
+          if (v) v->raw_number = true;
+          return v;
+        }
+        return asvJSONValue::makeDouble(d);
+      }
     }
   }
   return asvJSONValue::makeString(s.data(), s.size());
@@ -299,7 +323,11 @@ inline std::string javapropEscapeKey(std::string_view s) {
       case ':':  out += "\\:"; break;
       case '#':  out += "\\#"; break;
       case '!':  out += "\\!"; break;
-      default:   out += c; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c)); out += buf;
+        } else out += c;
+        break;
     }
   }
   return out;
@@ -521,6 +549,8 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
       // throwing. Mirrors dotenv.
       if (key.empty())
         throw asvJSONError("javaprop: empty key");
+      if (!asvJSONValue::checkStringLen(key.size()))
+        throw asvJSONError("javaprop: key too long");
 
       if (sep == 0) {
         // No separator at all: the whole trimmed line is the key, value empty.
