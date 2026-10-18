@@ -26569,6 +26569,23 @@ TEST(testADEExtras) {
     asvJSON jd;
     ASSERT(!jd.fromADE(dots));
   }
+  // 7. Encoder depth guard: a programmatic tree past MAX_NESTING_DEPTH throws
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("a: 1\n"));
+    // Build a tree that nests objects beyond MAX_NESTING_DEPTH levels deep
+    auto* cur = j.getRoot();
+    for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 5; i++) {
+      auto no = asvJSONValue::makeObject();
+      ASSERT(no != nullptr);
+      cur->obj->emplace("a", std::move(no));
+      cur = cur->get("a");
+    }
+    // The encoder must throw rather than emit or crash
+    bool threw = false;
+    try { j.toADE(); } catch (const std::exception&) { threw = true; }
+    ASSERT(threw);
+  }
 }
 
 TEST(testADEHeaderBlockScalarFixes) {
@@ -27025,7 +27042,7 @@ TEST(testADEStringTagConversionsStillProduceStrings) {
 }
 
 TEST(testADEEscapeErrorNamesTheOffendingEscape) {
-  // udeUnescape names the escape it rejected, but both quoted-string scanners
+  // adeUnescape names the escape it rejected, but both quoted-string scanners
   // used to swallow that text and report one generic message, which made the
   // detailed list in Section 13 of the spec unreachable.
   const char* cases[][2] = {
@@ -27601,19 +27618,19 @@ TEST(testADEReviewFixes) {
     ASSERT(j5.get("k") != nullptr && j5.get("k")->type == asvJSONValue::DOUBLE);
     if (j5.get("k")) ASSERT_EQ(j5.get("k")->getDouble(), 7.0);
   }
-  // udeHeaderVersion() had no caller; it is the documented version constant, so
+  // adeHeaderVersion() had no caller; it is the documented version constant, so
   // it stays with a note pointing at the parser that has to agree with it. This
   // assertion pins the two together.
-  ASSERT_EQ(asvJSONInternal::udeHeaderVersion(), std::string("1.1"));
+  ASSERT_EQ(asvJSONInternal::adeHeaderVersion(), std::string("1.1"));
   {
     // A document declaring this exact version parses; a newer major does not.
     asvJSON j;
-    ASSERT(j.fromADE(std::string("# ADE v") + asvJSONInternal::udeHeaderVersion() + "\na: 1\n"));
+    ASSERT(j.fromADE(std::string("# ADE v") + asvJSONInternal::adeHeaderVersion() + "\na: 1\n"));
     ASSERT(j.get("a") != nullptr && j.get("a")->getInt() == 1);
     asvJSON k;
     ASSERT(!k.fromADE("# ADE v2.0\na: 1\n"));
   }
-  // Hex case consistency: udeEscPipe writes \u007C and udeWriteQuoted wrote
+  // Hex case consistency: adeEscPipe writes \u007C and adeWriteQuoted wrote
   // \u00xx lowercase, so one character had two spellings. ADE.md documents the
   // uppercase form; both writers now use it.
   {

@@ -31,7 +31,7 @@ does not create an empty first document.
 
 **Note:** Document separation is handled as a pre-parsing step. The EBNF grammar defined in Appendix A is applied to each document chunk individually after the file is split by this separator.
 
-Because a multi-document stream decodes to a single root array, re-encoding it writes that array as one document  -  the `---` separators are not recreated. The data round-trips unchanged (`stream -> array -> document` is stable), but the result is no longer a multi-document stream. Keep the original file if the separators themselves matter. Line numbers in errors are relative to the whole input, not to the individual document.
+Because a multi-document stream decodes to a single root array, re-encoding it writes that array as one document  -  the `---` separators are not recreated. The data round-trips unchanged (`stream -> array -> document` is stable), but the result is no longer a multi-document stream. Keep the original file if the separators themselves matter. Line numbers in errors are relative to the individual document, not to the whole input: each document is parsed by its own `ADEParser` instance that resets `lineNum_ = 1`, so error messages carry per-document line numbers.
 
 ### 2.1 Header (Optional)
 The first non-empty line can be an optional header that identifies the format and may include flags:
@@ -45,7 +45,7 @@ The first non-empty line can be an optional header that identifies the format an
 * `strict`  -  optional flag that enables strict mode for the whole stream.
 * Unknown flags are ignored so that forward-compatible minor versions keep working.
 
-If no header is present, the document consists of a single plain-text line. A multi-word line that has no structured shape is kept as a verbatim `STRING`; a single token is parsed as a scalar per the normal typing rules (so `123` is an `INT`, `true` a `BOOL`, `1.5` a `DOUBLE`, an unquoted word a `STRING`). A line is only treated as plain text when it cannot be a structured document at all (no `:` separator and no structured start character); malformed or strict-mode-rejected documents report an error instead of degrading to plain text.
+If no header is present, the document content is parsed per the normal rules: `name: value` becomes an object, `[1, 2]` an array, `{a: 1}` an object, etc. A line that cannot be parsed as a structured document at all (no `:` separator and not starting with `[`, `{`, `|`, or `>`) is treated as plain text — multi-word lines become a verbatim `STRING`, single tokens are typed per the normal rules (`123` → `INT`, `true` → `BOOL`, `1.5` → `DOUBLE`, an unquoted word → `STRING`). Malformed structured documents (e.g. unterminated `[`, duplicate keys in strict mode) report an error instead of degrading to plain text.
 
 ---
 
@@ -393,7 +393,7 @@ The parser enforces documented resource limits:
 |-------|-------|-------|
 | Anchor resolution | single deep copy | An alias is resolved by copying the anchored value (bounded by the clone node budget); it never recurses into further alias resolution, so there is no alias-chain depth limit (Section 7). |
 | Number of anchors | 1,000,000 | `too many anchors` error once the per-document count is reached. |
-| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser, including the counting convention: the root container is level 1 and scalars do not count, so the same tree the JSON parser accepts is one `toADE()` serializes. A tree built past the limit by hand makes `toADE()` throw `ADE: maximum nesting depth exceeded` rather than emit a truncated document. |
+| Object/array nesting | core `MAX_NESTING_DEPTH` | Shared with the JSON parser, including the counting convention: the root container is level 1 and scalars do not count, so the same tree the JSON parser accepts is one `toADE()` serializes. The encoder checks depth at every OBJECT and ARRAY write site (`adeWriteObject`, `adeWriteArray`) and throws `ADE: maximum nesting depth exceeded` for programmatic trees built past the limit — a stack overflow is impossible from any tree the library itself produces, but a caller that constructs a deep tree by hand must respect the guard. |
 | String length | 10 MiB | Shared core limit (`MAX_STRING_LEN`). The limit is checked on the **decoded** value, so it applies to every string form: double-quoted, single-quoted, block scalar, and the quoted body of `!string` / `!regex` / `!base64`. Exceeding it is reported as `ADE: string too long`. The check lives in the string factory rather than at each call site, so it also covers the values `!string` builds by conversion (a number or a boolean rendered as text) even though those are orders of magnitude below the limit. |
 | Object/array size | 1,000,000 entries | Shared core limit. |
 
@@ -406,7 +406,9 @@ after the margin are content.
 
 ## 13. Error Handling
 
-ADE parsing is fail-fast: the parser reports a problem by throwing a C++ exception of type `asvJSONError`. The message always begins with the prefix `ADE: ` and, where the position is known, ends with ` at line <N>` giving the 1-based line number in the source document. Column information is **not** tracked, and there is no numeric error-code enumeration  -  the message text itself is the diagnostic.
+ADE parsing throws `asvJSONError` internally — the message always begins with the prefix `ADE: ` and, where the position is known, ends with ` at line <N>` giving the 1-based line number within the **current document** (not the whole input). Column information is **not** tracked, and there is no numeric error-code enumeration  -  the message text itself is the diagnostic.
+
+The public API (`asvJSON::fromADE()`) catches all exceptions internally and returns `false` with the message in `getLastError()`; it never propagates an exception to the caller. To catch exceptions directly, call `asvJSONInternal::parseADE()` instead — that function throws on failure and is the one described above.
 
 The following conditions raise an error (non-exhaustive; messages are verbatim):
 
