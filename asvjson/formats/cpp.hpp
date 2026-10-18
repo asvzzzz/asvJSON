@@ -1177,6 +1177,9 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             // the parameter list: that is what distinguishes a sloppy
             // `#define F (x) 1` from `#define WIDTH (800)`, whose parenthesized
             // value is the whole replacement and must stay object-like.
+            // Adjacent `(` with no trailing content (e.g. `#define ASSERT(x)`)
+            // is still function-like: the parameter list is present, it just
+            // has an empty body — common for assert stubs.
             bool functionLike = false;
             {
               size_t r = q;
@@ -1192,7 +1195,10 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                   size_t t2 = close + 1;
                   while (t2 < logical.size() && (logical[t2] == ' ' || logical[t2] == '\t' ||
                                                  logical[t2] == '\r')) t2++;
-                  functionLike = (t2 < logical.size());
+                  // Adjacent `(` (no whitespace between name and paren) is always
+                  // function-like, even with an empty body — common for assert stubs.
+                  bool adjacent = (r == q);
+                  functionLike = adjacent || (t2 < logical.size());
                 }
               }
             }
@@ -2090,7 +2096,23 @@ struct Reader {
         if (isP(";")) adv();
         std::vector<FieldDef> extras;
         if (def.name.empty()) {
-          for (auto& tk : trail) if (tk.kind == Tok::Ident) { def.name = tk.text; break; }
+          // `struct { ... } Foo, Bar;` or `typedef struct { ... } Foo, Bar;` —
+          // the first Ident becomes the tag name, subsequent Idents are extra
+          // declarators (weak aliases when coming through a typedef). Collect
+          // them so callers that know the context can register them.
+          bool gotName = false;
+          for (auto& tk : trail) {
+            if (tk.kind == Tok::Ident) {
+              if (!gotName) { def.name = tk.text; gotName = true; }
+              else {
+                FieldDef f;
+                f.name = tk.text;
+                f.type.kind = TypeRef::Unknown;
+                f.type.name = def.name;
+                extras.push_back(std::move(f));
+              }
+            }
+          }
         } else {
           // `struct Foo { ... } a, b, c = {};` - one declarator per
           // top-level comma-separated segment.
@@ -2126,9 +2148,28 @@ struct Reader {
             f.name = trail[nameI].text;
             f.type.kind = TypeRef::Unknown;
             f.type.name = def.name;
-            if (eq2 != static_cast<size_t>(-1)) {
-              f.hasInit = true;
-              for (size_t k = eq2 + 1; k < se; k++) f.init.push_back(trail[k]);
+            // Parse array suffix `[N]` after the name, mirroring parseMember.
+            for (size_t k = nameI + 1; k < se; k++) {
+              if (trail[k].kind == Tok::Punct && trail[k].text == "[") {
+                size_t j = k + 1;
+                std::string num;
+                while (j < se && !(trail[j].kind == Tok::Punct && trail[j].text == "]")) {
+                  if (trail[j].kind == Tok::Number) num = trail[j].text;
+                  j++;
+                }
+                TypeRef a;
+                a.kind = TypeRef::Array;
+                a.elem = std::make_shared<TypeRef>(f.type);
+                if (!num.empty()) {
+                  try { a.arrayLen = static_cast<size_t>(std::stoull(num)); a.hasLen = true; } catch (...) {}
+                }
+                f.type = a;
+                k = (j < se) ? j : se;
+              } else if (trail[k].kind == Tok::Punct && trail[k].text == "=") {
+                f.hasInit = true;
+                for (size_t m = k + 1; m < se; m++) f.init.push_back(trail[m]);
+                break;
+              }
             }
             extras.push_back(std::move(f));
           }
@@ -2243,7 +2284,50 @@ struct Reader {
       i++;
     }
     if (methodBody) { p = i; return; }
-    if (sawParen && !sawEq) { p = (end == npos) ? i : end + 1; return; }
+    // `int x(5);` / `std::string s("hello");` — direct-initialization of a
+    // variable, not a method declaration. Distinguish by looking inside the
+    // first paren: if it contains only literals/idents/punct (no type-like
+    // keywords) and is followed by `;` or `,`, treat as data member with init.
+    if (sawParen && !sawEq) {
+      bool looksLikeDirectInit = false;
+      {
+        size_t pi = npos, pc = npos;
+        for (size_t k = start; k < t.size(); k++) {
+          if (t[k].kind == Tok::Punct && t[k].text == "(") { pi = k; }
+          else if (t[k].kind == Tok::Punct && t[k].text == ")") { pc = k; break; }
+        }
+        if (pi != npos && pc != npos && pc > pi + 1) {
+          bool hasTypeKeyword = false;
+          static const char* typeKws[] = {"int","char","float","double","bool","auto",
+            "void","long","short","signed","unsigned","const","volatile","static","extern",
+            "struct","class","enum","union","typedef","template","typename","namespace",
+            "public","private","protected","virtual","explicit","friend","register","mutable"};
+          for (size_t k = pi + 1; k < pc; k++) {
+            if (t[k].kind == Tok::Ident) {
+              for (auto* kw : typeKws) {
+                if (t[k].text == kw) { hasTypeKeyword = true; break; }
+                if (!hasTypeKeyword && t[k].text.size() > 2 &&
+                    (t[k].text[0] >= 'A' && t[k].text[0] <= 'Z')) {
+                  // CamelCase ident at this position is likely a type name.
+                  hasTypeKeyword = true; break;
+                }
+              }
+              if (hasTypeKeyword) break;
+            }
+          }
+          bool endsSep = (end != npos) ||
+                         (pi + 1 < t.size() && t[pi + 1].kind == Tok::Punct &&
+                          (t[pi + 1].text == "," || t[pi + 1].text == ";"));
+          looksLikeDirectInit = !hasTypeKeyword && endsSep;
+        }
+      }
+      if (looksLikeDirectInit) {
+        // Fall through to normal member parsing below — the paren content will
+        // be captured as init text. Otherwise drop the whole declaration.
+      } else {
+        p = (end == npos) ? i : end + 1; return;
+      }
+    }
     if (sawParen && sawEq) {
       // `void f() = default;` / `= delete;`, and pure virtual `= 0`, are
       // function declarations, not data members. Without this check the outer
