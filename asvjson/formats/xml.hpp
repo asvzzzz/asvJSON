@@ -562,6 +562,23 @@ inline std::string xmlParseAttrValue(std::string_view s, size_t& pos) {
 	return xmlDecodeEntities(val);
 }
 
+// Every value-level STRING allocation in the XML decoder goes through this
+// wrapper. makeString returns nullptr both on OOM and when the payload exceeds
+// MAX_STRING_LEN -- and, unlike the JSON parser, the XML decoder does NOT
+// length-check text/attribute values, so a >10 MiB text or attribute used to
+// leave a null node in the tree: fromXML() returned true and the next
+// serialize()/toXML() dereferenced the nullptr (0xC0000005). Throwing here
+// keeps xmlParseElement "non-null or throw", matching plist's checkStringLen.
+inline std::unique_ptr<asvJSONValue> xmlMakeString(const char* s, size_t len) {
+	auto v = asvJSONValue::makeString(s, len);
+	if (!v) throw asvJSONError(len > asvJSONValue::MAX_STRING_LEN ? "XML: string too long" : "XML: out of memory");
+	return v;
+}
+
+inline std::unique_ptr<asvJSONValue> xmlMakeString(std::string_view sv) {
+	return xmlMakeString(sv.data(), sv.size());
+}
+
 // Detect value type from XML text content
 inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 	if (s.empty()) return asvJSONValue::makeNull();
@@ -584,8 +601,8 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 			for (const char* p = p0; p < s.data() + s.size(); ++p)
 				if (*p < '0' || *p > '9') { allDigits = false; break; }
 			if (allDigits) {
-				auto r = asvJSONValue::makeString(s.data(), s.size());
-				if (r) r->raw_number = true;
+				auto r = xmlMakeString(s.data(), s.size());
+				r->raw_number = true;
 				return r;
 			}
 			double d;
@@ -604,7 +621,15 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 #endif
 		}
 	}
-	return asvJSONValue::makeString(s.data(), s.size());
+	return xmlMakeString(s.data(), s.size());
+}
+
+// xmlDetectValue's scalar branches (makeNull/makeBool/makeInt/makeDouble) are
+// nothrow factories that return nullptr on OOM; funnel the result so a null
+// never lands in the tree -- same "non-null or throw" rule as xmlMakeString.
+inline std::unique_ptr<asvJSONValue> xmlNonNull(std::unique_ptr<asvJSONValue> v) {
+	if (!v) throw asvJSONError("XML: out of memory");
+	return v;
 }
 
 // true when a STRING needs a type="string" annotation on output so that a
@@ -658,11 +683,11 @@ inline bool xmlNeedsStringType(std::string_view s) {
 inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<std::string, std::string>& attrs, bool forceMixed) {
 	if (forceMixed) {
 		auto xobj = asvJSONValue::makeObject();
-		if (!xobj) return nullptr;
+		if (!xobj) throw asvJSONError("XML: out of memory");
 		auto xarr = asvJSONValue::makeArray();
-		if (!xarr) return nullptr;
+		if (!xarr) throw asvJSONError("XML: out of memory");
 		xobj->obj->emplace("#content", std::move(xarr));
-		for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
+		for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
 		return xobj;
 	}
 	auto tit = attrs.find("type");
@@ -675,10 +700,10 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 		for (const auto& [k, v] : attrs)
 			if (k != "type" && !(t == "extension" && k == "exttype")) { onlyTyped = false; break; }
 		if (onlyTyped) {
-			if (t == "string") return asvJSONValue::makeString("", 0);
-			if (t == "binary") return asvJSONValue::makeBinary(nullptr, 0);
-			if (t == "array") return asvJSONValue::makeArray();
-			if (t == "object") return asvJSONValue::makeObject();
+			if (t == "string") return xmlMakeString("", 0);
+			if (t == "binary") return xmlNonNull(asvJSONValue::makeBinary(nullptr, 0));
+			if (t == "array") return xmlNonNull(asvJSONValue::makeArray());
+			if (t == "object") return xmlNonNull(asvJSONValue::makeObject());
 			if (t == "extension") {
 				int8_t et = 0;
 				auto eit = attrs.find("exttype");
@@ -686,14 +711,14 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 					long ev = std::strtol(eit->second.c_str(), nullptr, 10);
 					if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
 				}
-				return asvJSONValue::makeExtension(et, nullptr, 0);
+				return xmlNonNull(asvJSONValue::makeExtension(et, nullptr, 0));
 			}
 		}
 	}
-	if (attrs.empty()) return asvJSONValue::makeString("", 0);
+	if (attrs.empty()) return xmlMakeString("", 0);
 	auto obj = asvJSONValue::makeObject();
-	if (!obj) return nullptr;
-	for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
+	if (!obj) throw asvJSONError("XML: out of memory");
+	for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
 	return obj;
 }
 
@@ -961,7 +986,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 					if (pos == bodyStart)
 						throw asvJSONError("unterminated element: <" + elemName + "> (expected </" + elemName + ">)");
 				}
-				return asvJSONValue::makeNull();
+				return xmlNonNull(asvJSONValue::makeNull());
 			}
 		}
 	}
@@ -982,7 +1007,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		pos++;
 		if (pos < s.size() && s[pos] == '>') pos++;
 		else throw asvJSONError("XML: malformed self-closing tag in <" + elemName + ">");
-		if (forceArray) return asvJSONValue::makeArray();
+		if (forceArray) return xmlNonNull(asvJSONValue::makeArray());
 		return xmlEmptyElement(attrs, forceMixed);
 	}
 
@@ -1047,7 +1072,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		// (STRING/BINARY/ARRAY/OBJECT/EXTENSION), and an attribute-only element
 		// stays an @-prefixed object. (An asv:arr-marked empty is still an
 		// empty array -- the marker is only emitted for non-empty arrays.)
-		if (forceArray) return asvJSONValue::makeArray();
+		if (forceArray) return xmlNonNull(asvJSONValue::makeArray());
 		return xmlEmptyElement(attrs, forceMixed);
 	}
 
@@ -1056,9 +1081,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// rule. Whitespace-only text segments (encoder indentation) carry no items.
 	if (forceArray) {
 		auto arr = asvJSONValue::makeArray();
-		if (!arr) return nullptr;
+		if (!arr) throw asvJSONError("XML: out of memory");
 		for (auto& seg : segments)
-			if (seg.isElement) arr->arr->push_back(std::move(seg.childVal));
+			if (seg.isElement) {
+				if (!seg.childVal) throw asvJSONError("XML: out of memory");
+				arr->arr->push_back(std::move(seg.childVal));
+			}
 		return arr;
 	}
 
@@ -1068,22 +1096,22 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			// <x asv:xc="1">text</x>: pure-text marker -- restore the original
 			// #content array of strings (do not value-detect).
 			auto xobj = asvJSONValue::makeObject();
-			if (!xobj) return nullptr;
+			if (!xobj) throw asvJSONError("XML: out of memory");
 			auto xarr = asvJSONValue::makeArray();
-			if (!xarr) return nullptr;
+			if (!xarr) throw asvJSONError("XML: out of memory");
 			for (size_t i = 0; i < segments.size(); i++)
 				if (!segments[i].isElement && !segments[i].text.empty())
-					xarr->arr->push_back(asvJSONValue::makeString(segments[i].text.data(), segments[i].text.size()));
+					xarr->arr->push_back(xmlMakeString(segments[i].text.data(), segments[i].text.size()));
 			xobj->obj->emplace("#content", std::move(xarr));
-			for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
+			for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
 			return xobj;
 		}
 		if (attrs.empty()) {
 			// CDATA is character data by definition: its text (possibly mixed
 			// with ordinary text) must never be re-detected as a number/bool/
 			// null, so any CDATA presence forces a plain STRING.
-			if (hasCdata) return asvJSONValue::makeString(combinedText.data(), combinedText.size());
-			return xmlDetectValue(combinedText);
+			if (hasCdata) return xmlMakeString(combinedText.data(), combinedText.size());
+			return xmlNonNull(xmlDetectValue(combinedText));
 		}
 		// Check for special type attribute (from toXML)
 		auto tit = attrs.find("type");
@@ -1094,21 +1122,21 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				// empty text included). With other attributes the element is
 				// an object: @attrs plus a #text that must stay STRING (this
 				// is what toXML emits for #text-bearing objects).
-				if (attrs.size() == 1) return asvJSONValue::makeString(combinedText.data(), combinedText.size());
+				if (attrs.size() == 1) return xmlMakeString(combinedText.data(), combinedText.size());
 				auto sobj = asvJSONValue::makeObject();
-				if (!sobj) return nullptr;
-				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
-				sobj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
+				if (!sobj) throw asvJSONError("XML: out of memory");
+				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+				sobj->obj->emplace("#text", xmlMakeString(combinedText.data(), combinedText.size()));
 				return sobj;
 			}
 			if (t == "datetime" && !combinedText.empty()) {
 				time_t ts = 0; int ms = 0; int tz = 0;
-				if (tryParseDateTime(combinedText, ts, &ms, &tz)) return asvJSONValue::makeDateTime(ts, ms, tz);
+				if (tryParseDateTime(combinedText, ts, &ms, &tz)) return xmlNonNull(asvJSONValue::makeDateTime(ts, ms, tz));
 			}
 			if (t == "binary" && !combinedText.empty()) {
 				std::string clean = xmlStripWs(combinedText);
 				auto decoded = decodeBase64Fast(clean.data(), clean.size());
-				if (!decoded.empty()) return asvJSONValue::makeBinary(decoded.data(), decoded.size());
+				if (!decoded.empty()) return xmlNonNull(asvJSONValue::makeBinary(decoded.data(), decoded.size()));
 			}
 			if (t == "objectid" && !combinedText.empty()) {
 				bool hexOk = true;
@@ -1120,7 +1148,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 						char buf[3] = {combinedText[i], combinedText[i+1], 0};
 						oid.push_back(static_cast<char>(std::strtol(buf, nullptr, 16)));
 					}
-					if (oid.size() == 12) return asvJSONValue::makeObjectId(std::string_view(oid.data(), 12));
+					if (oid.size() == 12) return xmlNonNull(asvJSONValue::makeObjectId(std::string_view(oid.data(), 12)));
 				}
 			}
 			if (t == "regex" && !combinedText.empty()) {
@@ -1138,13 +1166,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				opt = xmlUnescRegexText(opt);
 				if (!pat.empty()) {
 					auto rn = asvJSONValue::makeRegex(pat.c_str(), opt.empty() ? nullptr : opt.c_str());
-					if (rn) return rn;
+					return xmlNonNull(std::move(rn));
 				}
 			}
 			if (t == "timestamp" && !combinedText.empty()) {
 				long long v;
 				auto [ptr, ec] = std::from_chars(combinedText.data(), combinedText.data() + combinedText.size(), v);
-				if (ec == std::errc()) return asvJSONValue::makeTimestamp(v);
+				if (ec == std::errc()) return xmlNonNull(asvJSONValue::makeTimestamp(v));
 			}
 			if (t == "extension" && !combinedText.empty()) {
 				std::string clean = xmlStripWs(combinedText);
@@ -1156,21 +1184,21 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 						long ev = std::strtol(eit->second.c_str(), nullptr, 10);
 						if (ev >= -128 && ev <= 127) et = static_cast<int8_t>(ev);
 					}
-					return asvJSONValue::makeExtension(et, decoded.data(), decoded.size());
+					return xmlNonNull(asvJSONValue::makeExtension(et, decoded.data(), decoded.size()));
 				}
 			}
 		}
 		// Has attributes - object with #text + @attr
 		auto obj = asvJSONValue::makeObject();
-		if (!obj) return nullptr;
-		for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
-		if (!combinedText.empty()) obj->obj->emplace("#text", xmlDetectValue(combinedText));
+		if (!obj) throw asvJSONError("XML: out of memory");
+		for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+		if (!combinedText.empty()) obj->obj->emplace("#text", xmlNonNull(xmlDetectValue(combinedText)));
 		return obj;
 	}
 
 	// Has child elements (possibly interleaved with text)
 	auto obj = asvJSONValue::makeObject();
-	if (!obj) return nullptr;
+	if (!obj) throw asvJSONError("XML: out of memory");
 
 	// type="string" pins the element's own text as a STRING. The encoder emits
 	// it for a #text that would otherwise re-detect as a number/bool/null, and
@@ -1196,13 +1224,13 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// @type arrives as the reserved asv:ut attribute and maps back to @type.
 	for (const auto& [k, v] : attrs) {
 		if (pinTextString && k == "type") continue;
-		obj->obj->emplace(xmlAttrToKey(k), asvJSONValue::makeString(v.data(), v.size()));
+		obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
 	}
 
 	if (hasInterleaving || forceMixed) {
 		// Mixed content: preserve interleaved order as #content array
 		auto arr = asvJSONValue::makeArray();
-		if (!arr) return nullptr;
+		if (!arr) throw asvJSONError("XML: out of memory");
 		for (auto& seg : segments) {
 			if (seg.isElement) {
 				// Internal empty-marker element (<asv:s/>) between adjacent
@@ -1213,8 +1241,9 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				    seg.childVal && seg.childVal->type == asvJSONValue::STRING &&
 				    seg.childVal->str_data.empty())
 					continue;
+				if (!seg.childVal) throw asvJSONError("XML: out of memory");
 				auto wrapper = asvJSONValue::makeObject();
-				if (!wrapper) return nullptr;
+				if (!wrapper) throw asvJSONError("XML: out of memory");
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
 				arr->arr->push_back(std::move(wrapper));
 			} else {
@@ -1226,7 +1255,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				// that the encoder had to wrap as <item>10</item>, re-parsing as
 				// {"item":10} -- a one-way reshape that broke external
 				// mixed-content round-trips. Always-string closes that gap.
-				arr->arr->push_back(asvJSONValue::makeString(seg.text.data(), seg.text.size()));
+				arr->arr->push_back(xmlMakeString(seg.text.data(), seg.text.size()));
 			}
 		}
 		obj->obj->emplace("#content", std::move(arr));
@@ -1234,12 +1263,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		// Non-interleaved: all text first (if any), then all elements
 		// Add text content as #text (CDATA content stays raw STRING)
 		if (!combinedText.empty()) {
-			if (hasCdata || pinTextString) obj->obj->emplace("#text", asvJSONValue::makeString(combinedText.data(), combinedText.size()));
-			else obj->obj->emplace("#text", xmlDetectValue(combinedText));
+			if (hasCdata || pinTextString) obj->obj->emplace("#text", xmlMakeString(combinedText.data(), combinedText.size()));
+			else obj->obj->emplace("#text", xmlNonNull(xmlDetectValue(combinedText)));
 		} else if (pinTextString) {
 			// type="string" with no text run at all still denotes an empty
 			// STRING: this is what toXML emits for {#text:"", child:1}.
-			obj->obj->emplace("#text", asvJSONValue::makeString("", 0));
+			obj->obj->emplace("#text", xmlMakeString("", 0));
 		}
 
 		// Count occurrences of each child name (global, not just consecutive)
@@ -1255,12 +1284,14 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				auto it = obj->obj->find(seg.childName);
 				if (it == obj->obj->end()) {
 					auto arr = asvJSONValue::makeArray();
-					if (!arr) return nullptr;
+					if (!arr) throw asvJSONError("XML: out of memory");
 					obj->obj->emplace(seg.childName, std::move(arr));
 					it = obj->obj->find(seg.childName);
 				}
+				if (!seg.childVal) throw asvJSONError("XML: out of memory");
 				it->second->arr->push_back(std::move(seg.childVal));
 			} else {
+				if (!seg.childVal) throw asvJSONError("XML: out of memory");
 				obj->obj->emplace(seg.childName, std::move(seg.childVal));
 			}
 		}
