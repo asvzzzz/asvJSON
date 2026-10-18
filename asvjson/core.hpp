@@ -1,5 +1,5 @@
 #pragma once
-// asvJSON++ v1.17.0 - C++17 JSON library - Core Module
+// asvJSON++ v1.26.11 - C++17 JSON library - Core Module
 // 
 // Configuration:
 //   - Default (undefined): insertion-ordered object map (ObjectMapT).
