@@ -1466,12 +1466,15 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             asvJSONValue* arrVal;
             if (it == parent->obj->end()) {
               auto newArr = asvJSONValue::makeArray();
+              if (!newArr) throw asvJSONError("TOML: out of memory");
               arrVal = newArr.get();
               parent->obj->emplace(last, std::move(newArr));
             } else {
               arrVal = it->second.get();
             }
-            arrVal->arr->push_back(asvJSONValue::makeObject());
+            auto newElem = asvJSONValue::makeObject();
+            if (!newElem) throw asvJSONError("TOML: out of memory");
+            arrVal->arr->push_back(std::move(newElem));
             // Each element is its own table, so the key carries the new index
             tableDefs.insert(tomlCanonicalPath(root.get(), tablePath));
             arrayTablePaths.insert(fullPath);
@@ -1482,6 +1485,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               throw asvJSONError("cannot redefine key '" + last + "' as table");
             if (it == parent->obj->end()) {
               auto newObj = asvJSONValue::makeObject();
+              if (!newObj) throw asvJSONError("TOML: out of memory");
               parent->obj->emplace(last, std::move(newObj));
             }
             tableDefs.insert(defKey);

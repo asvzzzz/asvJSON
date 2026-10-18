@@ -2093,11 +2093,13 @@ public:
 		if (root && other.root) {
 			diffImpl(*root, *other.root, "", *patch);
 		} else if (!root && other.root) {
+			auto cv = cloneValue(other.root.get());
+			if (!cv) return result;
 			auto op = asvJSONValue::makeObject();
 			if (!op) return result;
 			op->emplace("op", asvJSONValue::makeStringView("add"));
 			op->emplace("path", asvJSONValue::makeStringView(""));
-			op->emplace("value", cloneValue(other.root.get()));
+			op->emplace("value", std::move(cv));
 			patch->push(std::move(op));
 		} else if (root && !other.root) {
 			auto op = asvJSONValue::makeObject();
@@ -2903,20 +2905,24 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 			auto it = mapFind(*a.obj, k);
 			std::string childPath = path + "/" + jsonPointerEscaped(k);
 			if (it == a.obj->end() || !it->second) {
+				auto cv = cloneValue(v.get());
+				if (!cv) return;
 				auto op = asvJSONValue::makeObject();
 				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("add"));
 				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
-				op->emplace("value", cloneValue(v.get()));
+				op->emplace("value", std::move(cv));
 				patch.push(std::move(op));
 			} else if (it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
 				diffImpl(*it->second, *v, childPath, patch);
 			} else if (*it->second != *v) {
+				auto cv = cloneValue(v.get());
+				if (!cv) return;
 				auto op = asvJSONValue::makeObject();
 				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("replace"));
 				op->emplace("path", asvJSONValue::makeString(childPath.data(), childPath.size()));
-				op->emplace("value", cloneValue(v.get()));
+				op->emplace("value", std::move(cv));
 				patch.push(std::move(op));
 			}
 		}
@@ -2933,19 +2939,23 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				if ((*a.arr)[i]->type == asvJSONValue::OBJECT && (*b.arr)[i]->type == asvJSONValue::OBJECT) {
 					diffImpl(*(*a.arr)[i], *(*b.arr)[i], idxPath, patch);
 				} else if (*(*a.arr)[i] != *(*b.arr)[i]) {
+					auto cv = cloneValue((*b.arr)[i].get());
+					if (!cv) return;
 					auto op = asvJSONValue::makeObject();
 					if (!op) return;
 					op->emplace("op", asvJSONValue::makeStringView("replace"));
 					op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
-					op->emplace("value", cloneValue((*b.arr)[i].get()));
+					op->emplace("value", std::move(cv));
 					patch.push(std::move(op));
 				}
 			} else if (!aHas && bHas) {
+				auto cv = cloneValue((*b.arr)[i].get());
+				if (!cv) return;
 				auto op = asvJSONValue::makeObject();
 				if (!op) return;
 				op->emplace("op", asvJSONValue::makeStringView("add"));
 				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
-				op->emplace("value", cloneValue((*b.arr)[i].get()));
+				op->emplace("value", std::move(cv));
 				patch.push(std::move(op));
 			} else if (aHas && !bHas) {
 				auto op = asvJSONValue::makeObject();
@@ -2959,11 +2969,13 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 	}
 	// Different types or scalars  ->  replace
 	{
+		auto cv = cloneValue(&b);
+		if (!cv) return;
 		auto op = asvJSONValue::makeObject();
 		if (!op) return;
 		op->emplace("op", asvJSONValue::makeStringView("replace"));
 		op->emplace("path", asvJSONValue::makeString(path.data(), path.size()));
-		op->emplace("value", cloneValue(&b));
+		op->emplace("value", std::move(cv));
 		patch.push(std::move(op));
 	}
 }
@@ -3028,6 +3040,7 @@ inline const asvJSONValue* asvJSON::getByPointer(std::string_view ptr) const {
 }
 
 inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value) {
+	if (!value) return false; // a null node would be dereferenced by every later tree walk
 	if (ptr.empty() || ptr == "/") { root = std::move(value); dirty_ = true; return true; }
 	if (ptr[0] != '/') return false;
 	if (!root) {
@@ -3176,7 +3189,8 @@ inline void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch,
 		if (it != target->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
 			mergePatchRecursive(it->second.get(), v.get(), depth + 1);
 		} else {
-			target->obj->insert_or_assign(k, cloneValue(v.get()));
+			auto c = cloneValue(v.get());
+			if (c) target->obj->insert_or_assign(k, std::move(c));
 		}
 	}
 }
@@ -3185,14 +3199,14 @@ inline void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch,
 inline void asvJSON::merge(const asvJSON& other) {
 	if (!other.root) return;
 	if (!root || root->type != asvJSONValue::OBJECT) {
-		root = cloneValue(other.root.get());
-		dirty_ = true;
+		auto c = cloneValue(other.root.get());
+		if (c) { root = std::move(c); dirty_ = true; }
 		return;
 	}
 	const asvJSONValue* patch = other.root.get();
 	if (!patch || patch->type != asvJSONValue::OBJECT || !patch->obj) {
-		root = cloneValue(patch);
-		dirty_ = true;
+		auto c = cloneValue(patch);
+		if (c) { root = std::move(c); dirty_ = true; }
 		return;
 	}
 	for (const auto& [k, v] : *patch->obj) {
@@ -3204,7 +3218,8 @@ inline void asvJSON::merge(const asvJSON& other) {
 		if (it != root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
 			mergePatchRecursive(it->second.get(), v.get(), 0);
 		} else {
-			root->obj->insert_or_assign(k, cloneValue(v.get()));
+			auto c = cloneValue(v.get());
+			if (c) root->obj->insert_or_assign(k, std::move(c));
 		}
 	}
 	dirty_ = true;
@@ -3216,7 +3231,8 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return result;
 	const asvJSONValue* p = patch.root.get();
 	if (p->type != asvJSONValue::OBJECT || !p->obj) {
-		result.root = cloneValue(p);
+		auto c = cloneValue(p);
+		if (c) result.root = std::move(c);
 		return result;
 	}
 	if (!result.root || result.root->type != asvJSONValue::OBJECT || !result.root->obj) {
@@ -3232,7 +3248,8 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 			if (it != result.root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
 				mergePatchRecursive(it->second.get(), v.get(), depth + 1);
 			} else {
-				result.root->obj->insert_or_assign(k, cloneValue(v.get()));
+				auto c = cloneValue(v.get());
+				if (c) result.root->obj->insert_or_assign(k, std::move(c));
 			}
 		}
 	}
