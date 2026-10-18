@@ -23,10 +23,10 @@
 //     filter that compares as integer 0.
 //   - Recursive descent is supported at the top level ($..name, $..*, $..[...])
 //     but NOT inside a filter. The RFC grammar allows a descendant-segment in a
-//     filter-query, here `$[?(@..a)]` is rejected by isValidPath (the filter's
-//     query-path grammar has no descendant-segment) and selects nothing through
-//     query(). Not supporting it is a deliberate simplification of the
-//     single-value filter evaluator described below.
+//     filter-query, here `$[?(@..a)]` and `$[?@.a..b]` are rejected by
+//     isValidPath (the filter's query-path grammar has no descendant-segment)
+//     and select nothing through query(). Not supporting it is a deliberate
+//     simplification of the single-value filter evaluator described below.
 //   - Filter comparisons are exact for int64 operands; an empty/nothing operand
 //     yields false for every operator except == where both sides must be empty.
 //   - A bare query in a filter is an existence test: true iff it selects at
@@ -878,6 +878,14 @@ class JPFilterEval {
       }
       if (!node) return nullptr;
     }
+    // Trailing recursive-descent after a segment (e.g. @.a..b) must not be
+    // silently ignored — the filter grammar has no descendant-segment, so
+    // treat it as "selects nothing" to stay consistent with isValidPath.
+    if (lex_.peek().type == TokType::DOTDOT) return nullptr;
+    // Trailing garbage (e.g. @.a{) must also not be silently ignored — the
+    // lexer falls through to !ok, which isValidPath catches but query() did
+    // not. Treat as "selects nothing" for consistency.
+    if (!lex_.peek().ok) return nullptr;
     return node;
   }
 
@@ -1227,10 +1235,21 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       // empties this selector, and jpExpand's unclean-up still runs.
       lex.next();
       auto children = jpAllChildren(node);
+      // Capture the filter end token from the copy lexer (not the outer one —
+      // the outer lex is not advanced by the evaluator). Stray tokens after
+      // the evaluated expression (e.g. `$[?@.a)]` with a trailing `)`) are
+      // invalid; reject the whole selector to match isValidPath's stricter check.
+      Tok filterEnd;
+      bool filterEndSet = false;
       for (const asvJSONValue* child : children) {
         PathLexer filterLex(lex);
         JPFilterEval filterEval(filterLex, child, res.root);
         if (filterEval.evaluate()) out.push_back(child);
+        filterEnd = filterLex.peek();
+        filterEndSet = true;
+      }
+      if (filterEndSet && filterEnd.type != TokType::RBRACKET && filterEnd.type != TokType::COMMA) {
+        closed = false; out.resize(before); return;
       }
       closed = lex.skipToFilterEnd();
     }
@@ -1465,7 +1484,11 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
   }
   // The token that ended the path loop must be a real boundary, not a
   // lexer fall-through: a garbage byte next to a query path (`@.a{`) would
-  // otherwise be silently treated as end-of-path.
+  // otherwise be silently treated as end-of-path. Recursive descent (DOTDOT)
+  // is also rejected here — it is valid at the top level but not inside a
+  // filter query-path, and self-consistency prevents future refactors from
+  // accidentally relying on callers to catch it.
+  if (lex.peek().type == TokType::DOTDOT) return false;
   if (!lex.peek().ok) return false;
   return true;
 }
