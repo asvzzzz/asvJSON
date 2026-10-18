@@ -34027,6 +34027,61 @@ TEST(testArrayAddNullGuard) {
 	}
 }
 
+// XML text/attribute values larger than MAX_STRING_LEN used to leave a null
+// node in the tree: makeString() returns nullptr above the limit and the XML
+// decoder (unlike the JSON parser) never length-checked text/attributes, so
+// fromXML() returned true while the next serialize()/toXML() dereferenced the
+// nullptr (access violation 0xC0000005). The parser now funnels every
+// value-level string through xmlMakeString, which throws -> false + lastError.
+TEST(testXMLStringTooLong) {
+	const size_t LIM = asvJSONValue::MAX_STRING_LEN;
+	const std::string big(LIM + 1, 'x'); // one byte over the limit
+
+	// Every shape that used to plant a null node: oversize attribute on an
+	// empty element, oversize attribute + text, oversize #text via
+	// type="string", asv:xc-pinned text, mixed content, nested element.
+	const std::string cases[] = {
+		"<a b=\"" + big + "\"/>",
+		"<a b=\"c\">" + big + "</a>",
+		"<a type=\"string\" x=\"1\">" + big + "</a>",
+		"<a asv:xc=\"1\">" + big + "</a>",
+		"<a>x<b/>" + big + "</a>",
+		"<a asv:xc=\"1\" b=\"" + big + "\"/>",
+		"<root><a>" + big + "</a></root>",
+		"<a>" + big + "</a>",
+		"<a type=\"string\">" + big + "</a>",
+	};
+	for (const auto& xml : cases) {
+		asvJSON j;
+		ASSERT_MSG(!j.fromXML(xml), "oversize XML value must fail");
+		ASSERT(j.getRoot() == nullptr);
+		ASSERT(j.getLastError().find("string too long") != std::string::npos);
+		// Nothing to serialize -> no null deref.
+		ASSERT_EQ(j.serialize(), std::string(""));
+	}
+
+	// Boundary: exactly MAX_STRING_LEN still parses (the limit is not lowered
+	// by the fix) and the node is a real STRING, never null.
+	{
+		const std::string atLim(LIM, 'y');
+		asvJSON j;
+		ASSERT(j.fromXML("<a b=\"" + atLim + "\"/>"));
+		const asvJSONValue* n = j.getRoot()->getConst("a");
+		ASSERT(n != nullptr);
+		const asvJSONValue* attr = n->getConst("@b");
+		ASSERT(attr != nullptr);
+		ASSERT(attr->type == asvJSONValue::STRING);
+		ASSERT_EQ(attr->str_data.size(), LIM);
+	}
+
+	// Sanity: ordinary XML is unaffected (no spurious throw).
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<root><a b=\"1\">hi</a><a c=\"2\">yo</a></root>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"root\":[{\"@b\":\"1\",\"#text\":\"hi\"},{\"@c\":\"2\",\"#text\":\"yo\"}]}"));
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34373,6 +34428,7 @@ RUN(testCBORFloat16);
 	RUN(testXMLArrayTypedItems);
 	RUN(testXMLAuditFixes);
 	RUN(testXMLAuditFixes2);
+	RUN(testXMLStringTooLong);
 	RUN(testXMLTextAndRegexFidelity);
 
 	std::cout << "\n--- SVG Serialization Tests ---\n";
