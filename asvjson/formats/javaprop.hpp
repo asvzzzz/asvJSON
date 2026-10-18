@@ -113,6 +113,7 @@ inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
     if (s.size() > i0 + 1 && s[i0] == '0' && (s[i0 + 1] == 'x' || s[i0 + 1] == 'X'))
       return asvJSONValue::makeString(s.data(), s.size());
     {
+      errno = 0;
       char* end = nullptr;
       long long ll = std::strtoll(s.c_str(), &end, 10);
       if (end && *end == 0 && end == s.c_str() + s.size()) {
@@ -132,8 +133,10 @@ inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
     }
 #endif
     {
-      double d = std::strtod(s.c_str(), &end);
-      if (end && *end == 0 && end == s.c_str() + s.size()) {
+      errno = 0;
+      char* end2 = nullptr;
+      double d = std::strtod(s.c_str(), &end2);
+      if (end2 && *end2 == 0 && end2 == s.c_str() + s.size()) {
         if (errno == ERANGE) {
           auto v = asvJSONValue::makeStringView(std::string_view(s));
           if (v) v->raw_number = true;
@@ -330,7 +333,7 @@ inline std::string javapropEscapeKey(std::string_view s) {
       case '#':  out += "\\#"; break;
       case '!':  out += "\\!"; break;
       default:
-        if (static_cast<unsigned char>(c) < 0x20) {
+        if (static_cast<unsigned char>(c) < 0x20 || c == '\x7f') {
           char buf[8]; snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c)); out += buf;
         } else out += c;
         break;
