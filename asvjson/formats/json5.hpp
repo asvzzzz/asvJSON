@@ -212,25 +212,45 @@ inline std::string json5ToJson(std::string_view input) {
     }
 
     // Comments outside strings (JSON5: //, /* */, #) are skipped.
+    // Line-terminator check used by line comments: \n, \r, U+2028, U+2029.
+    // JSON5 spec (Sec 8) treats all four as line terminators; a line comment
+    // runs until any one of them or EOF.
+    auto skipLineComment = [&]() {
+      size_t j = i + 1;
+      while (j < input.size()) {
+        char nc = input[j];
+        if (nc == '\n' || nc == '\r') break;
+        // U+2028 / U+2029: full 3-byte prefix check so we do not false-match
+        // on stray 0xA8 / 0xA9 bytes that happen to sit between other UTF-8.
+        unsigned char uc = static_cast<unsigned char>(nc);
+        if (uc == 0xA8 || uc == 0xA9) {
+          if (j >= 2 && static_cast<unsigned char>(input[j - 1]) == 0x80 &&
+              static_cast<unsigned char>(input[j - 2]) == 0xE2) break;
+        }
+        j++;
+      }
+      i = j;
+    };
     if (c == '#') {
       radixJustEnded = false;
-      while (i + 1 < input.size() && input[i + 1] != '\n') i++;
-      continue; // outer loop advances past the newline
+      skipLineComment();
+      continue;
     }
     if (c == '/' && i + 1 < input.size() && input[i + 1] == '/') {
       radixJustEnded = false;
-      while (i + 1 < input.size() && input[i + 1] != '\n') i++;
+      skipLineComment();
       continue;
     }
     if (c == '/' && i + 1 < input.size() && input[i + 1] == '*') {
       radixJustEnded = false;
       i += 2;
       while (i + 1 < input.size() && !(input[i] == '*' && input[i + 1] == '/')) i++;
+      if (i + 1 >= input.size()) throw asvJSONError("unterminated block comment in JSON5");
       // Leave i ON the closing '/' so the loop's own i++ steps past it. Advancing
       // by 2 here skipped the character after the comment as well, which ate the
       // closing '}' or ']' whenever a block comment was the last thing on the
       // line: {"a": 1 /* c */} converted to {"a": 1  and then failed with
-      // "Expected ',' or '}'". A space after the comment hid it.
+      // "Expected ',' or '}'". A space after the comment masked it.
       if (i + 1 < input.size()) i += 1;
       continue;
     }
@@ -276,10 +296,41 @@ inline std::string json5ToJson(std::string_view input) {
         if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
             static_cast<unsigned char>(input[j + 2]) == 0xBF) { j += 3; continue; }
         if (nc == '/' && j + 1 < input.size()) {
-          if (input[j + 1] == '/') { while (j < input.size() && input[j] != '\n') j++; continue; }
-          if (input[j + 1] == '*') { j += 2; while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++; if (j < input.size()) j += 2; continue; }
+          if (input[j + 1] == '/') {
+            // Same line-terminator set as the main comment skip.
+            while (j < input.size()) {
+              char nj = input[j];
+              if (nj == '\n' || nj == '\r') break;
+              unsigned char nuc = static_cast<unsigned char>(nj);
+              if (nuc == 0xA8 || nuc == 0xA9) {
+                if (j >= 2 && static_cast<unsigned char>(input[j - 1]) == 0x80 &&
+                    static_cast<unsigned char>(input[j - 2]) == 0xE2) break;
+              }
+              j++;
+            }
+            continue;
+          }
+          if (input[j + 1] == '*') {
+            j += 2;
+            while (j + 1 < input.size() && !(input[j] == '*' && input[j + 1] == '/')) j++;
+            if (j + 1 >= input.size()) throw asvJSONError("unterminated block comment in JSON5");
+            j += 2;
+            continue;
+          }
         }
-        if (nc == '#') { while (j < input.size() && input[j] != '\n') j++; continue; }
+        if (nc == '#') {
+          while (j < input.size()) {
+            char nj = input[j];
+            if (nj == '\n' || nj == '\r') break;
+            unsigned char nuc = static_cast<unsigned char>(nj);
+            if (nuc == 0xA8 || nuc == 0xA9) {
+              if (j >= 2 && static_cast<unsigned char>(input[j - 1]) == 0x80 &&
+                  static_cast<unsigned char>(input[j - 2]) == 0xE2) break;
+            }
+            j++;
+          }
+          continue;
+        }
         if (nc == '}' || nc == ']') isTrailing = true;
         break;
       }
@@ -578,6 +629,8 @@ inline asvJSONValue* json5FindPath(asvJSONValue* root, std::string_view path) {
       for (size_t k = 1; k + 1 < seg.size(); k++) {
         char d = seg[k];
         if (d < '0' || d > '9') return nullptr;
+        // Guard against overflow: same pattern as parseArrayIndex in schema.hpp.
+        if (idx > (SIZE_MAX - static_cast<size_t>(d - '0')) / 10) return nullptr;
         idx = idx * 10 + static_cast<size_t>(d - '0');
       }
       if (idx >= cur->arr->size()) return nullptr;
@@ -786,11 +839,12 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       } else {
         size_t j = i + 2;
         while (j + 1 < n && !(input[j] == '*' && input[j + 1] == '/')) j++;
-        size_t end = j;  // if unterminated, consume to EOF
+        if (j + 1 >= n) throw asvJSONError("unterminated block comment in JSON5");
+        size_t end = j;
         t.block = true;
         auto v = input.substr(i + 2, end - (i + 2));
         t.text.assign(v.data(), v.size());
-        i = j + (j + 1 < n ? 2 : 0);
+        i = j + 2;
       }
       toks.push_back(std::move(t));
       continue;
