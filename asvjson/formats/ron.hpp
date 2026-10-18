@@ -40,6 +40,27 @@
 //   `Comment.text` set programmatically with embedded newlines still produces
 //   parseable RON (the decoder itself can never produce one).
 //
+//   Known limitations:
+//   - Object keys that look like array indices (`"[0]"`, `"[42]"`) collide with
+//     the path `[N]` syntax used internally for comment attachment. Such keys
+//     round-trip correctly (the encoder quotes them), but comments on those
+//     nodes are silently dropped because ronFindPath cannot distinguish a
+//     literal key from an array index segment. Avoid using bracket-enclosed
+//     numeric keys if you need per-node comments.
+//   - The internal comment path uses `\x1F` as segment separator; a JSON key
+//     containing that byte is ambiguous and breaks comment resolution. This
+//     byte is a control character that is exceptionally rare in practice.
+//   - Map objects with all-ident keys are emitted in struct form on encode
+//     (`{"a":1,"b":2}` -> `(a: 1, b: 2)`). The value round-trips but the text
+//     differs; this is intentional (struct form is the RON idiom for ident-key
+//     objects).
+//   - `+5` parses as `5` and `007` parses as `7` (leading-plus and leading-zero
+//     normalization). These forms are not valid in Rust's ron crate but are
+//     accepted here for leniency; the normalized text is what round-trips.
+//   - A bare `]` or `}` at top level without a preceding container is rejected
+//     as unexpected (RON has no bare array/object literal at document root
+//     without a wrapper — this matches the Rust ron crate).
+//
 //   Depth: toRON() returns std::string with no error channel, so a tree nested
 //   deeper than MAX_NESTING_DEPTH (reachable via setByPointer, which does not
 //   enforce the limit) is emitted with "None" past that depth instead of
@@ -464,23 +485,36 @@ struct RonParser {
           break;
         }
         case 'u': {
-          size_t k = i + 2;
-          unsigned long cp = ronReadU4(in, k, "RON: invalid \\u char escape");
-          if (cp >= 0xD800 && cp <= 0xDBFF && k + 6 <= in.size() && in[k] == '\\' && in[k + 1] == 'u' &&
-              std::isxdigit(static_cast<unsigned char>(in[k + 2])) &&
-              std::isxdigit(static_cast<unsigned char>(in[k + 3])) &&
-              std::isxdigit(static_cast<unsigned char>(in[k + 4])) &&
-              std::isxdigit(static_cast<unsigned char>(in[k + 5]))) {
-            size_t k2 = k + 2;
-            unsigned long lo = ronReadU4(in, k2, "RON: invalid \\u char escape");
-            if (lo >= 0xDC00 && lo <= 0xDFFF) {
-              cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-              k = k2;
+          // Match the string parser: accept both \uXXXX and \u{...} forms.
+          if (i + 2 < in.size() && in[i + 2] == '{') {
+            size_t hs = i + 3, he = hs;
+            while (he < in.size() && std::isxdigit(static_cast<unsigned char>(in[he]))) ++he;
+            if (he == hs || he >= in.size() || in[he] != '}' || he - hs > 6)
+              throw asvJSONError("RON: invalid \\u{...} char escape");
+            unsigned long cp = 0;
+            for (size_t k = hs; k < he; k++) cp = (cp << 4) | static_cast<unsigned long>(ronHexVal(in[k]));
+            if (cp > 0x10FFFF) throw asvJSONError("RON: invalid \\u{...} char escape");
+            ronAppendUtf8(ch, cp);
+            i = he + 1;
+          } else {
+            size_t k = i + 2;
+            unsigned long cp = ronReadU4(in, k, "RON: invalid \\u char escape");
+            if (cp >= 0xD800 && cp <= 0xDBFF && k + 6 <= in.size() && in[k] == '\\' && in[k + 1] == 'u' &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 2])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 3])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 4])) &&
+                std::isxdigit(static_cast<unsigned char>(in[k + 5]))) {
+              size_t k2 = k + 2;
+              unsigned long lo = ronReadU4(in, k2, "RON: invalid \\u char escape");
+              if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                k = k2;
+              }
             }
+            if (cp >= 0xD800 && cp <= 0xDFFF) throw asvJSONError("RON: invalid \\u char escape");
+            ronAppendUtf8(ch, cp);
+            i = k;
           }
-          if (cp >= 0xD800 && cp <= 0xDFFF) throw asvJSONError("RON: invalid \\u char escape");
-          ronAppendUtf8(ch, cp);
-          i = k;
           break;
         }
         default: throw asvJSONError("RON: invalid char escape");
@@ -494,6 +528,12 @@ struct RonParser {
       if (i + len > in.size()) len = static_cast<int>(in.size() - i);
       ch = std::string(in.data() + i, static_cast<size_t>(len));
       i += len;
+      // Reject truncated or otherwise invalid UTF-8: a bare continuation byte
+      // or an incomplete multi-byte sequence (e.g. '\xC3' with no follower) is
+      // not a valid char value. The string parser already enforces this via
+      // validateUTF8; the char path must do the same for consistency.
+      if (!isValidUTF8(reinterpret_cast<const uint8_t*>(ch.data()), ch.size()))
+        throw asvJSONError("RON: invalid UTF-8 in char literal");
     }
     if (i >= in.size() || in[i] != '\'') throw asvJSONError("RON: unterminated char");
     ++i;
