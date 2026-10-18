@@ -2288,6 +2288,7 @@ struct Reader {
     // variable, not a method declaration. Distinguish by looking inside the
     // first paren: if it contains only literals/idents/punct (no type-like
     // keywords) and is followed by `;` or `,`, treat as data member with init.
+    size_t directInitPi = npos, directInitPc = npos;
     if (sawParen && !sawEq) {
       bool looksLikeDirectInit = false;
       {
@@ -2316,14 +2317,14 @@ struct Reader {
             }
           }
           bool endsSep = (end != npos) ||
-                         (pi + 1 < t.size() && t[pi + 1].kind == Tok::Punct &&
-                          (t[pi + 1].text == "," || t[pi + 1].text == ";"));
+                         (pc + 1 < t.size() && t[pc + 1].kind == Tok::Punct &&
+                          (t[pc + 1].text == "," || t[pc + 1].text == ";"));
           looksLikeDirectInit = !hasTypeKeyword && endsSep;
         }
       }
       if (looksLikeDirectInit) {
-        // Fall through to normal member parsing below — the paren content will
-        // be captured as init text. Otherwise drop the whole declaration.
+        directInitPi = pi;
+        directInitPc = pc;
       } else {
         p = (end == npos) ? i : end + 1; return;
       }
@@ -2521,6 +2522,14 @@ struct Reader {
       if (seq != npos) {
         f.hasInit = true;
         for (size_t k = seq + 1; k < seInit; k++) f.init.push_back(t[k]);
+      } else if (directInitPi != npos && directInitPc != npos &&
+                 directInitPi >= sb && directInitPc < se) {
+        // Paren-init (`int x(5);`, `std::string s("hello");`). The paren group
+        // is the initializer — capture it so cppRdScalarLiteral can strip parens
+        // and extract the value. Must be checked before brace-init since a
+        // direct-init cannot also have braces at this point.
+        f.hasInit = true;
+        for (size_t k = directInitPi; k <= directInitPc; k++) f.init.push_back(t[k]);
       } else if (biPos != npos) {
         // Brace-init (`Foo bar{5};`, `Point p{1,2};`, `int arr[3]{1,2,3};`).
         // The braces ARE part of f.init: materialize() locates the group with
