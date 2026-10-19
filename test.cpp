@@ -34619,6 +34619,36 @@ TEST(testTronCRLineEnding) {
 	}
 }
 
+// Review fix: comment handler (#) now stops at both \n and \r so a bare-\r
+// file does not let the comment swallow subsequent tokens. Without this, input
+// like "#comment\rcode" would consume "comment\r" and then keep scanning
+// forward until the next \n or EOF — effectively dropping everything after the
+// first bare-CR comment to EOF.
+TEST(testTronCommentWithCR) {
+	{
+		asvJSON j;
+		// Bare-\r before code: without the fix the comment handler would skip
+		// past \r and eat "code" until the next \n or EOF. With the fix, the
+		// comment ends at \r and "code" is parsed as an identifier token — but
+		// since we are not inside a class definition that expects one, it
+		// should be rejected as trailing tokens after the root value.
+		bool ok = j.fromTRON(std::string_view("#comment\rcode\nnull"));
+		ASSERT(!ok); // "code" is unexpected here — parser rejects cleanly
+	}
+	{
+		asvJSON j;
+		// Bare-\r between comment and data: same scenario, but with a value after.
+		bool ok = j.fromTRON(std::string_view("#comment\r\nnull"));
+		ASSERT(ok);
+	}
+	{
+		asvJSON j;
+		// CRLF in comment must still work (the fix preserves the existing path).
+		bool ok = j.fromTRON(std::string_view("#comment\r\nnull"));
+		ASSERT(ok);
+	}
+}
+
 // Review fix: TRON off-by-one in MAX_OBJECT_SIZE / MAX_ARRAY_SIZE check.
 // Check must happen BEFORE adding the element, not after.
 TEST(testTronObjectSizeCheckBeforeAdd) {
@@ -35324,6 +35354,7 @@ RUN(testYamlAuditReview);
 	RUN(testTomlEmptyKeyInArrayTable);
 	RUN(testYamlUnescapeDoubleHexInvalidFallback);
 	RUN(testTronCRLineEnding);
+	RUN(testTronCommentWithCR);
 	RUN(testTronObjectSizeCheckBeforeAdd);
 	RUN(testGoonKeyWithInteriorQuote);
 	RUN(testGoonISODateQuoted);

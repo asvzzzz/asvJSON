@@ -29,6 +29,10 @@
 // error. This matches the other recursive encoders (JSON5/RON/sexpr/GOON).
 // CUSTOM_TAG values are not preserved: they serialize as "null" (the encoder's
 // default case), as TRON has no marker form for them.
+// `;` is accepted only as a class-definition terminator (`class A: x,y;z`). In
+// every other context it emits a syntax error (the tokenizer still produces a
+// SEMICOLON token, but parseValue/parseInstance reject it). This is intentional:
+// the spec does not document `,` or `;` as general-purpose separators.
 // Decoder diagnostics are prefixed "TRON: " and carry no line number (unlike the
 // JSON/INI/TOML parsers): the lexer tokenizes the whole document before parsing,
 // so positions are not tracked through to the error sites.
@@ -406,9 +410,9 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
     char c = in[i];
     if (c == '\r') { i++; if (i < in.size() && in[i] == '\n') i++; add(TronTokType::NEWLINE); continue; }
     // Note: \r\n is consumed as a single NEWLINE above. A bare \r also becomes
-    // NEWLINE (the fix below). The original code silently skipped \r which meant
+    // NEWLINE (the fix above). The original code silently skipped \r which meant
     // old Mac-style line endings were invisible to the parser.
-    if (c == '#') { while (i < in.size() && in[i] != '\n') i++; continue; }
+    if (c == '#') { while (i < in.size() && in[i] != '\n' && in[i] != '\r') i++; continue; }
     if (c == '\n') { i++; add(TronTokType::NEWLINE); continue; }
     if (c == ' ' || c == '\t') { i++; continue; }
     if (c == '"') {
@@ -418,7 +422,7 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
         if (in[i] == '\\' && i + 1 < in.size()) { s += in[i++]; s += in[i++]; }
         else s += in[i++];
       }
-      if (i >= in.size()) throw asvJSONError("unterminated string in TRON");
+      if (i >= in.size()) throw asvJSONError("TRON: unterminated string in TRON");
       i++;
       add(TronTokType::STRING, s);
       continue;
@@ -476,7 +480,7 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
       case ';': add(TronTokType::SEMICOLON); break;
       case '=': add(TronTokType::EQUALS); break;
       default:
-        throw asvJSONError(std::string("unexpected character in TRON: '") + c + "'");
+        throw asvJSONError("TRON: " + std::string("unexpected character: '") + c + "'");
     }
     i++;
   }
@@ -530,15 +534,15 @@ struct TronParseState {
       if (peek().type == TronTokType::RBRACE) break;
       if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE)
         throw asvJSONError("TRON object too large");
-      if (peek().type != TronTokType::STRING) throw asvJSONError("expected string key");
+      if (peek().type != TronTokType::STRING) throw asvJSONError("TRON: expected string key");
       std::string key = tronUnescape(advance().text);
-      if (!match(TronTokType::COLON)) throw asvJSONError("expected ':'");
+      if (!match(TronTokType::COLON)) throw asvJSONError("TRON: expected ':'");
       skipNewlines();
       asvJSONValue* val = parseValue(depth + 1);
       if (val) obj->obj->insert_or_assign(key, std::unique_ptr<asvJSONValue>(val));
       skipNewlines();
     }
-    if (!match(TronTokType::RBRACE)) throw asvJSONError("expected '}' or ',' in object");
+    if (!match(TronTokType::RBRACE)) throw asvJSONError("TRON: expected '}' or ',' in object");
     // YAML set marker: {"$set":["a","b"]} -> object whose members are the array
     // strings (each mapped to null), flagged yaml_set. Recognized only when the
     // key is the sole member and every array element is a string, so a plain
@@ -594,16 +598,16 @@ struct TronParseState {
       if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
       skipNewlines();
     }
-    if (!match(TronTokType::RBRACKET)) throw asvJSONError("expected ']' or ',' in array");
+    if (!match(TronTokType::RBRACKET)) throw asvJSONError("TRON: expected ']' or ',' in array");
     return arr.release();
   }
 
   asvJSONValue* parseInstance(int depth) {
     std::string className = advance().text;
     auto it = classes.find(className);
-    if (it == classes.end()) throw asvJSONError("undefined class: " + className);
+    if (it == classes.end()) throw asvJSONError("TRON: undefined class: " + className);
     const auto& props = it->second.props;
-    if (!match(TronTokType::LPAREN)) throw asvJSONError("expected '('");
+    if (!match(TronTokType::LPAREN)) throw asvJSONError("TRON: expected '('");
     skipNewlines();
     auto obj = asvJSONValue::makeObject();
     if (!obj) throw asvJSONError("out of memory");
@@ -615,7 +619,7 @@ struct TronParseState {
       if (needsSeparator) {
         if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); needsSeparator = false; continue; }
         if (peek().type == TronTokType::RPAREN) break;
-        throw asvJSONError("expected ',' or ')'");
+        throw asvJSONError("TRON: expected ',' or ')'");
       }
       skipNewlines();
       if ((peek().type == TronTokType::IDENT || peek().type == TronTokType::STRING) && pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::EQUALS) {
@@ -627,37 +631,37 @@ struct TronParseState {
         skipNewlines();
         asvJSONValue* val = parseValue(depth + 1);
         if (namedArgs.find(propName) != namedArgs.end())
-          throw asvJSONError("duplicate argument: " + propName);
+          throw asvJSONError("TRON: duplicate argument: " + propName);
         namedArgs[propName] = std::unique_ptr<asvJSONValue>(val);
       } else {
-        if (namedMode) throw asvJSONError("positional arg after named");
+        if (namedMode) throw asvJSONError("TRON: positional arg after named");
         asvJSONValue* val = parseValue(depth + 1);
         posArgs.push_back(std::unique_ptr<asvJSONValue>(val));
       }
       needsSeparator = true;
       skipNewlines();
     }
-    if (!match(TronTokType::RPAREN)) throw asvJSONError("expected ')'");
+    if (!match(TronTokType::RPAREN)) throw asvJSONError("TRON: expected ')'");
     // Per spec, argument counts/names must match the class definition.
     // Positional args fill the first posArgs.size() properties in order.
     if (posArgs.size() > props.size())
-      throw asvJSONError("too many arguments for class " + className);
+      throw asvJSONError("TRON: too many arguments for class " + className);
     // Spec: a call with fewer values than the class has properties is a
     // SyntaxError (missing values are not silently filled with null).
     if (posArgs.size() + namedArgs.size() < props.size())
-      throw asvJSONError("not enough arguments for class " + className);
+      throw asvJSONError("TRON: not enough arguments for class " + className);
     if (!namedArgs.empty()) {
       std::unordered_set<std::string> propSet;
       propSet.reserve(props.size());
       for (const auto& p : props) propSet.insert(p);
       for (auto& kv : namedArgs) {
         if (propSet.find(kv.first) == propSet.end())
-          throw asvJSONError("unknown argument: " + kv.first);
+          throw asvJSONError("TRON: unknown argument: " + kv.first);
       }
     }
     for (size_t i = 0; i < posArgs.size(); i++) {
       if (namedArgs.find(props[i]) != namedArgs.end())
-        throw asvJSONError("argument specified twice: " + props[i]);
+        throw asvJSONError("TRON: argument specified twice: " + props[i]);
     }
     for (size_t i = 0; i < props.size(); i++) {
       std::unique_ptr<asvJSONValue> valPtr;
@@ -740,7 +744,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
         std::string content(raw.data() + 9, raw.size() - 9);
         if (!content.empty()) {
           size_t term = content.rfind('|');
-          if (term != std::string::npos && term > 0) {
+          if (term != std::string::npos && term != 0) {
             size_t sep = content.find('|');
             std::string pat = tronUnescape(content.substr(0, sep));
             std::string opts = (sep != term) ? tronUnescape(content.substr(sep + 1, term - sep - 1)) : std::string();
@@ -843,10 +847,10 @@ asvJSONValue* TronParseState::parseValue(int depth) {
     case TronTokType::IDENT: {
       if (pos + 1 < toks.size() && toks[pos + 1].type == TronTokType::LPAREN)
         return parseInstance(depth);
-      throw asvJSONError("unexpected identifier: " + tok.text);
+      throw asvJSONError("TRON: unexpected identifier: " + tok.text);
     }
     default:
-      throw asvJSONError("unexpected token");
+      throw asvJSONError("TRON: unexpected token");
   }
 }
 
@@ -909,10 +913,6 @@ inline bool asvJSON::fromTRON(std::string_view input) {
     }
     // Parse root value
     state.root = state.parseValue();
-    if (!state.root) {
-      root = nullptr;
-      return false;
-    }
     state.skipNewlines();
     if (state.peek().type != TronTokType::END)
       throw asvJSONError("trailing tokens after root value");
