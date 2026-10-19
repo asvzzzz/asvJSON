@@ -45,6 +45,15 @@ inline std::string adeToLower(std::string_view s) {
   return out;
 }
 
+// Null-node guard: every make* factory is a nothrow `new` that returns nullptr
+// on OOM. The ADE decoder builds the tree directly, so a null unique_ptr must
+// become a reported error instead of entering a container (a serializer would
+// dereference it). Mirrors makeAdeString's explicit check.
+inline std::unique_ptr<asvJSONValue> adeNonNull(std::unique_ptr<asvJSONValue> v) {
+  if (!v) throw asvJSONError("ADE: out of memory");
+  return v;
+}
+
 inline bool adeIsIdentStart(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
@@ -313,14 +322,14 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
       unsigned long long maxV = neg ? (static_cast<unsigned long long>(INT64_MAX) + 1ULL)
                                     : static_cast<unsigned long long>(INT64_MAX);
       if (overflow || v > maxV) {
-        auto s = asvJSONValue::makeStringView(tok);
-        if (s) s->raw_number = true;
+        auto s = adeNonNull(asvJSONValue::makeStringView(tok));
+        s->raw_number = true;
         return s;
       }
       if (neg && v == static_cast<unsigned long long>(INT64_MAX) + 1ULL)
-        return asvJSONValue::makeInt(std::numeric_limits<int64_t>::min());
+        return adeNonNull(asvJSONValue::makeInt(std::numeric_limits<int64_t>::min()));
       int64_t iv = neg ? -static_cast<int64_t>(v) : static_cast<int64_t>(v);
-      return asvJSONValue::makeInt(iv);
+      return adeNonNull(asvJSONValue::makeInt(iv));
     }
   }
 
@@ -360,11 +369,11 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
       if (c != '.' && c != 'e' && c != 'E' && c != '+' && c != '-') sigDigits++;
     }
     if (sigDigits > static_cast<size_t>(asvJSONValue::MAX_DOUBLE_SIG_DIGITS)) {
-      auto s = asvJSONValue::makeStringView(tok);
-      if (s) s->raw_number = true;
+      auto s = adeNonNull(asvJSONValue::makeStringView(tok));
+      s->raw_number = true;
       return s;
     }
-    return asvJSONValue::makeDouble(d);
+    return adeNonNull(asvJSONValue::makeDouble(d));
   }
   errno = 0;
   char* end = nullptr;
@@ -372,11 +381,11 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
   if (!end || *end != 0) return nullptr;
   if (errno == ERANGE) {
     // Big integer: keep the exact literal so round-trip is lossless.
-    auto s = asvJSONValue::makeStringView(tok);
-    if (s) s->raw_number = true;
+    auto s = adeNonNull(asvJSONValue::makeStringView(tok));
+    s->raw_number = true;
     return s;
   }
-  return asvJSONValue::makeInt(static_cast<int64_t>(ll));
+  return adeNonNull(asvJSONValue::makeInt(static_cast<int64_t>(ll)));
 }
 
 // Parse a ADE datetime value. Accepts the full ISO-8601 form handled by
@@ -898,6 +907,7 @@ private:
   std::unique_ptr<asvJSONValue> parseArray(int depth) {
     pos_++; // consume '['
     auto arr = asvJSONValue::makeArray();
+    if (!arr || !arr->arr) throw asvJSONError("ADE: out of memory");
     while (true) {
       skipWsAndComments();
       if (eof()) throw asvJSONError("ADE: unterminated array at line " + std::to_string(lineNum_));
@@ -905,7 +915,9 @@ private:
       if (peek() == ',') { pos_++; continue; } // leading/trailing comma tolerated
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
         throw asvJSONError("ADE: array too large");
-      arr->arr->push_back(parseValue(depth));
+      auto elem = parseValue(depth);
+      if (!elem) throw asvJSONError("ADE: out of memory");
+      arr->arr->push_back(std::move(elem));
       skipWsAndComments();
       if (eof()) throw asvJSONError("ADE: unterminated array at line " + std::to_string(lineNum_));
       if (peek() == ',') { pos_++; continue; }
@@ -921,6 +933,7 @@ private:
   std::unique_ptr<asvJSONValue> parseObject(int depth) {
     pos_++; // consume '{'
     auto obj = asvJSONValue::makeObject();
+    if (!obj || !obj->obj) throw asvJSONError("ADE: out of memory");
     while (true) {
       skipWsAndComments();
       if (eof()) throw asvJSONError("ADE: unterminated object at line " + std::to_string(lineNum_));
@@ -936,6 +949,7 @@ private:
       } else {
         val = parseValue(depth);
       }
+      if (!val) throw asvJSONError("ADE: out of memory");
       // YAML-style merge key inside inline objects: "{<<: *default}".
       if (pk.name == "<<" && !pk.quoted) {
         applyMergeKey(obj.get(), std::move(val));
@@ -1123,15 +1137,15 @@ private:
     std::string tok(text_.substr(start, pos_ - start));
 
     std::string lower = adeToLower(tok);
-    if (lower == "true") return asvJSONValue::makeBool(true);
-    if (lower == "false") return asvJSONValue::makeBool(false);
-    if (lower == "null") return asvJSONValue::makeNull();
+    if (lower == "true") return adeNonNull(asvJSONValue::makeBool(true));
+    if (lower == "false") return adeNonNull(asvJSONValue::makeBool(false));
+    if (lower == "null") return adeNonNull(asvJSONValue::makeNull());
 
     // Non-finite floats: .nan, -.nan, .inf, -.inf (YAML-style).
-    if (lower == ".nan") return asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN());
-    if (lower == "-.nan") return asvJSONValue::makeDouble(-std::numeric_limits<double>::quiet_NaN());
-    if (lower == ".inf" || lower == ".infinity") return asvJSONValue::makeDouble(std::numeric_limits<double>::infinity());
-    if (lower == "-.inf" || lower == "-.infinity") return asvJSONValue::makeDouble(-std::numeric_limits<double>::infinity());
+    if (lower == ".nan") return adeNonNull(asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+    if (lower == "-.nan") return adeNonNull(asvJSONValue::makeDouble(-std::numeric_limits<double>::quiet_NaN()));
+    if (lower == ".inf" || lower == ".infinity") return adeNonNull(asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+    if (lower == "-.inf" || lower == "-.infinity") return adeNonNull(asvJSONValue::makeDouble(-std::numeric_limits<double>::infinity()));
 
     auto num = adeTryParseNumber(tok);
     if (num) return num;
@@ -1199,7 +1213,7 @@ private:
         if (val->dbl < static_cast<double>(INT64_MIN) || val->dbl > static_cast<double>(INT64_MAX) ||
             val->dbl != std::floor(val->dbl))
           throw asvJSONError("ADE: !int requires an integral value");
-        return asvJSONValue::makeInt(static_cast<int64_t>(val->dbl));
+        return adeNonNull(asvJSONValue::makeInt(static_cast<int64_t>(val->dbl)));
       }
       if (val->type == asvJSONValue::STRING) {
         auto n = adeTryParseNumber(val->str_data);
@@ -1210,11 +1224,11 @@ private:
     }
     if (tag == "float") {
       if (val->type == asvJSONValue::DOUBLE) return val;
-      if (val->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(val->num));
+      if (val->type == asvJSONValue::INT) return adeNonNull(asvJSONValue::makeDouble(static_cast<double>(val->num)));
       if (val->type == asvJSONValue::STRING) {
         auto n = adeTryParseNumber(val->str_data);
         if (!n) throw asvJSONError("ADE: !float requires a numeric literal");
-        if (n->type == asvJSONValue::INT) return asvJSONValue::makeDouble(static_cast<double>(n->num));
+        if (n->type == asvJSONValue::INT) return adeNonNull(asvJSONValue::makeDouble(static_cast<double>(n->num)));
         // adeTryParseNumber returns a raw_number STRING for a literal no double
         // holds exactly (int64 overflow, or more significant digits than
         // MAX_DOUBLE_SIG_DIGITS). Returning it produced a node carrying the
@@ -1257,19 +1271,19 @@ private:
     }
     if (tag == "bool") {
       if (val->type == asvJSONValue::BOOL_VAL) return val;
-      if (val->type == asvJSONValue::INT) return asvJSONValue::makeBool(val->num != 0);
-      if (val->type == asvJSONValue::DOUBLE) return asvJSONValue::makeBool(val->dbl != 0.0);
+      if (val->type == asvJSONValue::INT) return adeNonNull(asvJSONValue::makeBool(val->num != 0));
+      if (val->type == asvJSONValue::DOUBLE) return adeNonNull(asvJSONValue::makeBool(val->dbl != 0.0));
       if (val->type == asvJSONValue::STRING) {
         std::string lower = adeToLower(val->str_data);
-        if (lower == "true" || lower == "yes" || lower == "on" || lower == "1") return asvJSONValue::makeBool(true);
-        if (lower == "false" || lower == "no" || lower == "off" || lower == "0") return asvJSONValue::makeBool(false);
+        if (lower == "true" || lower == "yes" || lower == "on" || lower == "1") return adeNonNull(asvJSONValue::makeBool(true));
+        if (lower == "false" || lower == "no" || lower == "off" || lower == "0") return adeNonNull(asvJSONValue::makeBool(false));
         throw asvJSONError("ADE: !bool requires true/false");
       }
       throw asvJSONError("ADE: !bool requires a boolean value");
     }
     if (tag == "null") {
       // Explicit null (useful for merge patch semantics): value is discarded.
-      return asvJSONValue::makeNull();
+      return adeNonNull(asvJSONValue::makeNull());
     }
     if (tag == "schema") {
       // Schema annotation: value is a schema reference (string) or an inline
@@ -1329,7 +1343,7 @@ private:
       int tz = 0;
       if (!adeTryParseDateTime(val->str_data, ts, &ms, &tz))
         throw asvJSONError("ADE: invalid datetime: " + val->str_data);
-      return asvJSONValue::makeDateTime(ts, ms, tz);
+      return adeNonNull(asvJSONValue::makeDateTime(ts, ms, tz));
     }
     if (tag == "regex") {
       if (val->type != asvJSONValue::STRING) throw asvJSONError("ADE: !regex requires a string value");
@@ -1371,24 +1385,24 @@ private:
         if (hi < 0 || lo < 0) throw asvJSONError("ADE: invalid !objectid value");
         bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
       }
-      return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(bytes), 12));
+      return adeNonNull(asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<const char*>(bytes), 12)));
     }
     if (tag == "timestamp") {
       // The encoder emits "!timestamp <int64>". Accept a bare integer (from
       // the encoder) or an ISO-8601 string (text form); on int64 overflow the
       // value arrives as a raw_number STRING, which is also accepted.
-      if (val->type == asvJSONValue::INT) return asvJSONValue::makeTimestamp(val->num);
+      if (val->type == asvJSONValue::INT) return adeNonNull(asvJSONValue::makeTimestamp(val->num));
       if (val->type == asvJSONValue::STRING) {
         errno = 0;
         char* end = nullptr;
         long long ts = std::strtoll(val->str_data.c_str(), &end, 10);
         if (!errno && end && *end == 0 && end != val->str_data.c_str())
-          return asvJSONValue::makeTimestamp(ts);
+          return adeNonNull(asvJSONValue::makeTimestamp(ts));
         time_t t = 0;
         int ms = 0;
         if (!adeTryParseDateTime(val->str_data, t, &ms))
           throw asvJSONError("ADE: invalid timestamp: " + val->str_data);
-        return asvJSONValue::makeTimestamp(static_cast<int64_t>(t));
+        return adeNonNull(asvJSONValue::makeTimestamp(static_cast<int64_t>(t)));
       }
       throw asvJSONError("ADE: !timestamp requires an integer or string value");
     }
@@ -1473,7 +1487,7 @@ private:
       // Only !null is meaningful without a value, and only in the SIMPLE form:
       // the verbatim !<null> is a custom tag, so it keeps the standard
       // "requires a value" rule.
-      if (!verbatim && tag == "null") return asvJSONValue::makeNull();
+      if (!verbatim && tag == "null") return adeNonNull(asvJSONValue::makeNull());
       throw asvJSONError("ADE: !" + tag + " requires a value");
     }
     skipWsAndComments();
@@ -1489,7 +1503,7 @@ private:
       // requires its value. Documented in ade.md beside the !null rule.
       if (atTagValueEnd()) {
         if (!verbatim && tag == "null") {
-          auto n = asvJSONValue::makeNull();
+          auto n = adeNonNull(asvJSONValue::makeNull());
           registerAnchor(anchor, n.get());
           return n;
         }
@@ -1608,6 +1622,7 @@ private:
             throw asvJSONError("ADE: nesting too deep");
           prefixDepth++;
           auto no = asvJSONValue::makeObject();
+          if (!no || !no->obj) throw asvJSONError("ADE: out of memory");
           auto* raw = no.get();
           cur->obj->emplace(seg, std::move(no));
           cur = raw;
@@ -1645,9 +1660,10 @@ private:
 
 std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
   skipWsAndComments();
-  if (eof()) return asvJSONValue::makeObject(); // empty document
+  if (eof()) return adeNonNull(asvJSONValue::makeObject()); // empty document
 
   std::unique_ptr<asvJSONValue> root = asvJSONValue::makeObject();
+  if (!root || !root->obj) throw asvJSONError("ADE: out of memory");
     bool any = false;
     while (true) {
       skipWsAndComments();
@@ -1678,6 +1694,7 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
       } else {
         val = parseValue(1);
       }
+      if (!val) throw asvJSONError("ADE: out of memory");
       // YAML-style merge key: "<<: *default" (only the unquoted form merges).
       if (key.name == "<<" && !key.quoted) {
         applyMergeKey(root.get(), std::move(val));
@@ -1709,8 +1726,10 @@ inline std::unique_ptr<asvJSONValue> adePlainTextFallback(const std::string& tex
   // the scalar-document parse below, which yields a real value for valid
   // documents (e.g. a root "!null", "&x 1" or "*x" after "&x 1") and rethrows
   // the original error for malformed ones.
-  if (c != '"' && c != '\'' && c != '!' && c != '&' && c != '*' && t.find(' ') != std::string_view::npos)
-    return asvJSONValue::makeStringView(t);
+  if (c != '"' && c != '\'' && c != '!' && c != '&' && c != '*' && t.find(' ') != std::string_view::npos) {
+    if (!asvJSONValue::checkStringLen(t.size())) throw asvJSONError("ADE: string too long");
+    return adeNonNull(asvJSONValue::makeStringView(t));
+  }
   // Keep the temporary buffer alive for the whole parse: ADEParser stores a
   // string_view, so the std::string must outlive the parser object.
   std::string buffer(t);
@@ -1800,6 +1819,7 @@ inline std::unique_ptr<asvJSONValue> parseADE(const std::string& text, bool stri
   std::vector<std::string> docs = splitAdeDocuments(body);
   if (docs.size() > 1) {
     auto arr = asvJSONValue::makeArray();
+    if (!arr || !arr->arr) throw asvJSONError("ADE: out of memory");
     for (const auto& doc : docs) {
       std::unique_ptr<asvJSONValue> v;
       try {
@@ -1809,6 +1829,7 @@ inline std::unique_ptr<asvJSONValue> parseADE(const std::string& text, bool stri
         v = adePlainTextFallback(doc, strict);
         if (!v) throw;
       }
+      if (!v) throw asvJSONError("ADE: out of memory");
       if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
         throw asvJSONError("ADE: too many documents");
       arr->arr->push_back(std::move(v));

@@ -1420,6 +1420,24 @@ inline std::vector<Tok> cppRdExpandMacros(const std::vector<Tok>& in,
   return out;
 }
 
+// Null-node guards for the direct tree decoder. make* is a nothrow `new` that
+// returns nullptr on OOM (and makeString above MAX_STRING_LEN), while fromCpp
+// builds the tree itself, so a null must become a reported error instead of
+// being returned / pushed into an array. A source literal larger than
+// MAX_STRING_LEN is reachable without OOM; the rest is defense in depth.
+inline std::unique_ptr<asvJSONValue> cppRdNonNull(std::unique_ptr<asvJSONValue> v) {
+  if (!v) throw asvJSONError("cpp: out of memory");
+  return v;
+}
+
+inline std::unique_ptr<asvJSONValue> cppRdString(std::string s) {
+  if (!asvJSONValue::checkStringLen(s.size()))
+    throw asvJSONError("cpp: string too long");
+  auto v = asvJSONValue::makeString(std::move(s));
+  if (!v) throw asvJSONError("cpp: out of memory");
+  return v;
+}
+
 // Interpret a scalar initializer as a single literal: strips balanced outer
 // parentheses and a leading unary sign, then reads one number/string/char/
 // bool/null literal. Returns nullptr when the tokens are not a literal.
@@ -1497,42 +1515,43 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
     if (flt) {
       try {
         double a = std::stod(sa), b = std::stod(sb);
-        return asvJSONValue::makeDouble(neg ? -a : a - b);
-      } catch (...) { return nullptr; }
+        return cppRdNonNull(asvJSONValue::makeDouble(neg ? -a : a - b));
+      } catch (const asvJSONError&) { throw; } catch (...) { return nullptr; }
     }
     try {
       unsigned long long a = std::stoull(sa, nullptr, 0);
       unsigned long long b = std::stoull(sb, nullptr, 0);
       unsigned long long r = (neg ? (0ull - a) : a) - b;
-      return asvJSONValue::makeInt(static_cast<int64_t>(r));
-    } catch (...) { return nullptr; }
+      return cppRdNonNull(asvJSONValue::makeInt(static_cast<int64_t>(r)));
+    } catch (const asvJSONError&) { throw; } catch (...) { return nullptr; }
   }
   if (v.size() != 1) return nullptr;
   const Tok* tk = v[0];
   if (tk->kind == Tok::Str || tk->kind == Tok::Char)
-    return asvJSONValue::makeString(std::string(tk->text));
+    return cppRdString(std::string(tk->text));
   if (tk->kind == Tok::Number) {
     std::string s = cppRdStripNumSuffix(tk->text);
     bool flt = wantDouble;
     for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (neg) s.insert(s.begin(), '-');
     if (flt) {
-      try { return asvJSONValue::makeDouble(std::stod(s)); }
-      catch (...) { return asvJSONValue::makeString(cppRdStripNumSuffix(tk->text)); }
+      try { return cppRdNonNull(asvJSONValue::makeDouble(std::stod(s))); }
+      catch (const asvJSONError&) { throw; }
+      catch (...) { return cppRdString(cppRdStripNumSuffix(tk->text)); }
     }
     // Boundary constant: -9223372036854775808 is valid but not a literal.
     if (s == "-9223372036854775808")
-      return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
+      return cppRdNonNull(asvJSONValue::makeInt((std::numeric_limits<long long>::min)()));
     long long iv = 0;
-    if (cppRdParseIntLiteral(s, iv)) return asvJSONValue::makeInt(static_cast<int64_t>(iv));
+    if (cppRdParseIntLiteral(s, iv)) return cppRdNonNull(asvJSONValue::makeInt(static_cast<int64_t>(iv)));
     // Overflow or a partially-consumed literal ("08"): preserve the value as a
     // string instead of silently zeroing it.
-    return asvJSONValue::makeString(cppRdStripNumSuffix(tk->text));
+    return cppRdString(cppRdStripNumSuffix(tk->text));
   }
   if (tk->kind == Tok::Ident) {
-    if (tk->text == "true") return asvJSONValue::makeBool(true);
-    if (tk->text == "false") return asvJSONValue::makeBool(false);
-    if (tk->text == "nullptr" || tk->text == "NULL") return asvJSONValue::makeNull();
+    if (tk->text == "true") return cppRdNonNull(asvJSONValue::makeBool(true));
+    if (tk->text == "false") return cppRdNonNull(asvJSONValue::makeBool(false));
+    if (tk->text == "nullptr" || tk->text == "NULL") return cppRdNonNull(asvJSONValue::makeNull());
   }
   return nullptr;
 }
@@ -2772,7 +2791,7 @@ struct Reader {
   }
 
   static std::unique_ptr<asvJSONValue> mkStr(std::string s) {
-    return asvJSONValue::makeString(std::move(s));
+    return cppRdString(std::move(s));
   }
 
   // A map key has to become a JSON object key, so the parsed key value is
@@ -2798,13 +2817,15 @@ struct Reader {
     bool flt = asDouble;
     for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (flt) {
-      try { return asvJSONValue::makeDouble(std::stod(s)); } catch (...) { return asvJSONValue::makeString(cppRdStripNumSuffix(raw)); }
+      try { return cppRdNonNull(asvJSONValue::makeDouble(std::stod(s))); }
+      catch (const asvJSONError&) { throw; }
+      catch (...) { return cppRdString(cppRdStripNumSuffix(raw)); }
     }
     if (s == "-9223372036854775808")
-      return asvJSONValue::makeInt((std::numeric_limits<long long>::min)());
+      return cppRdNonNull(asvJSONValue::makeInt((std::numeric_limits<long long>::min)()));
     long long iv = 0;
-    if (cppRdParseIntLiteral(s, iv)) return asvJSONValue::makeInt(static_cast<int64_t>(iv));
-    return asvJSONValue::makeString(cppRdStripNumSuffix(raw));
+    if (cppRdParseIntLiteral(s, iv)) return cppRdNonNull(asvJSONValue::makeInt(static_cast<int64_t>(iv)));
+    return cppRdString(cppRdStripNumSuffix(raw));
   }
 
   std::unique_ptr<asvJSONValue> materialize(const TypeRef& t,
@@ -2822,6 +2843,7 @@ struct Reader {
 
     if (rt.kind == TypeRef::Struct) {
       auto o = asvJSONValue::makeObject();
+      if (!o || !o->obj) throw asvJSONError("cpp: out of memory");
       const StructDef* sd = findStruct(rt.name);
       // Paren-init (`Foo f(1, 2);`) — positional args mapped to fields in order.
       bool pgrp = hasInit && cppRdParenGroup(init);
@@ -2836,7 +2858,7 @@ struct Reader {
           else if (pgrp && idx < pgroups.size() && !pgroups[idx].empty()) { fi = pgroups[idx]; hi = true; }
           else { fi = f.init; hi = f.hasInit; }
           auto child = materialize(f.type, fi, hi, depth + 1);
-          if (!child) continue;
+          if (!child) throw asvJSONError("cpp: out of memory");
           if (opts.includeComments && (!f.leading.empty() || !f.trailing.empty())) {
             child->comments.reset(new Comments());
             child->comments->leading = f.leading;
@@ -2851,26 +2873,33 @@ struct Reader {
     if (rt.kind == TypeRef::Enum) {
       if (hasInit && !grp) {
         std::string v = cppRdLastIdent(init);
-        if (!v.empty()) return asvJSONValue::makeString(std::move(v));
+        if (!v.empty()) return cppRdString(std::move(v));
       }
-      return asvJSONValue::makeNull();
+      return cppRdNonNull(asvJSONValue::makeNull());
     }
 
     if (rt.kind == TypeRef::Array) {
       auto a = asvJSONValue::makeArray();
+      if (!a || !a->arr) throw asvJSONError("cpp: out of memory");
       TypeRef elem;
       if (rt.elem) { elem = *rt.elem; resolve(elem); }
       const EnumDef* ed = (elem.kind == TypeRef::Enum) ? findEnum(elem.name) : nullptr;
       if (grp && !onlyEmptyGroup) {
-        for (auto& g : groups)
-          a->arr->push_back(materialize(elem, g, !g.empty(), depth + 1));
+        for (auto& g : groups) {
+          auto elemVal = materialize(elem, g, !g.empty(), depth + 1);
+          if (!elemVal) throw asvJSONError("cpp: out of memory");
+          a->arr->push_back(std::move(elemVal));
+        }
       } else if (rt.hasLen) {
         if (!asvJSONValue::checkArraySize(rt.arrayLen)) throw asvJSONError("CPP array too large");
         for (size_t k = 0; k < rt.arrayLen; k++) {
           if (ed && ed->members.size() == rt.arrayLen)
             a->arr->push_back(mkStr(ed->members[k]));
-          else
-            a->arr->push_back(materialize(elem, std::vector<Tok>(), false, depth + 1));
+          else {
+            auto elemVal = materialize(elem, std::vector<Tok>(), false, depth + 1);
+            if (!elemVal) throw asvJSONError("cpp: out of memory");
+            a->arr->push_back(std::move(elemVal));
+          }
         }
       }
       return a;
@@ -2889,10 +2918,10 @@ struct Reader {
               if (v->kind == Tok::Number && (at.scalar == TypeRef::SInt || at.scalar == TypeRef::SDouble))
                 return numberValue(v->text, at.scalar == TypeRef::SDouble);
               if ((v->text == "true" || v->text == "false") && at.scalar == TypeRef::SBool)
-                return asvJSONValue::makeBool(v->text == "true");
+                return cppRdNonNull(asvJSONValue::makeBool(v->text == "true"));
             }
             if (at.kind == TypeRef::Enum && v->kind == Tok::Ident)
-              return asvJSONValue::makeString(cppRdLastIdent(init));
+              return cppRdString(cppRdLastIdent(init));
           }
         }
       }
@@ -2902,11 +2931,11 @@ struct Reader {
     }
 
     if (rt.kind == TypeRef::Optional) {
-      if (!hasInit) return asvJSONValue::makeNull();
+      if (!hasInit) return cppRdNonNull(asvJSONValue::makeNull());
       const Tok* v = cppRdFirstVal(init);
       if (v && v->kind == Tok::Ident &&
           (v->text == "nullopt" || v->text == "NULL" || v->text == "nullptr"))
-        return asvJSONValue::makeNull();
+        return cppRdNonNull(asvJSONValue::makeNull());
       return materialize(rt.elem ? *rt.elem : TypeRef{}, init, hasInit, depth + 1);
     }
 
@@ -2917,6 +2946,7 @@ struct Reader {
       // only shape a map initializer can take, since the comma between key and
       // value must sit inside the inner braces).
       auto o = asvJSONValue::makeObject();
+      if (!o || !o->obj) throw asvJSONError("cpp: out of memory");
       if (grp && !onlyEmptyGroup) {
         TypeRef kt, vt;
         if (rt.elem) { kt = *rt.elem; resolve(kt); }
@@ -2928,6 +2958,7 @@ struct Reader {
           std::string name = mapKeyText(key.get());
           if (name.empty()) continue;
           auto val = materialize(vt, parts[1], !parts[1].empty(), depth + 1);
+          if (!val) throw asvJSONError("cpp: out of memory");
           o->obj->emplace(std::move(name), std::move(val));
         }
       }
@@ -2961,7 +2992,7 @@ struct Reader {
         const Tok* v = cppRdFirstVal(*litSrc);
         if (v && v->kind == Tok::Ident) {
           std::string id = cppRdLastIdent(*litSrc);
-          if (!id.empty()) return asvJSONValue::makeString(std::move(id));
+          if (!id.empty()) return cppRdString(std::move(id));
         }
         // An initializer this reader cannot evaluate (`1 | 2`, `1 << 4`,
         // `sizeof(int)`, `1 ? 2 : 3`) would fall through to the switch below
@@ -2973,12 +3004,12 @@ struct Reader {
       }
     }
     switch (rt.scalar) {
-      case TypeRef::SBool: return asvJSONValue::makeBool(false);
-      case TypeRef::SDouble: return asvJSONValue::makeDouble(0.0);
-      case TypeRef::SString: return asvJSONValue::makeString(std::string());
-      case TypeRef::SNull: return asvJSONValue::makeNull();
-      case TypeRef::SInt: return asvJSONValue::makeInt(0);
-      default: return asvJSONValue::makeNull();
+      case TypeRef::SBool: return cppRdNonNull(asvJSONValue::makeBool(false));
+      case TypeRef::SDouble: return cppRdNonNull(asvJSONValue::makeDouble(0.0));
+      case TypeRef::SString: return cppRdString(std::string());
+      case TypeRef::SNull: return cppRdNonNull(asvJSONValue::makeNull());
+      case TypeRef::SInt: return cppRdNonNull(asvJSONValue::makeInt(0));
+      default: return cppRdNonNull(asvJSONValue::makeNull());
     }
   }
 
@@ -3007,6 +3038,7 @@ struct Reader {
       if (f.name.empty()) continue;
       if (live.count(f.type.name)) continue;
       auto val = materialize(f.type, f.init, f.hasInit, 0);
+      if (!val) throw asvJSONError("cpp: out of memory");
       out->obj->emplace(f.name, std::move(val));
     }
   }
@@ -3035,11 +3067,13 @@ struct Reader {
 
     auto wrap = [&](const std::vector<const StructDef*>& list) {
       auto o = asvJSONValue::makeObject();
+      if (!o || !o->obj) throw asvJSONError("cpp: out of memory");
       for (auto* s : list) {
         TypeRef st;
         st.kind = TypeRef::Struct;
         st.name = s->name;
         auto val = materialize(st, std::vector<Tok>(), false, 0);
+        if (!val) throw asvJSONError("cpp: out of memory");
         if (opts.includeComments && val && (!s->leading.empty() || !s->closing.empty())) {
           val->comments.reset(new Comments());
           val->comments->leading = s->leading;
