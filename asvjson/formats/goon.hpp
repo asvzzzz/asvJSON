@@ -1021,7 +1021,7 @@ inline std::string goonToJson(std::string_view input) {
             raw += dline[pos]; pos++;
           }
         }
-        try { val = unescapeJsonString(raw, false); }
+        try { val = unescapeJsonString(raw, true); }
         catch (const std::runtime_error&) { throw asvJSONError("GOON: invalid escape in string"); }
         if (pos < dline.size()) pos++; // closing quote
       } else {
@@ -1329,7 +1329,7 @@ inline std::string goonToJson(std::string_view input) {
                   // explicitly quoted names need unescaping (robustness for external input).
                   if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
                     try {
-                      fields.push_back(unescapeJsonString(std::string_view(raw.data() + 1, raw.size() - 2), false));
+                      fields.push_back(unescapeJsonString(std::string_view(raw.data() + 1, raw.size() - 2), true));
                     } catch (const std::runtime_error&) {
                       fields.push_back(raw);  // keep raw on decode error
                     }
@@ -1353,7 +1353,7 @@ inline std::string goonToJson(std::string_view input) {
               // are unescaped back to their literal value here.
               if (key.size() >= 2 && key.front() == '"' && key.back() == '"') {
                 try {
-                  std::string uk = unescapeJsonString(key.substr(1, key.size() - 2), false);
+                  std::string uk = unescapeJsonString(key.substr(1, key.size() - 2), true);
                   out += '"' + goonEscKey(uk) + "\":";
                 } catch (const std::runtime_error&) {
                   throw asvJSONError("GOON: invalid escape in string");
@@ -1721,7 +1721,7 @@ int rindent = countIndent(rline);
         // Quoted key content is JSON-escaped text; decode it first so that
         // `\"`/`\\`/`\uXXXX` sequences are not escaped a second time.
         std::string decoded;
-        try { decoded = unescapeJsonString(key.substr(1, key.size() - 2), false); }
+        try { decoded = unescapeJsonString(key.substr(1, key.size() - 2), true); }
         catch (const std::runtime_error&) { throw asvJSONError("GOON: invalid escape in string"); }
         keyStr = goonEscKey(decoded);
       } else {

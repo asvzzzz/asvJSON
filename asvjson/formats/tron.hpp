@@ -394,7 +394,7 @@ struct TronTok {
 };
 
 inline std::string tronUnescape(const std::string& s) {
-  try { return unescapeJsonString(s, false); }
+  try { return unescapeJsonString(s, true); }
   catch (const std::runtime_error&) { throw asvJSONError("TRON: invalid escape in string"); }
 }
 

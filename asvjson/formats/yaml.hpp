@@ -903,9 +903,7 @@ inline std::string yamlForceStringVal(std::string_view val) {
 			if (end < val.size()) {
 				std::string unesc = yamlUnescapeSingle(val.substr(1, end - 1));
 				std::string out = "\"";
-				for (auto c : unesc) {
-					if (c == '"') out += "\\\""; else if (c == '\\') out += "\\\\"; else out += c;
-				}
+				appendJsonEscaped(out, unesc);
 				out += "\"";
 				return out;
 			}
@@ -1280,17 +1278,12 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		size_t sep = internal.rfind('|');
 		std::string pattern = (sep != std::string::npos) ? internal.substr(0, sep) : internal;
 		std::string opts = (sep != std::string::npos) ? internal.substr(sep + 1) : "";
-		std::string out = "{\"$regex\":\"";
-		for (auto c : pattern) {
-			if (c == '"') out += "\\\""; else if (c == '\\') out += "\\\\"; else out += c;
-		}
-		out += "\"";
+		std::string escPat, escOpts;
+		appendJsonEscaped(escPat, pattern);
+		std::string out = "{\"$regex\":\"" + escPat + "\"";
 		if (!opts.empty()) {
-			out += ",\"$options\":\"";
-			for (auto c : opts) {
-				if (c == '"') out += "\\\""; else if (c == '\\') out += "\\\\"; else out += c;
-			}
-			out += "\"";
+			appendJsonEscaped(escOpts, opts);
+			out += ",\"$options\":\"" + escOpts + "\"";
 		}
 		out += "}";
 		return out;
@@ -1386,12 +1379,9 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			name = tagStr.substr(1);                    // strip leading '!'
 		else
 			name = tagStr;
-		std::string out = "{\"$customTag\":{\"name\":\"";
-		for (auto c : name) {
-			if (c == '"' || c == '\\') out += '\\';
-			out += c;
-		}
-		out += "\",\"value\":";
+		std::string escName;
+		appendJsonEscaped(escName, name);
+		std::string out = "{\"$customTag\":{\"name\":\"" + escName + "\",\"value\":";
 		out += parsedVal;
 		out += "}}";
 		return out;
@@ -2641,13 +2631,9 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 		if (tagStr == "!" || tagStr == "?") return "null";
 		{
 			// bare custom tag => CUSTOM_TAG with a null value
-			std::string out = "{\"$customTag\":{\"name\":\"";
-			for (auto c : name) {
-				if (c == '"' || c == '\\') out += '\\';
-				out += c;
-			}
-			out += "\",\"value\":null}}";
-			return out;
+			std::string escName;
+			appendJsonEscaped(escName, name);
+			return "{\"$customTag\":{\"name\":\"" + escName + "\",\"value\":null}}";
 		}
 	}
 
@@ -2675,12 +2661,9 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 			return yamlParseTaggedValue(combined);
 		}
 		{
-			std::string out = "{\"$customTag\":{\"name\":\"";
-			for (auto c : name) {
-				if (c == '"' || c == '\\') out += '\\';
-				out += c;
-			}
-			out += "\",\"value\":";
+			std::string escName;
+			appendJsonEscaped(escName, name);
+			std::string out = "{\"$customTag\":{\"name\":\"" + escName + "\",\"value\":";
 			out += yamlParseInlineValue(text);
 			out += "}}";
 			return out;
@@ -2748,12 +2731,9 @@ inline std::string yamlTaggedBlockValue(std::string_view s,
 	if (!tagStr.empty() && tagStr[0] == '!' && tagStr[1] == '!')
 		throw asvJSONError(std::string("YAML: ") + tagStr + " tag applied to a non-scalar value");
 
-	std::string out = "{\"$customTag\":{\"name\":\"";
-	for (auto c : name) {
-		if (c == '"' || c == '\\') out += '\\';
-		out += c;
-	}
-	out += "\",\"value\":";
+	std::string escName;
+	appendJsonEscaped(escName, name);
+	std::string out = "{\"$customTag\":{\"name\":\"" + escName + "\",\"value\":";
 	out += childJson;
 	out += "}}";
 	return out;

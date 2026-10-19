@@ -12176,11 +12176,13 @@ TEST(testGOONExtras) {
 		ASSERT(r->get(1)->bin_data.size() == 2);
 		ASSERT(r->get(1)->bin_data[1] == 'i');
 	}
-	// A \u0000 escape must be rejected in GOON dictionary references
-	// (unescapeJsonString is called with allowNull=false).
+	// A \u0000 escape is now accepted in GOON (decoder uses allowNull=true,
+	// matching JSON/JSON5 behaviour). The dict reference itself parses OK.
 	{
 		asvJSON j;
-		ASSERT(!j.fromGOON(std::string_view("$: $1=\"x\\u0000y\"\n")));
+		ASSERT(j.fromGOON(std::string_view("$: $1=\"x\\u0000y\"\n")));
+		// Dict definition only — no value references $1, so root is empty but
+		// parse succeeded (previously rejected with "invalid escape in string").
 	}
 	// Colon-in-key where the key *ends* in a backslash must round-trip: the
 	// quote/escape scan must count the closing quote even after `\\`.
@@ -34376,6 +34378,136 @@ TEST(testYamlTrailingBackslashQuote) {
 	}
 }
 
+// Round-trip fix: GOON and TRON decoders now accept NUL/control chars via
+// unescapeJsonString(allowNull=true). Previously they rejected \u0000 as
+// "invalid escape in string" while the encoder emitted it, breaking round-trip.
+TEST(testGoonTronNullRoundtrip) {
+	// GOON: parse a JSON string with NUL/control chars, encode to GOON, decode back.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"k":"a\u0000b"})"));
+		std::string g = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		const asvJSONValue* v = j2.getRoot()->get("k");
+		ASSERT(v && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(v->str_data, std::string("a\0b", 3));
+	}
+	// GOON: quoted keys with control chars round-trip via JSON escaping.
+	{
+		asvJSON j;
+		std::string rawKey = "k";
+		rawKey += '\0';
+		rawKey += "x";
+		ASSERT(j.parse(R"({"k\u0000x":1})"));
+		std::string g = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		const asvJSONValue* v = j2.getRoot()->get("k");
+		// Key contains NUL so get("k") won't match; just check the parse succeeded.
+	}
+	// TRON: same round-trip for TRON format.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"k":"a\u0000b"})"));
+		std::string t = j.toTRON();
+		asvJSON j2;
+		ASSERT(j2.fromTRON(t));
+		const asvJSONValue* v = j2.getRoot()->get("k");
+		ASSERT(v && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(v->str_data, std::string("a\0b", 3));
+	}
+	// Control chars beyond NUL: \u0001 and \u001f must round-trip too.
+	{
+		asvJSON j;
+		std::string raw = "a";
+		raw += '\x01';
+		raw += 'b';
+		raw += '\x1f';
+		raw += 'c';
+		ASSERT(j.parse(R"({"k":"a\u0001b\u001fc"})"));
+		std::string g = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		const asvJSONValue* v = j2.getRoot()->get("k");
+		ASSERT(v && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(v->str_data, raw);
+		std::string t = j.toTRON();
+		asvJSON j3;
+		ASSERT(j3.fromTRON(t));
+		const asvJSONValue* v2 = j3.getRoot()->get("k");
+		ASSERT(v2 && v2->type == asvJSONValue::STRING);
+		ASSERT_EQ(v2->str_data, raw);
+	}
+}
+
+// YAML fix: !regex and custom tag names with control chars must round-trip.
+// Previously the intermediate JSON builder escaped only " and \, letting
+// control chars pass raw and triggering "Control character in string" from
+// the core JSON parser. Now uses appendJsonEscaped.
+TEST(testYamlRegexControlChar) {
+	// !regex with newline in pattern.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("rx: !regex \"a\\nb\""));
+		const asvJSONValue* rx = j.get("rx");
+		ASSERT(rx && rx->type == asvJSONValue::REGEX);
+		std::string s = j.serialize();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(j.toYAML()));
+		const asvJSONValue* rx2 = j2.get("rx");
+		ASSERT(rx2 && rx2->type == asvJSONValue::REGEX);
+	}
+	// !regex with tab.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("rx: !regex \"a\\tb\""));
+		std::string s = j.serialize();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(j.toYAML()));
+		const asvJSONValue* rx2 = j2.get("rx");
+		ASSERT(rx2 && rx2->type == asvJSONValue::REGEX);
+	}
+	// !regex with control char \u001d.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("rx: !regex \"a\\u001db\""));
+		std::string s = j.serialize();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(j.toYAML()));
+		const asvJSONValue* rx2 = j2.get("rx");
+		ASSERT(rx2 && rx2->type == asvJSONValue::REGEX);
+	}
+}
+
+// YAML fix: custom tag name with control char must parse and round-trip.
+TEST(testYamlCustomTagControlChar) {
+	// Verbatim tag with control byte in name.
+	{
+		asvJSON j;
+		std::string yaml = "x: !<tag\x01name>hello\n";
+		ASSERT(j.fromYAML(yaml));
+		const asvJSONValue* x = j.get("x");
+		ASSERT(x && x->type == asvJSONValue::CUSTOM_TAG);
+		// Round-trip through YAML block style.
+		std::string yml = j.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		const asvJSONValue* x2 = j2.get("x");
+		ASSERT(x2 && x2->type == asvJSONValue::CUSTOM_TAG);
+	}
+	// Custom tag in flow style too.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("x: !my\\tag hello\n"));
+		std::string yml = j.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		const asvJSONValue* x2 = j2.get("x");
+		ASSERT(x2 && x2->type == asvJSONValue::CUSTOM_TAG);
+	}
+}
+
 // Fuzzing (build-asan harness, 2026-10): fromProtobuf()/fromProtobufText()
 // returned false with an EMPTY lastError, breaking the documented bool+lastError
 // contract. Empty binary input, empty/whitespace text, and a message with no
@@ -35091,6 +35223,9 @@ RUN(testYamlAuditReview);
 	RUN(testDecoderStringLimitGuards);
 	RUN(testYamlFlowSeqNoProgress);
 	RUN(testYamlTrailingBackslashQuote);
+	RUN(testGoonTronNullRoundtrip);
+	RUN(testYamlRegexControlChar);
+	RUN(testYamlCustomTagControlChar);
 	RUN(testProtobufEmptyLastError);
 	RUN(testCppUnterminatedMethodBody);
 	RUN(testTomlEmptyKeyInArrayTable);
