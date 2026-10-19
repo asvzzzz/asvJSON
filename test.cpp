@@ -34376,6 +34376,19 @@ TEST(testYamlTrailingBackslashQuote) {
 	}
 }
 
+// Fuzzing (build-asan harness, 2026-10): fromProtobuf()/fromProtobufText()
+// returned false with an EMPTY lastError, breaking the documented bool+lastError
+// contract. Empty binary input, empty/whitespace text, and a message with no
+// fields ("{}") all returned false without setting lastError. Each case uses a
+// fresh object so a stale message from a previous call cannot mask the defect.
+TEST(testProtobufEmptyLastError) {
+	{ asvJSON j; ASSERT(!j.fromProtobuf(nullptr, 0)); ASSERT(!j.getLastError().empty()); }
+	{ asvJSON j; ASSERT(!j.fromProtobuf("", 0)); ASSERT(!j.getLastError().empty()); }
+	{ asvJSON j; ASSERT(!j.fromProtobufText("")); ASSERT(!j.getLastError().empty()); }
+	{ asvJSON j; ASSERT(!j.fromProtobufText("   \n\t ")); ASSERT(!j.getLastError().empty()); }
+	{ asvJSON j; ASSERT(!j.fromProtobufText("{}")); ASSERT(!j.getLastError().empty()); }
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -35020,6 +35033,7 @@ RUN(testYamlAuditReview);
 	RUN(testDecoderStringLimitGuards);
 	RUN(testYamlFlowSeqNoProgress);
 	RUN(testYamlTrailingBackslashQuote);
+	RUN(testProtobufEmptyLastError);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
