@@ -277,6 +277,11 @@ inline std::string goonFormatSpecial(const asvJSONValue* v) {
 inline bool goonNeedsQuotes(const std::string& s) {
   if (s.empty()) return true;
   if (s.front() == '"') return true;
+  // A '"' anywhere inside an unquoted key would confuse the decoder's
+  // quote-tracking scan: it opens inQ at the interior '"', never closes it,
+  // and a later ':' is consumed as "inside quotes" rather than as the
+  // separator. Quote the whole key so goonWriteKey emits "key" instead.
+  if (s.find('"') != std::string::npos) return true;
   for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':' || c == '*') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
   if (s.front() == '$' || s.front() == '#' || s.front() == '^' || (s.front() >= '0' && s.front() <= '9') || s.front() == '-')
@@ -287,6 +292,14 @@ inline bool goonNeedsQuotes(const std::string& s) {
   if (s == "T" || s == "F" || s == "_" || s == "~" || s == "true" || s == "false" || s == "null")
     return true;
   if (s == "NaN" || s == "Infinity" || s == "-Infinity") return true;
+  // An ISO-8601 shaped string would be re-interpreted as DATETIME by the core
+  // JSON parser on read, losing the original STRING type. Quote it so the
+  // decoder sees a plain quoted string and keeps it as STRING. Mirrors
+  // tronLooksLikeDateTime + tryParseDateTime shape check.
+  if (s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T') {
+    time_t ts = 0; int ms = 0, tz = 0;
+    if (tryParseDateTime(std::string_view(s.data(), s.size()), ts, &ms, &tz)) return true;
+  }
   return false;
 }
 
@@ -306,7 +319,8 @@ inline void goonWriteString(const std::string& s, std::string& out, const std::u
 
 inline void goonWriteKey(const std::string& key, std::string& out, const GoonWriteOptions& opts = {}) {
   if (key.empty() || opts.alwaysQuoteKeys || goonNeedsQuotes(key) ||
-      key.find('[') != std::string::npos || key.find(']') != std::string::npos) {
+      key.find('[') != std::string::npos || key.find(']') != std::string::npos ||
+      key.find('"') != std::string::npos) {
     out += '"';
     appendJsonEscaped(out, key);
     out += '"';
@@ -1796,6 +1810,7 @@ inline bool asvJSON::fromGOON(std::string_view input) {
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;
     lastError = e.what();
+    root = nullptr;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
@@ -1804,6 +1819,7 @@ inline bool asvJSON::fromGOON(std::string_view input) {
     // would silently change later parses (same lesson as fromJSON5).
     allowNaNInfinity = prevNaN;
     lastError = e.what();
+    root = nullptr;
     return false;
   }
 }
