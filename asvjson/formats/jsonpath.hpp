@@ -740,6 +740,12 @@ class JPFilterEval {
   int filterDepth_ = 0;
 
   const asvJSONValue* hold(std::unique_ptr<asvJSONValue> val) {
+    // A literal node is owned for the duration of the evaluation; a null
+    // (factory OOM / oversize string) must never be dereferenced later by the
+    // comparison operators or jpDeepEqual. Nothing is represented by returning
+    // nullptr directly from resolvePath, never through hold(), so throwing here
+    // does not change the "missing value" semantics.
+    if (!val) throw asvJSONError("JSONPath: out of memory");
     temp_vals_.push_back(std::move(val));
     return temp_vals_.back().get();
   }
@@ -921,6 +927,8 @@ class JPFilterEval {
     }
     if (t.type == TokType::STRING) {
       if (!t.ok) return nullptr;
+      if (!asvJSONValue::checkStringLen(t.val.size()))
+        throw asvJSONError("JSONPath: string literal too long");
       return hold(asvJSONValue::makeString(t.val.data(), t.val.size()));
     }
     if (t.type == TokType::TRUE_LIT) return hold(asvJSONValue::makeBool(true));
@@ -952,6 +960,8 @@ class JPFilterEval {
         if (ft.type == TokType::STRING) {
           if (!ft.ok) return hold(asvJSONValue::makeBool(false));
           lex_.next();
+          if (!asvJSONValue::checkStringLen(ft.val.size()))
+            throw asvJSONError("JSONPath: string literal too long");
           strNode = hold(asvJSONValue::makeString(ft.val.data(), ft.val.size()));
         } else {
           strNode = resolvePath();

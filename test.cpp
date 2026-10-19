@@ -34122,6 +34122,183 @@ TEST(testCoreNullNodeGuards) {
 	}
 }
 
+// INI regression for the oversized-string null-node crash: makeString() returns
+// nullptr above MAX_STRING_LEN, and the INI decoder used to store that nullptr
+// (iniSetValue) -- fromINI() then returned true and the next serialize()/access
+// dereferenced the null node (0xC0000005). The duplicate-key array form also
+// crashed INSIDE fromINI (it->second->type on a null member). All four shapes
+// must now fail with the bool + lastError contract.
+TEST(testINIStringLimit) {
+	const size_t LIM = asvJSONValue::MAX_STRING_LEN;
+	const std::string big(LIM + 1, 'x');
+	const std::string cases[] = {
+		"k = \"" + big + "\"\n",                 // quoted value
+		"k = " + big + "\n",                     // bare value
+		"k = \"a\"\nk = \"" + big + "\"\n",      // duplicate -> array overwrite
+		"k = \"" + big + "\"\nk = \"a\"\n",      // duplicate -> null member read
+	};
+	for (const auto& ini : cases) {
+		asvJSON j;
+		ASSERT_MSG(!j.fromINI(ini), "oversize INI value must fail");
+		ASSERT(j.getRoot() == nullptr);
+		ASSERT_MSG(j.getLastError().find("string too long") != std::string::npos, j.getLastError().c_str());
+		ASSERT_EQ(j.serialize(), std::string(""));
+	}
+
+	// Ordinary INI is unaffected by the guards.
+	{
+		asvJSON j;
+		ASSERT(j.fromINI("name = value\n[sec]\nk = 42\nflag = true\n"));
+		ASSERT_EQ(j.get("name")->getString(), std::string("value"));
+		ASSERT_EQ(j.get("sec")->get("k")->getInt(), int64_t(42));
+		ASSERT_EQ(j.get("sec")->get("flag")->getBool(), true);
+	}
+}
+
+// Shared walker for the decoder sweep: reports any structurally invalid node
+// (a null child pointer, or a container without its payload). A decoder may
+// fail cleanly or accept the input, but it must never hand back a tree the
+// next accessor would dereference.
+static bool treeHasNullNode(const asvJSONValue* v) {
+	if (!v) return true;
+	if (v->type == asvJSONValue::ARRAY) {
+		if (!v->arr) return true;
+		for (const auto& e : *v->arr) if (!e || treeHasNullNode(e.get())) return true;
+	} else if (v->type == asvJSONValue::OBJECT) {
+		if (!v->obj) return true;
+		for (const auto& kv : *v->obj) if (!kv.second || treeHasNullNode(kv.second.get())) return true;
+	}
+	if (v->custom_value && treeHasNullNode(v->custom_value.get())) return true;
+	return false;
+}
+
+// One oversized text value per direct-tree decoder. Every one used to be a
+// candidate for the same class of bug as INI (a nothrow makeString() result
+// stored without a guard). The assertion is deliberately two-sided: failing is
+// fine, but a success must produce a tree with no null nodes, and serialize()
+// must never crash.
+TEST(testDecoderStringLimitGuards) {
+	const size_t LIM = asvJSONValue::MAX_STRING_LEN;
+	const std::string big(LIM + 1, 'x');
+	const std::string bigLen = std::to_string(big.size());
+	auto be32 = [](std::string& s, uint32_t n) {
+		s += static_cast<char>((n >> 24) & 0xFF);
+		s += static_cast<char>((n >> 16) & 0xFF);
+		s += static_cast<char>((n >> 8) & 0xFF);
+		s += static_cast<char>(n & 0xFF);
+	};
+	auto le32 = [](std::string& s, uint32_t n) {
+		s += static_cast<char>(n & 0xFF);
+		s += static_cast<char>((n >> 8) & 0xFF);
+		s += static_cast<char>((n >> 16) & 0xFF);
+		s += static_cast<char>((n >> 24) & 0xFF);
+	};
+	auto check = [&](asvJSON& j, const char* label) {
+		if (j.getRoot()) ASSERT_MSG(!treeHasNullNode(j.getRoot()), label);
+		// A null child would crash here; an empty string is fine on failure.
+		std::string out = j.serialize();
+		(void)out;
+	};
+
+	{ // TOML
+		asvJSON j;
+		ASSERT(!j.fromTOML("k = \"" + big + "\"\n"));
+		check(j, "TOML");
+	}
+	{ // TRON
+		asvJSON j;
+		ASSERT(!j.fromTRON("class C: x\nC(x=\"" + big + "\")\n"));
+		check(j, "TRON");
+	}
+	{ // ADE
+		asvJSON j;
+		ASSERT(!j.fromADE("k: \"" + big + "\"\n"));
+		check(j, "ADE");
+	}
+	{ // C++ declarations
+		asvJSON j;
+		ASSERT(!j.fromCpp("struct X { std::string s = \"" + big + "\"; };\n"));
+		check(j, "CPP");
+	}
+	{ // plist
+		asvJSON j;
+		ASSERT(!j.fromPlist("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>k</key><string>" + big + "</string></dict></plist>"));
+		check(j, "plist");
+	}
+	{ // CSV (quoted cell is an explicit STRING)
+		asvJSON j;
+		ASSERT(!j.fromCSV("k\n\"" + big + "\"\n"));
+		check(j, "CSV");
+	}
+	{ // dotenv
+		asvJSON j;
+		ASSERT(!j.fromDotenv("K=\"" + big + "\"\n"));
+		check(j, "dotenv");
+	}
+	{ // Java properties
+		asvJSON j;
+		ASSERT(!j.fromJavaProp("k=" + big + "\n"));
+		check(j, "JavaProp");
+	}
+	{ // SVG goes through the same XML decoder
+		asvJSON j;
+		ASSERT(!j.fromSVG("<svg><text>" + big + "</text></svg>"));
+		check(j, "SVG");
+	}
+	{ // bencode root byte string
+		asvJSON j;
+		ASSERT(!j.fromBencode(bigLen + ":" + big));
+		check(j, "bencode");
+	}
+	{ // UBJSON Sl <len32> bytes
+		std::string ubj = "Sl";
+		be32(ubj, static_cast<uint32_t>(big.size()));
+		ubj += big;
+		asvJSON j;
+		ASSERT(!j.fromUBJSON(ubj));
+		check(j, "UBJSON");
+	}
+	{ // CBOR text string, 4-byte length
+		std::string cbor;
+		cbor += static_cast<char>(0x7A);
+		be32(cbor, static_cast<uint32_t>(big.size()));
+		cbor += big;
+		asvJSON j;
+		ASSERT(!j.fromCBOR(cbor));
+		check(j, "CBOR");
+	}
+	{ // MessagePack str32
+		std::string mp;
+		mp += static_cast<char>(0xDB);
+		be32(mp, static_cast<uint32_t>(big.size()));
+		mp += big;
+		asvJSON j;
+		ASSERT(!j.fromMessagePack(mp));
+		check(j, "MessagePack");
+	}
+	{ // BSON string element
+		std::string body;
+		body += static_cast<char>(0x02);
+		body += 'k';
+		body += '\0';
+		le32(body, static_cast<uint32_t>(big.size() + 1));
+		body += big;
+		body += '\0';
+		body += '\0';
+		std::string bson;
+		le32(bson, static_cast<uint32_t>(body.size() + 4));
+		bson += body;
+		asvJSON j;
+		ASSERT(!j.fromBSON(bson));
+		check(j, "BSON");
+	}
+	{ // Protobuf text format
+		asvJSON j;
+		ASSERT(!j.fromProtobufText("k: \"" + big + "\""));
+		check(j, "protobuf text");
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34762,6 +34939,8 @@ RUN(testYamlAuditReview);
 	RUN(testAuditGoonTronSpec);
 	RUN(testArrayAddNullGuard);
 	RUN(testCoreNullNodeGuards);
+	RUN(testINIStringLimit);
+	RUN(testDecoderStringLimitGuards);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

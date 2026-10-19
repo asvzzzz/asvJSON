@@ -569,6 +569,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   if (s[0] == '{') {
     s.remove_prefix(1);
     auto obj = asvJSONValue::makeObject();
+    if (!obj) throw asvJSONError("TOML: out of memory");
     std::unordered_set<std::string> seenKeys;
     bool closed = false;
     while (!s.empty()) {
@@ -657,6 +658,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
             auto it = cur->obj->find(keys[i]);
             if (it == cur->obj->end()) {
               auto newObj = asvJSONValue::makeObject();
+              if (!newObj) throw asvJSONError("TOML: out of memory");
               auto* raw = newObj.get();
               cur->obj->emplace(keys[i], std::move(newObj));
               cur = raw;
@@ -1283,6 +1285,7 @@ inline asvJSONValue* tomlNavigate(asvJSONValue* cur, const std::vector<std::stri
     if (it == cur->obj->end()) {
       if (!create) return nullptr;
       auto newObj = asvJSONValue::makeObject();
+      if (!newObj) throw asvJSONError("TOML: out of memory");
       auto* raw = newObj.get();
       cur->obj->emplace(seg, std::move(newObj));
       cur = raw;
@@ -1344,10 +1347,12 @@ inline bool asvJSON::fromTOML(std::string_view input) {
   try {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
+      if (!root) throw asvJSONError("TOML: out of memory");
       return true;
     }
 
     root = asvJSONValue::makeObject();
+    if (!root) throw asvJSONError("TOML: out of memory");
     std::vector<std::string> tablePath;
     bool isArrayTable = false;
     std::unordered_set<std::string> tableDefs; // header-defined tables (redefinition guard)
