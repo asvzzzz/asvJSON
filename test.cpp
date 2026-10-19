@@ -34419,6 +34419,34 @@ TEST(testCppUnterminatedMethodBody) {
 	}
 }
 
+// Fuzzing (build-asan harness, 2026-10) found an ASan access-violation in
+// fromTOML: inside an array-of-tables element a key=value line with NO key
+// (`= 1`) leaves `keys` empty, but the `keys.size() == 1` / else split still
+// called `keys.back()` -- UB on an empty vector, observed as an access-violation
+// copying a garbage std::string (address 0xffffffffffffffff). Minimized:
+// "[[rows]]\n= 1\n". The non-array branch already drops such a line via its
+// fullPath.empty() check.
+TEST(testTomlEmptyKeyInArrayTable) {
+	const char* bad[] = {
+		"[[rows]]\n= 1\n",
+		"[[rows]]\n= 1\n[[rows]]\n= 2\n",
+		"t = true\n[[rows]]\n= 1\nb = 2\n",
+	};
+	for (const char* s : bad) {
+		asvJSON j;
+		bool ok = j.fromTOML(s);
+		// Must never crash; an empty-key line is dropped.
+		if (!ok) ASSERT_MSG(!j.getLastError().empty(), s);
+	}
+
+	// A normal array-of-tables still parses into two elements.
+	asvJSON j;
+	ASSERT(j.fromTOML("[[rows]]\na = 1\nb = 2\n[[rows]]\na = 3\nb = 4\n"));
+	const asvJSONValue* rows = j.get("rows");
+	ASSERT(rows && rows->type == asvJSONValue::ARRAY && rows->arr);
+	ASSERT_EQ(rows->arr->size(), 2u);
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -35065,6 +35093,7 @@ RUN(testYamlAuditReview);
 	RUN(testYamlTrailingBackslashQuote);
 	RUN(testProtobufEmptyLastError);
 	RUN(testCppUnterminatedMethodBody);
+	RUN(testTomlEmptyKeyInArrayTable);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

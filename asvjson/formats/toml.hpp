@@ -1671,6 +1671,12 @@ inline bool asvJSON::fromTOML(std::string_view input) {
       if (isArrayTable) {
         // Inside [[array]]: set on current (last) array element
         if (tablePath.empty()) continue;
+        // A line with no key at all (`= 1`) yields an empty `keys`; the
+        // `keys.size() == 1` / else split below only covers 1 and >= 2, so
+        // `keys.back()` was called on an empty vector (fuzz finding: ASan
+        // access-violation copying a garbage std::string). The regular branch
+        // already drops such a line via its `fullPath.empty()` check.
+        if (keys.empty()) continue;
         std::string arrKey = tablePath.back();
         std::vector<std::string> parentPath(tablePath.begin(), tablePath.end() - 1);
         asvJSONValue* parent = tomlNavigate(root.get(), parentPath, false);
