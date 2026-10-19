@@ -1556,7 +1556,7 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
-  if (!data || size < 1) return false;
+  if (!data || size < 1) { lastError = "protobuf: empty input"; return false; }
   try {
     std::shared_ptr<ProtoSchema> schema;
     if (!schemaJson.empty()) {
@@ -1607,11 +1607,11 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
         static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
       pos = 3;
     protoTextSkipWS(text, pos);
-    if (pos >= text.size()) return false;
+    if (pos >= text.size()) { lastError = "protobuf text: empty input"; return false; }
     if (text[pos] == '{') {
       pos++;
       auto obj = asvJSONValue::makeObject();
-      if (!obj) return false;
+      if (!obj) { lastError = "protobuf text: out of memory"; return false; }
       protoTextParseBody(text, pos, obj.get(), 1);
       if (obj->obj && !obj->obj->empty()) root = std::move(obj);
     } else if (text[pos] == '[' && !protoTextIsBracketedName(text, pos)) {
@@ -1622,7 +1622,7 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       // object branch below: "[a\]]: 7" is a message, not a list.
       pos++;
       auto arr = asvJSONValue::makeArray();
-      if (!arr) return false;
+      if (!arr) { lastError = "protobuf text: out of memory"; return false; }
       protoTextParseArrayBody(text, pos, arr.get(), 1);
       if (arr->arr) root = std::move(arr);
     } else {
@@ -1642,7 +1642,7 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       }
       if (probe < text.size() && text[probe] == ':') {
         auto obj = asvJSONValue::makeObject();
-        if (!obj) return false;
+        if (!obj) { lastError = "protobuf text: out of memory"; return false; }
         protoTextParseBody(text, pos, obj.get(), 1);
         if (obj->obj && !obj->obj->empty()) root = std::move(obj);
       } else {
@@ -1651,8 +1651,9 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
         if (val) root = std::move(val);
       }
     }
-    if (root) formatType = FormatType::ProtobufText;
-    return root != nullptr;
+    if (root) { formatType = FormatType::ProtobufText; return true; }
+    lastError = "protobuf text: no value";
+    return false;
   } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
 }
 
