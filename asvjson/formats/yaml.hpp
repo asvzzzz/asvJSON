@@ -1947,7 +1947,18 @@ inline std::string yamlParseFlowSeq(const std::string& s, size_t& pos,
 		if (s[pos] == ',') { pos++; continue; }
 		if (!first) out += ",";
 		first = false;
-		out += yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
+		// A flow value must consume at least one byte. A stray closer/separator
+		// that no branch consumes (e.g. '}' or ':' inside '[...]') would
+		// otherwise leave pos unchanged and spin this loop forever, padding
+		// `out` with commas until the process runs out of memory. The root and
+		// block paths pre-gather the flow text and reject an unterminated
+		// collection before reaching here, but the anchor/tag paths call
+		// yamlParseInlineValue directly -- "&E[}" used to hang.
+		size_t before = pos;
+		std::string elem = yamlParseFlowValue(s, pos, anchors, resolving, depth + 1);
+		if (pos == before)
+			throw asvJSONError("YAML: unexpected character in flow sequence");
+		out += elem;
 	}
 	if (pos >= s.size())
 		throw asvJSONError("YAML: unterminated flow collection");
