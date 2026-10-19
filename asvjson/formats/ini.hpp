@@ -365,6 +365,7 @@ inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
     if (it == cur->obj->end()) {
       if (!create) return nullptr;
       auto newObj = asvJSONValue::makeObject();
+      if (!newObj) throw asvJSONError("INI: out of memory");
       auto* raw = newObj.get();
       cur->obj->emplace(seg, std::move(newObj));
       cur = raw;
@@ -526,11 +527,35 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
   }
 }
 
+// -- Null-node guards -------------------------------------------------------
+// Every factory is a nothrow `new`: it returns nullptr both on OOM and (for
+// makeString/makeStringView) when the payload exceeds MAX_STRING_LEN. The INI
+// decoder builds the tree directly (it never round-trips through parse()), and
+// its input length is not bounded anywhere else, so a bare/quoted value larger
+// than MAX_STRING_LEN used to plant a null member: fromINI() returned true and
+// the next serialize() dereferenced it (0xC0000005). These helpers enforce the
+// module's "non-null or throw" contract, matching plist's checkStringLen and
+// XML's xmlMakeString.
+inline std::unique_ptr<asvJSONValue> iniNonNull(std::unique_ptr<asvJSONValue> v) {
+  if (!v) throw asvJSONError("INI: out of memory");
+  return v;
+}
+
+inline std::unique_ptr<asvJSONValue> iniMakeString(const std::string& s) {
+  auto v = asvJSONValue::makeString(s.data(), s.size());
+  if (!v) {
+    if (s.size() > asvJSONValue::MAX_STRING_LEN)
+      throw asvJSONError("INI: string too long");
+    throw asvJSONError("INI: out of memory");
+  }
+  return v;
+}
+
 // Try to infer a typed value from a parsed INI string.
 // Quoted values always remain strings; bare values may be null/bool/int/double.
 inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quoted) {
   if (quoted) {
-    return asvJSONValue::makeString(s.data(), s.size());
+    return iniMakeString(s);
   }
   // A BARE value in the exact ISO-8601 form fmtDateTimeVal() writes is a
   // DATETIME (the same convention as CSV/dotenv/Java Properties). The encoder's
@@ -543,18 +568,18 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     time_t ts = 0;
     int ms = 0, tz = 0;
     if (tryParseDateTime(s, ts, &ms, &tz))
-      return asvJSONValue::makeDateTime(ts, ms, tz);
+      return iniNonNull(asvJSONValue::makeDateTime(ts, ms, tz));
   }
   // Bare "null" decodes to the null type (encoder emits the literal, and a
   // STRING "null" is quoted so it stays text -- see iniFormatVal).
-  if (s == "null") return asvJSONValue::makeNull();
+  if (s == "null") return iniNonNull(asvJSONValue::makeNull());
   // Bare "{}" / "[]" represent empty containers (the encoder emits them for
   // object/array values that have no children).
-  if (s == "{}") return asvJSONValue::makeObject();
-  if (s == "[]") return asvJSONValue::makeArray();
+  if (s == "{}") return iniNonNull(asvJSONValue::makeObject());
+  if (s == "[]") return iniNonNull(asvJSONValue::makeArray());
   // Case-insensitive bool
-  if (s == "true" || s == "True" || s == "TRUE") return asvJSONValue::makeBool(true);
-  if (s == "false" || s == "False" || s == "FALSE") return asvJSONValue::makeBool(false);
+  if (s == "true" || s == "True" || s == "TRUE") return iniNonNull(asvJSONValue::makeBool(true));
+  if (s == "false" || s == "False" || s == "FALSE") return iniNonNull(asvJSONValue::makeBool(false));
   // Try int (base 10 -- no octal surprises)
   if (!s.empty()) {
     // JSON numbers never carry leading zeros ("042", "-042", "+042"), so those
@@ -562,12 +587,12 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     // re-parse). "0", "-0", "0.5", "-0.5" still parse as numbers.
     size_t i0 = (s[0] == '+' || s[0] == '-') ? 1 : 0;
     if (s.size() > i0 + 1 && s[i0] == '0' && s[i0 + 1] >= '0' && s[i0 + 1] <= '9')
-      return asvJSONValue::makeString(s.data(), s.size());
+      return iniMakeString(s);
     // "0x"/"0X" literals are hex floats to strtod, not INI numbers. INI has no
     // hex syntax, so keep the literal as text (else "k = 0x10" silently
     // becomes 16 on a re-parse).
     if (s.size() > i0 + 1 && s[i0] == '0' && (s[i0 + 1] == 'x' || s[i0 + 1] == 'X'))
-      return asvJSONValue::makeString(s.data(), s.size());
+      return iniMakeString(s);
     errno = 0;
     char* end = nullptr;
     long long ll = std::strtoll(s.c_str(), &end, 10);
@@ -576,11 +601,11 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
         // Out-of-range integer: preserve the exact literal so the round-trip is
         // lossless (same convention as core JSON and ADE) instead of silently
         // clamping to LLONG_MAX.
-        auto v = asvJSONValue::makeStringView(std::string_view(s));
-        if (v) v->raw_number = true;
+        auto v = iniNonNull(asvJSONValue::makeStringView(std::string_view(s)));
+        v->raw_number = true;
         return v;
       }
-      return asvJSONValue::makeInt(static_cast<int64_t>(ll));
+      return iniNonNull(asvJSONValue::makeInt(static_cast<int64_t>(ll)));
     }
     // Try double
     errno = 0;
@@ -589,12 +614,12 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
       if (errno == ERANGE) {
         // Out-of-range double (e.g. "1e999"): preserve the literal as text
         // instead of silently degrading it to +inf/-inf/0 on the round-trip.
-        return asvJSONValue::makeStringView(std::string_view(s));
+        return iniNonNull(asvJSONValue::makeStringView(std::string_view(s)));
       }
-      return asvJSONValue::makeDouble(d);
+      return iniNonNull(asvJSONValue::makeDouble(d));
     }
   }
-  return asvJSONValue::makeString(s.data(), s.size());
+  return iniMakeString(s);
 }
 
 // Insert a value into an object by key. Repeated keys convert to arrays: the
@@ -602,15 +627,22 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
 // so the decoder must merge them back into an array instead of overriding.
 inline void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val) {
   if (!target || target->type != asvJSONValue::OBJECT || !target->obj) return;
+  // A null value must never enter the tree: every serializer dereferences
+  // members/elements without a null check.
+  if (!val) throw asvJSONError("INI: out of memory");
   auto it = target->obj->find(key);
   if (it == target->obj->end()) {
     target->obj->emplace(key, std::move(val));
   } else {
     // Convert to array if not already
-    if (it->second->type == asvJSONValue::ARRAY) {
+    if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
       it->second->arr->push_back(std::move(val));
     } else {
+      // A null EXISTING node means an earlier insert already broke the
+      // invariant (defensive: unreachable now that values are checked).
+      if (!it->second) throw asvJSONError("INI: out of memory");
       auto arr = asvJSONValue::makeArray();
+      if (!arr || !arr->arr) throw asvJSONError("INI: out of memory");
       arr->arr->push_back(std::move(it->second));
       arr->arr->push_back(std::move(val));
       it->second = std::move(arr);
@@ -1499,6 +1531,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
   try {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
+      if (!root) throw asvJSONError("INI: out of memory");
       return true;
     }
 
@@ -1507,6 +1540,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
       input = input.substr(3);
 
     root = asvJSONValue::makeObject();
+    if (!root) throw asvJSONError("INI: out of memory");
 
     auto lines = splitLines(input);
     std::vector<std::string> sectionPath;
@@ -1596,6 +1630,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
             auto it = parent->obj->find(seg);
             if (it == parent->obj->end()) {
               auto newObj = asvJSONValue::makeObject();
+              if (!newObj) throw asvJSONError("INI: out of memory");
               auto* raw = newObj.get();
               parent->obj->emplace(seg, std::move(newObj));
               parent = raw;
@@ -1609,13 +1644,16 @@ inline bool asvJSON::fromINI(std::string_view input) {
           auto it = parent->obj->find(arrKey);
           if (it == parent->obj->end()) {
             auto newArr = asvJSONValue::makeArray();
+            if (!newArr || !newArr->arr) throw asvJSONError("INI: out of memory");
             auto* arrPtr = newArr.get();
             parent->obj->emplace(arrKey, std::move(newArr));
             auto newObj = asvJSONValue::makeObject();
+            if (!newObj) throw asvJSONError("INI: out of memory");
             currentArrayElement = newObj.get();
             arrPtr->arr->push_back(std::move(newObj));
-          } else if (it->second->type == asvJSONValue::ARRAY) {
+          } else if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
             auto newObj = asvJSONValue::makeObject();
+            if (!newObj) throw asvJSONError("INI: out of memory");
             currentArrayElement = newObj.get();
             it->second->arr->push_back(std::move(newObj));
           } else {
