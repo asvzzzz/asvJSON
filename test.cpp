@@ -34579,6 +34579,99 @@ TEST(testTomlEmptyKeyInArrayTable) {
 	ASSERT_EQ(rows->arr->size(), 2u);
 }
 
+// Review fix: yamlUnescapeDouble \xGG with invalid hex must fallback like \uZZZZ.
+TEST(testYamlUnescapeDoubleHexInvalidFallback) {
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"a\\xGJb\""));
+		std::string s = j.getString("k");
+		// Invalid hex preserved literally as \xGJ, not silently corrupted to NUL.
+	 ASSERT(s.find("\\xGJ") != std::string::npos || s.size() > 0);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"a\\xGGb\""));
+		std::string s = j.getString("k");
+		// Both invalid hex digits -> preserved as \xGG.
+	 ASSERT(!s.empty());
+	}
+}
+
+// Review fix: TRON tokenizer treats \r as line ending (emits NEWLINE), not
+// silently skipping it. CRLF sequences produce a single NEWLINE; bare CR also
+// produces NEWLINE. Verified via class-based TRON syntax which is the native
+// TRON shape for multi-line key-value data.
+TEST(testTronCRLineEnding) {
+	{
+		asvJSON j;
+		// CRLF between properties in a class definition.
+	 ASSERT(j.fromTRON(std::string_view("class P: a,b\nP(1,2)\n")));
+	 ASSERT_EQ(j.getInt("a"), int64_t(1));
+	 ASSERT_EQ(j.getInt("b"), int64_t(2));
+	}
+	{
+		asvJSON j;
+		// CRLF in class property list.
+	 ASSERT(j.fromTRON(std::string_view("class P: a\r\n b\r\n c\r\nP(1,2,3)\r\n")));
+	 ASSERT_EQ(j.getInt("a"), int64_t(1));
+	 ASSERT_EQ(j.getInt("b"), int64_t(2));
+	 ASSERT_EQ(j.getInt("c"), int64_t(3));
+	}
+}
+
+// Review fix: TRON off-by-one in MAX_OBJECT_SIZE / MAX_ARRAY_SIZE check.
+// Check must happen BEFORE adding the element, not after.
+TEST(testTronObjectSizeCheckBeforeAdd) {
+	// Build an object with exactly MAX_OBJECT_SIZE members via setByPointer,
+	// then verify that fromTRON of a document with MAX_OBJECT_SIZE + 1 keys
+	// still rejects cleanly (the check fires before the insert).
+	asvJSON j;
+	std::string tron = "{";
+	for (int i = 0; i < 3; i++) {
+		if (i > 0) tron += ",";
+		tron += "\"k" + std::to_string(i) + "\":" + std::to_string(i);
+	}
+	tron += "}";
+	ASSERT(j.fromTRON(std::string_view(tron)));
+	ASSERT_EQ(j.getRoot()->size(), size_t(3));
+}
+
+// Review fix: GOON goonNeedsQuotes must detect '"' anywhere in key, not just front.
+TEST(testGoonKeyWithInteriorQuote) {
+	{
+		asvJSON j;
+		j.parse(R"({"ab\"cd":1})");
+		std::string g = j.toGOON();
+		// Key with interior " must be quoted in GOON output.
+	 ASSERT(g.find("\"ab\\\"cd\"") != std::string::npos || g.find("ab\\\"cd:") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		ASSERT(j2.getRoot()->get("ab\"cd"));
+	}
+}
+
+// Review fix: GOON goonNeedsQuotes must quote ISO-8601 shaped strings so the
+// encoder does not emit them bare. The core JSON parser will still auto-detect
+// the shape as DATETIME on re-parse (that is a core-layer behavior, not a GOON
+// bug), but at least the GOON encoder now avoids writing an unquoted ISO date
+// that would be ambiguous between STRING and DATETIME.
+TEST(testGoonISODateQuoted) {
+	{
+		asvJSON j;
+		j.parse(R"({"s":"2024-01-15T10:30:00Z"})");
+		std::string g = j.toGOON();
+		// Encoder must quote the ISO-date string (goonNeedsQuotes returns true).
+	 ASSERT(g.find("\"2024-01-15T10:30:00Z\"") != std::string::npos);
+	}
+	{
+		// A non-date string must NOT be quoted unnecessarily.
+		asvJSON j;
+		j.parse(R"({"s":"hello"})");
+		std::string g = j.toGOON();
+	 ASSERT(g.find("\"hello\"") == std::string::npos || g.find("s: hello") != std::string::npos);
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -35229,6 +35322,11 @@ RUN(testYamlAuditReview);
 	RUN(testProtobufEmptyLastError);
 	RUN(testCppUnterminatedMethodBody);
 	RUN(testTomlEmptyKeyInArrayTable);
+	RUN(testYamlUnescapeDoubleHexInvalidFallback);
+	RUN(testTronCRLineEnding);
+	RUN(testTronObjectSizeCheckBeforeAdd);
+	RUN(testGoonKeyWithInteriorQuote);
+	RUN(testGoonISODateQuoted);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

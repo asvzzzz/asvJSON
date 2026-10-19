@@ -404,7 +404,10 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
   auto add = [&](TronTokType t, std::string s = {}) { toks.push_back({t, std::move(s)}); };
   while (i < in.size()) {
     char c = in[i];
-    if (c == '\r') { i++; continue; }
+    if (c == '\r') { i++; if (i < in.size() && in[i] == '\n') i++; add(TronTokType::NEWLINE); continue; }
+    // Note: \r\n is consumed as a single NEWLINE above. A bare \r also becomes
+    // NEWLINE (the fix below). The original code silently skipped \r which meant
+    // old Mac-style line endings were invisible to the parser.
     if (c == '#') { while (i < in.size() && in[i] != '\n') i++; continue; }
     if (c == '\n') { i++; add(TronTokType::NEWLINE); continue; }
     if (c == ' ' || c == '\t') { i++; continue; }
@@ -496,7 +499,7 @@ struct TronParseState {
   const TronTok& peek() { return toks[pos]; }
   const TronTok& advance() { return toks[pos++]; }
   bool match(TronTokType t) { if (toks[pos].type == t) { pos++; return true; } return false; }
-  void skipNewlines() { while (toks[pos].type == TronTokType::NEWLINE || toks[pos].type == TronTokType::SEMICOLON) pos++; }
+  void skipNewlines() { while (toks[pos].type == TronTokType::NEWLINE) pos++; }
 
   // A property name is a bare identifier or a quoted string. Per the spec, an
   // unquoted identifier immediately followed by '(' is a class *instantiation*
@@ -519,14 +522,14 @@ struct TronParseState {
     if (peek().type == TronTokType::RBRACE) { advance(); return obj.release(); }
     bool first = true;
     while (true) {
-      if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE)
-        throw asvJSONError("TRON object too large");
       if (!first) {
         if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
         else break;
       }
       first = false;
       if (peek().type == TronTokType::RBRACE) break;
+      if (obj->obj->size() >= asvJSONValue::MAX_OBJECT_SIZE)
+        throw asvJSONError("TRON object too large");
       if (peek().type != TronTokType::STRING) throw asvJSONError("expected string key");
       std::string key = tronUnescape(advance().text);
       if (!match(TronTokType::COLON)) throw asvJSONError("expected ':'");
@@ -579,14 +582,14 @@ struct TronParseState {
     if (peek().type == TronTokType::RBRACKET) { advance(); return arr.release(); }
     bool first = true;
     while (true) {
-      if (arr->size() >= asvJSONValue::MAX_ARRAY_SIZE)
-        throw asvJSONError("TRON array too large");
       if (!first) {
         if (peek().type == TronTokType::COMMA) { advance(); skipNewlines(); }
         else break;
       }
       first = false;
       if (peek().type == TronTokType::RBRACKET) break;
+      if (arr->size() >= asvJSONValue::MAX_ARRAY_SIZE)
+        throw asvJSONError("TRON array too large");
       asvJSONValue* val = parseValue(depth + 1);
       if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
       skipNewlines();

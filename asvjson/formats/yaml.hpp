@@ -177,7 +177,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			return true;
 		}
 		case T::DATETIME: {
-			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
 			out += dt; return true;
 		}
 		case T::BINARY: {
@@ -376,7 +376,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			break;
 		}
 		case T::DATETIME: {
-			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt);
+			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
 			out += prefix() + dt + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::BINARY:
@@ -549,10 +549,11 @@ inline std::string yamlUnescapeDouble(std::string_view s) {
 						if (c >= '0' && c <= '9') return c - '0';
 						if (c >= 'a' && c <= 'f') return c - 'a' + 10;
 						if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-						return 0;
+						return -1;
 					};
-					unsigned char val = static_cast<unsigned char>((hex(1) << 4) | hex(2));
-					out += static_cast<char>(val);
+					int hi = hex(1), lo = hex(2);
+					if (hi < 0 || lo < 0) { out += "\\x"; out.append(s, i + 1, 2); i += 2; break; }
+					out += static_cast<char>((static_cast<unsigned char>(hi) << 4) | static_cast<unsigned char>(lo));
 					i += 2;
 					break;
 				}
@@ -2272,8 +2273,7 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 			// indent; otherwise it would be doing indentation work.
 			if (contentIndent < 0 || static_cast<int>(spaces) < contentIndent) {
 				yamlRejectTabIndent(raw, static_cast<int>(ci) + 1);
-				ci++;
-				continue;
+				// yamlRejectTabIndent throws — ci++/continue below are dead code.
 			}
 		}
 		const int si = static_cast<int>(spaces);
