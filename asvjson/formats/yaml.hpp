@@ -1421,7 +1421,7 @@ inline YamlPrecomp yamlPrecomputeQuotes(std::string_view s) {
 			}
 			r.inQuote[i] = true;
 		} else if (inDQuote) {
-			if (s[i] == '\\') { i++; r.inQuote[i] = true; }
+			if (s[i] == '\\') { if (i + 1 < s.size()) { i++; r.inQuote[i] = true; } }
 			else if (s[i] == '"') inDQuote = false;
 			r.inQuote[i] = true;
 		} else {
