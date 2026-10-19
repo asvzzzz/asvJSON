@@ -34324,6 +34324,58 @@ TEST(testYamlFlowSeqNoProgress) {
 	ASSERT_EQ(b->arr->at(1)->num, 2);
 }
 
+// Fuzzing (build-asan harness, 2026-10) found a heap-buffer-overflow in
+// yamlPrecomputeQuotes. Inside a double-quoted run a backslash does `i++` and
+// then writes r.inQuote[i] with no bound check: when the backslash is the LAST
+// byte of the scanned line the index becomes s.size(). For a std::vector<bool>
+// whose size is an exact multiple of 32 the write lands in the next, unallocated
+// bit word, which ASan reports as a 4-byte heap-buffer-overflow ("READ of size 4
+// ... 0 bytes after 8-byte region"). The line must contain '&' (and an opening
+// double quote before the backslash) to reach the anchor pre-scan that calls
+// this helper. Minimized input: '&"' + 61 filler bytes + '\' == 64 bytes.
+TEST(testYamlTrailingBackslashQuote) {
+	// Lengths straddling every vector<bool> word boundary; 32/64/96 are the
+	// sizes that actually faulted under ASan.
+	for (size_t L : {(size_t)3, (size_t)4, (size_t)31, (size_t)32, (size_t)33,
+	                 (size_t)34, (size_t)63, (size_t)64, (size_t)65, (size_t)96}) {
+		std::string s = "&\"";
+		s.append(L - 3, 'x');
+		s += '\\';
+		ASSERT_EQ(s.size(), L);
+		asvJSON j;
+		bool ok = j.fromYAML(s);
+		if (!ok) ASSERT_MSG(!j.getLastError().empty(), s);
+	}
+
+	// The exact minimized ASan repro.
+	{
+		std::string s = "&\"";
+		s.append(61, 'x');
+		s += '\\';
+		ASSERT_EQ(s.size(), 64u);
+		asvJSON j;
+		ASSERT(!j.fromYAML(s));
+		ASSERT(!j.getLastError().empty());
+	}
+
+	// A well-formed double-quoted string with an escaped backslash is unaffected,
+	// including one whose escaped backslash ends the quoted scalar.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"a\\\\b\"\n"));
+		const asvJSONValue* k = j.get("k");
+		ASSERT(k && k->type == asvJSONValue::STRING);
+		ASSERT_EQ(k->str_data, std::string("a\\b"));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("k: \"a\\\\\"\n"));
+		const asvJSONValue* k = j.get("k");
+		ASSERT(k && k->type == asvJSONValue::STRING);
+		ASSERT_EQ(k->str_data, std::string("a\\"));
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34967,6 +35019,7 @@ RUN(testYamlAuditReview);
 	RUN(testINIStringLimit);
 	RUN(testDecoderStringLimitGuards);
 	RUN(testYamlFlowSeqNoProgress);
+	RUN(testYamlTrailingBackslashQuote);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
