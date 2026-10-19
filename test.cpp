@@ -34389,6 +34389,36 @@ TEST(testProtobufEmptyLastError) {
 	{ asvJSON j; ASSERT(!j.fromProtobufText("{}")); ASSERT(!j.getLastError().empty()); }
 }
 
+// Fuzzing (build-asan harness, 2026-10) found a container-overflow in the
+// cppread parser. parseMember()'s method-body brace scan used
+// `while (i < t.size() && d > 0)`, which walks PAST the End sentinel (always at
+// t.size()-1) when the `{` is never closed; `p = i` then left p == t.size(), and
+// the next eof()/cur() read t[p] one past the vector (ASan "container-overflow",
+// READ of size 4, reported at cpp.hpp's eof()). Minimized:
+// "struct A {\nint f() {\n".
+TEST(testCppUnterminatedMethodBody) {
+	const char* bad[] = {
+		"struct A {\nint f() {\n",
+		"struct A {\nint f() { /* c */\n",
+		"struct A {\nint f() {\n\n",
+		"struct A {\nint f() {}\n",
+		"struct A {\nint f() { } ;\n",
+	};
+	for (const char* s : bad) {
+		asvJSON j;
+		ASSERT_MSG(!j.fromCpp(s), s);
+		ASSERT_MSG(!j.getLastError().empty(), s);
+	}
+
+	// Well-formed method bodies still parse; the method is dropped as before.
+	{
+		asvJSON j;
+		ASSERT(j.fromCpp("struct A {\n  int f() { return 1; }\n  int x = 5;\n};\n"));
+		ASSERT(j.getRoot() != nullptr);
+		ASSERT(!j.serialize().empty());
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -35034,6 +35064,7 @@ RUN(testYamlAuditReview);
 	RUN(testYamlFlowSeqNoProgress);
 	RUN(testYamlTrailingBackslashQuote);
 	RUN(testProtobufEmptyLastError);
+	RUN(testCppUnterminatedMethodBody);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

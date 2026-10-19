@@ -2298,14 +2298,14 @@ struct Reader {
             else if (sawEq) brace++;
             else {
               int d = 1; i++;
-              while (i < t.size() && d > 0) {
+              while (i < t.size() && d > 0 && t[i].kind != Tok::End) {
                 if (t[i].kind == Tok::Punct && t[i].text == "{") d++;
                 else if (t[i].kind == Tok::Punct && t[i].text == "}") d--;
                 i++;
               }
               methodBody = true;
-              while (t[i].kind == Tok::Comment) i++;
-              if (t[i].kind == Tok::Punct && t[i].text == ";") i++;
+              while (i < t.size() && t[i].kind == Tok::Comment) i++;
+              if (i < t.size() && t[i].kind == Tok::Punct && t[i].text == ";") i++;
               break;
             }
           } else brace++;
