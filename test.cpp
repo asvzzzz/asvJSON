@@ -34299,6 +34299,31 @@ TEST(testDecoderStringLimitGuards) {
 	}
 }
 
+// Fuzzing (build-asan harness, 2026-10) found that a malformed flow sequence
+// reached through the ANCHOR path spun forever: yamlParseFlowSeq fed a stray
+// '}' / ':' / ',' to yamlParseFlowValue, whose plain-scalar branch returned
+// "null" without consuming a byte, so pos never advanced and the loop padded
+// `out` with commas until memory was exhausted. The block/root paths pre-gather
+// the flow text and reject an unterminated collection first, but the anchor and
+// tag paths call yamlParseInlineValue directly. Minimized input: "&E[}".
+TEST(testYamlFlowSeqNoProgress) {
+	const char* bad[] = {"&E[}", "&a[:]", "&a[}", "&x[1,}", "&x[1,:]"};
+	for (const char* s : bad) {
+		asvJSON j;
+		ASSERT_MSG(!j.fromYAML(s), s);
+		ASSERT_MSG(!j.getLastError().empty(), s);
+	}
+
+	// A well-formed anchored flow value still parses and resolves its alias.
+	asvJSON j;
+	ASSERT(j.fromYAML("a: &x [1, 2]\nb: *x\n"));
+	const asvJSONValue* b = j.get("b");
+	ASSERT(b && b->type == asvJSONValue::ARRAY && b->arr);
+	ASSERT_EQ(b->arr->size(), 2u);
+	ASSERT_EQ(b->arr->at(0)->num, 1);
+	ASSERT_EQ(b->arr->at(1)->num, 2);
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -34941,6 +34966,7 @@ RUN(testYamlAuditReview);
 	RUN(testCoreNullNodeGuards);
 	RUN(testINIStringLimit);
 	RUN(testDecoderStringLimitGuards);
+	RUN(testYamlFlowSeqNoProgress);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
