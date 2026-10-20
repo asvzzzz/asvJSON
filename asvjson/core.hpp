@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // asvJSON++ v1.26.11 - C++17 JSON library - Core Module
 // 
 // Configuration:
@@ -3479,7 +3479,7 @@ inline std::string asvJSON::toXML() const {
 // Root handling:
 //   - null / non-OBJECT root: outputs empty <svg xmlns="..."></svg> (data lost).
 //   - empty OBJECT {}: outputs empty <svg xmlns="..."></svg> (valid minimal doc).
-//   - single key "svg": emits directly — no double-wrap.
+//   - single key "svg": emits directly - no double-wrap.
 //   - single non-"svg" key: wraps in <svg> to guarantee a single XML root.
 //   - multi-key root: wraps in <svg> to avoid multiple root elements (invalid XML).
 //   - empty-string key (""): renders as <element> (fallback name, not valid SVG).
@@ -3492,7 +3492,7 @@ inline std::string asvJSON::toSVG() const {
 	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 	if (!root || root->type != asvJSONValue::OBJECT || !root->obj) {
 		// Non-OBJECT, null: wrap in minimal <svg> so output stays XML-well-formed.
-		// Data is silently lost (documented limitation — use an object root).
+		// Data is silently lost (documented limitation - use an object root).
 		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
 	} else if (root->obj->empty()) {
 		// Empty object: valid minimal SVG document.

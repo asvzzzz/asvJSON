@@ -1,4 +1,4 @@
-#include "asvJSON++.hpp"
+﻿#include "asvJSON++.hpp"
 using namespace asvJSONInternal;
 #include <iostream>
 #include <cassert>
@@ -2631,7 +2631,7 @@ TEST(testBSONEncoderUTF8Validation) {
 	asvJSON jGood;
 	auto obj2 = asvJSONValue::makeObject();
 	if (!obj2) throw std::runtime_error("alloc failed");
-	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "e"
 	jGood.setValue("", std::move(obj2));
 	auto bson4 = jGood.toBSON();
 	ASSERT(bson4.size() > 0);
@@ -3743,7 +3743,7 @@ TEST(testMsgpackEncoderUTF8Validation) {
 	asvJSON jGood;
 	auto obj2 = asvJSONValue::makeObject();
 	if (!obj2) throw std::runtime_error("alloc failed");
-	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "e"
 	jGood.setValue("", std::move(obj2));
 	auto mp4 = jGood.toMessagePack();
 	ASSERT(mp4.size() > 0);
@@ -6673,26 +6673,26 @@ TEST(testXMLAuditFixes2) {
 	}
 	// AUDIT: xmlNameChar accepted only ASCII, so a NON-ASCII element name was
 	// cut off at its first UTF-8 byte when xmlSkipNilBody scanned for the
-	// matching </name>. A well-formed <ф xsi:nil="true">hi</ф> was rejected as
+	// matching </name>. A well-formed <f xsi:nil="true">hi</f> was rejected as
 	// an unterminated element because the close-tag scan produced an empty
 	// name. xmlNameChar now uses the same unsigned-byte class as
 	// xmlParseName (alnum, '-', '_', ':', '.' and anything >= 0x80).
 	{
 		asvJSON a;
-		ASSERT(a.fromXML(u8"<ф xsi:nil=\"true\">hi</ф>"));
-		ASSERT(a.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		ASSERT(a.fromXML(u8"<f xsi:nil=\"true\">hi</f>"));
+		ASSERT(a.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
 		// nested same-name content must still be skipped wholesale
 		asvJSON b;
-		ASSERT(b.fromXML(u8"<ф xsi:nil=\"true\"><ф/></ф>"));
-		ASSERT(b.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		ASSERT(b.fromXML(u8"<f xsi:nil=\"true\"><f/></f>"));
+		ASSERT(b.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
 		asvJSON c;
-		ASSERT(c.fromXML(u8"<ф xsi:nil=\"true\"><x>1</x>text</ф>"));
-		ASSERT(c.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
+		ASSERT(c.fromXML(u8"<f xsi:nil=\"true\"><x>1</x>text</f>"));
+		ASSERT(c.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
 		// a genuinely unterminated non-ASCII element is still rejected
 		asvJSON d;
-		ASSERT(!d.fromXML(u8"<ф xsi:nil=\"true\">hi"));
+		ASSERT(!d.fromXML(u8"<f xsi:nil=\"true\">hi"));
 		asvJSON e;
-		ASSERT(!e.fromXML(u8"<ф xsi:nil=\"true\">hi</x>"));
+		ASSERT(!e.fromXML(u8"<f xsi:nil=\"true\">hi</x>"));
 		// the pre-existing ASCII nesting behaviour is unchanged
 		asvJSON f;
 		ASSERT(f.fromXML("<x xsi:nil=\"true\"><x attr=\"1\"/></x>"));
@@ -7135,7 +7135,7 @@ TEST(testSVGReviewFixes) {
 		ASSERT(svg.find(">Hi</text>") != std::string::npos);
 	}
 
-	// Round-trip: multiple same-named siblings with @attrs survive JSON→SVG→JSON.
+	// Round-trip: multiple same-named siblings with @attrs survive JSON->SVG->JSON.
 	{
 		asvJSON j, j2;
 		std::string jsonIn = R"({"svg":{"defs":{"clipPath":[{"@id":"x1","rect":{"@x":"1"}},{"@id":"x2","circle":{"@r":"2"}}]}}})";
@@ -7150,7 +7150,7 @@ TEST(testSVGReviewFixes) {
 	 ASSERT_EQ(std::string((*clips->arr)[0]->get("@id")->getString()), "x1");
 	 ASSERT_EQ(std::string((*clips->arr)[1]->get("@id")->getString()), "x2");
 	}
-	// Empty array: key must not be silently dropped — emits empty self-closing tag.
+	// Empty array: key must not be silently dropped - emits empty self-closing tag.
 	{
 		asvJSON json;
 		json.parse(std::string(R"({"items":[]})"));
@@ -12181,7 +12181,7 @@ TEST(testGOONExtras) {
 	{
 		asvJSON j;
 		ASSERT(j.fromGOON(std::string_view("$: $1=\"x\\u0000y\"\n")));
-		// Dict definition only — no value references $1, so root is empty but
+		// Dict definition only - no value references $1, so root is empty but
 		// parse succeeded (previously rejected with "invalid escape in string").
 	}
 	// Colon-in-key where the key *ends* in a backslash must round-trip: the
@@ -34622,14 +34622,14 @@ TEST(testTronCRLineEnding) {
 // Review fix: comment handler (#) now stops at both \n and \r so a bare-\r
 // file does not let the comment swallow subsequent tokens. Without this, input
 // like "#comment\rcode" would consume "comment\r" and then keep scanning
-// forward until the next \n or EOF — effectively dropping everything after the
+// forward until the next \n or EOF - effectively dropping everything after the
 // first bare-CR comment to EOF.
 TEST(testTronCommentWithCR) {
 	{
 		asvJSON j;
 		// Bare-\r (no following \n): the comment handler must stop at '\r' and
 		// not swallow subsequent bytes until the next '\n'. With the fix,
-		// "#comment\rnull" parses as null — the comment ends at '\r'.
+		// "#comment\rnull" parses as null - the comment ends at '\r'.
 		bool ok = j.fromTRON(std::string_view("#comment\rnull"));
 		ASSERT(ok);
 	}
@@ -34641,20 +34641,20 @@ TEST(testTronCommentWithCR) {
 	}
 	{
 		asvJSON j;
-		// Content after a bare-\r comment must NOT be silently swallowed — it is
+		// Content after a bare-\r comment must NOT be silently swallowed - it is
 		// an unexpected token and the parser must reject the document.
 		bool ok = j.fromTRON(std::string_view("#comment\rcode\nnull"));
-		ASSERT(!ok); // "code" is unexpected here — parser rejects cleanly
+		ASSERT(!ok); // "code" is unexpected here - parser rejects cleanly
 	}
 	// Bare-root __REGEX__ with a pipe is rejected at the lexer level (| is a TRON
 	// syntax char); only JSON-embedded marker forms decode as REGEX. This is a
-	// documented limitation, not a bug — the encoder never emits bare-root markers.
+	// documented limitation, not a bug - the encoder never emits bare-root markers.
 	{
 		asvJSON j;
 		// The pipe in __REGEX__abc|def is treated as TRON syntax, not as a marker
 		// separator, because the document root does not enter the marker path.
 		bool ok = j.fromTRON(std::string_view("__REGEX__abc|def\n"));
-		ASSERT(!ok); // "TRON: unexpected character: '|'" — by design
+		ASSERT(!ok); // "TRON: unexpected character: '|'" - by design
 	}
 	{
 		asvJSON j;
@@ -34703,7 +34703,7 @@ TEST(testGoonKeyWithInteriorQuote) {
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
-// the decoded type — both quoted and unquoted forms produce DATETIME. Documented
+// the decoded type - both quoted and unquoted forms produce DATETIME. Documented
 // in goon.hpp header. Note: an ISO-8601 string containing ':' is still quoted
 // because ':' is a structural separator in GOON (line 293), not because of any
 // ISO-specific logic.

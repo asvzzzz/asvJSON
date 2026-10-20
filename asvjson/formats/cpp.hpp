@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // C++ struct/enum code generation and decoding for asvJSON++.
 //
 // `toCpp()` infers C++ type declarations (structs, enums, arrays) from a parsed
@@ -28,7 +28,7 @@
 //   - Paren-init for struct types (`Foo f(1, 2);`) maps positional args to
 //     fields in order; the values are parsed but only scalar literals survive.
 //     Complex expressions fall back to field defaults.
-//   - Container paren-init (`std::vector<int> v(10);`) emits an empty array —
+//   - Container paren-init (`std::vector<int> v(10);`) emits an empty array -
 //     the size argument is not interpreted (container semantics differ: vector
 //     takes count, string takes count+char, map ignores). Use brace-init or
 //     explicit element listing for predictable output.
@@ -1188,7 +1188,7 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             // value is the whole replacement and must stay object-like.
             // Adjacent `(` with no trailing content (e.g. `#define ASSERT(x)`)
             // is still function-like: the parameter list is present, it just
-            // has an empty body — common for assert stubs.
+            // has an empty body - common for assert stubs.
             bool functionLike = false;
             {
               size_t r = q;
@@ -1205,7 +1205,7 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                   while (t2 < logical.size() && (logical[t2] == ' ' || logical[t2] == '\t' ||
                                                  logical[t2] == '\r')) t2++;
                   // Adjacent `(` (no whitespace between name and paren) is always
-                  // function-like, even with an empty body — common for assert stubs.
+                  // function-like, even with an empty body - common for assert stubs.
                   bool adjacent = (r == q);
                   functionLike = adjacent || (t2 < logical.size());
                 }
@@ -2132,7 +2132,7 @@ struct Reader {
         if (isP(";")) adv();
         std::vector<FieldDef> extras;
         if (def.name.empty()) {
-          // `struct { ... } Foo, Bar;` or `typedef struct { ... } Foo, Bar;` —
+          // `struct { ... } Foo, Bar;` or `typedef struct { ... } Foo, Bar;` -
           // the first Ident becomes the tag name, subsequent Idents are extra
           // declarators (weak aliases when coming through a typedef). Collect
           // them so callers that know the context can register them.
@@ -2320,7 +2320,7 @@ struct Reader {
       i++;
     }
     if (methodBody) { p = i; return; }
-    // `int x(5);` / `std::string s("hello");` — direct-initialization of a
+    // `int x(5);` / `std::string s("hello");` - direct-initialization of a
     // variable, not a method declaration. Distinguish by looking inside the
     // first paren: if it contains only literals/idents/punct (no type-like
     // keywords) and is followed by `;` or `,`, treat as data member with init.
@@ -2577,7 +2577,7 @@ struct Reader {
       } else if (directInitPi != npos && directInitPc != npos &&
                  directInitPi >= sb && directInitPc < se) {
         // Paren-init (`int x(5);`, `std::string s("hello");`). The paren group
-        // is the initializer — capture it so cppRdScalarLiteral can strip parens
+        // is the initializer - capture it so cppRdScalarLiteral can strip parens
         // and extract the value. Must be checked before brace-init since a
         // direct-init cannot also have braces at this point.
         f.hasInit = true;
@@ -2845,7 +2845,7 @@ struct Reader {
       auto o = asvJSONValue::makeObject();
       if (!o || !o->obj) throw asvJSONError("cpp: out of memory");
       const StructDef* sd = findStruct(rt.name);
-      // Paren-init (`Foo f(1, 2);`) — positional args mapped to fields in order.
+      // Paren-init (`Foo f(1, 2);`) - positional args mapped to fields in order.
       bool pgrp = hasInit && cppRdParenGroup(init);
       std::vector<std::vector<Tok>> pgroups;
       if (pgrp) pgroups = cppRdSplitTop({init.begin() + 1, init.end() - 1});

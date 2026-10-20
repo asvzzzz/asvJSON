@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // YAML serialization/parsing for asvJSON++
 //
 // Known limitations
@@ -2273,7 +2273,7 @@ inline std::string yamlParseBlockScalar(const std::string& header, const std::ve
 			// indent; otherwise it would be doing indentation work.
 			if (contentIndent < 0 || static_cast<int>(spaces) < contentIndent) {
 				yamlRejectTabIndent(raw, static_cast<int>(ci) + 1);
-				// yamlRejectTabIndent throws — ci++/continue below are dead code.
+				// yamlRejectTabIndent throws - ci++/continue below are dead code.
 			}
 		}
 		const int si = static_cast<int>(spaces);

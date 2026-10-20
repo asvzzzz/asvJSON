@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // SVG (Scalable Vector Graphics) serialization/parsing for asvJSON++
 //
 // SVG is XML-based, so fromSVG delegates to the existing XML parser after BOM
@@ -18,7 +18,7 @@
 //   - Booleans become "true"/"false" strings
 //   - Null values are skipped (no attribute emitted)
 //   - Void (self-closing) elements: rect, circle, ellipse, line, path, polyline,
-//     polygon — children are silently ignored if present. Note: `image` and `use`
+//     polygon - children are silently ignored if present. Note: `image` and `use`
 //     are container elements per SVG spec and are NOT self-closing.
 //
 // Known limitations:
@@ -32,7 +32,7 @@
 //     sibling elements plus the no-collapse decode (see Decoder below).
 //     An empty array decodes back as an empty STRING ("") rather than null.
 //   - Non-OBJECT root: scalar/null/ARRAY roots are replaced by an empty
-//     <svg xmlns="..."></svg> — data is silently lost. Use an object root.
+//     <svg xmlns="..."></svg> - data is silently lost. Use an object root.
 //   - Multi-key root objects are wrapped in <svg> (guarantees single XML root).
 //   - Empty-string root key ("") produces element "<element>" (fallback name);
 //     @-only root objects produce invalid SVG with "@<attrname>" as element tag
@@ -42,11 +42,11 @@
 //     as an empty <tag></tag>. OBJECT and ARRAY children are recursively serialized.
 //   - Non-OBJECT root values (scalars, ARRAY, and special types) are wrapped in
 //     <root>...</root> by free toSVG(const asvJSONValue*); scalar content is
-//     preserved but ARRAY/special-type contents are lost — documented limitation.
+//     preserved but ARRAY/special-type contents are lost - documented limitation.
 //   - Empty #text ("") on elements that round-trip as self-closing is silently
 //     dropped: {"g":{"@class":"x","#text":""}} -> <g class="x"/> -> {"g":{"@class":"x"}}.
-//     Semantically empty text ≡ absent, but the shape changes from {#text:""} to absent.
-//   - svgSerializeElement has no depth guard — deeply nested programmatic trees can
+//     Semantically empty text == absent, but the shape changes from {#text:""} to absent.
+//   - svgSerializeElement has no depth guard - deeply nested programmatic trees can
 //     overflow the stack. Consistent with other encoders (toXML/toUBJSON/etc.).
 //
 // Decoder: since SVG is XML, fromSVG reuses the shared XML document parser
@@ -74,7 +74,7 @@ inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out);
 // Point 8: check v == nullptr at the start.
 // Point 2: compute value in a local buffer first, then write name=value atomically.
 // Point 3: escape attribute values (&, ", <, >).
-// Point 5: support ARRAY values — iterate elements and join with spaces.
+// Point 5: support ARRAY values - iterate elements and join with spaces.
 inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSONValue* v) {
 	if (name.empty() || name[0] != '@') return;
 	if (!v) return; // Point 8
@@ -82,7 +82,7 @@ inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSON
 	std::string key = std::string(name).substr(1); // strip '@'
 	if (key.empty()) return;
 
-	// Compute value in a local buffer first (Point 2 — atomic write)
+	// Compute value in a local buffer first (Point 2 - atomic write)
 	bool hasValue = false;
 	std::string valBuf;
 	switch (v->type) {
@@ -194,7 +194,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		}
 
 		// Self-closing: void elements, or empty containers with no text/children.
-		// Attributes don't require a body — <g class="foo"/> is valid XML/SVG.
+		// Attributes don't require a body - <g class="foo"/> is valid XML/SVG.
 		bool isEmptyLeaf = !isSelfClosing && !hasElementChildren && textContent.empty();
 
 		if (isSelfClosing || isEmptyLeaf) {
@@ -264,7 +264,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		// Each array element represents a sibling with the same tag name.
 		// Delegate to svgSerializeElement so @-attributes and #text are handled
 		// correctly (the OBJECT branch knows how to skip @/emit as attrs,
-		// and emit #text as element content). Pass indent unchanged — each
+		// and emit #text as element content). Pass indent unchanged - each
 		// element writes its own opening/closing tag at this level.
 		for (const auto& elem : *(v->arr)) {
 			if (!elem) continue;
@@ -364,7 +364,7 @@ inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out) {
 	}
 }
 
-// AsvJSONValue method implementations — must be inside the namespace.
+// AsvJSONValue method implementations - must be inside the namespace.
 inline void asvJSONValue::toSVG(std::string& out) const {
 	asvJSONInternal::asvJSONValue_toSVG(this, out);
 }
