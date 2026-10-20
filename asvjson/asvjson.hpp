@@ -311,9 +311,26 @@ inline bool asvJSON::fromAny(std::string_view input) {
       }
     }
 
-    // INI without '=': section headers + key:value or key<space>value
-    if (s.find('[') != std::string_view::npos) {
-      if (fromINI(s)) return true;
+    // INI without '=': section headers + key:value or key<space>value.
+    // Require an actual SECTION HEADER (a line whose first non-space char is
+    // '['), not merely a '[' anywhere: TOON/GOON length headers like
+    // "c[2]: 1,2" and "c[]:" used to satisfy the old s.find('[') test, so
+    // fromAny() claimed the document as INI before reaching YAML/GOON/TOON.
+    {
+      bool hasSectionHeader = false;
+      size_t p = 0;
+      while (p < s.size()) {
+        size_t e = s.find('\n', p);
+        if (e == std::string_view::npos) e = s.size();
+        size_t q = p;
+        while (q < e && (s[q] == ' ' || s[q] == '\t' || s[q] == '\r')) q++;
+        if (q < e && s[q] == '[') { hasSectionHeader = true; break; }
+        if (e == s.size()) break;
+        p = e + 1;
+      }
+      if (hasSectionHeader) {
+        if (fromINI(s)) return true;
+      }
     }
 
     // Dotenv: flat KEY=VALUE lines (no [section] headers). Only attempted after
