@@ -43,10 +43,11 @@
 // Apple readers will not understand, mirroring the JSON layer's
 // allowNaNInfinity convention.
 //
-// parseValue recurses two depth steps per container level (<dict>/<array>
-// cost parseValue -> parseDict/parseArray -> parseValue), so
-// MAX_NESTING_DEPTH is effectively halved for plist documents. Conservative,
-// never exceeded.
+// The depth counter advances once per container level: parseValue ->
+// parseDict/parseArray (same depth) -> parseValue(depth + 1). That matches
+// MAX_NESTING_DEPTH exactly, so every tree the encoders accept can be parsed
+// back (the old two-steps-per-level accounting halved the effective limit and
+// rejected a legal 40-deep document that toPlist() had just written).
 
 #include "../core.hpp"
 
@@ -476,9 +477,9 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     return asvJSONValue::makeBinary(bytes.data(), bytes.size());
   }
 
-  if (name == "dict") return sc ? asvJSONValue::makeObject() : parseDict(depth + 1);
+  if (name == "dict") return sc ? asvJSONValue::makeObject() : parseDict(depth);
 
-  if (name == "array") return sc ? asvJSONValue::makeArray() : parseArray(depth + 1);
+  if (name == "array") return sc ? asvJSONValue::makeArray() : parseArray(depth);
 
   fail("unexpected element <" + name + ">");
 }

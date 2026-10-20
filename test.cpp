@@ -23903,6 +23903,21 @@ TEST(testPlistRoundTrip) {
     ASSERT_EQ(inst->get((size_t)2)->getInt(), int64_t(3));
     std::remove("plist_rt.plist");
   }
+  // 40 nested objects is below MAX_NESTING_DEPTH (48). The parser used to
+  // count TWO depth steps per <dict>, so it rejected a tree that toPlist() had
+  // just written.
+  {
+    std::string t;
+    for (int i = 0; i < 40; i++) t += "{\"a\":";
+    t += "1";
+    for (int i = 0; i < 40; i++) t += "}";
+    asvJSON j;
+    ASSERT(j.parse(t));
+    std::string pl = j.toPlist();
+    asvJSON k;
+    ASSERT(k.fromPlist(pl));
+    ASSERT(k.serialize() == j.serialize());
+  }
 }
 
 TEST(testPlistAuditRegressions) {
