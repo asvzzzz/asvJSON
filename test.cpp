@@ -7713,6 +7713,14 @@ TEST(testFromYAML) {
 		ASSERT(json.fromYAML("? a: b"));
 		ASSERT_EQ(std::string(json.getString("a")), "b");
 	}
+	// Explicit-key inline value continued on a deeper line: the fold must
+	// roll back only the value text, never the already-emitted "key": prefix
+	// (this used to erase the key and fail with Expected ':').
+	{
+		asvJSON json;
+		ASSERT(json.fromYAML("? foo: 1\n  more"));
+		ASSERT_EQ(std::string(json.getString("foo")), "1 more");
+	}
 	// Explicit key with a nested mapping value
 	{
 		asvJSON json;
