@@ -34627,23 +34627,15 @@ TEST(testTronCRLineEnding) {
 TEST(testTronCommentWithCR) {
 	{
 		asvJSON j;
-		// Bare-\r before code: without the fix the comment handler would skip
-		// past \r and eat "code" until the next \n or EOF. With the fix, the
-		// comment ends at \r and "code" is parsed as an identifier token — but
-		// since we are not inside a class definition that expects one, it
-		// should be rejected as trailing tokens after the root value.
-		bool ok = j.fromTRON(std::string_view("#comment\rcode\nnull"));
-		ASSERT(!ok); // "code" is unexpected here — parser rejects cleanly
-	}
-	{
-		asvJSON j;
-		// Bare-\r between comment and data: same scenario, but with a value after.
-		bool ok = j.fromTRON(std::string_view("#comment\r\nnull"));
+		// Bare-\r (no following \n): the comment handler must stop at '\r' and
+		// not swallow subsequent bytes until the next '\n'. With the fix,
+		// "#comment\rnull" parses as null — the comment ends at '\r'.
+		bool ok = j.fromTRON(std::string_view("#comment\rnull"));
 		ASSERT(ok);
 	}
 	{
 		asvJSON j;
-		// CRLF in comment must still work (the fix preserves the existing path).
+		// Bare-\r between comment and data: same scenario, but with a value after.
 		bool ok = j.fromTRON(std::string_view("#comment\r\nnull"));
 		ASSERT(ok);
 	}

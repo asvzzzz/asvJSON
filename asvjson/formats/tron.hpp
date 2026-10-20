@@ -422,7 +422,7 @@ inline std::vector<TronTok> tronTokenize(std::string_view in, bool allowNaNInfin
         if (in[i] == '\\' && i + 1 < in.size()) { s += in[i++]; s += in[i++]; }
         else s += in[i++];
       }
-      if (i >= in.size()) throw asvJSONError("TRON: unterminated string in TRON");
+      if (i >= in.size()) throw asvJSONError("TRON: unterminated string");
       i++;
       add(TronTokType::STRING, s);
       continue;
@@ -565,7 +565,7 @@ struct TronParseState {
           for (const auto& m : *setArr->arr) {
             if (!m) continue;
             if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
-              throw asvJSONError("TRON set too large");
+              throw asvJSONError("TRON: set too large");
             auto nullv = asvJSONValue::makeNull();
             if (!nullv) throw asvJSONError("out of memory");
             obj->obj->emplace(m->str_data, std::move(nullv));
@@ -593,7 +593,7 @@ struct TronParseState {
       first = false;
       if (peek().type == TronTokType::RBRACKET) break;
       if (arr->size() >= asvJSONValue::MAX_ARRAY_SIZE)
-        throw asvJSONError("TRON array too large");
+        throw asvJSONError("TRON: array too large");
       asvJSONValue* val = parseValue(depth + 1);
       if (val) arr->arr->push_back(std::unique_ptr<asvJSONValue>(val));
       skipNewlines();
@@ -690,7 +690,7 @@ struct TronParseState {
 asvJSONValue* TronParseState::parseValue(int depth) {
   skipNewlines();
   if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
-    throw asvJSONError("TRON nesting too deep");
+    throw asvJSONError("TRON: nesting too deep");
   auto& tok = peek();
   static const double tronNaN = std::numeric_limits<double>::quiet_NaN();
   static const double tronInf = std::numeric_limits<double>::infinity();
@@ -744,7 +744,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
         std::string content(raw.data() + 9, raw.size() - 9);
         if (!content.empty()) {
           size_t term = content.rfind('|');
-          if (term != std::string::npos && term != 0) {
+          if (term != std::string::npos) {
             size_t sep = content.find('|');
             std::string pat = tronUnescape(content.substr(0, sep));
             std::string opts = (sep != term) ? tronUnescape(content.substr(sep + 1, term - sep - 1)) : std::string();
@@ -814,12 +814,12 @@ asvJSONValue* TronParseState::parseValue(int depth) {
         double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
         auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), d);
-        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("invalid number: " + n);
+        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
 #else
         char* end;
         errno = 0;
         d = std::strtod(n.c_str(), &end);
-        if (errno == ERANGE || end != n.c_str() + n.size()) throw asvJSONError("invalid number: " + n);
+        if (errno == ERANGE || end != n.c_str() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
 #endif
         auto v = asvJSONValue::makeDouble(d);
         if (!v) throw asvJSONError("out of memory");
@@ -827,7 +827,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
       } else {
         long long l;
         auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), l);
-        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("invalid number: " + n);
+        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
         auto v = asvJSONValue::makeInt(l);
         if (!v) throw asvJSONError("out of memory");
         return v.release();
