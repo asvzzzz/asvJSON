@@ -34635,9 +34635,16 @@ TEST(testTronCommentWithCR) {
 	}
 	{
 		asvJSON j;
-		// Bare-\r between comment and data: same scenario, but with a value after.
+		// CRLF in comment must still work (the fix preserves the existing path).
 		bool ok = j.fromTRON(std::string_view("#comment\r\nnull"));
 		ASSERT(ok);
+	}
+	{
+		asvJSON j;
+		// Content after a bare-\r comment must NOT be silently swallowed — it is
+		// an unexpected token and the parser must reject the document.
+		bool ok = j.fromTRON(std::string_view("#comment\rcode\nnull"));
+		ASSERT(!ok); // "code" is unexpected here — parser rejects cleanly
 	}
 }
 
