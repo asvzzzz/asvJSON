@@ -3240,7 +3240,6 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			yamlCheckFrameIndent(stack, indent);
 
 			std::string jsonKey = isCompoundKey ? ("\"" + compoundKey + "\"") : ("\"" + yamlEscKey(rawKey) + "\"");
-			const size_t inlineValStart = out.size();
 			if (!inlineVal.empty() && inlineVal[0] != '#') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
@@ -3272,6 +3271,10 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				} else if (inlineVal.size() > 1 && inlineVal[0] == '*') {
 					out += yamlResolveAlias(std::string_view(inlineVal).substr(1), anchors, resolving);
 				} else {
+					// The fold rolls `out` back to the value start, so the
+					// marker must sit AFTER the `"key":` prefix (otherwise a
+					// multi-line explicit-key value erased its own key).
+					const size_t inlineValStart = out.size();
 					out += yamlParseInlineValue(inlineVal);
 					yamlFoldPlainScalar(lines, li, indent + 1, out, inlineValStart, inlineVal);
 				}
