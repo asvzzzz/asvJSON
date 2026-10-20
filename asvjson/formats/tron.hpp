@@ -744,7 +744,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
         std::string content(raw.data() + 9, raw.size() - 9);
         if (!content.empty()) {
           size_t term = content.rfind('|');
-          if (term != std::string::npos) {
+          if (term != 0) {
             size_t sep = content.find('|');
             std::string pat = tronUnescape(content.substr(0, sep));
             std::string opts = (sep != term) ? tronUnescape(content.substr(sep + 1, term - sep - 1)) : std::string();
