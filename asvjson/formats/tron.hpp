@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // TRON (Token Reduced Object Notation) serialization/parsing for asvJSON++
 //
 // JSON superset that hoists repeated property sets into class definitions:

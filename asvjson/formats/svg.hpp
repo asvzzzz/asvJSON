@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // SVG (Scalable Vector Graphics) serialization/parsing for asvJSON++
 //
 // SVG is XML-based, so fromSVG delegates to the existing XML parser after BOM

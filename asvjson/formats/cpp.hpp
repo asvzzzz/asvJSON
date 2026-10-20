@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // C++ struct/enum code generation and decoding for asvJSON++.
 //
 // `toCpp()` infers C++ type declarations (structs, enums, arrays) from a parsed

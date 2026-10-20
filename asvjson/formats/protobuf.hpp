@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Protocol Buffers (wire format + text format) for asvJSON++
 // Supports schema-less dynamic encoding (field numbers as keys) and JSON-driven schema.
 //

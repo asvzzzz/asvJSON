@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // YAML serialization/parsing for asvJSON++
 //
 // Known limitations

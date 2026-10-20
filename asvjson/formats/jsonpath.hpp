@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // JSONPath (RFC 9535) implementation for asvJSON++
 // Supports:
 //   $ (root), .member, ['member'], [index], [start:end:step] (slice),

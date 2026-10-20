@@ -1,4 +1,4 @@
-﻿#include "asvJSON++.hpp"
+#include "asvJSON++.hpp"
 using namespace asvJSONInternal;
 #include <iostream>
 #include <cassert>
@@ -2631,7 +2631,7 @@ TEST(testBSONEncoderUTF8Validation) {
 	asvJSON jGood;
 	auto obj2 = asvJSONValue::makeObject();
 	if (!obj2) throw std::runtime_error("alloc failed");
-	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "e"
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
 	jGood.setValue("", std::move(obj2));
 	auto bson4 = jGood.toBSON();
 	ASSERT(bson4.size() > 0);
@@ -3743,7 +3743,7 @@ TEST(testMsgpackEncoderUTF8Validation) {
 	asvJSON jGood;
 	auto obj2 = asvJSONValue::makeObject();
 	if (!obj2) throw std::runtime_error("alloc failed");
-	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "e"
+	obj2->obj->insert_or_assign(std::string("\xC3\xA9"), asvJSONValue::makeNull()); // "é"
 	jGood.setValue("", std::move(obj2));
 	auto mp4 = jGood.toMessagePack();
 	ASSERT(mp4.size() > 0);
@@ -6673,26 +6673,26 @@ TEST(testXMLAuditFixes2) {
 	}
 	// AUDIT: xmlNameChar accepted only ASCII, so a NON-ASCII element name was
 	// cut off at its first UTF-8 byte when xmlSkipNilBody scanned for the
-	// matching </name>. A well-formed <f xsi:nil="true">hi</f> was rejected as
+	// matching </name>. A well-formed <ф xsi:nil="true">hi</ф> was rejected as
 	// an unterminated element because the close-tag scan produced an empty
 	// name. xmlNameChar now uses the same unsigned-byte class as
 	// xmlParseName (alnum, '-', '_', ':', '.' and anything >= 0x80).
 	{
 		asvJSON a;
-		ASSERT(a.fromXML(u8"<f xsi:nil=\"true\">hi</f>"));
-		ASSERT(a.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
+		ASSERT(a.fromXML(u8"<ф xsi:nil=\"true\">hi</ф>"));
+		ASSERT(a.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
 		// nested same-name content must still be skipped wholesale
 		asvJSON b;
-		ASSERT(b.fromXML(u8"<f xsi:nil=\"true\"><f/></f>"));
-		ASSERT(b.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
+		ASSERT(b.fromXML(u8"<ф xsi:nil=\"true\"><ф/></ф>"));
+		ASSERT(b.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
 		asvJSON c;
-		ASSERT(c.fromXML(u8"<f xsi:nil=\"true\"><x>1</x>text</f>"));
-		ASSERT(c.getRoot()->get(u8"f")->type == asvJSONValue::NULL_VAL);
+		ASSERT(c.fromXML(u8"<ф xsi:nil=\"true\"><x>1</x>text</ф>"));
+		ASSERT(c.getRoot()->get(u8"ф")->type == asvJSONValue::NULL_VAL);
 		// a genuinely unterminated non-ASCII element is still rejected
 		asvJSON d;
-		ASSERT(!d.fromXML(u8"<f xsi:nil=\"true\">hi"));
+		ASSERT(!d.fromXML(u8"<ф xsi:nil=\"true\">hi"));
 		asvJSON e;
-		ASSERT(!e.fromXML(u8"<f xsi:nil=\"true\">hi</x>"));
+		ASSERT(!e.fromXML(u8"<ф xsi:nil=\"true\">hi</x>"));
 		// the pre-existing ASCII nesting behaviour is unchanged
 		asvJSON f;
 		ASSERT(f.fromXML("<x xsi:nil=\"true\"><x attr=\"1\"/></x>"));
