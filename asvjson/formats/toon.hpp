@@ -211,6 +211,19 @@ inline std::string toonLeafVal(const asvJSONValue* v) {
       r += '"';
       return r;
     }
+    case asvJSONValue::CUSTOM_TAG: {
+      // The Extended JSON marker the core parser recognizes ($customTag), so
+      // the tag name and its payload survive a TOON round-trip like the other
+      // special types above. Without it the default branch emitted "null" and
+      // silently dropped both.
+      std::string r = "{\"$customTag\":{\"name\":\"";
+      appendJsonEscaped(r, v->str_data);
+      r += "\",\"value\":";
+      if (v->custom_value) v->custom_value->serialize(r, true);
+      else r += "null";
+      r += "}}";
+      return r;
+    }
     default: return "null";
   }
 }
@@ -240,15 +253,17 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
   bool allPrim = true;
   for (size_t i = 0; i < v->size(); i++) {
     auto* e = v->get(i);
-    // BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP/DATETIME count as non-primitives
-    // even though toonLeafVal renders them: their JSON-object text carries
-    // depth-0 commas (e.g. {"$binary":{...,"subType":".."}}) and the decoder's
-    // cell splitter is quote-aware, not brace-aware, so they cannot live in an
-    // inline row next to a length header without being cut into extra cells.
+    // BINARY/EXTENSION/OBJECTID/REGEX/TIMESTAMP/DATETIME/CUSTOM_TAG count as
+    // non-primitives even though toonLeafVal renders them: their JSON-object
+    // text carries depth-0 commas (e.g. {"$binary":{...,"subType":".."}}) and
+    // the decoder's cell splitter is quote-aware, not brace-aware, so they
+    // cannot live in an inline row next to a length header without being cut
+    // into extra cells.
     if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
                e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
                e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
-               e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME)) { allPrim = false; break; }
+               e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME ||
+               e->type == asvJSONValue::CUSTOM_TAG)) { allPrim = false; break; }
   }
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   std::string head = pad + "- [" + std::to_string(v->size()) + "]:";
@@ -331,7 +346,8 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       if (e && (e->type == asvJSONValue::OBJECT || e->type == asvJSONValue::ARRAY ||
                 e->type == asvJSONValue::BINARY || e->type == asvJSONValue::EXTENSION ||
                 e->type == asvJSONValue::OBJECTID || e->type == asvJSONValue::REGEX ||
-                e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME)) { allPrim = false; break; }
+                e->type == asvJSONValue::TIMESTAMP || e->type == asvJSONValue::DATETIME ||
+                e->type == asvJSONValue::CUSTOM_TAG)) { allPrim = false; break; }
     }
     std::string head = pad + (isRoot ? "" : toonQuoteVal(key)) + "[" + std::to_string(v->size()) + "]:";
     if (allPrim) {

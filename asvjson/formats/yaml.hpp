@@ -347,6 +347,13 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 					size_t eol = v->str_data.find('\n', i);
 					if (eol == std::string_view::npos) eol = v->str_data.size();
 					std::string_view frag(v->str_data.data() + i, eol - i);
+					// A CR (or any other C0 control) inside a block-scalar line
+					// cannot survive: CR is a line break to YAML and \r at the end
+					// of a line made the line look blank, so "x\r\ny" decoded as
+					// "x\n" + an extra blank. Quote such strings (the double-quoted
+					// form escapes them losslessly).
+					for (char cc : frag)
+						if ((static_cast<unsigned char>(cc) < 0x20) && cc != '\t') { needQuote = true; break; }
 					size_t j = 0;
 					while (j < frag.size() && (frag[j] == ' ' || frag[j] == '\t')) j++;
 if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
@@ -523,7 +530,12 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow);
 		}
 	} else {
-		yamlBlockVal(v, out, indent, key, isArrayItem, o, false);
+		// The fallback handles scalars (including root ones) and empty
+		// collections. A root scalar has an empty key and !isArrayItem, which
+		// is also the shape of an empty-key object member: isRoot keeps the
+		// root value bare instead of wrapping it into "'': value".
+		yamlBlockVal(v, out, indent, key, isArrayItem, o, false,
+		             indent == 0 && key.empty() && !isArrayItem);
 	}
 }
 
@@ -3028,6 +3040,45 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			}
 			return got;
 		}
+	}
+
+	// A root-level block scalar ("|" / ">" with optional indent/chomp
+	// indicators) is a scalar document: parse it directly, then reject any
+	// trailing content outside it instead of silently ignoring it.
+	{
+		std::string_view fc = stripIndent(lines[firstLine]);
+		if (!fc.empty() && (fc[0] == '|' || fc[0] == '>')) {
+			size_t bLi = firstLine;
+			std::string got = yamlParseBlockScalar(std::string(fc), lines, bLi, fc[0] == '>', -1);
+			for (size_t t = bLi + 1; t < lines.size(); t++) {
+				std::string_view tc = stripIndent(lines[t]);
+				if (tc.empty() || tc[0] == '#') continue;
+				throw asvJSONError("YAML: unexpected content after block scalar");
+			}
+			return yamlQuoteJsonScalar(got);
+		}
+	}
+
+	// A whole document that is a plain/quoted scalar (no mapping separator, no
+	// sequence dash, no flow collection, tag, anchor, or block-scalar header)
+	// is a root scalar. yamlScalarDocValue already implements the YAML plain
+	// scalar folding rules (a single line break becomes a space, each blank
+	// line becomes "\n"), and the JSON layer accepts a top-level scalar. The
+	// old flow fell through to the object branch, opened '{', and rejected the
+	// document with "Expected ':'", so a `toYAML()` round-trip of a root STRING
+	// / INT / BOOL could not be read back.
+	{
+		std::string raw;
+		for (size_t t = firstLine; t < lines.size(); t++) {
+			std::string_view c = stripIndent(lines[t]);
+			c = yamlStripComment(c);
+			while (!c.empty() && (c.back() == ' ' || c.back() == '\t' || c.back() == '\r')) c.remove_suffix(1);
+			if (t > firstLine) raw += '\n';
+			raw.append(c);
+		}
+		bool isScalar = false;
+		std::string sv = yamlScalarDocValue(raw, isScalar);
+		if (isScalar) return sv;
 	}
 
 	bool rootIsArr = false;

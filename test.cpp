@@ -7788,8 +7788,9 @@ TEST(testFromYAML) {
 	// Colon without space is a plain scalar, not a mapping: "a:b" is not "a: b"
 	{
 		asvJSON json;
-		ASSERT(!json.fromYAML("a:b"));
-		ASSERT(std::string(json.lastError).find("Expected ':'") != std::string::npos);
+		ASSERT(json.fromYAML("a:b"));
+		ASSERT(json.getRoot() && json.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(json.getRoot()->getString()), "a:b");
 	}
 	// ": value" with no key
 	{
@@ -12745,6 +12746,17 @@ TEST(testProtobufTextFormat) {
 	ASSERT_EQ(std::string(json2.getString("name")), "test");
 	ASSERT_EQ(json2.getInt("count"), 42);
 	ASSERT_EQ(json2.getBool("flag"), true);
+	// A quoted root scalar whose text contains ']' followed by ':' must stay a
+	// scalar: the implicit-object probe used to scan past the opening quote,
+	// find "]:", and reject the document with "protobuf text: no value".
+	for (const char* doc : {R"("[]:")", R"("x]:")", R"("a[b]:c")"}) {
+		asvJSON j;
+		ASSERT(j.parse(doc));
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(j.toProtobufText()));
+		ASSERT(j2.getRoot() && j2.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getRoot()->getString()), std::string(j.getRoot()->getString()));
+	}
 }
 
 TEST(testProtobufTextIntOverflow) {
@@ -17007,6 +17019,25 @@ TEST(testTOONSpecialTypes) {
     ASSERT(bin3 != nullptr && bin3->type == asvJSONValue::BINARY);
     ASSERT_EQ(bin3->bin_data.size(), size_t(3));
     ASSERT_EQ(bin3->bin_data[2], 0x03);
+  }
+  // CUSTOM_TAG previously fell into the leaf default and serialized as null,
+  // dropping the tag name and payload. It now rides the $customTag marker.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    auto ct = std::make_unique<asvJSONValue>();
+    ct->type = asvJSONValue::CUSTOM_TAG;
+    ct->str_data = "mytag";
+    ct->custom_value = asvJSONValue::makeString("payload", 7);
+    j.getRoot()->obj->emplace("ct", std::move(ct));
+    std::string s = j.toTOON();
+    asvJSON j2;
+    ASSERT(j2.fromTOON(std::string_view(s)));
+    auto* ct2 = j2.getRoot()->getConst("ct");
+    ASSERT(ct2 != nullptr && ct2->type == asvJSONValue::CUSTOM_TAG);
+    ASSERT_EQ(std::string_view(ct2->str_data), std::string_view("mytag"));
+    ASSERT(ct2->custom_value != nullptr && ct2->custom_value->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(ct2->custom_value->getString()), "payload");
   }
   // A value-only regex with empty options still round-trips.
   {
@@ -34810,20 +34841,85 @@ TEST(testRootScalarEdgeRoundtrip) {
 		ASSERT(y.find("'':") == std::string::npos);
 		ASSERT(y.find("\"\":") == std::string::npos);
 		ASSERT(y.find("abc") != std::string::npos);
+		asvJSON jb;
+		ASSERT(jb.fromYAML(y));
+		ASSERT(jb.getRoot() && jb.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(jb.getRoot()->getString()), "abc");
 		asvJSON e;
 		ASSERT(e.parse(R"("")"));
 		y = e.toYAML();
 		ASSERT(y.find("'':") == std::string::npos);
 		ASSERT(y.find("\"\":") == std::string::npos);
+		asvJSON eb;
+		ASSERT(eb.fromYAML(y));
+		ASSERT(eb.getRoot() && eb.getRoot()->type == asvJSONValue::STRING);
+		ASSERT(eb.getRoot()->str_data.empty());
 		// Document markers as string data must be quoted.
 		asvJSON m;
 		ASSERT(m.parse(R"("---")"));
 		y = m.toYAML();
 		ASSERT(y.find("'---'") != std::string::npos || y.find("\"---\"") != std::string::npos);
+		asvJSON mb;
+		ASSERT(mb.fromYAML(y));
+		ASSERT(mb.getRoot() && mb.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(mb.getRoot()->getString()), "---");
 		asvJSON m2;
 		ASSERT(m2.parse(R"("...")"));
 		y = m2.toYAML();
 		ASSERT(y.find("'...'") != std::string::npos || y.find("\"...\"") != std::string::npos);
+		asvJSON m2b;
+		ASSERT(m2b.fromYAML(y));
+		ASSERT(m2b.getRoot() && m2b.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(m2b.getRoot()->getString()), "...");
+		// A root block scalar (multiline string) and the lone indicators "-"
+		// and "?" are scalar documents too.
+		asvJSON ml;
+		ASSERT(ml.parse(R"("a\nb")"));
+		y = ml.toYAML();
+		asvJSON mlb;
+		ASSERT(mlb.fromYAML(y));
+		ASSERT(mlb.getRoot() && mlb.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(mlb.getRoot()->getString()), "a\nb");
+		asvJSON par;
+		ASSERT(par.parse(R"("a\n\nb")"));
+		y = par.toYAML();
+		asvJSON parb;
+		ASSERT(parb.fromYAML(y));
+		ASSERT(parb.getRoot() && parb.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(parb.getRoot()->getString()), "a\n\nb");
+		for (const char* lit : {R"("-")", R"("?")"}) {
+			asvJSON j;
+			ASSERT(j.parse(lit));
+			y = j.toYAML();
+			asvJSON jb;
+			ASSERT(jb.fromYAML(y));
+			ASSERT(jb.getRoot() && jb.getRoot()->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(jb.getRoot()->getString()), std::string(1, lit[1]));
+		}
+		// A CR inside a multiline string must not be emitted raw in a block
+		// scalar (YAML reads CR as a line break, so "x\r\ny" came back as "x\n").
+		asvJSON cr;
+		ASSERT(cr.parse(R"({"s":"x\r\ny"})"));
+		y = cr.toYAML();
+		asvJSON crb;
+		ASSERT(crb.fromYAML(y));
+		const asvJSONValue* crv = crb.getRoot()->getConst("s");
+		ASSERT(crv && crv->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(crv->getString()), "x\r\ny");
+		// Scalar roots of other types and multi-document scalar streams.
+		asvJSON num;
+		ASSERT(num.parse("42"));
+		y = num.toYAML();
+		asvJSON numb;
+		ASSERT(numb.fromYAML(y));
+		ASSERT(numb.getRoot() && numb.getRoot()->type == asvJSONValue::INT);
+		ASSERT_EQ(numb.getRoot()->num, int64_t(42));
+		asvJSON md;
+		ASSERT(md.fromYAML("a\n---\nb\n"));
+		ASSERT(md.getRoot() && md.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(md.getRoot()->arr->size(), size_t(2));
+		ASSERT_EQ(std::string(md.getRoot()->arr->at(0)->getString()), "a");
+		ASSERT_EQ(std::string(md.getRoot()->arr->at(1)->getString()), "b");
 	}
 	// GOON / TOON: a root scalar of just TAB was emitted raw, stripped as
 	// whitespace and rejected (GOON) or lost (TOON).
@@ -34838,6 +34934,20 @@ TEST(testRootScalarEdgeRoundtrip) {
 		ASSERT(t.fromTOON(j.toTOON()));
 		ASSERT(t.getRoot() && t.getRoot()->type == asvJSONValue::STRING);
 		ASSERT_EQ(t.getRoot()->str_data, std::string("\t"));
+	}
+	// GOON: a root string starting with a CLOSING bracket was emitted bare and
+	// rejected ("unrecognized line ... in object context").
+	{
+		for (const char* doc : {R"("}")", R"("]")"}) {
+			asvJSON j;
+			ASSERT(j.parse(doc));
+			std::string g = j.toGOON();
+			ASSERT(g.find('"') != std::string::npos);
+			asvJSON j2;
+			ASSERT(j2.fromGOON(g));
+			ASSERT(j2.getRoot() && j2.getRoot()->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(j2.getRoot()->getString()), std::string(1, doc[1]));
+		}
 	}
 	// TOON: the root inline-array form with a TAB element ("[1]: <tab>")
 	// reported "array length mismatch (declared 1, got 0)".

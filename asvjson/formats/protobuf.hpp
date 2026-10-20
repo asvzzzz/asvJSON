@@ -1583,6 +1583,12 @@ inline std::string asvJSON::toProtobufText() const {
 // honours the '\' escape the writer uses inside a name, so a ']' in the name
 // itself does not end it.
 inline bool protoTextIsBracketedName(const std::string& text, size_t pos) {
+  // Only a real '[' at pos can open a name. The callers also probe a scalar
+  // root, where pos may sit on a quote: the old scan started at pos+1 and
+  // happily found a ']' + ':' INSIDE the quoted text, so the root string
+  // "[]:" (or "x]:") was misread as an implicit message and rejected with
+  // "protobuf text: no value".
+  if (pos >= text.size() || text[pos] != '[') return false;
   size_t i = pos + 1;
   while (i < text.size()) {
     // A quoted token is an array element, never an extension name ("[]:",

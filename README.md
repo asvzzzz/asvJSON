@@ -601,6 +601,7 @@ YAML parsing details:
 - **Escapes** - `\uXXXX` combines surrogate pairs into the astral code point; an unpaired surrogate becomes U+FFFD (it has no UTF-8 form), and an unknown escape such as `\uZZZZ` is kept verbatim.
 - **Comments** - a comment may follow a single-line flow collection (`{a: 1} # c`, also as a mapping value or a `!!set` value), and comment paths are length-prefixed, so a key holding any byte (e.g. U+001F) keeps its comment. At most one trailing comment is re-emitted, inline, and only when it is a single-line one; a multi-line block trailing comment has no inline form and is dropped. Errors inside an anchored or embedded block report a line number relative to that block.
 - **Multi-line strings with `#`** - a `'#'`-leading line is content in a block scalar (the `'#'` only starts a comment below the content indent), so such strings use `|` instead of being quoted.
+- **Root scalars** - a document that is a plain or quoted scalar, a multi-line folded plain scalar, or a root block scalar (`|`/`>`) decodes as that scalar. The encoder emits a root scalar bare (no `'': value` wrapper in either style) and quotes the lone `-`/`?` indicators and the `---`/`...` markers so string data cannot turn into a sequence or document boundary.
 
 `toYAML()` also accepts a `YamlWriteOptions` struct for fine-grained control:
 ```cpp
@@ -761,6 +762,8 @@ has no unquoted separator and is reported as an `unrecognized line` -  a
 hand-written quoted scalar like `"a:b"` must appear as a value (e.g. `k: "a:b"`)
 or as the whole document. (An *unterminated* quoted token, e.g. the escaped-quote
 key `"a\"` of `"a\": 1`, still falls back to the raw `:` so it keeps parsing.)
+
+Special types ride the Extended JSON markers the core JSON parser recognizes, so BINARY, EXTENSION, OBJECTID, REGEX, TIMESTAMP, DATETIME and CUSTOM_TAG round-trip through `toTOON()`/`fromTOON()` (a CUSTOM_TAG keeps both its name and its payload via `{"$customTag":{"name":...,"value":...}}`).
 
 ### TRON
 

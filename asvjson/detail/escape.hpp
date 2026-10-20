@@ -87,6 +87,10 @@ inline bool yamlNeedsQuotes(std::string_view s) {
 	// line is a stream boundary, not a string (a root STRING with that text
 	// decoded as an empty document / null).
 	if (s == "---" || s == "...") return true;
+	// A lone dash / question mark is a sequence / explicit-key indicator at
+	// the start of a line, so it must be quoted (a root STRING "-" was emitted
+	// bare and decoded as an empty sequence; "?" as an empty key).
+	if (s == "-" || s == "?") return true;
 	if (s == "~" || s == ".nan" || s == ".NaN" || s == ".NAN" ||
 		s == ".inf" || s == ".Inf" || s == ".INF" || s == "+.inf" || s == "-.inf" ||
 		s == "Infinity" || s == "+Infinity" || s == "-Infinity" || s == "NaN")
