@@ -300,7 +300,10 @@ inline bool goonNeedsQuotes(const std::string& s) {
   if (s.front() == '$' || s.front() == '#' || s.front() == '^' || (s.front() >= '0' && s.front() <= '9') || s.front() == '-')
     return true;
   if (s.front() == '+' && s.size() > 1 && s[1] >= '0' && s[1] <= '9') return true;
-  if (s.front() == '{' || s.front() == '[') return true;
+  // A leading closing bracket is just as ambiguous at the root: a bare "}"
+  // line is rejected as "unrecognized line ... in object context" and "]" is
+  // read as a flow-collection closer. Quote both, like their openers.
+  if (s.front() == '{' || s.front() == '[' || s.front() == '}' || s.front() == ']') return true;
   if (s.size() >= 2 && s[0] == '_' && s[1] == '_') return true;
   if (s == "T" || s == "F" || s == "_" || s == "~" || s == "true" || s == "false" || s == "null")
     return true;
