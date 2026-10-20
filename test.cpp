@@ -7330,6 +7330,20 @@ TEST(testToYAML) {
 		ASSERT_EQ(v->getStringLen(), 6);
 		ASSERT_EQ(static_cast<unsigned char>(v->getString()[4]), (unsigned char)0x01);
 	}
+	// Flow/Auto style must escape control characters: a raw control byte in a
+	// key (or value) produced "{<0x01>: v}", which the parser rejected with
+	// "Control character in string". Block style masked this by re-escaping
+	// the key while building the intermediate JSON.
+	{
+		asvJSON json;
+		json.putString(std::string("\x01", 1), "v\x02x");
+		std::string yml = json.toYAML(false);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		auto* v = j2.getRoot()->get(std::string_view("\x01", 1));
+		ASSERT(v != nullptr);
+		ASSERT_EQ(std::string(v->getString()), std::string("v\x02x"));
+	}
 }
 
 TEST(testFromYAML) {
@@ -13009,6 +13023,20 @@ TEST(testProtobufTextArrayRootAndNulls) {
 		ASSERT(r->arr->at(0)->num == 1 && r->arr->at(1)->num == 2 && r->arr->at(2)->num == 3);
 		// Re-serializing the parsed value must reproduce the same text.
 		ASSERT_EQ(j2.toProtobufText(), text);
+	}
+	// A quoted element containing ']' followed by ':' must not be mistaken for
+	// a bracketed extension field name: ["[]:"] used to decode as the object
+	// {"\"[": "]"}.
+	{
+		asvJSON j;
+		j.parse(std::string(R"(["[]:"])"));
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		ASSERT(j2.fromProtobufText(text));
+		auto* r = j2.getRoot();
+		ASSERT(r != nullptr && r->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(r->arr->size(), size_t(1));
+		ASSERT_EQ(std::string(r->arr->at(0)->getString()), std::string("[]:"));
 	}
 	// Array of messages as a root, and the empty array.
 	{
@@ -25905,6 +25933,19 @@ TEST(testADERoundTrip) {
     ASSERT(arr != nullptr && arr->type == asvJSONValue::ARRAY);
     ASSERT_EQ(arr->arr->size(), size_t(3));
     ASSERT_EQ(std::string(j2.getString("words")), "two words");
+  }
+  // Empty-string key round-trip: toADE() writes `"": v`, which the root
+  // parser used to reject with "expected key" (nested objects already
+  // accepted it).
+  {
+    asvJSON j;
+    j.setValue("", asvJSONValue::makeString("v", 1));
+    std::string ude = j.toADE();
+    asvJSON j2;
+    ASSERT(j2.fromADE(ude));
+    auto* ev = j2.getRoot()->get("");
+    ASSERT(ev != nullptr && ev->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(ev->getString()), "v");
   }
   // Binary round-trip
   {
