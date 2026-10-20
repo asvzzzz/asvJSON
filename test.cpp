@@ -34646,6 +34646,27 @@ TEST(testTronCommentWithCR) {
 		bool ok = j.fromTRON(std::string_view("#comment\rcode\nnull"));
 		ASSERT(!ok); // "code" is unexpected here — parser rejects cleanly
 	}
+	// Bare-root __REGEX__ with a pipe is rejected at the lexer level (| is a TRON
+	// syntax char); only JSON-embedded marker forms decode as REGEX. This is a
+	// documented limitation, not a bug — the encoder never emits bare-root markers.
+	{
+		asvJSON j;
+		// The pipe in __REGEX__abc|def is treated as TRON syntax, not as a marker
+		// separator, because the document root does not enter the marker path.
+		bool ok = j.fromTRON(std::string_view("__REGEX__abc|def\n"));
+		ASSERT(!ok); // "TRON: unexpected character: '|'" — by design
+	}
+	{
+		asvJSON j;
+		// JSON-embedded form works: the string value goes through tronUnescape which
+		// recognizes the __REGEX__ prefix and restores the REGEX type.
+		bool ok = j.fromTRON(std::string_view("{\"re\":\"__REGEX__abc|def|\"}\n"));
+		ASSERT(ok);
+		auto* re = j.getRoot()->getConst("re");
+		ASSERT(re != nullptr && re->type == asvJSONValue::REGEX);
+		ASSERT_EQ(j.getRegexPattern("re"), std::string("abc"));
+		ASSERT_EQ(j.getRegexOptions("re"), std::string("def"));
+	}
 }
 
 // Review fix: TRON off-by-one in MAX_OBJECT_SIZE / MAX_ARRAY_SIZE check.

@@ -36,6 +36,14 @@
 // Decoder diagnostics are prefixed "TRON: " and carry no line number (unlike the
 // JSON/INI/TOML parsers): the lexer tokenizes the whole document before parsing,
 // so positions are not tracked through to the error sites.
+//
+// Known limitation: bare-root REGEX markers (`__REGEX__pattern|opts`) are NOT
+// accepted at the document root — `|` is a TRON syntax character there and the
+// lexer rejects it before the marker handler runs. The encoder never emits such
+// a form (it wraps REGEX values in a JSON object key), so this is not a round-trip
+// gap. Hand-written documents that use this spelling will fail with
+// "TRON: unexpected character: '|''; the supported external-marker form is the
+// JSON-embedded one: `{"re":"__REGEX__pattern|opts|"}`.
 
 #include "../core.hpp"
 
