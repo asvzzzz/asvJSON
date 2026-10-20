@@ -27961,6 +27961,16 @@ TEST(testFromAnyAndFormatType) {
 		ASSERT(doc.fromAny("(root (a 1))"));
 		ASSERT(doc.getFormatType() == FormatType::SExpr);
 	}
+	// A mid-line '[' (TOON/GOON length headers) is not an INI section header:
+	// "c[2]:" used to trip the INI-without-'=' branch, flattening the document
+	// and losing the nested value before YAML/TOON/GOON were even tried.
+	{
+		asvJSON doc;
+		ASSERT(doc.fromAny("c[2]: 1,2\nd:\n  e: true\n"));
+		ASSERT(doc.getFormatType() != FormatType::INI);
+		ASSERT(doc.getNested("d.e") != nullptr);
+		ASSERT(doc.getRoot()->get("d")->type == asvJSONValue::OBJECT);
+	}
 	{
 		asvJSON doc;
 		ASSERT(doc.fromAny("{a: 1}"));
