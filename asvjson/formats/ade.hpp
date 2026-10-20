@@ -1934,6 +1934,10 @@ inline bool adeStringNeedsQuote(std::string_view s, bool strict) {
       lower == ".nan" || lower == "-.nan" ||
       lower == ".inf" || lower == "-.inf" || lower == ".infinity" || lower == "-.infinity") return true;
   if (adeTryParseNumber(std::string(s))) return true;
+  // A bare "---" / "..." line is a YAML-style document start/end marker and is
+  // skipped by the decoder, so a root string with that text would decode as an
+  // empty document. Quote it.
+  if (s == "---" || s == "...") return true;
   // Strings starting with comment prefixes would be misinterpreted as comments
   // by the parser (skipWsAndComments runs before parseValue).
   if (s.size() >= 2 && s[0] == '/' && (s[1] == '/' || s[1] == '*')) return true;

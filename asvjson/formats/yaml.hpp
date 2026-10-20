@@ -57,7 +57,8 @@ inline constexpr size_t MAX_YAML_DEPTH = 64;
 
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc);
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc,
+                         bool isRoot = false);
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow);
 
@@ -116,7 +117,7 @@ inline void asvJSONValue::toYAML(std::string& out, const YamlWriteOptions& opts)
 	switch (opts.style) {
 		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, 0, "", false, opts, false); break;
 		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, 0, "", false, opts, true); break;
-		default: yamlBlockVal(this, out, 0, "", false, opts, true);
+		default: yamlBlockVal(this, out, 0, "", false, opts, true, true);
 	}
 }
 
@@ -126,7 +127,8 @@ inline void asvJSONValue::toYAML(std::string& out, int indent, const std::string
 	switch (o.style) {
 		case YamlWriteOptions::Style::Auto: yamlFlowVal(this, out, indent, key, isArrayItem, o, false); break;
 		case YamlWriteOptions::Style::Flow: yamlFlowVal(this, out, indent, key, isArrayItem, o, true); break;
-		default: yamlBlockVal(this, out, indent, key, isArrayItem, o, true);
+		default: yamlBlockVal(this, out, indent, key, isArrayItem, o, true,
+		                      indent == 0 && key.empty() && !isArrayItem);
 	}
 }
 
@@ -264,12 +266,18 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 
 // Emit a value in block style at the given indent.
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
-                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc) {
+                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc,
+                         bool isRoot) {
 	using T = asvJSONValue::Type;
 	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
-		if (!key.empty() || !isArrayItem) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
+		// An empty OBJECT key needs the quoted "'': " form, but the ROOT scalar
+		// call also has an empty key and must stay a bare scalar: emitting
+		// "'': value" wrapped it into an object with an empty key on reparse.
+		// isRoot separates the two (a root object's members are emitted at the
+		// same indent, so indent alone cannot).
+		if (!key.empty() || (!isArrayItem && !isRoot)) return std::string(indent * iw, ' ') + yamlKeyOpt(key, o) + ": ";
 		return "";
 	};
 

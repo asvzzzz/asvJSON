@@ -34797,6 +34797,74 @@ TEST(testGoonISODateNotQuoted) {
 	}
 }
 
+// Root-scalar edge cases: YAML must not wrap a root scalar in an empty-key
+// mapping, GOON/TOON must quote control chars, and ADE must quote the
+// document markers "---" / "..." so a root string with that text survives.
+TEST(testRootScalarEdgeRoundtrip) {
+	// YAML: a bare root scalar stays bare (a nested EMPTY key still emits
+	// "'': v" -- covered by the existing empty-key round-trip test).
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"("abc")"));
+		std::string y = j.toYAML();
+		ASSERT(y.find("'':") == std::string::npos);
+		ASSERT(y.find("\"\":") == std::string::npos);
+		ASSERT(y.find("abc") != std::string::npos);
+		asvJSON e;
+		ASSERT(e.parse(R"("")"));
+		y = e.toYAML();
+		ASSERT(y.find("'':") == std::string::npos);
+		ASSERT(y.find("\"\":") == std::string::npos);
+		// Document markers as string data must be quoted.
+		asvJSON m;
+		ASSERT(m.parse(R"("---")"));
+		y = m.toYAML();
+		ASSERT(y.find("'---'") != std::string::npos || y.find("\"---\"") != std::string::npos);
+		asvJSON m2;
+		ASSERT(m2.parse(R"("...")"));
+		y = m2.toYAML();
+		ASSERT(y.find("'...'") != std::string::npos || y.find("\"...\"") != std::string::npos);
+	}
+	// GOON / TOON: a root scalar of just TAB was emitted raw, stripped as
+	// whitespace and rejected (GOON) or lost (TOON).
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"("\t")"));
+		asvJSON g;
+		ASSERT(g.fromGOON(j.toGOON()));
+		ASSERT(g.getRoot() && g.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(g.getRoot()->str_data, std::string("\t"));
+		asvJSON t;
+		ASSERT(t.fromTOON(j.toTOON()));
+		ASSERT(t.getRoot() && t.getRoot()->type == asvJSONValue::STRING);
+		ASSERT_EQ(t.getRoot()->str_data, std::string("\t"));
+	}
+	// TOON: the root inline-array form with a TAB element ("[1]: <tab>")
+	// reported "array length mismatch (declared 1, got 0)".
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"(["\t"])"));
+		asvJSON t;
+		ASSERT(t.fromTOON(j.toTOON()));
+		ASSERT(t.getRoot() && t.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(t.getRoot()->arr->size(), size_t(1));
+		ASSERT_EQ(t.getRoot()->arr->at(0)->str_data, std::string("\t"));
+	}
+	// ADE: bare "---" and "..." lines are document markers, so a root string
+	// with that text must be quoted.
+	{
+		const char* markers[] = {"---", "..."};
+		for (const char* m : markers) {
+			asvJSON j;
+			ASSERT(j.parse(std::string("\"") + m + "\""));
+			asvJSON a;
+			ASSERT(a.fromADE(j.toADE()));
+			ASSERT(a.getRoot() && a.getRoot()->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(a.getRoot()->getString()), std::string(m));
+		}
+	}
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -35442,6 +35510,7 @@ RUN(testYamlAuditReview);
 	RUN(testYamlFlowSeqNoProgress);
 	RUN(testYamlTrailingBackslashQuote);
 	RUN(testGoonTronNullRoundtrip);
+	RUN(testRootScalarEdgeRoundtrip);
 	RUN(testYamlRegexControlChar);
 	RUN(testYamlCustomTagControlChar);
 	RUN(testProtobufEmptyLastError);
