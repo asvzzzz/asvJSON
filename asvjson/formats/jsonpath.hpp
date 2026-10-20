@@ -1177,7 +1177,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
           lex.next();
           Tok stepTok = lex.peek();
           if (stepTok.type == TokType::NUMBER) {
-            if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) { out.resize(before); return; }
+            if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step)) { out.resize(before); return; }
             lex.next();
           }
         }
@@ -1226,7 +1226,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
         lex.next();
         Tok stepTok = lex.peek();
         if (stepTok.type == TokType::NUMBER) {
-          if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step) || step == 0) { out.resize(before); return; }
+          if (!stepTok.ok || !jpParseIntStrict(stepTok.val, step)) { out.resize(before); return; }
           lex.next();
         }
       }
@@ -1458,7 +1458,7 @@ inline PathResult jpQuery(const asvJSONValue* root, std::string_view path) {
 // ---------------------------------------------------------------------------
 // Strict path validation (isValidPath). Fully consumes the token stream and
 // enforces well-formedness (grammar, balanced parens/brackets) plus the semantic
-// requirements of RFC 9535 (I-JSON range for indices/steps, step != 0, valid
+// requirements of RFC 9535 (I-JSON range for indices/steps, valid
 // filter/function-argument syntax).
 // ---------------------------------------------------------------------------
 
@@ -1707,7 +1707,7 @@ inline bool jpValidateBracketContent(PathLexer& lex) {
         if (lex.peek().type == TokType::COLON) {
           lex.next();
           if (lex.peek().type == TokType::NUMBER) {
-            if (!lex.peek().ok || !jpParseIntStrict(lex.peek().val, v) || v == 0) return false;
+            if (!lex.peek().ok || !jpParseIntStrict(lex.peek().val, v)) return false;
             lex.next();
           } else if (lex.peek().type != TokType::RBRACKET &&
                      lex.peek().type != TokType::COMMA) {
@@ -1735,7 +1735,7 @@ inline bool jpValidateBracketContent(PathLexer& lex) {
         lex.next();
         if (lex.peek().type == TokType::NUMBER) {
           int64_t v;
-          if (!lex.peek().ok || !jpParseIntStrict(lex.peek().val, v) || v == 0) return false;
+          if (!lex.peek().ok || !jpParseIntStrict(lex.peek().val, v)) return false;
           lex.next();
         } else if (lex.peek().type != TokType::RBRACKET &&
                    lex.peek().type != TokType::COMMA) {

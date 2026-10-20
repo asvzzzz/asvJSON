@@ -29354,6 +29354,12 @@ TEST(testJSONPathExtras) {
 		ASSERT_EQ(doc.query("$[-]").size(), size_t(0));
 		ASSERT_EQ(doc.query("$[1.5]").size(), size_t(0));
 		ASSERT_EQ(doc.query("$[0:3:0]").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[::0]").size(), size_t(0));
+		// A step of 0 is valid RFC grammar and selects nothing; the selector
+		// list must still continue (the old parser discarded the whole bracket).
+		auto step0 = doc.query("$[0:3:0,2]");
+		ASSERT_EQ(step0.size(), size_t(1));
+		ASSERT_EQ(step0[0]->num, int64_t(3));
 		ASSERT_EQ(doc.query("$[99999999999999999999999999]").size(), size_t(0));
 		ASSERT_EQ(doc.query(R"($["\z"])").size(), size_t(0));
 	}
@@ -29375,7 +29381,7 @@ TEST(testJSONPathExtras) {
 		auto r2 = doc.query("$.a.missing.length()");
 		ASSERT_EQ(r2.size(), size_t(0)); // selecting the length of a non-existent property yields nothing, not 0
 	}
-	// -- isValidPath is strict (RFC 9535 grammar + I-JSON ranges + step != 0) --
+	// -- isValidPath is strict (RFC 9535 grammar + I-JSON ranges) --
 	{
 		ASSERT(asvJSON::isValidPath("$"));
 		ASSERT(asvJSON::isValidPath("$.a.b[0]['c']"));
@@ -29385,13 +29391,14 @@ TEST(testJSONPathExtras) {
 		ASSERT(asvJSON::isValidPath("$[-1]"));
 		ASSERT(asvJSON::isValidPath("$[0:1]"));
 		ASSERT(asvJSON::isValidPath("$[::2]"));
+		ASSERT(asvJSON::isValidPath("$[0:3:0]"));
 		ASSERT(asvJSON::isValidPath("$[?(@.a.length() > 1)]"));
 		ASSERT(asvJSON::isValidPath("$[?(match(@.a, 'x'))]"));
 		ASSERT(asvJSON::isValidPath("$[?(@.a == 1 && @.b)]"));
 		ASSERT(!asvJSON::isValidPath("$[-]"));
 		ASSERT(!asvJSON::isValidPath("$[1.5]"));
 		ASSERT(!asvJSON::isValidPath("$[01]"));
-		ASSERT(!asvJSON::isValidPath("$[0:3:0]"));
+		ASSERT(!asvJSON::isValidPath("$[0:3:01]"));
 		ASSERT(!asvJSON::isValidPath(R"($['ab])"));
 		ASSERT(!asvJSON::isValidPath("$[99999999999999999999999999]"));
 		ASSERT(!asvJSON::isValidPath("$[?(@.a == )]"));
