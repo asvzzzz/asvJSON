@@ -15,6 +15,14 @@
 // {"$customTag":{"name":...,"value":...}} that the core parser recognizes --
 // the tag name and payload both survive instead of degrading to null.
 //
+// DATETIME round-trip limitation: DATETIME values serialize as ISO-8601 strings
+// (e.g. "2024-01-01T12:00:00Z"), which the core JSON parser auto-detects and
+// re-parses as DATETIME on read -- so a STRING that happens to hold an ISO-8601
+// text cannot be round-tripped as STRING; it will decode back as DATETIME. The
+// encoder does NOT special-case these strings (unquoted or quoted), because the
+// decoder sees the same token either way and re-interprets it. This is a known
+// lossy boundary, not a bug in the encoder.
+//
 // Number grammar: a leading '+' is not part of a number, so hand-written
 // "+5" / "+Infinity" / "+NaN" are plain STRINGS (the encoder quotes such
 // strings too). A sign inside an exponent ("1e+5") is accepted.
@@ -292,14 +300,6 @@ inline bool goonNeedsQuotes(const std::string& s) {
   if (s == "T" || s == "F" || s == "_" || s == "~" || s == "true" || s == "false" || s == "null")
     return true;
   if (s == "NaN" || s == "Infinity" || s == "-Infinity") return true;
-  // An ISO-8601 shaped string would be re-interpreted as DATETIME by the core
-  // JSON parser on read, losing the original STRING type. Quote it so the
-  // decoder sees a plain quoted string and keeps it as STRING. Mirrors
-  // tronLooksLikeDateTime + tryParseDateTime shape check.
-  if (s.size() >= 20 && s[4] == '-' && s[7] == '-' && s[10] == 'T') {
-    time_t ts = 0; int ms = 0, tz = 0;
-    if (tryParseDateTime(std::string_view(s.data(), s.size()), ts, &ms, &tz)) return true;
-  }
   return false;
 }
 
@@ -1131,7 +1131,10 @@ inline std::string goonToJson(std::string_view input) {
     // encoder now quotes) stays a string instead of becoming a timestamp.
     if (s.size() >= 1 && s.front() != '"') {
       std::string_view unquoted = s;
-      if (unquoted.substr(0, 6) == "__TS__") {
+      // Length-checked compare: string_view::compare() throws std::out_of_range
+      // when pos > size(), so a short token must be filtered out by an explicit
+      // size test rather than by letting compare() clip it. Matches goonIsSpecialMarker().
+      if (unquoted.size() >= 6 && unquoted.compare(0, 6, "__TS__") == 0) {
         // Require a numeric payload. A bare `__TS__` has none, and interpolating
         // nothing produced `{"$timestamp":{"t":}}` -- invalid JSON that the JSON
         // layer then rejected with a foreign "Unexpected: }" message. Fall through
@@ -1140,13 +1143,13 @@ inline std::string goonToJson(std::string_view input) {
         if (goonAllIntDigits(tsd))
           return "{\"$timestamp\":{\"t\":" + std::string(tsd) + "}}";
       }
-      if (unquoted.substr(0, 7) == "__OID__") {
+      if (unquoted.size() >= 7 && unquoted.compare(0, 7, "__OID__") == 0) {
         return "{\"$oid\":\"" + std::string(unquoted.substr(7)) + "\"}";
       }
-      if (unquoted.substr(0, 10) == "__BASE64__") {
+      if (unquoted.size() >= 10 && unquoted.compare(0, 10, "__BASE64__") == 0) {
         return "{\"$binary\":{\"base64\":\"" + std::string(unquoted.substr(10)) + "\",\"subType\":\"00\"}}";
       }
-      if (unquoted.substr(0, 9) == "__REGEX__") {
+      if (unquoted.size() >= 9 && unquoted.compare(0, 9, "__REGEX__") == 0) {
         // The encoder escapes '|', '\', ':', '\n' and '\r' inside the payload,
         // so split at the LAST unescaped '|' and unescape both sides. Because
         // '\' is escaped first, a payload holding a literal backslash-n stays
@@ -1184,7 +1187,7 @@ inline std::string goonToJson(std::string_view input) {
         appendJsonEscaped(optsEsc, opts);
         return "{\"$regex\":\"" + patEsc + "\",\"$options\":\"" + optsEsc + "\"}";
       }
-      if (unquoted.substr(0, 7) == "__EXT__") {
+      if (unquoted.size() >= 7 && unquoted.compare(0, 7, "__EXT__") == 0) {
         std::string rest(unquoted.substr(7));
         size_t us = rest.find('_');
         if (us != std::string::npos) {
@@ -1639,68 +1642,6 @@ inline std::string goonToJson(std::string_view input) {
       }
     }
       }
-    }
-
-    // Plain []: with no fields -> list (rare, but spec allows)
-    if (content.size() >= 2 && content.compare(0, 2, "[]") == 0 && content.find(':') != std::string_view::npos) {
-      size_t colon = content.find(':');
-      addComma(stack, out);
-      if (!stack.empty()) stack.back().first = false;
-      out += '[';
-      stack.push_back({'A', true, indent, true, false});
-      size_t after = colon + 1;
-      while (after < content.size() && content[after] == ' ') after++;
-      if (after < content.size()) {
-        std::string_view rest = content.substr(after);
-        std::vector<std::string> inlineVals;
-        {
-          std::string cur2;
-        bool inQ = false;
-        bool escape = false;
-        for (size_t ci = 0; ci < rest.size(); ci++) {
-          char c2 = rest[ci];
-          if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
-          if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
-          escape = false;
-          if (c2 == ',' && !inQ) {
-            size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
-            size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
-            inlineVals.push_back(cur2.substr(vs, ve - vs));
-            cur2.clear(); continue;
-          }
-          cur2 += c2;
-        }
-          size_t vs = 0; while (vs < cur2.size() && cur2[vs] == ' ') vs++;
-          size_t ve = cur2.size(); while (ve > vs && cur2[ve-1] == ' ') ve--;
-          if (!cur2.empty()) inlineVals.push_back(cur2.substr(vs, ve - vs));
-        }
-        for (auto& v : inlineVals) {
-          if (!stack.empty() && !stack.back().first) out += ',';
-          if (!stack.empty()) stack.back().first = false;
-          out += expandCell(v);
-        }
-      }
-      // Read list items from subsequent lines (with lastRl to prevent double-processing)
-      size_t lastRl = li;
-      for (size_t rl = li + 1; rl < lines.size(); rl++) {
-        auto& rline = lines[rl];
-        if (rline.empty()) continue;
-int rindent = countIndent(rline);
-        if (rindent <= indent) break;
-        std::string_view rcont = stripIndent(rline);
-        if (rcont.size() >= 2 && rcont[0] == '-' && rcont[1] == ' ') {
-          out += ',';
-          out += expandCell(rcont.substr(2));
-          lastRl = rl;
-        } else {
-          // Not a simple "- " item - let outer loop handle it
-          break;
-        }
-      }
-      if (lastRl > li) li = lastRl;
-      out += ']';
-      if (!stack.empty()) stack.pop_back();
-      continue;
     }
 
     // List item: - value

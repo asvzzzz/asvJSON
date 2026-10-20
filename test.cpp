@@ -34680,18 +34680,25 @@ TEST(testGoonKeyWithInteriorQuote) {
 	}
 }
 
-// Review fix: GOON goonNeedsQuotes must quote ISO-8601 shaped strings so the
-// encoder does not emit them bare. The core JSON parser will still auto-detect
-// the shape as DATETIME on re-parse (that is a core-layer behavior, not a GOON
-// bug), but at least the GOON encoder now avoids writing an unquoted ISO date
-// that would be ambiguous between STRING and DATETIME.
-TEST(testGoonISODateQuoted) {
+// Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
+// type-preservation reasons. The core JSON parser auto-detects the shape and
+// re-parses as DATETIME on read, so quoting the string in GOON would not change
+// the decoded type — both quoted and unquoted forms produce DATETIME. Documented
+// in goon.hpp header. Note: an ISO-8601 string containing ':' is still quoted
+// because ':' is a structural separator in GOON (line 293), not because of any
+// ISO-specific logic.
+TEST(testGoonISODateNotQuoted) {
 	{
 		asvJSON j;
 		j.parse(R"({"s":"2024-01-15T10:30:00Z"})");
 		std::string g = j.toGOON();
-		// Encoder must quote the ISO-date string (goonNeedsQuotes returns true).
+		// The ':' in the ISO string forces quoting (GOON structural char), but it is
+		// NOT quoted because goonNeedsQuotes detects an ISO date shape. After parsing
+		// back, the value is DATETIME either way.
 	 ASSERT(g.find("\"2024-01-15T10:30:00Z\"") != std::string::npos);
+		asvJSON j2;
+		j2.fromGOON(g);
+		ASSERT(j2.getRoot()->getConst("s")->type == asvJSONValue::DATETIME);
 	}
 	{
 		// A non-date string must NOT be quoted unnecessarily.
@@ -34699,6 +34706,15 @@ TEST(testGoonISODateQuoted) {
 		j.parse(R"({"s":"hello"})");
 		std::string g = j.toGOON();
 	 ASSERT(g.find("\"hello\"") == std::string::npos || g.find("s: hello") != std::string::npos);
+	}
+	{
+		// An ISO-8601 date-only string starting with a digit IS quoted because
+		// goonNeedsQuotes quotes any string whose first char is a digit (line 295).
+		// This is unrelated to the ISO-shape check we removed.
+		asvJSON j;
+		j.parse(R"({"s":"2024-01-15"})");
+		std::string g = j.toGOON();
+		ASSERT(g.find("\"2024-01-15\"") != std::string::npos);
 	}
 }
 
@@ -35357,7 +35373,7 @@ RUN(testYamlAuditReview);
 	RUN(testTronCommentWithCR);
 	RUN(testTronObjectSizeCheckBeforeAdd);
 	RUN(testGoonKeyWithInteriorQuote);
-	RUN(testGoonISODateQuoted);
+	RUN(testGoonISODateNotQuoted);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
