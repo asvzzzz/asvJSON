@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // asvJSON++ v1.26.11 - C++17 JSON library - Core Module
 // 
 // Configuration:

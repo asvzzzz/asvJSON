@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // CBOR (RFC 8949) serialization/parsing for asvJSON++
 //
 // Timestamp vs DateTime (asvJSON-specific extension of tag 1):

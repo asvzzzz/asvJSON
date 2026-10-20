@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // RON (Rusty Object Notation) serialization/parsing for asvJSON++
 //
 // RON is a configuration/data format with Rust-like syntax (the format used by

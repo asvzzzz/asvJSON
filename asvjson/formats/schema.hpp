@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // JSON Schema validation for asvJSON++
 // Supports draft-07 core validation keywords:
 //   type, const, enum, allOf, anyOf, oneOf, not,

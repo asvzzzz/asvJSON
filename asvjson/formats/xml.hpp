@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // XML serialization/parsing for asvJSON++
 // Namespace prefixes (e.g. xml:lang, xsi:nil) are preserved as part of key strings:
 //   - Attributes become "@prefix:name" keys (e.g. "@xml:lang")

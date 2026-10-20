@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // UBJSON (Universal Binary JSON) serialization/parsing for asvJSON++.
 //
 // Marker set (big-endian for all multi-byte numerics, per ubjson.org):

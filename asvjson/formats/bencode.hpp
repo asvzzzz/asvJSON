@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Bencode serialization/parsing for asvJSON++.
 //
 // Bencode is the BitTorrent encoding (used in .torrent files):
