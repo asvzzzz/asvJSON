@@ -961,9 +961,7 @@ inline bool goonAllIntDigits(std::string_view s) {
 // prefix are unambiguous in practice because goonNeedsQuotes() forces a key
 // starting with "__" to be quoted.
 inline bool goonIsSpecialMarker(std::string_view s) {
-  // Length is checked before each compare: string_view::compare() throws
-  // std::out_of_range when pos > size(), so a short token must be filtered out
-  // by an explicit size test rather than by letting compare() clip it.
+  // Fast path: if the token is shorter than the prefix it cannot match.
   if (s.size() >= 9 && s.compare(0, 9, "__REGEX__") == 0) return true;
   if (s.size() >= 6 && s.compare(0, 6, "__TS__") == 0) return true;
   if (s.size() >= 7 && s.compare(0, 7, "__OID__") == 0) return true;
@@ -1131,9 +1129,7 @@ inline std::string goonToJson(std::string_view input) {
     // encoder now quotes) stays a string instead of becoming a timestamp.
     if (s.size() >= 1 && s.front() != '"') {
       std::string_view unquoted = s;
-      // Length-checked compare: string_view::compare() throws std::out_of_range
-      // when pos > size(), so a short token must be filtered out by an explicit
-      // size test rather than by letting compare() clip it. Matches goonIsSpecialMarker().
+      // Fast path: if the token is shorter than the prefix it cannot match.
       if (unquoted.size() >= 6 && unquoted.compare(0, 6, "__TS__") == 0) {
         // Require a numeric payload. A bare `__TS__` has none, and interpolating
         // nothing produced `{"$timestamp":{"t":}}` -- invalid JSON that the JSON
