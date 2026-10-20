@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // TRON (Token Reduced Object Notation) serialization/parsing for asvJSON++
 //
 // JSON superset that hoists repeated property sets into class definitions:
@@ -38,7 +38,7 @@
 // so positions are not tracked through to the error sites.
 //
 // Known limitation: bare-root REGEX markers (`__REGEX__pattern|opts`) are NOT
-// accepted at the document root — `|` is a TRON syntax character there and the
+// accepted at the document root - `|` is a TRON syntax character there and the
 // lexer rejects it before the marker handler runs. The encoder never emits such
 // a form (it wraps REGEX values in a JSON object key), so this is not a round-trip
 // gap. Hand-written documents that use this spelling will fail with

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // RON (Rusty Object Notation) serialization/parsing for asvJSON++
 //
 // RON is a configuration/data format with Rust-like syntax (the format used by
@@ -59,7 +59,7 @@
 //     accepted here for leniency; the normalized text is what round-trips.
 //   - A bare `]` or `}` at top level without a preceding container is rejected
 //     as unexpected (RON has no bare array/object literal at document root
-//     without a wrapper — this matches the Rust ron crate).
+//     without a wrapper - this matches the Rust ron crate).
 //
 //   Depth: toRON() returns std::string with no error channel, so a tree nested
 //   deeper than MAX_NESTING_DEPTH (reachable via setByPointer, which does not

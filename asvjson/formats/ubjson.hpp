@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // UBJSON (Universal Binary JSON) serialization/parsing for asvJSON++.
 //
 // Marker set (big-endian for all multi-byte numerics, per ubjson.org):
@@ -73,7 +73,7 @@
 // extension explicitly.
 //
 // Limitations:
-//   CUSTOM_TAG -> Z (null) on encode, type identity is lost — UBJSON has no
+//   CUSTOM_TAG -> Z (null) on encode, type identity is lost - UBJSON has no
 //     tag marker and no payload form that preserves a custom name/value pair.
 //     DATETIME -> DOUBLE (fractional seconds survive as double precision, so
 //     about 10 microseconds of resolution, not exact ms); TIMESTAMP -> INT64;
@@ -233,7 +233,7 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
     }
     default:
       // CUSTOM_TAG is the only core type not handled above. UBJSON has no
-      // extension-tag marker, so there is no lossless encoding path — degrade
+      // extension-tag marker, so there is no lossless encoding path - degrade
       // to null (Z) rather than emitting garbage. Documented in the header
       // limitations; callers that need round-trip fidelity should convert to
       // a supported form before calling toUBJSON().

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // JSON Schema validation for asvJSON++
 // Supports draft-07 core validation keywords:
 //   type, const, enum, allOf, anyOf, oneOf, not,
@@ -159,7 +159,7 @@ private:
   // The body of validate(), called from inside its exception fence.
   // An empty document (root == nullptr) is treated as null: it validates against
   // the schema as a null value would. This matches the draft-07 semantics where
-  // an absent instance is equivalent to JSON null — so {"type":"object"} fails
+  // an absent instance is equivalent to JSON null - so {"type":"object"} fails
   // on an empty document, while true-schema or {} succeeds.
   bool validateImpl(const asvJSONValue* value, const asvJSONValue* schema) {
     if (!schema) return true;

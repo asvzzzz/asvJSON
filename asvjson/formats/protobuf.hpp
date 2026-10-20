@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // Protocol Buffers (wire format + text format) for asvJSON++
 // Supports schema-less dynamic encoding (field numbers as keys) and JSON-driven schema.
 //
@@ -1143,7 +1143,7 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
     protoTextSkipWS(text, pos);
     if (pos >= text.size()) return nullptr; // lone sign: not a valid number
     // Signed inf / infinity / nan words, or any alphabetic token after a sign.
-    // "-inf" / "+nan" → double; everything else (e.g. "-abc", "+infx") survives
+    // "-inf" / "+nan" -> double; everything else (e.g. "-abc", "+infx") survives
     // as a raw-number string instead of disappearing as nullptr.
     if (std::isalpha(static_cast<unsigned char>(text[pos])) || text[pos] == '_') {
       std::string w = protoTextParseIdent(text, pos);

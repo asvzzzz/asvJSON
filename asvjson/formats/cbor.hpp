@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // CBOR (RFC 8949) serialization/parsing for asvJSON++
 //
 // Timestamp vs DateTime (asvJSON-specific extension of tag 1):
@@ -15,7 +15,7 @@
 // Documented lossiness (none of it is a decode error -- the value survives, but
 // in a different shape):
 //   - Unassigned simple values (info 0..19) and undefined (info == 23 / 0xF7)
-//     decode to NULL. The encoder never emits these — null is always 0xF6. A
+//     decode to NULL. The encoder never emits these - null is always 0xF6. A
 //     round-trip through an external tool that writes 0xF7 or a simple value
 //     therefore loses identity: the decoder reads null, the encoder re-emits
 //     0xF6. Not a bug, but worth noting for interoperability.
@@ -41,13 +41,13 @@
 //     type 2, deliberately unchecked) for arbitrary byte payloads.
 //
 // NaN / Infinity are encoded natively via float16 (0xFA), float32 (0xF9), and
-// float64 (0xFB) — no allowNaNInfinity flag is needed or used; the encoder
+// float64 (0xFB) - no allowNaNInfinity flag is needed or used; the encoder
 // always emits them, and the decoder always accepts them. This matches CBOR's
 // native capability (RFC 8949 sec 3.4.3).
 //
 // Container sizes (ARRAY/OBJECT) are enforced on encode against MAX_ARRAY_SIZE
 // / MAX_OBJECT_SIZE; an oversized programmatic tree is rejected at its own
-// emit site during traversal — partial output from earlier siblings may remain.
+// emit site during traversal - partial output from earlier siblings may remain.
 // The depth guard is `depth > MAX_NESTING_DEPTH` with the root item at depth 0,
 // and it is checked for EVERY item -- containers and scalars alike. The core JSON
 // parser instead increments before checking and checks only containers, so the

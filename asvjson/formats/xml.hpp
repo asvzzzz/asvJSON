@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // XML serialization/parsing for asvJSON++
 // Namespace prefixes (e.g. xml:lang, xsi:nil) are preserved as part of key strings:
 //   - Attributes become "@prefix:name" keys (e.g. "@xml:lang")
@@ -24,15 +24,15 @@
 //     strings with an internal empty marker element (<asv:s/>) that the
 //     parser drops on a re-parse.
 //   - RESERVED internal keys (in mixed #content only): asv:s (separator
-//     marker), asv:xc (existence = rich/mixed-content pin; value is ignored —
+//     marker), asv:xc (existence = rich/mixed-content pin; value is ignored -
 //     the encoder writes "1", but any value including "" triggers), asv:arr ("1" =
 //     single-element array pin). A user key equal to one of these is only
 //     affected inside a mixed #content (asv:xc/) array; elsewhere on the
 //     document the literal text round-trips as data. The asv:arr marker
-//     always wins — <x asv:arr="1"/> and <x asv:arr="1"></x> both parse as [],
+//     always wins - <x asv:arr="1"/> and <x asv:arr="1"></x> both parse as [],
 //     and <x asv:arr="1" foo="bar">...</x> parses as [] with @foo silently
 //     dropped. When both asv:xc and asv:arr are present (not emitted by the
-//     encoder), asv:arr wins — the element becomes [] with text dropped.
+//     encoder), asv:arr wins - the element becomes [] with text dropped.
 //     Extracted before the self-closing split; the encoder never emits
 //     asv:arr on empty elements, so this is only reachable from hand-written XML.
 //   - A user "@type" key is written as the reserved attribute asv:ut, because
@@ -322,7 +322,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			// Check for #content array (mixed content from fromXML)
 			auto contentIt = obj->find("#content");
 			if (contentIt != obj->end() && contentIt->second && contentIt->second->type == ARRAY) {
-				// #text and #content cannot coexist — they are alternative
+				// #text and #content cannot coexist - they are alternative
 				// representations of the same thing. A programmatic tree with
 				// both is malformed; reject it rather than silently dropping
 				// one side.

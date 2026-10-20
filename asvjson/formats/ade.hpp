@@ -476,7 +476,7 @@ private:
     auto dec = [singleQuoted](std::string_view field) {
       return singleQuoted ? adeUnescapeSingle(field) : adeUnescape(field);
     };
-    // Canonical form: __REGEX__<pattern>|<opts>| � the body has exactly two
+    // Canonical form: __REGEX__<pattern>|<opts>|  the body has exactly two
     // pipes (separator + trailing terminator). Three or more means a bare '|'
     // leaked into pattern or opts, which the old rfind/find logic would silently
     // truncate; reject so no data is lost (the encoder escapes all interior '|'

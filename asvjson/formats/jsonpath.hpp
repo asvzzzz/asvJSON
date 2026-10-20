@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // JSONPath (RFC 9535) implementation for asvJSON++
 // Supports:
 //   $ (root), .member, ['member'], [index], [start:end:step] (slice),
@@ -896,10 +896,10 @@ class JPFilterEval {
       // on a dead node and Nothing propagates to the end of the path.
     }
     // Trailing recursive-descent after a segment (e.g. @.a..b) must not be
-    // silently ignored — the filter grammar has no descendant-segment, so
+    // silently ignored - the filter grammar has no descendant-segment, so
     // treat it as "selects nothing" to stay consistent with isValidPath.
     if (lex_.peek().type == TokType::DOTDOT) return nullptr;
-    // Trailing garbage (e.g. @.a{) must also not be silently ignored — the
+    // Trailing garbage (e.g. @.a{) must also not be silently ignored - the
     // lexer falls through to !ok, which isValidPath catches but query() did
     // not. Treat as "selects nothing" for consistency.
     if (!lex_.peek().ok) return nullptr;
@@ -1256,7 +1256,7 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       // empties this selector, and jpExpand's unclean-up still runs.
       lex.next();
       auto children = jpAllChildren(node);
-      // Capture the filter end token from the copy lexer (not the outer one —
+      // Capture the filter end token from the copy lexer (not the outer one -
       // the outer lex is not advanced by the evaluator). Stray tokens after
       // the evaluated expression (e.g. `$[?@.a)]` with a trailing `)`) are
       // invalid; reject the whole selector to match isValidPath's stricter check.
@@ -1506,7 +1506,7 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
   // The token that ended the path loop must be a real boundary, not a
   // lexer fall-through: a garbage byte next to a query path (`@.a{`) would
   // otherwise be silently treated as end-of-path. Recursive descent (DOTDOT)
-  // is also rejected here — it is valid at the top level but not inside a
+  // is also rejected here - it is valid at the top level but not inside a
   // filter query-path, and self-consistency prevents future refactors from
   // accidentally relying on callers to catch it.
   if (lex.peek().type == TokType::DOTDOT) return false;

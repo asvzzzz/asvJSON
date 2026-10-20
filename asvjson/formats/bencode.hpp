@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // Bencode serialization/parsing for asvJSON++.
 //
 // Bencode is the BitTorrent encoding (used in .torrent files):
@@ -32,7 +32,7 @@
 // programmatically throws "nesting too deep" instead of overflowing the stack.
 // Container sizes (ARRAY/OBJECT) are also enforced on encode; STRING/BINARY/
 // OBJECTID/REGEX/EXTENSION payloads are checked against MAX_STRING_LEN at their
-// respective emit sites — an oversized value is rejected at its own emit site
+// respective emit sites - an oversized value is rejected at its own emit site
 // during traversal, matching the parser's behavior. Partial output from earlier
 // siblings may remain in the buffer on throw.
 //
