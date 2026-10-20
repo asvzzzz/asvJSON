@@ -83,6 +83,10 @@ inline bool yamlNeedsQuotes(std::string_view s) {
 	// Strings that would be read back as numbers or special YAML scalars must
 	// be quoted so they round-trip as strings ("001", "1.2", ".inf", "~", ...).
 	if (yamlLooksNumeric(s)) return true;
+	// Document markers must be quoted: a bare "---" / "..." at the start of a
+	// line is a stream boundary, not a string (a root STRING with that text
+	// decoded as an empty document / null).
+	if (s == "---" || s == "...") return true;
 	if (s == "~" || s == ".nan" || s == ".NaN" || s == ".NAN" ||
 		s == ".inf" || s == ".Inf" || s == ".INF" || s == "+.inf" || s == "-.inf" ||
 		s == "Infinity" || s == "+Infinity" || s == "-Infinity" || s == "NaN")

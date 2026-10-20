@@ -290,7 +290,12 @@ inline bool goonNeedsQuotes(const std::string& s) {
   // and a later ':' is consumed as "inside quotes" rather than as the
   // separator. Quote the whole key so goonWriteKey emits "key" instead.
   if (s.find('"') != std::string::npos) return true;
-  for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':' || c == '*') return true;
+  // Control characters (tab included) and DEL cannot appear in an unquoted
+  // scalar: a root value of just "\t" was emitted bare, stripped as
+  // whitespace, and rejected as "unrecognized line". Quoting routes it through
+  // appendJsonEscaped, which escapes the byte.
+  for (unsigned char c : s) if (c < 0x20 || c == 0x7F) return true;
+  for (char c : s) if (c == ',' || c == ':' || c == '*') return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
   if (s.front() == '$' || s.front() == '#' || s.front() == '^' || (s.front() >= '0' && s.front() <= '9') || s.front() == '-')
     return true;

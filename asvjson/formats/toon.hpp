@@ -104,6 +104,9 @@ inline bool toonValNeedsQuotes(std::string_view s, bool forKey) {
   if (toonIsJsonValue(s)) return true;             // true / false / null / "{...}" / "[...]"
   if (s.front() == '-') return true;               // leading '-' could be misread as a list item / root array
   for (char c : s) if (c == ',' || c == '\n' || c == '\r' || c == ':') return true;
+  // Control characters (tab included) and DEL must be quoted; a bare tab was
+  // written raw and then read as indentation/whitespace on decode.
+  for (unsigned char c : s) if (c < 0x20 || c == 0x7F) return true;
   if (s.front() == ' ' || s.back() == ' ') return true;
   if (forKey && s.find('[') != std::string::npos) return true;  // keys like a[3] collide with key[N]: headers
   if (s.find('"') != std::string::npos) return true;  // embedded quotes must not break quote-aware key parsing
