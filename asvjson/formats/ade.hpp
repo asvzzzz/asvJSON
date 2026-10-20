@@ -1683,7 +1683,10 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
         return val;
       }
       ParsedKey key = parseKey();
-      if (key.name.empty()) throw asvJSONError("ADE: expected key at line " + std::to_string(lineNum_));
+      // An empty name is only legitimate when it was written as a quoted
+      // literal (`"": v`): parseKey throws for a missing bare key, and
+      // toADE() emits exactly that quoted form for an empty key.
+      if (key.name.empty() && !key.quoted) throw asvJSONError("ADE: expected key at line " + std::to_string(lineNum_));
       skipWs();
       if (eof() || peek() != ':') throw asvJSONError("ADE: expected ':' after key '" + key.name + "' at line " + std::to_string(lineNum_));
       pos_++;

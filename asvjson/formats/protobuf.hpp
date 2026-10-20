@@ -1585,6 +1585,9 @@ inline std::string asvJSON::toProtobufText() const {
 inline bool protoTextIsBracketedName(const std::string& text, size_t pos) {
   size_t i = pos + 1;
   while (i < text.size()) {
+    // A quoted token is an array element, never an extension name ("[]:",
+    // "[\"[]:\"]" used to be read as the field name '[' plus value ']').
+    if (text[i] == '"' || text[i] == '\'') return false;
     if (text[i] == '\\' && i + 1 < text.size()) { i += 2; continue; }
     if (text[i] == ']') {
       i++;

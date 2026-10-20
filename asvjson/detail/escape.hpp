@@ -70,6 +70,12 @@ inline bool yamlLooksNumeric(std::string_view s) {
 inline bool yamlNeedsQuotes(std::string_view s) {
 	if (s.empty()) return true;
 	if (s[0] == ' ' || s[0] == '\t') return true;
+	// Control characters (and DEL) are not YAML-printable: a bare scalar with
+	// one would be emitted raw and rejected on reparse (block keys survived
+	// only because the block path re-escapes them while building the
+	// intermediate JSON; flow keys and values did not). Force the quoted form,
+	// which yamlDQuote escapes as \xNN.
+	for (unsigned char c : s) if (c < 0x20 || c == 0x7F) return true;
 	static const char* keywords[] = {"null", "NULL", "Null", "true", "TRUE", "True", "false", "FALSE", "False",
 		"yes", "YES", "Yes", "no", "NO", "No", "on", "ON", "On", "off", "OFF", "Off",
 		"y", "Y", "n", "N"};
@@ -117,7 +123,21 @@ inline std::string yamlDQuote(std::string_view s) {
 			case '\\': out += "\\\\"; break;
 			case '"': out += "\\\""; break;
 			case '\0': out += "\\0"; break;
-			default: out += c;
+			default: {
+				// Other C0 controls and DEL are not YAML-printable: emit them
+				// as \xNN (yamlUnescapeDouble decodes \xNN) instead of writing
+				// a raw byte that the intermediate JSON step rejects.
+				unsigned char uc = static_cast<unsigned char>(c);
+				if (uc < 0x20 || uc == 0x7F) {
+					static const char hex[] = "0123456789ABCDEF";
+					out += "\\x";
+					out += hex[uc >> 4];
+					out += hex[uc & 0x0F];
+				} else {
+					out += c;
+				}
+				break;
+			}
 		}
 	}
 	out += '"';
