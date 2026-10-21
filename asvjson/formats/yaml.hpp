@@ -148,6 +148,34 @@ inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
 	return out;
 }
 
+// Write a REGEX value as the `!regex "<pattern>|<options>"` scalar.
+// A literal '|' inside the pattern or the options is written as \u007C (the
+// same convention TRON and XML use), so the '|' that separates the two
+// fields stays unambiguous: the decoder splits the RAW scalar text and only
+// then unescapes each side. Without the escape a pattern like "a|b" (no
+// options) came back as the pattern "a" with the options "b".
+inline void yamlFmtRegexVal(std::string_view s, std::string& out) {
+	size_t sep = s.rfind('\0');
+	std::string_view pat = (sep != std::string_view::npos) ? s.substr(0, sep) : s;
+	std::string_view opts = (sep != std::string_view::npos && sep + 1 < s.size())
+		? s.substr(sep + 1) : std::string_view();
+	auto escField = [](std::string& o, std::string_view t) {
+		std::string tmp;
+		appendJsonEscaped(tmp, t);
+		for (char c : tmp) {
+			if (c == '|') o += "\\u007C";
+			else o += c;
+		}
+	};
+	out.push_back('"');
+	escField(out, pat);
+	if (!opts.empty()) {
+		out += '|';
+		escField(out, opts);
+	}
+	out.push_back('"');
+}
+
 // Try to emit value inline (for flow mode). Returns true if successful.
 inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWriteOptions& o, bool forceFlow) {
 	using T = asvJSONValue::Type;
@@ -194,7 +222,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			out += "!objectid " + hex; return true;
 		}
 		case T::REGEX: {
-			std::string r; fmtRegexVal(v->str_data, r);
+			std::string r; yamlFmtRegexVal(v->str_data, r);
 			out += "!regex " + r; return true;
 		}
 		case T::TIMESTAMP: {
@@ -404,7 +432,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			out += prefix() + "!objectid " + hex + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::REGEX: {
-			std::string r; fmtRegexVal(v->str_data, r);
+			std::string r; yamlFmtRegexVal(v->str_data, r);
 			out += prefix() + "!regex " + r + yamlTrail(v, wc) + "\n"; break;
 		}
 		case T::TIMESTAMP: {
@@ -881,11 +909,6 @@ inline std::string yamlProcessYamlEmbed(std::string raw) {
 	return nested;
 }
 
-// Convert unescaped regex "pattern|opts" to internal pattern|opts
-inline std::string yamlRegexToInternal(std::string_view s) {
-	return std::string(s);
-}
-
 // Force a YAML value to be treated as a JSON string (for !!str tag)
 inline std::string yamlForceStringVal(std::string_view val) {
 	while (!val.empty() && (val[0] == ' ' || val[0] == '\t')) val.remove_prefix(1);
@@ -1058,6 +1081,48 @@ inline std::string yamlParseFlowValue(const std::string& s, size_t& pos,
     std::unordered_map<std::string, std::string>* anchors,
     std::unordered_set<std::string>* resolving,
     int depth = 0);
+
+// Split the scalar of a `!regex` tag into the pattern and the options.
+// The double-quoted form (the one the encoder writes) is split on the RAW
+// text: the encoder writes a literal '|' in the pattern as \u007C, so the
+// separator is the last RAW '|' and an escaped pipe can never be mistaken
+// for it. Each side is unescaped separately afterwards. Without this the
+// unescaping ran first, so a pattern like "a|b" (no options) came back as
+// the pattern "a" with the options "b".
+// A scalar without an escaped pipe keeps the historical behavior (the
+// already-decoded text is split at its last '|'), so documents written by
+// earlier versions decode exactly as before.
+inline void yamlSplitRegexScalar(std::string_view val, std::string& pattern, std::string& opts) {
+	std::string_view s = val;
+	while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) s.remove_prefix(1);
+	if (!s.empty() && s[0] == '"') {
+		// Collect the inner text with the escapes intact.
+		std::string inner;
+		bool closed = false;
+		for (size_t i = 1; i < s.size(); i++) {
+			if (s[i] == '\\' && i + 1 < s.size()) { inner += s[i]; inner += s[i + 1]; i++; continue; }
+			if (s[i] == '"') { closed = true; break; }
+			inner += s[i];
+		}
+		if (closed && inner.find("\\u007C") != std::string::npos) {
+			size_t sep = inner.rfind('|');
+			std::string patRaw = (sep == std::string::npos) ? inner : inner.substr(0, sep);
+			std::string optRaw = (sep == std::string::npos) ? std::string() : inner.substr(sep + 1);
+			pattern = yamlUnescapeDouble(patRaw);
+			opts = yamlUnescapeDouble(optRaw);
+			return;
+		}
+	}
+	// Legacy path: decode the scalar first, then split at the last '|'.
+	std::string resolved = yamlParseInlineValue(val);
+	if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
+		resolved = resolved.substr(1, resolved.size() - 2);
+	std::string raw;
+	try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
+	size_t sep = raw.rfind('|');
+	pattern = (sep != std::string::npos) ? raw.substr(0, sep) : raw;
+	opts = (sep != std::string::npos) ? raw.substr(sep + 1) : std::string();
+}
 
 // Parse tagged YAML value -- handles all !!word / !word tags
 inline std::string yamlParseTaggedValue(std::string_view s) {
@@ -1293,15 +1358,8 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		return "{\"$oid\":\"" + esc + "\"}";
 	}
 	if (tag == "!regex") {
-		std::string resolved = yamlParseInlineValue(val);
-		if (resolved.size() >= 2 && resolved[0] == '"' && resolved.back() == '"')
-			resolved = resolved.substr(1, resolved.size() - 2);
-		std::string raw;
-		try { raw = unescapeJsonString(resolved, true); } catch (...) { raw = resolved; }
-		std::string internal = yamlRegexToInternal(raw);
-		size_t sep = internal.rfind('|');
-		std::string pattern = (sep != std::string::npos) ? internal.substr(0, sep) : internal;
-		std::string opts = (sep != std::string::npos) ? internal.substr(sep + 1) : "";
+		std::string pattern, opts;
+		yamlSplitRegexScalar(val, pattern, opts);
 		std::string escPat, escOpts;
 		appendJsonEscaped(escPat, pattern);
 		std::string out = "{\"$regex\":\"" + escPat + "\"";
