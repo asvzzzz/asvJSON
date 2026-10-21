@@ -37,6 +37,18 @@
 // instance with no progress, an unsatisfiable condition that legitimately
 // matches nothing, so inside a fork it reads as "branch did not match" rather
 // than "schema is broken".
+//
+// Deliberate strictness (draft-07 states a SHOULD, not a MUST, for these):
+//   - An EMPTY `enum`, `type`, `allOf`, `anyOf` or `oneOf` is a malformed
+//     schema. An empty `enum`/`type`/`anyOf`/`oneOf` matches nothing and an
+//     empty `allOf` matches everything, so all five are degenerate.
+//   - Duplicate `enum`/`type`/`required` entries are malformed (the arrays
+//     SHOULD be unique; `1` and `1.0` are the same enum entry).
+//   - An unknown `type` name is malformed instead of compiling to a schema
+//     that rejects every value.
+//   - The draft-04 boolean `exclusiveMinimum`/`exclusiveMaximum` is only
+//     accepted together with the `minimum`/`maximum` it modifies.
+//   - An empty `required` stays a legal no-op.
 
 #include "../core.hpp"
 #include <cstring>
