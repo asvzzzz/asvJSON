@@ -15379,6 +15379,86 @@ TEST(testToTOML) {
   }
 }
 
+// TOML has no special types, so they degrade to text like the other text
+// formats (INI/CSV/dotenv/Java Properties). Before the fix tomlVal() had no
+// case for REGEX/OBJECTID/TIMESTAMP/EXTENSION/CUSTOM_TAG at all: the member
+// was silently DROPPED, so the key disappeared from the document (a
+// {"r":{"$regex":"abc"}} tree produced an EMPTY TOML document).
+TEST(testTomlSpecialTypes) {
+  // REGEX -> the pattern text (the options after the NUL are dropped).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"r":{"$regex":"abc"}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("r = \"abc\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT(j2.get("r") != nullptr);
+    ASSERT_EQ(j2.getString("r"), std::string("abc"));
+  }
+  // OBJECTID -> the 24-hex text.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"o":{"$oid":"0102030405060708090a0b0c"}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("o = \"0102030405060708090a0b0c\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getString("o"), std::string("0102030405060708090a0b0c"));
+  }
+  // TIMESTAMP -> the epoch seconds (re-read as an INT).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"t":{"$timestamp":{"t":1700000000}}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("t = 1700000000") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getInt("t"), int64_t(1700000000));
+  }
+  // BINARY / EXTENSION -> the base64 payload text.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"b":{"$binary":{"base64":"AQID","subType":"00"}}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("b = \"AQID\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getString("b"), std::string("AQID"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"e":{"$binary":{"base64":"AQID","subType":"05"}}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("e = \"AQID\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getString("e"), std::string("AQID"));
+  }
+  // CUSTOM_TAG -> the Extended-JSON text of the tag.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"c":{"$customTag":{"name":"mytag","value":42}}})")));
+    std::string toml = j.toTOML();
+    ASSERT(toml.find("mytag") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    ASSERT_EQ(j2.getString("c"), std::string(R"({"$customTag":{"name":"mytag","value":42}})"));
+  }
+  // A special type inside an ARRAY keeps the element (it is not dropped).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":[{"$regex":"abc"}]})")));
+    std::string toml = j.toTOML();
+    asvJSON j2;
+    ASSERT(j2.fromTOML(std::string_view(toml)));
+    const asvJSONValue* arr = j2.getRoot() ? j2.getRoot()->getConst("a") : nullptr;
+    ASSERT(arr && arr->type == asvJSONValue::ARRAY && arr->size() == size_t(1));
+    if (arr && arr->size() == size_t(1))
+      ASSERT_EQ(arr->get(0)->getString(), std::string("abc"));
+  }
+}
+
 TEST(testFromTOML) {
   // Direct parsing: simple key=value
   {
@@ -35602,6 +35682,7 @@ RUN(testGOONSpecialValues);
 	
 	std::cout << "\n--- TOML Serialization Tests ---\n";
 	RUN(testToTOML);
+	RUN(testTomlSpecialTypes);
 	RUN(testFromTOML);
 	RUN(testTomlReviewFixes);
 
