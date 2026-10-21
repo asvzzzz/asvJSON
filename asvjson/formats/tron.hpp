@@ -866,6 +866,11 @@ inline bool asvJSON::fromTRON(std::string_view input) {
   dirty_ = false;
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
+  // UTF-8 BOM, like every other from* decoder: without this the lexer hit the
+  // BOM bytes as an unexpected character and the whole document was rejected.
+  if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+    input.remove_prefix(3);
+  if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
   try {
     auto toks = tronTokenize(input, allowNaNInfinity);
     TronParseState state(toks);

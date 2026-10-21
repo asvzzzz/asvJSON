@@ -1751,6 +1751,11 @@ inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
 inline bool asvJSON::fromGOON(std::string_view input) {
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
+  // UTF-8 BOM, like every other from* decoder: without this the BOM became the
+  // first key's leading bytes ("\xEF\xBB\xBFkey").
+  if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+    input.remove_prefix(3);
+  if (input.empty()) { lastError = "empty input"; return false; }
   // Security: reject inputs larger than 10 MB to prevent memory exhaustion.
   constexpr size_t MAX_GOON_INPUT = 10u * 1024u * 1024u;
   if (input.size() > MAX_GOON_INPUT) { lastError = "GOON input exceeds 10 MB limit"; return false; }

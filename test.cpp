@@ -29869,6 +29869,101 @@ TEST(testJSONPathValidator) {
 // 2.5.2.1: member-name-shorthand = identifier / %x27 *qchar %x27), so
 // $.'a b' and $.'' select a member exactly like $['a b'] and $[''] do. The
 // quoted segment token was ignored, so such a path silently selected nothing.
+// Audit fix: every from* decoder must strip a leading UTF-8 BOM. YAML, TOML
+// and GOON kept it as the FIRST KEY's leading bytes ("\xEF\xBB\xBFkey"), and
+// TRON's lexer rejected the document outright ("unexpected character").
+// The BOM is legal in a UTF-8 text file (Windows editors add it), so a file
+// with and without a BOM must decode to the same tree.
+TEST(testBomStrippedByDecoders) {
+	const std::string bom = "\xEF\xBB\xBF";
+	// Each case decodes a document that must yield {"k":"v"} (CSV/JSONLines: a
+	// one-element array).
+	auto check = [&](const char* name, bool ok, const asvJSON& j) {
+		ASSERT_MSG(ok, name);
+		if (!ok) return;
+		const asvJSONValue* v = j.getRoot() ? j.getRoot()->getConst("k") : nullptr;
+		ASSERT_MSG(v != nullptr, name);
+		if (v) ASSERT_MSG(std::string(v->getString()) == "v", name);
+	};
+	{
+		asvJSON j;
+		bool ok = j.parse(bom + "{\"k\":\"v\"}");
+		check("json", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromJSON5(bom + "{k:'v'}");
+		check("json5", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromYAML(bom + "k: v\n");
+		check("yaml", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromTOML(bom + "k = \"v\"\n");
+		check("toml", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromINI(bom + "k = v\n");
+		check("ini", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromCSV(bom + "k\nv\n");
+		ASSERT(ok);
+		ASSERT(j.getRoot() && j.getRoot()->size() == size_t(1));
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromDotenv(bom + "k=v\n");
+		check("dotenv", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromJavaProp(bom + "k=v\n");
+		check("javaprop", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromSexpr(bom + "(k \"v\")");
+		check("sexpr", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromRON(bom + "(k: \"v\")");
+		check("ron", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromTOON(bom + "k: v\n");
+		check("toon", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromGOON(bom + "k: v\n");
+		check("goon", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromTRON(bom + "{\"k\": \"v\"}");
+		check("tron", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromADE(bom + "k: v\n");
+		check("ade", ok, j);
+	}
+	{
+		asvJSON j;
+		bool ok = j.fromJSONLines(bom + "{\"k\":\"v\"}\n");
+		ASSERT(ok);
+		ASSERT(j.getRoot() && j.getRoot()->size() == size_t(1));
+	}
+}
+
 TEST(testJSONPathQuotedNameShorthand) {
 	asvJSON doc;
 	ASSERT(doc.parse(std::string_view(R"({"":0,"a":1,"a b":2,"x":{"a b":3}})")));
@@ -36088,6 +36183,7 @@ RUN(testYamlAuditReview);
 	RUN(testGoonQuotedFieldBrace);
 	RUN(testYamlRegexPipeSeparator);
 	RUN(testJSONPathQuotedNameShorthand);
+	RUN(testBomStrippedByDecoders);
 	RUN(testXMLControlCharRejected);
 
 	std::cout << "\n========================================" << std::endl;

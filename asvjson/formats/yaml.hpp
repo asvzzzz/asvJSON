@@ -4247,6 +4247,11 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 	allowNaNInfinity = true;
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
+		// UTF-8 BOM, like every other from* decoder. Without this the BOM became
+		// the first key's leading bytes ("\xEF\xBB\xBFkey") - a silently
+		// corrupted key instead of the documented plain one.
+		if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
+			input.remove_prefix(3);
 		std::string json = yamlToJson(input);
 		bool ok = parse(std::string_view(json));
 		allowNaNInfinity = prevNaN;
