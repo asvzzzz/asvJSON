@@ -48,6 +48,10 @@
 //     Semantically empty text == absent, but the shape changes from {#text:""} to absent.
 //   - svgSerializeElement has no depth guard - deeply nested programmatic trees can
 //     overflow the stack. Consistent with other encoders (toXML/toUBJSON/etc.).
+//   - A C0 control byte other than tab, LF and CR has NO legal XML 1.0 spelling
+//     (the Char production excludes it and a character reference may not name it
+//     either), so toSVG() REPORTS it with an asvJSONError instead of writing it
+//     raw - the markup would otherwise be one that no conforming parser accepts.
 //
 // Decoder: since SVG is XML, fromSVG reuses the shared XML document parser
 // (xmlParseDocument) but with collapseSameNamed=false. XML needs the collapse
@@ -214,14 +218,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			if (hasElementChildren) {
 				for (int i = 0; i < indent + 2; ++i) out += ' ';
 			}
-			for (char c : textContent) {
-				switch (c) {
-					case '&': out += "&amp;"; break;
-					case '<': out += "&lt;"; break;
-					case '>': out += "&gt;"; break;
-					default:  out += c;
-				}
-			}
+			xmlEscapeTextInto(out, textContent);
 			if (hasElementChildren) {
 				out += '\n';
 			}
@@ -279,14 +276,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			return;
 		}
 		out += '>';
-		for (char c : v->str_data) {
-			switch (c) {
-				case '&': out += "&amp;"; break;
-				case '<': out += "&lt;"; break;
-				case '>': out += "&gt;"; break;
-				default:  out += c;
-			}
-		}
+		xmlEscapeTextInto(out, v->str_data);
 		out += "</";
 		out += tag;
 		out += '>';

@@ -36,6 +36,10 @@
 //   JSON (`{"$binary":{...,"subType":...}}`, subType 00 vs. the extension type),
 //   OBJECTID `{"$oid":"<24 hex>"}` over the 12 raw bytes, REGEX
 //   `{"$regex":...,"$options":...}`, TIMESTAMP `{"$timestamp":{"t":...}}`.
+//   CUSTOM_TAG rides the same Extended-JSON convention as the core JSON
+//   serializer (`{"$customTag":{"name":...,"value":...}}`), which the core
+//   object parser restores; the encoder's default branch used to write a bare
+//   "null" for it, so the tag and its payload were lost.
 
 #include "../core.hpp"
 
@@ -1239,6 +1243,21 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       out += "\",\"subType\":\"";
       out += hex;
       out += "\"}}";
+      break;
+    }
+    case asvJSONValue::CUSTOM_TAG: {
+      // The same Extended-JSON convention the core JSON serializer uses
+      // ({"$customTag":{"name":...,"value":...}}), which the JSON5 decoder
+      // restores through the core object parser. The default branch used to
+      // write a bare "null", so the tag and its payload were lost.
+      out += "{\"$customTag\":{\"name\":\"";
+      appendJsonEscaped(out, v->str_data);
+      out += "\",\"value\":";
+      // allowNaNInfinity: the JSON5 decoder accepts the NaN/Infinity literals,
+      // so a non-finite double inside the tag survives as a literal.
+      if (v->custom_value) v->custom_value->serialize(out, true);
+      else out += "null";
+      out += "}}";
       break;
     }
     default: out += "null"; break;

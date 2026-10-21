@@ -82,10 +82,24 @@ inline void localtimeSafe(std::tm* tm, const int64_t* t) { time_t tt = static_ca
 #define asvjson_timegm timegm
 #endif
 
+namespace asvJSONInternal {
+
+// asvJSONError class
+// Defined BEFORE the detail headers so those helpers can throw it too (the XML
+// escaper rejects the characters XML 1.0 cannot represent).
+class asvJSONError : public std::runtime_error {
+public:
+	explicit asvJSONError(const std::string& msg) : std::runtime_error(msg) {}
+	explicit asvJSONError(const char* msg) : std::runtime_error(msg) {}
+};
+
+} // namespace asvJSONInternal
+
 #include "detail/utf8.hpp"
 #include "detail/escape.hpp"
 #include "detail/base64.hpp"
 #include "detail/datetime.hpp"
+
 namespace asvJSONInternal {
 
 // Object map type - default keeps key insertion order so parse->serialize round-trips
@@ -390,13 +404,6 @@ private:
 		// This is an intentional trade-off for the small-object path; bulk
 		// erase should be done via a dedicated method if performance matters.
 	}
-};
-
-// asvJSONError class
-class asvJSONError : public std::runtime_error {
-public:
-	explicit asvJSONError(const std::string& msg) : std::runtime_error(msg) {}
-	explicit asvJSONError(const char* msg) : std::runtime_error(msg) {}
 };
 
 struct JsonProxy; // forward declaration for operator[] chaining
