@@ -18,6 +18,13 @@
 //   the RFC 3339 form `t = 2024-01-01T00:00:00Z`, which decodes to STRING. A
 //   DATETIME whose instant gmtimeSafe cannot convert renders as the QUOTED
 //   string "null" (a bare `null` is not valid TOML), so it re-parses as STRING.
+// - REGEX, OBJECTID, TIMESTAMP, EXTENSION and CUSTOM_TAG have no TOML form
+//   either: toTOML() writes them as text (the pattern only, the 24-hex, the
+//   epoch seconds, the base64 payload, the Extended-JSON text), so fromTOML()
+//   reads them back as STRING (an INT for TIMESTAMP). Before, tomlVal() had no
+//   case for them at all and the member was dropped SILENTLY, so the key
+//   disappeared from the document (a {"r":{"$regex":"abc"}} tree produced an
+//   EMPTY TOML document).
 // - Mixed-type arrays are accepted, a lenient extension: TOML 1.0 requires an
 //   array to be homogeneous ("data types may not be mixed"), but fromTOML()
 //   parses `[1, "two"]` without complaint. It has to: toTOML() writes whatever
@@ -204,6 +211,42 @@ inline std::string tomlVal(const asvJSONValue* v) {
       return s;
     }
     case T::STRING: return tomlEscapeStr(v->str_data);
+    case T::TIMESTAMP:
+      // The epoch seconds survive as the same INT number on a re-parse; the
+      // type identity is lost (mirrors CSV/INI/Java Properties/UBJSON).
+      return std::to_string(v->num);
+    case T::BINARY:
+      return "\"" + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\"";
+    case T::EXTENSION: {
+      // The payload as a quoted BASE64 string, like the other text formats; on
+      // a re-parse it is a plain STRING (TOML has no binary type and no
+      // subtype convention). The EXTENSION's ext_type does not survive.
+      std::string b = encodeBase64(v->bin_data.data(), v->bin_data.size());
+      return tomlEscapeStr(b);
+    }
+    case T::OBJECTID: {
+      // The 12 bytes as a quoted 24-hex string.
+      std::string hex;
+      fmtObjectIdHexVal(v->str_data, hex);
+      return tomlEscapeStr(hex);
+    }
+    case T::REGEX: {
+      // Only the pattern text survives; the options after the NUL are dropped
+      // (mirrors the CSV/INI/bencode/plist encoders).
+      size_t sep = v->str_data.rfind('\0');
+      std::string_view pat = (sep == std::string_view::npos)
+                               ? std::string_view(v->str_data)
+                               : std::string_view(v->str_data.data(), sep);
+      return tomlEscapeStr(pat);
+    }
+    case T::CUSTOM_TAG: {
+      // No native TOML form: keep the tag name AND value as the same
+      // Extended-JSON convention text serialize() emits, quoted so it re-parses
+      // as a STRING holding that JSON.
+      std::string payload;
+      v->serialize(payload, false);
+      return tomlEscapeStr(payload);
+    }
     case T::DATETIME: {
       std::string s;
       fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
@@ -214,7 +257,6 @@ inline std::string tomlVal(const asvJSONValue* v) {
       if (s == "null") return "\"null\"";
       return s;
     }
-    case T::BINARY: return "\"" + encodeBase64(v->bin_data.data(), v->bin_data.size()) + "\"";
     case T::ARRAY: {
       if (!v->arr) return "[]";
       std::string out = "[";
