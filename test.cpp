@@ -26130,6 +26130,13 @@ TEST(testADEMergeKeys) {
     ASSERT_EQ(j.getInt("b"), int64_t(3));
     ASSERT_EQ(j.getInt("c"), int64_t(4));
   }
+  // The merged members keep the ORDER of the sequence (the later source wins
+  // on a conflict, but its members are not moved to the front).
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("m1: &m1 {x: 1}\nm2: &m2 {y: 2}\n<<: [*m1, *m2]\n"));
+    ASSERT_EQ(j.serialize(), std::string_view(R"({"m1":{"x":1},"m2":{"y":2},"x":1,"y":2})"));
+  }
   // Merge inside an inline object
   {
     asvJSON j;
