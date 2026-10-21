@@ -3552,57 +3552,6 @@ inline std::string asvJSON::toINI(bool pretty) const {
 	return out;
 }
 
-inline std::string asvJSON::toJSONLines() const {
-	std::string out;
-	if (!root) return out;
-	if (root->type == asvJSONValue::ARRAY && root->arr) {
-		for (const auto& elem : *root->arr) {
-			elem->serialize(out, allowNaNInfinity);
-			out += '\n';
-		}
-	} else {
-		root->serialize(out, allowNaNInfinity);
-		out += '\n';
-	}
-	return out;
-}
-
-inline bool asvJSON::fromJSONLines(std::string_view input) {
-	root = nullptr;
-	dirty_ = false;
-	formatType = FormatType::Unknown;
-	try {
-		auto arr = asvJSONValue::makeArray();
-		if (!arr) { lastError = "out of memory"; return false; }
-		size_t pos = 0;
-		while (pos < input.size()) {
-			size_t end = input.find('\n', pos);
-			if (end == std::string_view::npos) end = input.size();
-			std::string_view line = input.substr(pos, end - pos);
-			while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
-				line.remove_suffix(1);
-			if (!line.empty()) {
-				asvJSON tmp;
-				if (!tmp.parse(line))
-					throw asvJSONError("JSON Lines: invalid JSON near: " + std::string(line.substr(0, 30)));
-				arr->arr->push_back(tmp.releaseRoot());
-			}
-			pos = end + 1;
-		}
-		root = std::move(arr);
-		formatType = FormatType::JSONLines;
-		return true;
-	} catch (const asvJSONError& e) {
-		lastError = e.what();
-		root = nullptr;
-		return false;
-	} catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers.
-		lastError = e.what();
-		root = nullptr;
-		return false;
-	}
-}
-
 inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth);
 
 

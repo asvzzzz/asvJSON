@@ -16404,6 +16404,97 @@ TEST(testFromJSONLines) {
   }
 }
 
+// JSON Lines UTF-8 safety: the error prefix must never split a multi-byte
+// sequence. Build an invalid line whose first 30 bytes straddle a 2-byte UTF-8
+// character (U+043F 'п' = 0xD0 0xBF). The "JSON Lines: invalid JSON near:"
+// prefix portion of lastError must itself be valid UTF-8. We isolate it by
+// stripping the inner parser's diagnostic suffix (everything after "near: ")
+// and validating only the prefix segment.
+TEST(testJSONLinesUtf8SafeErrorMessage) {
+  // 29 ASCII chars + U+043F 'п' (D0 BF) + 'x' = 32 bytes total for the bad
+  // line. jsonlinesPrefix takes min(32,30)=30 -> "29 ASCII + D0" then backs
+  // up past the continuation D0 -> 29 ASCII chars. The message prefix is
+  // therefore valid UTF-8 even though the original input had a multi-byte
+  // char at byte 30.
+  std::string bad(29, 'a');
+  bad.push_back('\xD0');
+  bad.push_back('\xBF');
+  bad += "x";
+  asvJSON j;
+  ASSERT(!j.fromJSONLines(std::string_view(bad)));
+  const std::string& err = j.getLastError();
+  // The error starts with "JSON Lines: invalid JSON near: ". Find that marker
+  // and validate only the prefix part (up to and including the truncated line).
+  // The inner parser may append its own garbage after "near: <prefix>", but
+  // the prefix we construct must be valid UTF-8.
+  const char* marker = "JSON Lines: invalid JSON near: ";
+  auto pos = err.find(marker);
+  ASSERT(pos != std::string::npos);
+  // Validate bytes from start of `err` through the end of the marker + prefix.
+  // The prefix is everything between marker and the first newline or end of string.
+  size_t checkUpTo = err.find('\n', pos);
+  if (checkUpTo == std::string::npos) checkUpTo = err.size();
+  for (size_t i = 0; i < checkUpTo; ) {
+    unsigned char c = static_cast<unsigned char>(err[i]);
+    if (c < 0x80) {
+      ++i;
+    } else if ((c & 0xE0) == 0xC0) {
+      ASSERT(i + 1 < checkUpTo);
+      unsigned char c2 = static_cast<unsigned char>(err[i + 1]);
+      ASSERT((c2 & 0xC0) == 0x80);
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      ASSERT(i + 2 < checkUpTo);
+      for (int k = 1; k <= 2; ++k) {
+        unsigned char ck = static_cast<unsigned char>(err[i + k]);
+        ASSERT((ck & 0xC0) == 0x80);
+      }
+      i += 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      ASSERT(i + 3 < checkUpTo);
+      for (int k = 1; k <= 3; ++k) {
+        unsigned char ck = static_cast<unsigned char>(err[i + k]);
+        ASSERT((ck & 0xC0) == 0x80);
+      }
+      i += 4;
+    } else {
+      ASSERT(false); // stray continuation or overlong in the prefix
+    }
+  }
+}
+
+// Round-trip: toJSONLines -> fromJSONLines must yield the original array.
+TEST(testJSONLinesRoundTrip) {
+  // Array of objects
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"([{"a":1,"b":"hello"},{"c":[1,2,3]}])")));
+    std::string jl = j.toJSONLines();
+    asvJSON j2;
+    ASSERT(j2.fromJSONLines(std::string_view(jl)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(2));
+    ASSERT_EQ(j2.getRoot()->get(0)->get("a")->getInt(), int64_t(1));
+    ASSERT_EQ(j2.getRoot()->get(0)->get("b")->getString(), std::string("hello"));
+    ASSERT_EQ(j2.getRoot()->get(1)->get("c")->size(), size_t(3));
+  }
+  // Empty input -> empty array
+  {
+    asvJSON j;
+    ASSERT(j.fromJSONLines(std::string_view("")));
+    ASSERT_EQ(j.getRoot()->size(), size_t(0));
+  }
+  // Scalar root -> single-element array on round-trip
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("42")));
+    std::string jl = j.toJSONLines();
+    asvJSON j2;
+    ASSERT(j2.fromJSONLines(std::string_view(jl)));
+    ASSERT_EQ(j2.getRoot()->size(), size_t(1));
+    ASSERT_EQ(j2.getRoot()->get(0)->getInt(), int64_t(42));
+  }
+}
+
 TEST(testToSexpr) {
   // Basic object round-trip
   {
@@ -35949,6 +36040,8 @@ RUN(testGOONSpecialValues);
 
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
+	RUN(testJSONLinesUtf8SafeErrorMessage);
+	RUN(testJSONLinesRoundTrip);
 
 	std::cout << "\n--- S-Expression Serialization Tests ---\n";
 	RUN(testToSexpr);
