@@ -1340,7 +1340,11 @@ inline std::string goonToJson(std::string_view input) {
             bool hasFields = afterB < content.size() && content[afterB] == '{';
             std::vector<std::string> fields;
             if (hasFields) {
-              size_t closeBr = content.find('}', afterB);
+              // Quote-aware: a quoted field name may contain '}' (e.g.
+              // t[1]{"a}b"}:). A plain find('}') closed the field list inside
+              // the quote, so the header was not recognized at all.
+              size_t relBr = goonFindUnquoted(content.substr(afterB), '}');
+              size_t closeBr = (relBr == std::string_view::npos) ? std::string_view::npos : afterB + relBr;
               if (closeBr != std::string_view::npos) {
                 std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
                 auto fieldParts = goonSplitCommas(fc);

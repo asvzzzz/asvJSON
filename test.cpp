@@ -34639,6 +34639,71 @@ TEST(testYamlRegexControlChar) {
 	}
 }
 
+// YAML fix: the '|' that separates the pattern from the options must not be
+// confused with a '|' INSIDE the pattern. The decoder split the already
+// unescaped scalar at its last '|', so the pattern "a|b" (no options) came
+// back as the pattern "a" with the options "b" - a silent round-trip data
+// loss. The encoder now writes a literal '|' in the pattern as \u007C (the
+// same convention TRON and XML use) and the decoder splits the RAW scalar
+// text, so the separator stays unambiguous.
+TEST(testYamlRegexPipeSeparator) {
+	// A pattern with a pipe and no options round-trips exactly.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"rx\":{\"$regex\":\"a|b\"}}"));
+		std::string yml = j.toYAML();
+		ASSERT(yml.find("!regex \"a\\u007Cb\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT_EQ(std::string(j2.getRegexPattern("rx")), std::string("a|b"));
+		ASSERT_EQ(std::string(j2.getRegexOptions("rx")), std::string(""));
+	}
+	// A pattern with a pipe AND options round-trips exactly.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"rx\":{\"$regex\":\"a|b\",\"$options\":\"i\"}}"));
+		std::string yml = j.toYAML();
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT_EQ(std::string(j2.getRegexPattern("rx")), std::string("a|b"));
+		ASSERT_EQ(std::string(j2.getRegexOptions("rx")), std::string("i"));
+	}
+	// A pattern with several pipes and no options.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"rx\":{\"$regex\":\"a|b|c\"}}"));
+		asvJSON j2;
+		ASSERT(j2.fromYAML(j.toYAML()));
+		ASSERT_EQ(std::string(j2.getRegexPattern("rx")), std::string("a|b|c"));
+		ASSERT_EQ(std::string(j2.getRegexOptions("rx")), std::string(""));
+	}
+	// A pattern without a pipe is unchanged (no escape is added).
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"rx\":{\"$regex\":\"abc\",\"$options\":\"i\"}}"));
+		std::string yml = j.toYAML();
+		ASSERT(yml.find("!regex \"abc|i\"") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromYAML(yml));
+		ASSERT_EQ(std::string(j2.getRegexPattern("rx")), std::string("abc"));
+		ASSERT_EQ(std::string(j2.getRegexOptions("rx")), std::string("i"));
+	}
+	// Documents written before the fix keep their old reading: the last '|'
+	// of the decoded text is still the separator.
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("rx: !regex \"a|b\"\n"));
+		ASSERT_EQ(std::string(j.getRegexPattern("rx")), std::string("a"));
+		ASSERT_EQ(std::string(j.getRegexOptions("rx")), std::string("b"));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromYAML("rx: !regex \"a|b|i\"\n"));
+		ASSERT_EQ(std::string(j.getRegexPattern("rx")), std::string("a|b"));
+		ASSERT_EQ(std::string(j.getRegexOptions("rx")), std::string("i"));
+	}
+}
+
 // YAML fix: custom tag name with control char must parse and round-trip.
 TEST(testYamlCustomTagControlChar) {
 	// Verbatim tag with control byte in name.
@@ -34889,6 +34954,35 @@ TEST(testGoonInlineListHeaderLookalike) {
 		const asvJSONValue* rows = j.get("rows");
 		ASSERT(rows && rows->type == asvJSONValue::ARRAY && rows->arr->size() == 2);
 		ASSERT_EQ(rows->arr->at(1)->get("b")->getInt(), int64_t(4));
+	}
+}
+
+// Review fix: a quoted tabular FIELD NAME may contain '}'. The field-list scan
+// used a plain find('}'), so t[1]{"a}b"}: closed the field list inside the
+// quote and the header was not recognized ("unrecognized line 2 in object
+// context"). The header probe was already quote-aware; the extraction was not.
+TEST(testGoonQuotedFieldBrace) {
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON("t[1]{\"a}b\"}:\n  1\n"));
+		const asvJSONValue* t = j.getRoot() ? j.getRoot()->getConst("t") : nullptr;
+		ASSERT(t && t->type == asvJSONValue::ARRAY && t->arr->size() == 1);
+		if (t && t->arr->size() == 1) {
+			const asvJSONValue* cell = t->arr->at(0)->getConst("a}b");
+			ASSERT(cell && cell->getInt() == int64_t(1));
+		}
+	}
+	{
+		// A '}' in a later field, next to a quoted field with a comma.
+		asvJSON j;
+		ASSERT(j.fromGOON("t[1]{\"a,b\",\"c}d\"}:\n  x,y\n"));
+		const asvJSONValue* t = j.getRoot() ? j.getRoot()->getConst("t") : nullptr;
+		ASSERT(t && t->type == asvJSONValue::ARRAY && t->arr->size() == 1);
+		if (t && t->arr->size() == 1) {
+			const asvJSONValue* row = t->arr->at(0).get();
+			ASSERT_EQ(row->getConst("a,b")->getString(), std::string("x"));
+			ASSERT_EQ(row->getConst("c}d")->getString(), std::string("y"));
+		}
 	}
 }
 
@@ -35754,6 +35848,8 @@ RUN(testYamlAuditReview);
 	RUN(testGoonKeyWithInteriorQuote);
 	RUN(testGoonInlineListHeaderLookalike);
 	RUN(testGoonISODateNotQuoted);
+	RUN(testGoonQuotedFieldBrace);
+	RUN(testYamlRegexPipeSeparator);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;
