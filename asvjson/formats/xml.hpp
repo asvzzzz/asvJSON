@@ -90,6 +90,14 @@
 //     now matches it for non-pinned external input too.
 //   - A NaN/Infinity attribute value throws (it has no XML attribute text
 //     form); NaN/Infinity doubles in element content serialize as xsi:nil.
+//   - A C0 control byte other than tab, LF and CR has NO legal XML 1.0
+//     spelling: the Char production excludes it and a character reference may
+//     not name it either ("the replacement text of an entity must match the
+//     production Char"). The encoder therefore REPORTS it with an
+//     asvJSONError ("XML: control character U+0001 cannot be serialized ...")
+//     instead of writing it raw, which produced a document that no conforming
+//     parser accepts. The DECODER stays lenient: such a byte is character
+//     data and is read back as it stands.
 
 #include "../core.hpp"
 

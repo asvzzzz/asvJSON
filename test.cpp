@@ -20637,6 +20637,41 @@ TEST(testJSON5Audit) {
     ASSERT(ext != nullptr && ext->type == asvJSONValue::EXTENSION);
     ASSERT_EQ(ext->ext_type, 127);
   }
+  // CUSTOM_TAG round-trips through the Extended-JSON convention. The encoder's
+  // default branch used to write a bare "null", so the tag AND its payload were
+  // lost (the key survived, but the value became null).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"c\":{\"$customTag\":{\"name\":\"mytag\",\"value\":42}}}")));
+    const asvJSONValue* src = j.getRoot() ? j.getRoot()->getConst("c") : nullptr;
+    ASSERT(src != nullptr && src->type == asvJSONValue::CUSTOM_TAG);
+    std::string s = j.toJSON5();
+    ASSERT(s.find("\"$customTag\"") != std::string::npos);
+    ASSERT(s.find("mytag") != std::string::npos);
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    const asvJSONValue* c = j2.getRoot() ? j2.getRoot()->getConst("c") : nullptr;
+    ASSERT(c != nullptr && c->type == asvJSONValue::CUSTOM_TAG);
+    if (c && c->type == asvJSONValue::CUSTOM_TAG) {
+      ASSERT_EQ(std::string(c->str_data), std::string("mytag"));
+      ASSERT(c->custom_value != nullptr && c->custom_value->type == asvJSONValue::INT);
+      if (c->custom_value) ASSERT_EQ(c->custom_value->num, int64_t(42));
+    }
+  }
+  // A CUSTOM_TAG with a null value keeps the null payload.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"c\":{\"$customTag\":{\"name\":\"empty\",\"value\":null}}}")));
+    std::string s = j.toJSON5();
+    asvJSON j2;
+    ASSERT(j2.fromJSON5(std::string_view(s)));
+    const asvJSONValue* c = j2.getRoot() ? j2.getRoot()->getConst("c") : nullptr;
+    ASSERT(c != nullptr && c->type == asvJSONValue::CUSTOM_TAG);
+    if (c && c->type == asvJSONValue::CUSTOM_TAG) {
+      ASSERT_EQ(std::string(c->str_data), std::string("empty"));
+      ASSERT(c->custom_value == nullptr || c->custom_value->type == asvJSONValue::NULL_VAL);
+    }
+  }
   // NaN / Infinity values survive a JSON5 round-trip
   {
     asvJSON j;
@@ -35066,6 +35101,83 @@ TEST(testGoonQuotedFieldBrace) {
 	}
 }
 
+// Audit fix: XML 1.0's Char production excludes every C0 control byte except
+// tab, LF and CR, and a character reference may not name one either, so such
+// a byte has NO legal XML spelling. The encoders wrote it raw, producing a
+// document that no conforming parser accepts (the library's own reader
+// happened to accept it back). The XML-based formats now report it instead of
+// emitting invalid XML - the same "an unencodable value is an error, never a
+// non-round-trippable output" rule the dotenv encoder follows.
+TEST(testXMLControlCharRejected) {
+	// A control byte in a text value is rejected. (A raw control byte cannot
+	// come from JSON text - the JSON parser refuses it - so the value is built
+	// programmatically.)
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("x\x01""y", 3));
+		bool threw = false;
+		try {
+			j.toXML();
+		} catch (const asvJSONError& e) {
+			threw = true;
+			ASSERT(std::string(e.what()).find("U+0001") != std::string::npos);
+		}
+		ASSERT(threw);
+	}
+	// ... and in an attribute value.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		auto obj = asvJSONValue::makeObject();
+		obj->obj->emplace("@id", asvJSONValue::makeString("x\x1F""y", 3));
+		j.getRoot()->obj->emplace("a", std::move(obj));
+		bool threw = false;
+		try {
+			j.toXML();
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(threw);
+	}
+	// plist and SVG share the XML escaper, so they reject it too.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("x\x01""y", 3));
+		bool threw = false;
+		try {
+			j.toPlist();
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(threw);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("x\x01""y", 3));
+		bool threw = false;
+		try {
+			j.toSVG();
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		ASSERT(threw);
+	}
+	// Tab, LF and CR ARE legal XML characters and must still be written.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("x\ty\nz\r", 6));
+		std::string xml = j.toXML();
+		ASSERT(xml.find("x\ty\nz\r") != std::string::npos);
+		asvJSON j2;
+		ASSERT(j2.fromXML(xml));
+		ASSERT_EQ(j2.getString("a"), std::string("x\ty\nz\r"));
+	}
+}
+
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
@@ -35931,6 +36043,7 @@ RUN(testYamlAuditReview);
 	RUN(testGoonISODateNotQuoted);
 	RUN(testGoonQuotedFieldBrace);
 	RUN(testYamlRegexPipeSeparator);
+	RUN(testXMLControlCharRejected);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

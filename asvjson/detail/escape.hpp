@@ -8,6 +8,27 @@
 namespace asvJSONInternal {
 
 // ---------- XML helpers ----------
+// XML 1.0's Char production is #x9 | #xA | #xD | [#x20-#xD7FF] | ... : every
+// other C0 control byte is excluded, and a character reference may not name
+// one either ("the replacement text of an entity must match the production
+// Char"). Such a byte therefore has NO legal XML spelling, not even as
+// "&#1;". Writing it raw produced a document that no conforming parser
+// accepts (and the library's own reader happened to accept it back), so it is
+// reported instead - the same "an unencodable value is an error, never a
+// non-round-trippable output" rule the dotenv encoder follows.
+inline bool xmlCharAllowed(unsigned char c) {
+	return c >= 0x20 || c == '\t' || c == '\n' || c == '\r';
+}
+
+inline std::string xmlInvalidCharMessage(unsigned char c) {
+	static const char* HEX = "0123456789ABCDEF";
+	std::string msg = "XML: control character U+00";
+	msg += HEX[(c >> 4) & 0xF];
+	msg += HEX[c & 0xF];
+	msg += " cannot be serialized (XML 1.0 has no legal spelling for it)";
+	return msg;
+}
+
 inline std::string xmlEscapeContent(std::string_view s) {
 	std::string out;
 	out.reserve(s.size() + 8);
@@ -18,10 +39,29 @@ inline std::string xmlEscapeContent(std::string_view s) {
 			case '>': out += "&gt;"; break;
 			case '"': out += "&quot;"; break;
 			case '\'': out += "&apos;"; break;
-			default: out += c;
+			default:
+				if (!xmlCharAllowed(static_cast<unsigned char>(c)))
+					throw asvJSONError(xmlInvalidCharMessage(static_cast<unsigned char>(c)));
+				out += c;
 		}
 	}
 	return out;
+}
+
+// Escape XML character data (the &, <, > set - the quotes stay literal in text
+// content). Same control-character rule as xmlEscapeContent.
+inline void xmlEscapeTextInto(std::string& out, std::string_view s) {
+	for (char c : s) {
+		switch (c) {
+			case '&': out += "&amp;"; break;
+			case '<': out += "&lt;"; break;
+			case '>': out += "&gt;"; break;
+			default:
+				if (!xmlCharAllowed(static_cast<unsigned char>(c)))
+					throw asvJSONError(xmlInvalidCharMessage(static_cast<unsigned char>(c)));
+				out += c;
+		}
+	}
 }
 
 inline std::string xmlSanitizeElementName(std::string_view key) {

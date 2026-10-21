@@ -35,6 +35,12 @@
 // (a single leftover significant character is genuinely ambiguous and is
 // rejected).
 //
+// A C0 control byte other than tab, LF and CR has NO legal XML 1.0 spelling
+// (the Char production excludes it and a character reference may not name it
+// either), so toPlist() REPORTS it with an asvJSONError instead of writing it
+// raw - the document would otherwise be one that no conforming parser
+// accepts. The decoder stays lenient and reads such a byte back as it stands.
+//
 // <date> keeps the value's stored timezone offset when one is present. Apple's
 // plist spec wants UTC with a trailing Z, so documents destined for Apple
 // tooling should use offset-less datetimes; the offset form parses back, so
