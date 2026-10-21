@@ -1375,9 +1375,50 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
     if (cppRdIdentStart(c)) {
       size_t s = i;
       while (i < n && cppRdIdentChar(in[i])) i++;
+      std::string ident(in.data() + s, i - s);
+      // Check for raw string literal: R"..." or R"delimiter(...)delimiter"
+      if ((!skipTok) && (ident == "R" || ident == "r") && i < n && in[i] == '(') {
+        size_t js = i;
+        while (i < n && in[i] == '(') i++;
+        std::string delim;
+        while (i < n && in[i] != ')') { delim += in[i++]; }
+        if (i >= n) {
+          if (!skipTok) {
+            Tok t; t.kind = Tok::Ident; t.line = line; t.text = std::move(ident);
+            out.push_back(std::move(t));
+          }
+          continue;
+        }
+        i++; // ')'
+        // Accumulate until we see the closing delimiter followed by '"'
+        std::string val;
+        size_t sl = line;
+        while (i < n) {
+          if (in[i] == ')') {
+            size_t j = i + 1;
+            bool delimMatch = true;
+            for (char dc : delim) {
+              if (j >= n || in[j] != dc) { delimMatch = false; break; }
+              j++;
+            }
+            if (delimMatch && j < n && in[j] == '"') {
+              i = j + 1;
+              break;
+            }
+          }
+          if (in[i] == '\n') line++;
+          val += in[i++];
+        }
+        if (i >= n) throw asvJSONError("cpp: unterminated raw string literal at line " + std::to_string(sl));
+        if (!skipTok) {
+          Tok t; t.kind = Tok::Str; t.line = sl; t.text = std::move(val);
+          out.push_back(std::move(t));
+        }
+        continue;
+      }
       if (!skipTok) {
         Tok t; t.kind = Tok::Ident; t.line = line;
-        t.text.assign(in.data() + s, i - s);
+        t.text = std::move(ident);
         out.push_back(std::move(t));
       }
       continue;
@@ -1390,6 +1431,31 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
     } else {
       i++;
     }
+  }
+  // Strip string/char literal prefixes (L, u8, u, U, R) from the token stream.
+  // The lexer emits them as separate Ident tokens, but they are not part of
+  // the literal value. Merge each prefix+literal pair into a single Str/Char token.
+  {
+    std::vector<Tok> result;
+    result.reserve(out.size());
+    for (size_t k = 0; k < out.size(); ) {
+      const Tok& tk = out[k];
+      bool isPrefix = false;
+      if (tk.kind == Tok::Ident && (tk.text == "L" || tk.text == "u8" || tk.text == "u" ||
+              tk.text == "U")) {
+        if (k + 1 < out.size() && (out[k + 1].kind == Tok::Str || out[k + 1].kind == Tok::Char)) {
+          isPrefix = true;
+        }
+      }
+      if (isPrefix) {
+        result.push_back(out[k + 1]);
+        k += 2;
+      } else {
+        result.push_back(tk);
+        k++;
+      }
+    }
+    out = std::move(result);
   }
   Tok e; e.kind = Tok::End; e.line = line;
   out.push_back(std::move(e));
@@ -1438,14 +1504,68 @@ inline std::unique_ptr<asvJSONValue> cppRdString(std::string s) {
   return v;
 }
 
+// Concatenate adjacent string literal tokens. C++ concatenates them into one
+// value: "a" "b" -> "ab". Also strips string/char literal prefixes (L, u8, u, U).
+// Note: R/r raw string literals are handled in the lexer directly.
+inline std::vector<Tok> cppRdProcessStringLiterals(std::vector<Tok> init) {
+  // First, strip prefixes: merge prefix+literal pairs
+  {
+    std::vector<Tok> result;
+    result.reserve(init.size());
+    for (size_t k = 0; k < init.size(); ) {
+      const Tok& tk = init[k];
+      bool isPrefix = false;
+      if (tk.kind == Tok::Ident && (tk.text == "L" || tk.text == "u8" || tk.text == "u" ||
+              tk.text == "U")) {
+        if (k + 1 < init.size() && (init[k + 1].kind == Tok::Str || init[k + 1].kind == Tok::Char)) {
+          isPrefix = true;
+        }
+      }
+      if (isPrefix) {
+        result.push_back(init[k + 1]);
+        k += 2;
+      } else {
+        result.push_back(tk);
+        k++;
+      }
+    }
+    init = std::move(result);
+  }
+  // Then, concatenate adjacent string literals
+  {
+    std::vector<Tok> out;
+    out.reserve(init.size());
+    for (size_t i = 0; i < init.size(); ) {
+      if (init[i].kind == Tok::Str && i + 1 < init.size() && init[i + 1].kind == Tok::Str) {
+        std::string combined = init[i].text;
+        size_t lastIdx = i;
+        while (i + 1 < init.size() && init[i + 1].kind == Tok::Str) {
+          i++;
+          combined += init[i].text;
+          lastIdx = i;
+        }
+        out.push_back(init[lastIdx]);
+        out.back().text = std::move(combined);
+      } else {
+        out.push_back(init[i]);
+      }
+      i++;
+    }
+    init = std::move(out);
+  }
+  return init;
+}
+
 // Interpret a scalar initializer as a single literal: strips balanced outer
 // parentheses and a leading unary sign, then reads one number/string/char/
 // bool/null literal. Returns nullptr when the tokens are not a literal.
 inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& init,
-                                                        bool wantDouble) {
+                                                         bool wantDouble) {
+  // Process string literals: strip prefixes and concatenate adjacent strings.
+  std::vector<Tok> processed = cppRdProcessStringLiterals(init);
   std::vector<const Tok*> v;
-  v.reserve(init.size());
-  for (const Tok& tk : init) if (tk.kind != Tok::Comment) v.push_back(&tk);
+  v.reserve(processed.size());
+  for (const Tok& tk : processed) if (tk.kind != Tok::Comment) v.push_back(&tk);
   while (v.size() >= 2 && v.front()->kind == Tok::Punct && v.front()->text == "(" &&
          v.back()->kind == Tok::Punct && v.back()->text == ")") {
     int d = 0;
