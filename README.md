@@ -134,7 +134,7 @@ Behavior worth knowing:
 
 - **Custom types and `type`.** Each custom type is matched by the JSON shape it serializes to, so `{"type":"string"}` accepts a `DATETIME` and `{"type":"object"}` accepts an `OBJECTID`, `REGEX`, `CUSTOM_TAG`, `EXTENSION` or `TIMESTAMP` (all of which emit extended-JSON objects). Both spellings are accepted where both are plausible -- `OBJECTID`/`REGEX`/`CUSTOM_TAG` pass as `string` or `object`, `TIMESTAMP` as `integer`/`number`/`object`, `BINARY` as `string` or `object` -- so no schema that passed before stops passing. Plain JSON parses those extended forms back as ordinary objects, which is why the distinction only shows on decoded or programmatically built nodes.
 - **Malformed schemas fail loudly.** A keyword value of the wrong shape is rejected (`enum` not an array, a non-numeric `minimum`, a non-string `pattern`/`format`, a `type`/`required` entry that is not a string). This includes inside `anyOf`/`oneOf`/`not`/`if`/`contains`: those keywords read a branch failure as "the instance did not match", so a broken branch is now reported instead of being counted as a mismatch that flips the verdict. Only subschemas the instance actually reaches are checked -- an unused `properties` entry is not.
-- **Degenerate keyword shapes are rejected**, in the spirit of the empty-`enum` rule: `enum: []` and `type: []` (both match nothing), duplicate `type`/`required` entries (draft-07 says these arrays SHOULD be unique), and the draft-04 boolean `exclusiveMinimum`/`exclusiveMaximum` without the `minimum`/`maximum` it modifies. An empty `required` stays a legal no-op.
+- **Degenerate keyword shapes are rejected**, in the spirit of the empty-`enum` rule: `enum: []` and `type: []` (both match nothing), an empty `allOf`/`anyOf`/`oneOf` (an empty `allOf` matches everything and an empty `anyOf`/`oneOf` matches nothing, so both are degenerate), duplicate `type`/`required` entries (draft-07 says these arrays SHOULD be unique), and the draft-04 boolean `exclusiveMinimum`/`exclusiveMaximum` without the `minimum`/`maximum` it modifies. An empty `required` stays a legal no-op.
 - **Never throws.** `validate()` converts an escaping `std::exception` -- an allocation failure, or `std::regex_error` from a `pattern` whose *match* runs out of stack (the pattern itself compiled fine) -- into `false` with a `Schema validation failed: ...` message.
 
 Disable with `#define ASVJSON_DISABLE_SCHEMA`.
@@ -154,7 +154,9 @@ const asvJSONValue* first = doc.queryFirst("$.users[0].name");
 bool valid = asvJSON::isValidPath("$.users[*].name"); // true
 ```
 
-Supports: `$`, `.member`, `['member']`, `[index]`, `[start:end:step]` slices, `..` recursive descent, `[*]` wildcard, `?(filter)` with `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`, `!` operators, and functions: `length()`, `count()`, `min()`, `max()`, `sum()`, `avg()`, `match()`, `search()`, `value()`.
+Supports: `$`, `.member`, `.'quoted member'`, `['member']`, `[index]`, `[start:end:step]` slices, `..` recursive descent, `[*]` wildcard, `?(filter)` with `<`, `>`, `<=`, `>=`, `==`, `!=`, `&&`, `||`, `!` operators, and functions: `length()`, `count()`, `min()`, `max()`, `sum()`, `avg()`, `match()`, `search()`, `value()`.
+
+The member-name shorthand also accepts a quoted name, as RFC 9535 2.5.2.1 allows: `$.'a b'` and `$.''` select a member exactly like `$['a b']` and `$['']` do (including the descendant form `$..'a b'` and the same shorthand inside a filter path).
 
 `query()` is inherently lenient (RFC 9535): a selector it cannot evaluate (e.g. an unterminated bracket, arguments passed to a function, or a filter expression containing unsupported constructs) never throws  -  it contributes no matches, so a malformed path yields an empty result rather than a partial one. Function arguments are only allowed on the parenthesized right-hand side of filter operators (e.g. `[?(@.price ..)]`).
 

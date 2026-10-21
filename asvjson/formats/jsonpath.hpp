@@ -1,13 +1,19 @@
 #pragma once
 // JSONPath (RFC 9535) implementation for asvJSON++
 // Supports:
-//   $ (root), .member, ['member'], [index], [start:end:step] (slice),
+//   $ (root), .member, .'quoted member', ['member'], [index],
+//   [start:end:step] (slice),
 //   ..member / ..* / ..[selectors] (recursive descent), [*] (wildcard), .*,
 //   [?filter] / [?(filter)] with operators: < > <= >= == != && || !
 //   functions: length(), count(), min(), max(), sum(), avg(), match(), search(),
 //   value()
 //
 // RFC compliance notes:
+//   - The member-name shorthand also accepts a QUOTED name (RFC 9535 2.5.2.1:
+//     member-name-shorthand = identifier / %x27 *qchar %x27), so $.'a b' and
+//     $.'' select a member exactly like $['a b'] and $[''] do. The same
+//     shorthand works in the descendant form ($..'a b') and inside a filter
+//     query path (@.'a b').
 //   - Numeric selectors/bounds/indices are validated per the RFC int grammar
 //     (no leading zeros) and must lie in the I-JSON exact range
 //     [-(2^53)+1, (2^53)-1]; out-of-range or malformed numbers select nothing
@@ -815,7 +821,12 @@ class JPFilterEval {
       if (lex_.peek().type == TokType::DOT) {
         lex_.next();
         Tok p = lex_.next();
-        if (p.type != TokType::IDENT) {
+        if (p.type == TokType::STRING) {
+          // A quoted member-name-shorthand (@.'a b'), RFC 9535 2.5.2.1.
+          if (!p.ok) { node = nullptr; break; }
+          node = jpGetProp(node, p.val);
+          if (!node) node = nullptr;
+        } else if (p.type != TokType::IDENT) {
           if (p.type == TokType::STAR) {
             // wildcard: the node is selected iff it has at least one child
             if (jpAllChildren(node).empty()) node = nullptr;
@@ -1119,6 +1130,13 @@ inline void jpExpandDot(Tok seg, PathLexer& lex, const asvJSONValue* node,
   } else if (seg.type == TokType::IDENT) {
     const asvJSONValue* child = jpGetProp(node, seg.val);
     if (child) out.push_back(child);
+  } else if (seg.type == TokType::STRING && seg.ok) {
+    // The member-name-shorthand also allows a QUOTED name (RFC 9535 2.5.2.1:
+    // member-name-shorthand = identifier / %x27 *qchar %x27), so $.'a b' and
+    // $.'' select a member like $['a b'] and $[''] do. The segment token was
+    // ignored before, so such a path silently selected nothing.
+    const asvJSONValue* child = jpGetProp(node, seg.val);
+    if (child) out.push_back(child);
   }
 }
 
@@ -1130,6 +1148,9 @@ inline void jpExpandDotDot(Tok seg, PathLexer& lex, const asvJSONValue* node,
   if (seg.type == TokType::STAR) {
     jpDescChildrenAll(node, out);
   } else if (seg.type == TokType::IDENT) {
+    jpDescChildrenName(node, seg.val, out);
+  } else if (seg.type == TokType::STRING && seg.ok) {
+    // The quoted member-name-shorthand (see jpExpandDot).
     jpDescChildrenName(node, seg.val, out);
   } else if (seg.type == TokType::LBRACKET) {
     // lex is positioned right after '['; the child segment is applied to each
@@ -1471,6 +1492,12 @@ inline bool jpValidateQueryPath(PathLexer& lex) {
       lex.next();
       Tok seg = lex.peek();
       if (seg.type == TokType::STAR) { lex.next(); continue; }
+      // A quoted member-name-shorthand ($.'a b') is a valid name segment.
+      if (seg.type == TokType::STRING) {
+        if (!seg.ok) return false;
+        lex.next();
+        continue;
+      }
       if (seg.type != TokType::IDENT) return false;
       lex.next();
       if (jpIsZeroArgFunc(seg.val) && lex.peek().type == TokType::LPAREN) {
@@ -1761,7 +1788,9 @@ inline bool jpIsValid(std::string_view path) {
       lex.next();
       Tok seg = lex.next();
       if (!seg.ok) return false;
-      if (seg.type != TokType::IDENT && seg.type != TokType::STAR) return false;
+      // IDENT (an identifier) or STRING (a quoted member-name-shorthand).
+      if (seg.type != TokType::IDENT && seg.type != TokType::STAR && seg.type != TokType::STRING)
+        return false;
       if (seg.type == TokType::IDENT && jpIsZeroArgFunc(seg.val) &&
           lex.peek().type == TokType::LPAREN) {
         // Zero-arg only, as above: the closing ')' has to be consumed here, and
@@ -1784,7 +1813,9 @@ inline bool jpIsValid(std::string_view path) {
       } else {
         lex.next();
         if (!seg.ok) return false;
-        if (seg.type != TokType::IDENT && seg.type != TokType::STAR) return false;
+        // IDENT (an identifier) or STRING (a quoted member-name-shorthand).
+        if (seg.type != TokType::IDENT && seg.type != TokType::STAR && seg.type != TokType::STRING)
+          return false;
       }
     } else if (t.type == TokType::LBRACKET) {
       lex.next(); // consume '['

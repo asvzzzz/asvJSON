@@ -29865,6 +29865,50 @@ TEST(testJSONPathValidator) {
 // RFC 9535 conformance fixes: filter -0/-0.5 numbers (2.3.5.1), match/search
 // excluded from path segments (2.4.6/2.4.7), and ValueType function arguments
 // (2.4.3) accepted by the validator and evaluated per the RFC.
+// Audit fix: the member-name-shorthand also allows a QUOTED name (RFC 9535
+// 2.5.2.1: member-name-shorthand = identifier / %x27 *qchar %x27), so
+// $.'a b' and $.'' select a member exactly like $['a b'] and $[''] do. The
+// quoted segment token was ignored, so such a path silently selected nothing.
+TEST(testJSONPathQuotedNameShorthand) {
+	asvJSON doc;
+	ASSERT(doc.parse(std::string_view(R"({"":0,"a":1,"a b":2,"x":{"a b":3}})")));
+	{
+		auto r = doc.query("$.'a'");
+		ASSERT_EQ(r.size(), size_t(1));
+		if (r.size() == 1) ASSERT(r[0] && r[0]->num == 1);
+	}
+	{
+		auto r = doc.query("$.'a b'");
+		ASSERT_EQ(r.size(), size_t(1));
+		if (r.size() == 1) ASSERT(r[0] && r[0]->num == 2);
+	}
+	{
+		// The empty name is a legal member name.
+		auto r = doc.query("$.''");
+		ASSERT_EQ(r.size(), size_t(1));
+		if (r.size() == 1) ASSERT(r[0] && r[0]->num == 0);
+	}
+	{
+		// The descendant form takes the same shorthand.
+		auto r = doc.query("$..'a b'");
+		ASSERT_EQ(r.size(), size_t(2));
+	}
+	{
+		// A quoted name inside a filter query path. The filter iterates the
+		// members of an ARRAY of objects, so @ binds to the object itself.
+		asvJSON arr;
+		ASSERT(arr.parse(std::string_view(R"({"x":[{"a b":3}]})")));
+		auto r = arr.query("$.x[?@.'a b' == 3].'a b'");
+		ASSERT_EQ(r.size(), size_t(1));
+		if (r.size() == 1) ASSERT(r[0] && r[0]->num == 3);
+	}
+	// The path validator accepts the shorthand and rejects an unterminated one.
+	ASSERT(asvJSON::isValidPath("$.'a b'"));
+	ASSERT(asvJSON::isValidPath("$.''"));
+	ASSERT(asvJSON::isValidPath("$..'a b'"));
+	ASSERT(!asvJSON::isValidPath("$.'a"));
+}
+
 TEST(testJSONPathSpecFixes) {
 	// -- filter number grammar: `number = (int / "-0") [ frac ] [ exp ]` --
 	{
@@ -36043,6 +36087,7 @@ RUN(testYamlAuditReview);
 	RUN(testGoonISODateNotQuoted);
 	RUN(testGoonQuotedFieldBrace);
 	RUN(testYamlRegexPipeSeparator);
+	RUN(testJSONPathQuotedNameShorthand);
 	RUN(testXMLControlCharRejected);
 
 	std::cout << "\n========================================" << std::endl;
