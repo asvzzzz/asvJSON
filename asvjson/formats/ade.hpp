@@ -27,6 +27,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 
 namespace asvJSONInternal {
 
@@ -1588,13 +1589,36 @@ private:
     if (val->type == asvJSONValue::OBJECT) {
       adeMergeInto(obj, val.get());
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
-      // Later objects in the sequence take precedence (YAML semantics), so
-      // iterate in reverse: the first-processed source keeps its keys and
-      // earlier sources only fill in the gaps.
-      for (auto it = val->arr->rbegin(); it != val->arr->rend(); ++it) {
-        if ((*it)->type != asvJSONValue::OBJECT)
+      // "Later objects in the sequence take precedence" (YAML semantics): for a
+      // CONFLICT the later entry wins, but the merged keys keep the ORDER of the
+      // sequence. Iterating the sequence in reverse got the precedence right and
+      // the order wrong (`<<: [*a, *b]` put b's members first).
+      std::set<std::string> merged;
+      for (auto& src : *val->arr) {
+        if (!src || src->type != asvJSONValue::OBJECT)
           throw asvJSONError("ADE: merge key sequence must contain only objects");
-        adeMergeInto(obj, it->get());
+        if (!src->obj) continue;
+        for (const auto& [k, v] : *src->obj) {
+          auto it = obj->obj->find(k);
+          if (it == obj->obj->end()) {
+            if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+              throw asvJSONError("ADE: object too large");
+            auto copy = cloneValue(v.get());
+            // A failed clone (clone budget exhausted) must not be swallowed: that
+            // would drop a key from the merge with no error, unlike registerAnchor/
+            // parseAlias, which both turn the same failure into a throw.
+            if (!copy) throw asvJSONError("ADE: failed to clone merged key " + k);
+            obj->obj->emplace(k, std::move(copy));
+            merged.insert(k);
+          } else if (merged.count(k)) {
+            // The key came from an EARLIER source of this same merge, so the
+            // later entry wins. A key that was in the TARGET object before the
+            // merge is not touched - the target's own keys take precedence.
+            auto copy = cloneValue(v.get());
+            if (!copy) throw asvJSONError("ADE: failed to clone merged key " + k);
+            it->second = std::move(copy);
+          }
+        }
       }
     } else {
       throw asvJSONError("ADE: merge key requires an object or sequence of objects");
