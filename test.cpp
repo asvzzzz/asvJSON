@@ -19215,6 +19215,162 @@ TEST(testToCpp) {
   }
 }
 
+// Audit gap list for fromCpp(): literal forms, declarator shapes and
+// declaration kinds the decoder used to mis-read or drop. Every case below was
+// reproduced before the fix (see the probe table in the audit notes).
+TEST(testCppLiteralAndDeclGaps) {
+  // -- string literal prefixes: the prefix is NOT part of the value --
+  {
+    const char* srcs[] = {
+      "struct S { std::string s = L\"wide\"; };",
+      "struct S { std::string s = u8\"utf8\"; };",
+      "struct S { std::string s = u\"u16\"; };",
+      "struct S { std::string s = U\"u32\"; };",
+    };
+    const char* want[] = {"wide", "utf8", "u16", "u32"};
+    for (int i = 0; i < 4; i++) {
+      asvJSON j;
+      ASSERT(j.fromCpp(srcs[i]));
+      ASSERT(j.get("S") != nullptr);
+      const asvJSONValue* s = j.get("S") ? j.get("S")->getConst("s") : nullptr;
+      ASSERT(s != nullptr);
+      if (s) ASSERT_EQ(std::string(s->getString()), std::string(want[i]));
+    }
+  }
+  // -- raw string literal R"(...)" --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { std::string s = R\"(raw)\"; };"));
+    const asvJSONValue* s = j.get("S") ? j.get("S")->getConst("s") : nullptr;
+    ASSERT(s != nullptr);
+    if (s) ASSERT_EQ(std::string(s->getString()), std::string("raw"));
+  }
+  // -- adjacent string literals are concatenated --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { std::string s = \"a\" \"b\" \"c\"; };"));
+    const asvJSONValue* s = j.get("S") ? j.get("S")->getConst("s") : nullptr;
+    ASSERT(s != nullptr);
+    if (s) ASSERT_EQ(std::string(s->getString()), std::string("abc"));
+  }
+  // -- char literal with a prefix --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { char c = u'x'; };"));
+    const asvJSONValue* c = j.get("S") ? j.get("S")->getConst("c") : nullptr;
+    ASSERT(c != nullptr);
+    if (c) ASSERT_EQ(std::string(c->getString()), std::string("x"));
+  }
+  // -- nested braces in an initializer keep their nesting --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { std::vector<std::vector<int>> v = {{1,2},{3}}; };"));
+    const asvJSONValue* v = j.get("S") ? j.get("S")->getConst("v") : nullptr;
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->size() == size_t(2));
+    if (v && v->type == asvJSONValue::ARRAY && v->size() == size_t(2)) {
+      ASSERT(v->get(0)->type == asvJSONValue::ARRAY && v->get(0)->size() == size_t(2));
+      if (v->get(0)->type == asvJSONValue::ARRAY && v->get(0)->size() == size_t(2))
+        ASSERT_EQ(v->get(0)->get(0)->num, int64_t(1));
+    }
+  }
+  // -- an operator overload is a function, not a data member --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { bool operator==(const S&) const; int a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      ASSERT(s->getConst("operator") == nullptr);
+      ASSERT(s->getConst("a") != nullptr);
+    }
+  }
+  // -- a 2D array keeps its dimension order: int m[2][3] is 2 rows of 3 --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { int m[2][3]; };"));
+    const asvJSONValue* m = j.get("S") ? j.get("S")->getConst("m") : nullptr;
+    ASSERT(m != nullptr && m->type == asvJSONValue::ARRAY && m->size() == size_t(2));
+    if (m && m->type == asvJSONValue::ARRAY && m->size() == size_t(2)) {
+      ASSERT(m->get(0)->type == asvJSONValue::ARRAY && m->get(0)->size() == size_t(3));
+    }
+  }
+  // -- an enum nested in a struct keeps the member (its variants) --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { enum E { A, B } e; int a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* e = s->getConst("e");
+      ASSERT(e != nullptr);
+      if (e) {
+        ASSERT(e->type == asvJSONValue::ARRAY && e->size() == size_t(2));
+        if (e->type == asvJSONValue::ARRAY && e->size() == size_t(2))
+          ASSERT_EQ(std::string(e->get(0)->getString()), std::string("A"));
+      }
+      ASSERT(s->getConst("a") != nullptr);
+    }
+  }
+  // -- an enum is a TYPE: its variants materialize where the type is used --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("enum E { A, B, C };\nstruct S { std::array<E,3> v; };"));
+    const asvJSONValue* v = j.get("S") ? j.get("S")->getConst("v") : nullptr;
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->size() == size_t(3));
+    if (v && v->type == asvJSONValue::ARRAY && v->size() == size_t(3))
+      ASSERT_EQ(std::string(v->get(2)->getString()), std::string("C"));
+  }
+  // -- a global variable declaration is a declaration too --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("int g = 5;"));
+    ASSERT(j.get("g") != nullptr);
+    if (j.get("g")) ASSERT_EQ(j.get("g")->num, int64_t(5));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("double g = 1.5;"));
+    ASSERT(j.get("g") != nullptr);
+    if (j.get("g")) ASSERT(j.get("g")->type == asvJSONValue::DOUBLE);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("std::string g = \"x\";"));
+    ASSERT(j.get("g") != nullptr);
+    if (j.get("g")) ASSERT_EQ(std::string(j.get("g")->getString()), std::string("x"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("int g[3] = {1,2,3};"));
+    const asvJSONValue* g = j.get("g");
+    ASSERT(g != nullptr && g->type == asvJSONValue::ARRAY && g->size() == size_t(3));
+    if (g && g->type == asvJSONValue::ARRAY && g->size() == size_t(3))
+      ASSERT_EQ(g->get(2)->num, int64_t(3));
+  }
+  // -- #if defined(...) conditions are evaluated --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("#define BAR 1\n#if defined(BAR) && !defined(FOO)\nstruct S { int a; };\n#endif"));
+    ASSERT(j.get("S") != nullptr);
+  }
+  // -- an alias must not turn the root into a scalar --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("using Alias = int;\nstruct S { Alias a; };"));
+    ASSERT(j.get("S") != nullptr);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("typedef int MyInt;\nstruct S { MyInt a; };"));
+    ASSERT(j.get("S") != nullptr);
+  }
+  // -- a negative array size is an error, not an empty array --
+  {
+    asvJSON j;
+    ASSERT(!j.fromCpp("struct S { int a[-1]; };"));
+  }
+}
+
 TEST(testFromCpp) {
   // Modern C++ round-trip: flat object with scalar defaults.
   {
@@ -36061,6 +36217,7 @@ RUN(testRONCommentOrderAndPendants);
 RUN(testRootFootingComments);
   RUN(testToCpp);
 RUN(testFromCpp);
+RUN(testCppLiteralAndDeclGaps);
 RUN(testFromCppAudit);
 RUN(testFromCppArraySizeGuard);
   RUN(testFromCppDefineMacros);

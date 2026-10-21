@@ -850,10 +850,18 @@ struct Tok {
 };
 
 inline bool cppRdIdentStart(char c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+  // A byte >= 0x80 starts a UTF-8 identifier (C++11 allows universal
+  // character names and extended characters).
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+         static_cast<unsigned char>(c) >= 0x80;
 }
 inline bool cppRdIdentChar(char c) {
-  return cppRdIdentStart(c) || (c >= '0' && c <= '9');
+  // A byte >= 0x80 is part of a UTF-8 identifier (C++11 allows universal
+  // character names and extended characters). Without it the scan stopped at
+  // the first byte of a non-ASCII name, and `int e;` was decoded as a field
+  // named "int" with the real name lost.
+  return cppRdIdentStart(c) || (c >= '0' && c <= '9') ||
+         static_cast<unsigned char>(c) >= 0x80;
 }
 
 inline std::string cppRdStripNumSuffix(std::string s) {
@@ -1376,45 +1384,52 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       size_t s = i;
       while (i < n && cppRdIdentChar(in[i])) i++;
       std::string ident(in.data() + s, i - s);
-      // Check for raw string literal: R"..." or R"delimiter(...)delimiter"
-      if ((!skipTok) && (ident == "R" || ident == "r") && i < n && in[i] == '(') {
-        size_t js = i;
-        while (i < n && in[i] == '(') i++;
+      // Raw string literal: R"delimiter(... )delimiter" (C++11). The form is
+      // R"d chars )d" - the opening paren comes AFTER the quote, so the
+      // delimiter is read first and the body ends at ')' + delimiter + '"'.
+      // The body is taken verbatim (no escape processing) and may span lines.
+      if (ident == "R" && i < n && in[i] == '"') {
+        size_t sl = line;
+        size_t j = i + 1;
         std::string delim;
-        while (i < n && in[i] != ')') { delim += in[i++]; }
-        if (i >= n) {
+        // The delimiter is at most 16 chars and may not contain a space, a
+        // paren or a backslash (C++11 [lex.string]).
+        while (j < n && delim.size() < 16 && in[j] != '(' && in[j] != ')' &&
+               in[j] != '\\' && !std::isspace(static_cast<unsigned char>(in[j]))) {
+          delim += in[j++];
+        }
+        if (j < n && in[j] == '(') {
+          j++; // '('
+          std::string val;
+          bool closed = false;
+          while (j < n) {
+            if (in[j] == ')') {
+              size_t k = j + 1;
+              bool delimMatch = true;
+              for (char dc : delim) {
+                if (k >= n || in[k] != dc) { delimMatch = false; break; }
+                k++;
+              }
+              if (delimMatch && k < n && in[k] == '"') {
+                j = k + 1;
+                closed = true;
+                break;
+              }
+            }
+            if (in[j] == '\n') line++;
+            val += in[j++];
+          }
+          if (!closed)
+            throw asvJSONError("cpp: unterminated raw string literal at line " + std::to_string(sl));
+          i = j;
           if (!skipTok) {
-            Tok t; t.kind = Tok::Ident; t.line = line; t.text = std::move(ident);
+            Tok t; t.kind = Tok::Str; t.line = sl; t.text = std::move(val);
             out.push_back(std::move(t));
           }
           continue;
         }
-        i++; // ')'
-        // Accumulate until we see the closing delimiter followed by '"'
-        std::string val;
-        size_t sl = line;
-        while (i < n) {
-          if (in[i] == ')') {
-            size_t j = i + 1;
-            bool delimMatch = true;
-            for (char dc : delim) {
-              if (j >= n || in[j] != dc) { delimMatch = false; break; }
-              j++;
-            }
-            if (delimMatch && j < n && in[j] == '"') {
-              i = j + 1;
-              break;
-            }
-          }
-          if (in[i] == '\n') line++;
-          val += in[i++];
-        }
-        if (i >= n) throw asvJSONError("cpp: unterminated raw string literal at line " + std::to_string(sl));
-        if (!skipTok) {
-          Tok t; t.kind = Tok::Str; t.line = sl; t.text = std::move(val);
-          out.push_back(std::move(t));
-        }
-        continue;
+        // Not a raw string after all (e.g. R"( is a macro call): fall through
+        // and emit the identifier as usual.
       }
       if (!skipTok) {
         Tok t; t.kind = Tok::Ident; t.line = line;
@@ -1432,31 +1447,11 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       i++;
     }
   }
-  // Strip string/char literal prefixes (L, u8, u, U, R) from the token stream.
-  // The lexer emits them as separate Ident tokens, but they are not part of
-  // the literal value. Merge each prefix+literal pair into a single Str/Char token.
-  {
-    std::vector<Tok> result;
-    result.reserve(out.size());
-    for (size_t k = 0; k < out.size(); ) {
-      const Tok& tk = out[k];
-      bool isPrefix = false;
-      if (tk.kind == Tok::Ident && (tk.text == "L" || tk.text == "u8" || tk.text == "u" ||
-              tk.text == "U")) {
-        if (k + 1 < out.size() && (out[k + 1].kind == Tok::Str || out[k + 1].kind == Tok::Char)) {
-          isPrefix = true;
-        }
-      }
-      if (isPrefix) {
-        result.push_back(out[k + 1]);
-        k += 2;
-      } else {
-        result.push_back(tk);
-        k++;
-      }
-    }
-    out = std::move(result);
-  }
+  // NOTE: the string/char literal prefixes (L, u8, u, U) are NOT stripped here.
+  // A global Ident+literal merge would eat a legitimate identifier that happens
+  // to be followed by a string token (an initializer list element `{u, "x"}`).
+  // The prefix is removed where a literal is actually expected - in
+  // cppRdProcessStringLiterals, which runs on the initializer of one member.
   Tok e; e.kind = Tok::End; e.line = line;
   out.push_back(std::move(e));
   return out;
@@ -2131,7 +2126,16 @@ struct Reader {
           for (auto& f : parseStructDecl()) fileScope.push_back(std::move(f));
           continue;
         }
-        if (s == "enum" && looksLikeNestedDef()) { parseEnumDecl(); continue; }
+        if (s == "enum" && looksLikeNestedDef()) {
+          enumDeclVar_.clear();
+          enumDeclMembers_.clear();
+          parseEnumDecl();
+          // NOTE: a standalone enum is a TYPE declaration, not a value - its
+          // variants materialize where the type is used (`std::array<E,3> v`
+          // -> the variant names). So no root member is created here: the
+          // enum-map mechanism (see the "modes" case in testFromCpp) owns that.
+          continue;
+        }
         if (s == "typedef") { parseTypedef(); continue; }
         if (s == "using") { parseUsing(); continue; }
         if (s == "namespace") {
@@ -2154,8 +2158,91 @@ struct Reader {
       }
       if (isP("{")) { skipBalanced("{", "}"); continue; }
       if (isP(";")) { adv(); continue; }
+      // A file-scope variable declaration (`int g = 5;`, `std::string s = "x";`,
+      // `int g[3] = {1,2,3};`) is a declaration too. The top level used to skip
+      // such tokens one by one, so a file with only globals decoded to "no type
+      // declarations found" and the values were lost.
+      if (cppRdLooksLikeFileScopeDecl()) {
+        StructDef tmp;
+        const size_t save = p;
+        parseMember(tmp);
+        if (p == save) { adv(); continue; }  // no progress -> skip one token
+        for (auto& f : tmp.fields) fileScope.push_back(std::move(f));
+        continue;
+      }
       adv();
     }
+  }
+
+  // True when the tokens at the current position look like a file-scope
+  // variable declaration: a type, a declarator name and then `=`, `;`, `[` or
+  // `,`. A leading C++ keyword means it is a type declaration or a statement,
+  // not a variable.
+  bool cppRdLooksLikeFileScopeDecl() {
+    if (cur().kind != Tok::Ident) return false;
+    // A leading declaration/statement keyword means this is a type
+    // declaration or a statement, not a variable. A TYPE keyword (int,
+    // double, ...) is fine - that is exactly a variable declaration.
+    static const char* declKws[] = {
+      "struct", "class", "enum", "typedef", "using", "namespace", "template",
+      "extern", "friend", "public", "private", "protected", "static_assert",
+      "operator", "return", "if", "else", "for", "while", "do", "switch",
+      "case", "break", "continue", "goto", "try", "catch", "throw", "delete",
+      "new", "sizeof", "alignof", "decltype", "typename"
+    };
+    for (auto* kw : declKws) if (cur().text == kw) return false;
+
+    // A qualified type name: `ident :: ident` (with an optional template
+    // argument list) - `std::string s = "x";`.
+    {
+      size_t q = p + 1;
+      while (q < t.size() && t[q].kind == Tok::Comment) q++;
+      if (q + 1 < t.size() && t[q].kind == Tok::Punct && t[q].text == "::" &&
+          t[q + 1].kind == Tok::Ident) {
+        size_t e = q + 2;
+        if (e < t.size() && t[e].kind == Tok::Punct && t[e].text == "<") {
+          int d = 0;
+          size_t r = e;
+          for (; r < t.size(); ++r) {
+            if (t[r].kind != Tok::Punct) continue;
+            if (t[r].text == "<") d++;
+            else if (t[r].text == ">") { d--; if (d == 0) { r++; break; } }
+          }
+          if (r >= t.size()) return false;
+          e = r;
+        }
+        while (e < t.size() && t[e].kind == Tok::Comment) e++;
+        if (e >= t.size() || t[e].kind != Tok::Ident) return false;
+        e++;
+        while (e < t.size() && t[e].kind == Tok::Comment) e++;
+        if (e >= t.size() || t[e].kind != Tok::Punct) return false;
+        return t[e].text == "=" || t[e].text == ";" || t[e].text == "[" || t[e].text == ",";
+      }
+    }
+
+    // A plain type: one or more type keywords - `unsigned long long x = 1;`.
+    static const char* typeKws[] = {
+      "int", "char", "long", "short", "signed", "unsigned", "float", "double",
+      "bool", "void", "size_t", "wchar_t", "char16_t", "char32_t"
+    };
+    size_t k = p;
+    size_t kwCount = 0;
+    while (k < t.size()) {
+      while (k < t.size() && t[k].kind == Tok::Comment) k++;
+      if (k >= t.size() || t[k].kind != Tok::Ident) break;
+      bool isKw = false;
+      for (auto* kw : typeKws) if (t[k].text == kw) { isKw = true; break; }
+      if (!isKw) break;
+      kwCount++;
+      k++;
+    }
+    if (kwCount == 0) return false;
+    while (k < t.size() && t[k].kind == Tok::Comment) k++;
+    if (k >= t.size() || t[k].kind != Tok::Ident) return false;
+    k++;
+    while (k < t.size() && t[k].kind == Tok::Comment) k++;
+    if (k >= t.size() || t[k].kind != Tok::Punct) return false;
+    return t[k].text == "=" || t[k].text == ";" || t[k].text == "[" || t[k].text == ",";
   }
 
   // Parse the `{ ... }` scope starting at the current `{` with a fresh reader
@@ -2304,28 +2391,44 @@ struct Reader {
             f.name = trail[nameI].text;
             f.type.kind = TypeRef::Unknown;
             f.type.name = def.name;
-            // Parse array suffix `[N]` after the name, mirroring parseMember.
+            // Parse the array suffix `[N]` (and `[N][M]`) after the name,
+            // mirroring parseMember. The dimensions are collected in order and
+            // the type is built from the inside out, so `int m[2][3]` is an
+            // array of 2 rows of 3 - before, the second suffix overwrote the
+            // first and the row count came out as 3.
+            std::vector<size_t> dims;
             for (size_t k = nameI + 1; k < se; k++) {
               if (trail[k].kind == Tok::Punct && trail[k].text == "[") {
                 size_t j = k + 1;
+                while (j < se && trail[j].kind == Tok::Comment) j++;
+                if (j < se && trail[j].kind == Tok::Punct && trail[j].text == "-")
+                  throw asvJSONError("cpp: negative array size");
                 std::string num;
                 while (j < se && !(trail[j].kind == Tok::Punct && trail[j].text == "]")) {
                   if (trail[j].kind == Tok::Number) num = trail[j].text;
                   j++;
                 }
-                TypeRef a;
-                a.kind = TypeRef::Array;
-                a.elem = std::make_shared<TypeRef>(f.type);
                 if (!num.empty()) {
-                  try { a.arrayLen = static_cast<size_t>(std::stoull(num)); a.hasLen = true; } catch (...) {}
+                  try { dims.push_back(static_cast<size_t>(std::stoull(num))); } catch (...) {}
                 }
-                f.type = a;
                 k = (j < se) ? j : se;
               } else if (trail[k].kind == Tok::Punct && trail[k].text == "=") {
                 f.hasInit = true;
                 for (size_t m = k + 1; m < se; m++) f.init.push_back(trail[m]);
                 break;
               }
+            }
+            if (!dims.empty()) {
+              TypeRef ty = f.type;
+              for (size_t d = dims.size(); d-- > 0;) {
+                TypeRef a;
+                a.kind = TypeRef::Array;
+                a.elem = std::make_shared<TypeRef>(ty);
+                a.arrayLen = dims[d];
+                a.hasLen = true;
+                ty = a;
+              }
+              f.type = ty;
             }
             extras.push_back(std::move(f));
           }
@@ -2355,7 +2458,22 @@ struct Reader {
         if (s == "using") { parseUsing(); continue; }
         if (s == "friend" || s == "static_assert") { skipToSemi(); continue; }
         if (looksLikeNestedDef()) {
-          if (s == "enum") parseEnumDecl();
+          if (s == "enum") {
+            enumDeclVar_.clear();
+            enumDeclMembers_.clear();
+            parseEnumDecl();
+            if (!enumDeclVar_.empty()) {
+              // `enum E { A, B } e;` - the enum AND a member of that type.
+              // The member was swallowed by the enum declaration before.
+              FieldDef ef;
+              ef.name = enumDeclVar_;
+              TypeRef et;
+              et.kind = TypeRef::Enum;
+              et.name = enumDeclName_;
+              ef.type = et;
+              def.fields.push_back(std::move(ef));
+            }
+          }
           else {
             auto flds = parseStructDecl();
             for (auto& f : flds) def.fields.push_back(std::move(f));
@@ -2388,6 +2506,42 @@ struct Reader {
       const Tok& tk = t[i];
       if (tk.kind == Tok::End) break;
       if (tk.kind == Tok::Comment) { i++; continue; }
+      if (tk.kind == Tok::Ident && tk.text == "operator" &&
+          paren == 0 && ang == 0 && brk == 0 && brace == 0) {
+        // An operator function declaration (`bool operator==(const S&) const;`).
+        // The operator symbol is lexed as separate punctuation, so the `=` of
+        // `==` would otherwise look like an initializer: the member was decoded
+        // as a field named "operator" with a bool value. `operator` is a keyword
+        // in C++, so it can never be a field name - the whole declaration is a
+        // function and is skipped like a method.
+        size_t q = i + 1;
+        while (q < t.size() && t[q].kind == Tok::Comment) q++;
+        bool isOperator = false;
+        if (q < t.size() && t[q].kind == Tok::Punct) {
+          const std::string& op = t[q].text;
+          isOperator = (op == "(" || op == "[") ||
+                       (op.size() == 1 &&
+                        std::string("=!<>+-*/%&|^~").find(op[0]) != std::string::npos);
+        }
+        if (isOperator) {
+          size_t k = i;
+          int dp = 0, db = 0, dc = 0;
+          while (k < t.size() && t[k].kind != Tok::End) {
+            if (t[k].kind == Tok::Punct) {
+              if (t[k].text == "(") dp++;
+              else if (t[k].text == ")") { if (dp > 0) dp--; }
+              else if (t[k].text == "[") db++;
+              else if (t[k].text == "]") { if (db > 0) db--; }
+              else if (t[k].text == "{") dc++;
+              else if (t[k].text == "}") { if (dc > 0) dc--; }
+              else if (t[k].text == ";" && dp == 0 && db == 0 && dc == 0) { k++; break; }
+            }
+            k++;
+          }
+          p = k;
+          return;
+        }
+      }
       if (tk.kind == Tok::Punct) {
         const std::string& s = tk.text;
         if (s == "(") {
@@ -2670,25 +2824,41 @@ struct Reader {
       size_t suf = nameI + 1;
       // A function pointer's post-name region is its closing `)` and parameter
       // list -- never an array suffix.
+      // The dimensions are collected in order and the type is built from the
+      // inside out, so `int m[2][3]` is an array of 2 rows of 3. Before, each
+      // suffix wrapped the previous type, which reversed the dimension order
+      // (3 rows of 2).
+      std::vector<size_t> dims;
       while (suf < lim2 && !fnPtr) {
         if (t[suf].kind == Tok::Punct && t[suf].text == "[") {
           size_t j = suf + 1;
+          while (j < lim2 && t[j].kind == Tok::Comment) j++;
+          if (j < lim2 && t[j].kind == Tok::Punct && t[j].text == "-")
+            throw asvJSONError("cpp: negative array size");
           std::string num;
           while (j < lim2 && !(t[j].kind == Tok::Punct && t[j].text == "]")) {
             if (t[j].kind == Tok::Number) num = t[j].text;
             j++;
           }
-          TypeRef a;
-          a.kind = TypeRef::Array;
-          a.elem = std::make_shared<TypeRef>(f.type);
           if (!num.empty()) {
-            try { a.arrayLen = static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num))); a.hasLen = true; } catch (...) {}
+            try { dims.push_back(static_cast<size_t>(std::stoull(cppRdStripNumSuffix(num)))); } catch (...) {}
           }
-          f.type = a;
           suf = (j < lim2) ? j + 1 : lim2;
         } else {
           suf++;
         }
+      }
+      if (!dims.empty()) {
+        TypeRef ty = f.type;
+        for (size_t d = dims.size(); d-- > 0;) {
+          TypeRef a;
+          a.kind = TypeRef::Array;
+          a.elem = std::make_shared<TypeRef>(ty);
+          a.arrayLen = dims[d];
+          a.hasLen = true;
+          ty = a;
+        }
+        f.type = ty;
       }
       if (seq != npos) {
         f.hasInit = true;
@@ -2769,8 +2939,8 @@ struct Reader {
       while (!eof() && !isP("{") && !isP(";")) adv();
       skipTrivia();
     }
-    if (isP(";")) { adv(); return; }
-    if (!isP("{")) { skipToSemi(); return; }
+    if (isP(";")) { adv(); enumDeclVar_.clear(); return; }
+    if (!isP("{")) { skipToSemi(); enumDeclVar_.clear(); return; }
     adv(); // '{'
     EnumDef def;
     def.name = name;
@@ -2792,14 +2962,34 @@ struct Reader {
     }
     if (isP("}")) adv();
     skipTrivia();
-    if (def.name.empty() && cur().kind == Tok::Ident) { def.name = cur().text; adv(); }
+    if (def.name.empty() && cur().kind == Tok::Ident) { def.name = cur().text; adv(); skipTrivia(); }
+    else if (cur().kind == Tok::Ident) {
+      // `enum E { A, B } e;` declares a MEMBER of that enum type as well. The
+      // declarator is not part of the enum definition, so it must not be
+      // swallowed by the "skip to ;" below - the member was lost that way.
+      size_t q = p + 1;
+      while (q < t.size() && t[q].kind == Tok::Comment) q++;
+      if (q < t.size() && t[q].kind == Tok::Punct &&
+          (t[q].text == ";" || t[q].text == "=" || t[q].text == "[")) {
+        enumDeclVar_ = cur().text;
+        enumDeclMembers_ = def.members;
+        adv();
+        skipTrivia();
+      }
+    }
     while (!eof() && !isP(";")) adv();
     if (isP(";")) adv();
+    enumDeclName_ = def.name;
     if (!def.name.empty()) enums.push_back(std::move(def));
   }
 
-  void parseUsing() {
-    adv(); // using
+  // Set by parseEnumDecl when the enum definition is followed by a declarator
+  // name (`enum E { A, B } e;`): the member name and the variant list.
+  std::string enumDeclVar_;
+  std::vector<std::string> enumDeclMembers_;
+  std::string enumDeclName_;
+
+  void parseUsing() {    adv(); // using
     skipTrivia();
     if (isKw("namespace")) { skipToSemi(); return; }
     std::string name;
@@ -2994,6 +3184,21 @@ struct Reader {
         std::string v = cppRdLastIdent(init);
         if (!v.empty()) return cppRdString(std::move(v));
       }
+      // Without an initializer the value is the enum's VARIANT LIST - the same
+      // shape toCpp() emits an enum for (an array of identifier strings), so
+      // `enum E { A, B } e;` keeps the member `e` with the value ["A","B"] and
+      // a standalone `enum E { A, B };` becomes {"E":["A","B"]}.
+      const EnumDef* ed = findEnum(rt.name);
+      if (ed && !ed->members.empty()) {
+        auto a = asvJSONValue::makeArray();
+        if (!a || !a->arr) throw asvJSONError("cpp: out of memory");
+        for (const std::string& m : ed->members) {
+          auto sv = cppRdString(m);
+          if (!sv) throw asvJSONError("cpp: out of memory");
+          a->arr->push_back(std::move(sv));
+        }
+        return a;
+      }
       return cppRdNonNull(asvJSONValue::makeNull());
     }
 
@@ -3173,7 +3378,13 @@ struct Reader {
         if (a.weak) continue;
         if (!best || a.order < best->order) best = &a;
       }
-      if (best) return materialize(best->type, std::vector<Tok>(), false, 0);
+      // A strong alias drives the root ONLY when the file declares no struct of
+      // its own. With real struct definitions present the alias is just a
+      // type name, and letting it drive the root dropped every struct in the
+      // file (`using Alias = int;` + `struct S { Alias a; };` decoded to the
+      // scalar 0 instead of {"S":{"a":0}}).
+      if (best && structs.empty() && fileScope.empty())
+        return materialize(best->type, std::vector<Tok>(), false, 0);
     }
     if (structs.empty() && fileScope.empty()) return nullptr;
 
@@ -3232,6 +3443,15 @@ struct Reader {
     if (!roots.empty()) {
       std::unique_ptr<asvJSONValue> out = wrap(roots);
       addFileScopeInst(out, roots);
+      return out;
+    }
+    if (structs.empty()) {
+      // Only file-scope variables (`int g = 5;`): the root is the object of
+      // those variables. The fallback below assumed a struct exists and read
+      // structs[0] out of bounds.
+      std::unique_ptr<asvJSONValue> out = asvJSONValue::makeObject();
+      if (!out || !out->obj) throw asvJSONError("cpp: out of memory");
+      addFileScopeInst(out, std::vector<const StructDef*>{});
       return out;
     }
     std::vector<const StructDef*> list = {&structs[0]};
