@@ -1320,13 +1320,19 @@ inline std::string goonToJson(std::string_view input) {
       // (alwaysQuoteKeys / keys containing `[`/`]` produce `"a[2]"[1]{b}:`).
       size_t openB = goonFindUnquoted(content, '[');
       if (openB != std::string_view::npos && openB + 1 < content.size()) {
-        size_t closeB = content.find(']', openB);
+        // Both closers must be quote-aware too. A plain find(']') found the
+        // bracket inside a quoted LIST VALUE (`- ["x",false,"[]:","0x10"]`),
+        // saw the ':' right after it and treated the list item as a tabular
+        // array header, emitting only the text after that colon as the value.
+        size_t relClose = goonFindUnquoted(content.substr(openB), ']');
+        size_t closeB = (relClose == std::string_view::npos) ? std::string_view::npos : openB + relClose;
         if (closeB != std::string_view::npos) {
           size_t afterB = closeB + 1;
           bool isHeader = false;
           if (afterB < content.size() && content[afterB] == ':') isHeader = true;
           if (!isHeader && afterB < content.size() && content[afterB] == '{') {
-            size_t closeBr = content.find('}', afterB);
+            size_t relBr = goonFindUnquoted(content.substr(afterB), '}');
+            size_t closeBr = (relBr == std::string_view::npos) ? std::string_view::npos : afterB + relBr;
             if (closeBr != std::string_view::npos && closeBr + 1 < content.size() && content[closeBr + 1] == ':')
               isHeader = true;
           }
