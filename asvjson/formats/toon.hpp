@@ -457,21 +457,32 @@ inline std::vector<std::string> toonSplitCommas(std::string_view s) {
   std::string cur;
   bool inQuotes = false;
   bool escape = false;
+  bool cellStart = true;  // only spaces/tabs seen in the current cell
   int brace = 0;
   for (size_t i = 0; i < s.size(); i++) {
     char c = s[i];
     if (escape) { cur += c; escape = false; continue; }
     if (c == '\\' && inQuotes) { cur += c; escape = true; continue; }
-    if (c == '"') { cur += c; inQuotes = !inQuotes; continue; }
+    if (c == '"') { cur += c; inQuotes = !inQuotes; cellStart = false; continue; }
     if (!inQuotes) {
-      if (c == '{' || c == '[') brace++;
-      else if (c == '}' || c == ']') { if (brace > 0) brace--; }
+      // A group opener counts only at the START of a cell (a JSON object or
+      // array value) or inside an already-open group. An unquoted scalar may
+      // contain '{' / '[' as ordinary text (";{9", "x[y"); treating such an
+      // interior byte as depth swallowed every following comma, so an inline
+      // array of plain strings decoded as one cell and failed its length check.
+      if (c == '{' || c == '[') {
+        if (brace > 0 || cellStart) brace++;
+      } else if (c == '}' || c == ']') {
+        if (brace > 0) brace--;
+      }
     }
     if (c == ',' && !inQuotes && brace == 0) {
       result.push_back(std::move(cur));
       cur.clear();
+      cellStart = true;
       continue;
     }
+    if (c != ' ' && c != '\t') cellStart = false;
     cur += c;
   }
   result.push_back(std::move(cur));

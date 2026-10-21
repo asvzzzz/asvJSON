@@ -1305,6 +1305,16 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           const asvJSONValue* cr = nullptr;
           if (ronIsRangeObject(child, cr)) childObjectOk = false;
         }
+        // The named form wraps the child in '(...)'. The decoder classifies a
+        // parenthesized group as a struct only when its FIRST entry is a bare
+        // ident followed by ':'. A child object with any quoted map key is
+        // emitted with quoted keys, so `Name("k": v)` would be read as a tuple
+        // and fail at the ':'. Such a child must use the plain map form.
+        if (childObjectOk && child->type == asvJSONValue::OBJECT && !child->obj->empty()) {
+          for (const auto& [k, _] : *(child->obj)) {
+            if (!ronIsValidFieldKey(k)) { childObjectOk = false; break; }
+          }
+        }
         bool namedGroup = childObjectOk ||
                           (child->type == asvJSONValue::ARRAY && child->arr && !child->arr->empty());
         if (namedGroup && ronIsValidTypeName(nit->first)) {

@@ -18520,6 +18520,26 @@ TEST(testRONReviewFixes) {
     ASSERT(ok.parse(std::string_view("{\"A::Ok\":{\"x\":1}}")));
     ASSERT_EQ(ok.toRON(false), std::string("A::Ok(x:1)"));
   }
+  // 1b. The named form `Name(...)` is only decodable when the wrapped object
+  // uses bare struct fields. A child object with quoted map keys must fall
+  // back to the plain map form; otherwise `Name("k": v)` is read as a tuple
+  // and rejected at the ':'.
+  {
+    const char* docs[] = {
+      R"({"A":{"\"q\"":1}})",
+      "{\"\xF0\x9F\x98\x80\":{\"a\\\"b\":true,\" a\":true}}",
+      "{\"\xC3\xA9\":{\"x\":1}}",
+      R"({"null":{"\u0000\n_9a":false}})"
+    };
+    for (const char* doc : docs) {
+      asvJSON src;
+      ASSERT(src.parse(doc));
+      std::string ron = src.toRON(false);
+      asvJSON back;
+      ASSERT_MSG(back.fromRON(ron), ron);
+      ASSERT_EQ(back.serialize(), src.serialize());
+    }
+  }
   // 2. Several closing comments before `)` / `]` used to get a comma each, which
   // left the 2nd+ comment where the parser expects a field.
   {
@@ -34812,6 +34832,39 @@ TEST(testGoonKeyWithInteriorQuote) {
 	}
 }
 
+// Review fix: a quoted LIST VALUE that happens to contain "]:" must not be
+// mistaken for a tabular array header. The header probe used a plain find(']'),
+// so `- ["x",false,"[]:","0x10"]` found the bracket inside the quoted "[]:"
+// value, saw the following ':' and decoded the item as the single string after
+// that colon.
+TEST(testGoonInlineListHeaderLookalike) {
+	{
+		asvJSON j;
+		ASSERT(j.parse("[[\"c\\\":X1\",false,\"[]:\",\"0x10\"]]"));
+		std::string g = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+		ASSERT_EQ(j2.getRoot()->arr->at(0)->arr->size(), size_t(4));
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse("[[\"cX\",false,\"[]:\",\"0x10\"]]"));
+		std::string g = j.toGOON();
+		asvJSON j2;
+		ASSERT(j2.fromGOON(g));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// A real tabular header still decodes after the quote-aware closer scan.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON("rows[2]{a,b}:\n  1,2\n  3,4\n"));
+		const asvJSONValue* rows = j.get("rows");
+		ASSERT(rows && rows->type == asvJSONValue::ARRAY && rows->arr->size() == 2);
+		ASSERT_EQ(rows->arr->at(1)->get("b")->getInt(), int64_t(4));
+	}
+}
+
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
@@ -34942,6 +34995,25 @@ TEST(testRootScalarEdgeRoundtrip) {
 		ASSERT_EQ(md.getRoot()->arr->size(), size_t(2));
 		ASSERT_EQ(std::string(md.getRoot()->arr->at(0)->getString()), "a");
 		ASSERT_EQ(std::string(md.getRoot()->arr->at(1)->getString()), "b");
+		// An empty-key OBJECT or ARRAY member is not the root document: it
+		// must keep the quoted "'': " wrapper. The block encoder used to treat
+		// the empty key as the root and emit the child's contents directly (or
+		// a second "---" for an array), dropping the key or splitting the
+		// document into two.
+		const char* ekeyDocs[] = {R"({"":{"a":1}})", R"({"":[1,2]})", R"({"":{"":1}})"};
+		for (const char* lit : ekeyDocs) {
+			asvJSON e;
+			ASSERT(e.parse(lit));
+			for (int style = 0; style < 3; ++style) {
+				YamlWriteOptions o;
+				if (style == 1) o.style = YamlWriteOptions::Style::Auto;
+				if (style == 2) o.style = YamlWriteOptions::Style::Flow;
+				std::string y = (style == 0) ? e.toYAML() : e.toYAML(o);
+				asvJSON eb;
+				ASSERT(eb.fromYAML(y));
+				ASSERT_EQ(eb.serialize(), e.serialize());
+			}
+		}
 	}
 	// GOON / TOON: a root scalar of just TAB was emitted raw, stripped as
 	// whitespace and rejected (GOON) or lost (TOON).
@@ -35653,6 +35725,7 @@ RUN(testYamlAuditReview);
 	RUN(testTronCommentWithCR);
 	RUN(testTronObjectSizeCheckBeforeAdd);
 	RUN(testGoonKeyWithInteriorQuote);
+	RUN(testGoonInlineListHeaderLookalike);
 	RUN(testGoonISODateNotQuoted);
 
 	std::cout << "\n========================================" << std::endl;
