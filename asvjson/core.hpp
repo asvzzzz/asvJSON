@@ -3137,11 +3137,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 	if (ptr[0] != '/') return false;
 	if (!root) return false;
 	if (ptr == "/-") return false;
-	asvJSONValue* parent = nullptr;
 	asvJSONValue* cur = root.get();
-	std::string lastKey;
-	size_t lastIdx = 0;
-	bool lastIsArray = false;
 	size_t start = 1;
 	while (start < ptr.size()) {
 		size_t slash = ptr.find('/', start);
@@ -3158,7 +3154,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 			}
 			auto it = mapFind(*cur->obj, key);
 			if (it == cur->obj->end()) return false;
-			parent = cur; cur = it->second.get(); lastKey = key; lastIsArray = false;
+			cur = it->second.get();
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (!isArrayIndex(seg)) return false;
 			size_t idx = 0;
@@ -3169,7 +3165,7 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 				dirty_ = true;
 				return true;
 			}
-			parent = cur; cur = (*cur->arr)[idx].get(); lastIdx = idx; lastIsArray = true;
+			cur = (*cur->arr)[idx].get();
 		} else return false;
 		start = (slash == std::string_view::npos) ? ptr.size() : slash + 1;
 	}

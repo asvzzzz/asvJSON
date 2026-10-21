@@ -2471,7 +2471,7 @@ struct Reader {
       // pick the last PARAMETER (or, with no parameters, fp only by luck).
       // Detect the `( *` opening and take the identifier after the `*` (an
       // optional `const`/`volatile` may sit between them: `int (*const fp)()`).
-      size_t fnParen = npos, fpNameI = npos;
+      size_t fpNameI = npos;
       bool fnPtr = false;
       {
         int P2 = 0;
@@ -2483,7 +2483,6 @@ struct Reader {
               while (m < se && t[m].kind == Tok::Comment) m++;
               if (m < se && t[m].kind == Tok::Punct && t[m].text == "*") {
                 fnPtr = true;
-                fnParen = k;
                 size_t nn = m + 1;
                 while (nn < se && t[nn].kind == Tok::Comment) nn++;
                 while (nn < se && t[nn].kind == Tok::Ident &&

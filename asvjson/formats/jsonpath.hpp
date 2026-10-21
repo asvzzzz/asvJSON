@@ -1122,7 +1122,7 @@ struct PathResult {
 
 inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res);
 
-inline void jpExpandDot(Tok seg, PathLexer& lex, const asvJSONValue* node,
+inline void jpExpandDot(Tok seg, const asvJSONValue* node,
                          std::vector<const asvJSONValue*>& out) {
   if (seg.type == TokType::STAR) {
     auto children = jpAllChildren(node);
@@ -1408,7 +1408,7 @@ inline void jpExpand(const asvJSONValue* node, PathLexer& lex, PathResult& res) 
         current = std::move(next);
       } else {
         std::vector<const asvJSONValue*> next;
-        for (auto* n : current) jpExpandDot(seg, lex, n, next);
+        for (auto* n : current) jpExpandDot(seg, n, next);
         current = std::move(next);
       }
     }

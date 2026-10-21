@@ -899,7 +899,7 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
     std::vector<Json5CommentEntry> out;
     std::vector<Comment> pendLead;
     std::vector<Comment> pendTrail;
-  } p{toks};
+  } p{toks, 0, {}, {}, {}};
 
   auto joinPath = [](const std::string& path, const std::string& seg) {
     return json5PathJoin(path, seg);
