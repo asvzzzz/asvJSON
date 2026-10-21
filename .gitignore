@@ -14,3 +14,7 @@ build_gcc*/
 
 # Local agent instructions (never commit)
 AGENTS.md
+
+# Local agent setup (per-machine: two-model roles, never commit)
+.opencode/
+opencode.jsonc
