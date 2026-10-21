@@ -18,3 +18,7 @@ AGENTS.md
 # Local agent setup (per-machine: two-model roles, never commit)
 .opencode/
 opencode.jsonc
+
+# Example program output (examples.exe writes these into the CWD)
+test_output.json
+example_output.*
