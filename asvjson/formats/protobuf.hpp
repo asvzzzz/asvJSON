@@ -63,6 +63,10 @@
 // - A schema field marked "repeated" whose JSON value is not an ARRAY is
 //   encoded as a single element and decodes as a one-element array, which
 //   round-trips in both directions.
+// - An EMPTY repeated array has no wire representation at all (protobuf3
+//   semantics: an empty repeated field is indistinguishable from an absent
+//   one), so toProtobuf()/fromProtobuf() drops the key: {"rep":[]} comes back
+//   without "rep". The same holds for the schema-less form.
 // - A top-level JSON array is wrapped into a synthetic message (marker field
 //   19001 + repeated field 1) so the elements survive a schema-less round-trip
 //   intact; non-object array elements cannot be represented in the wrapper and
