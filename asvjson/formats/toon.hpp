@@ -712,7 +712,11 @@ inline std::string toonToJson(std::string_view input) {
           bool hasFields = afterB < content.size() && content[afterB] == '{';
           std::vector<std::string> fields;
           if (hasFields) {
-            size_t closeBr = content.find('}', afterB);
+            // Quote-aware: a quoted field name may contain '}' (e.g.
+            // t[1]{"a}b"}:), and a plain find('}') ended the field list early,
+            // leaving the header unrecognized.
+            size_t relBr = toonFindFirstUnquoted(content.substr(afterB), '}');
+            size_t closeBr = (relBr == std::string_view::npos) ? std::string_view::npos : afterB + relBr;
             if (closeBr != std::string_view::npos) {
               std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
               auto fieldParts = toonSplitCommas(fc);

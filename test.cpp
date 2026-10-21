@@ -11024,6 +11024,33 @@ TEST(testTOONReviewFixes2) {
 		ASSERT(h2.fromTOON(h.toTOON()));
 		ASSERT_EQ(std::string(h2.getRoot()->str_data), "a[3]: x");
 	}
+	// 6. A quoted tabular field name may contain '}'. The field-list scan used
+	// a plain find('}'), so `t[1]{"a}b"}:` closed the fields inside the quote
+	// and the header was not recognized at all ("unrecognized line 2").
+	{
+		asvJSON j;
+		ASSERT(j.fromTOON("t[1]{\"a}b\"}:\n  1\n"));
+		auto* t = j.getRoot() ? j.getRoot()->getConst("t") : nullptr;
+		ASSERT(t != nullptr && t->type == asvJSONValue::ARRAY && t->size() == size_t(1));
+		if (t && t->size() == size_t(1)) {
+			auto* row = t->get(0);
+			ASSERT(row != nullptr && row->type == asvJSONValue::OBJECT);
+			if (row) {
+				auto* cell = row->getConst("a}b");
+				ASSERT(cell != nullptr && cell->getInt() == int64_t(1));
+			}
+		}
+		// Quoted '}' in a LATER field with other fields still splits correctly.
+		asvJSON k;
+		ASSERT(k.fromTOON("t[1]{\"a,b\",\"c}d\"}:\n  x,y\n"));
+		auto* kt = k.getRoot() ? k.getRoot()->getConst("t") : nullptr;
+		ASSERT(kt != nullptr && kt->type == asvJSONValue::ARRAY && kt->size() == size_t(1));
+		if (kt && kt->size() == size_t(1) && kt->get(0)) {
+			auto* row = kt->get(0);
+			ASSERT_EQ(row->getConst("a,b")->getString(), std::string("x"));
+			ASSERT_EQ(row->getConst("c}d")->getString(), std::string("y"));
+		}
+	}
 }
 
 TEST(testToTRON) {
