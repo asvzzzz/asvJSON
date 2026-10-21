@@ -819,7 +819,7 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
     // ';' or '#' line inside a continuation became a pending comment and was
     // then attached as a leading comment to whatever key came next:
     //
-    //   a = 1 \
+    //   a = 1 (continued)
     //   ; part of the value, not a comment
     //   b = 2
     //
@@ -907,11 +907,11 @@ inline std::vector<IniCommentEntry> iniCollectComments(std::string_view input) {
           std::string segPath = iniPathJoin(physBase, seg);
           // Is this enclosing level a tracked array? Then descend into its
           // current (last) element, mirroring the decoder's descendArrays().
-          bool isArray = false;
+          bool segIsArray = false;
           for (const auto& ac : arrayCounts) {
-            if (ac.first == segPath) { isArray = true; break; }
+            if (ac.first == segPath) { segIsArray = true; break; }
           }
-          if (isArray) {
+          if (segIsArray) {
             size_t lastIdx = 0;
             for (auto& ac : arrayCounts) {
               if (ac.first == segPath) { lastIdx = ac.second > 0 ? ac.second - 1 : 0; break; }

@@ -48,13 +48,15 @@ struct JsonSaxHandler {
   virtual void onEndObject() {}
   virtual void onStartArray() {}
   virtual void onEndArray() {}
-  virtual void onKey(std::string_view key) {}
-  virtual void onStringValue(std::string_view value) {}
-  virtual void onIntegerValue(int64_t value) {}
-  virtual void onDoubleValue(double value) {}
-  virtual void onBoolValue(bool value) {}
+  // The default implementations are no-ops: the parameters are unused, and
+  // naming them keeps the signature readable for the overriding handlers.
+  virtual void onKey(std::string_view key) { (void)key; }
+  virtual void onStringValue(std::string_view value) { (void)value; }
+  virtual void onIntegerValue(int64_t value) { (void)value; }
+  virtual void onDoubleValue(double value) { (void)value; }
+  virtual void onBoolValue(bool value) { (void)value; }
   virtual void onNullValue() {}
-  virtual void onError(std::string_view message) {}
+  virtual void onError(std::string_view message) { (void)message; }
 };
 
 // ============================================================================
@@ -197,7 +199,7 @@ private:
   }
 
   void parseObject() {
-    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
+    if (depth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     cntObject_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartObject();
@@ -230,7 +232,7 @@ private:
   }
 
   void parseArray() {
-    if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) throw std::runtime_error("Maximum nesting depth exceeded");
+    if (depth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw std::runtime_error("Maximum nesting depth exceeded");
     depth_++;
     cntArray_[depth_] = 0; // fresh container on this level: size limits are per-container, not per-level
     handler_->onStartArray();
@@ -692,7 +694,7 @@ private:
   bool isValueStart(char c) {
     return c == '"' || c == '{' || c == '[' || c == 't' || c == 'f' || c == 'n' ||
            c == '-' || (c >= '0' && c <= '9') ||
-           (c == 'N' || c == 'I') && allowNaNInfinity;
+           ((c == 'N' || c == 'I') && allowNaNInfinity);
   }
 
   // Strict JSON number grammar: [-] int [. frac] [(e|E)[+|-] digits]. Rejects
@@ -836,7 +838,7 @@ private:
     }
 
     if (c == '{') {
-      if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
+      if (depth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) { setError("Maximum nesting depth exceeded"); return false; }
       depth_++;
       containerStack_.push_back({Container::OBJ, 0, false});
       handler_.onStartObject();
@@ -855,7 +857,7 @@ private:
       return false;
     }
     if (c == '[') {
-      if (depth_ >= asvJSONValue::MAX_NESTING_DEPTH) { setError("Maximum nesting depth exceeded"); return false; }
+      if (depth_ >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) { setError("Maximum nesting depth exceeded"); return false; }
       depth_++;
       containerStack_.push_back({Container::ARR, 0, false});
       handler_.onStartArray();

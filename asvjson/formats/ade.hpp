@@ -1898,7 +1898,6 @@ inline void adeWriteQuoted(std::ostream& os, std::string_view s) {
 // escape is not usable: adeUnescape would collapse "\|" into "|" (and "\|" is
 // not itself a valid ADE escape).
 inline void adeEscPipe(std::ostream& os, std::string_view s) {
-  static constexpr char HEX[] = "0123456789ABCDEF";
   for (unsigned char c : s) {
     if (c == '|') { os << "\\u007C"; continue; }
     switch (c) {

@@ -284,7 +284,7 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // input rejects here too. A deeper document still dies in parse()'s own
   // container cap -- the same one-level-more-vs-JSON difference pinned for
   // CBOR in testCBORNestingDepthBoundary.
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("S-Expression nesting too deep");
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("S-Expression nesting too deep");
 
   if (pos >= tokens.size()) throw asvJSONError("unexpected end of S-Expression");
   if (tokens[pos].type == SEXPR_RPAREN) throw asvJSONError("unexpected closing parenthesis");

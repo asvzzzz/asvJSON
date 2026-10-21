@@ -140,7 +140,7 @@ inline void cborWriteText(std::vector<uint8_t>& out, const std::string& s) {
 
 inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
   using T = asvJSONValue::Type;
-  if (depth > MAX_NESTING_DEPTH) throw asvJSONError("CBOR nesting too deep");
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
   switch (type) {
     case T::NULL_VAL:
       out.push_back(0xF6); // RFC 8949: 0xF6 = null (0xF7 is undefined)
@@ -308,7 +308,7 @@ inline uint64_t cborReadArg(const uint8_t* data, size_t& pos, size_t dataLen, ui
 // dead by construction; they are kept as defense in depth against a future
 // early return, so do not read a failure to trip them as a reachable state.
 inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("CBOR nesting too deep");
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
   if (pos >= dataLen) throw asvJSONError("CBOR unexpected end");
 
   uint8_t byte = data[pos++];

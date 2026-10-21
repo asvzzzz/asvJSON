@@ -1302,7 +1302,7 @@ inline std::string goonToJson(std::string_view input) {
   };
 
   out = rootIsArr ? '[' : '{';
-  stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true});
+  stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true, 0, 0, {}, -1});
 
   for (size_t li = firstLine; li < lines.size(); li++) {
     auto& line = lines[li];
@@ -1394,7 +1394,7 @@ inline std::string goonToJson(std::string_view input) {
               }
             }
             out += '[';
-            stack.push_back({'A', true, indent, true, false});
+            stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
           }
           size_t afterColon = afterB + 1;
           while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
@@ -1676,7 +1676,7 @@ inline std::string goonToJson(std::string_view input) {
       addComma(stack, out);
       curFrame.first = false;
       out += '{';
-      stack.push_back({'O', true, indent, true, false});
+      stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
       continue;
     }
 
@@ -1704,7 +1704,7 @@ inline std::string goonToJson(std::string_view input) {
 
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
-        stack.push_back({'O', true, indent, true, false});
+        stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else if (valPart == "[]") {

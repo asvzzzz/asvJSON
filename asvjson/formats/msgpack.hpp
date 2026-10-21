@@ -501,10 +501,17 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		case 0xD1: { if (pos + 2 > dataLen) throw asvJSONError("MsgPack int16"); int16_t v = static_cast<int16_t>((static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1]); pos += 2; return asvJSONValue::makeInt(v); }
 		case 0xD2: { if (pos + 4 > dataLen) throw asvJSONError("MsgPack int32"); uint32_t v = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3]; pos += 4; return asvJSONValue::makeInt(static_cast<int32_t>(v)); }
 		case 0xD3: { if (pos + 8 > dataLen) throw asvJSONError("MsgPack int64"); uint64_t v = 0; for (int i = 0; i < 8; i++) v = (v << 8) | data[pos + i]; pos += 8; return asvJSONValue::makeInt(static_cast<int64_t>(v)); }
-		case 0xD4: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext1"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos >= dataLen) throw asvJSONError("MsgPack fixext1 overflow"); if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 1); pos += 1; if (!re) { auto v = asvJSONValue::makeExtension(et, data + pos - 1, 1); if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; } return re; } if (et == 4) return msgpackDecodeCustomTag(data, pos, 1, depth); auto v = asvJSONValue::makeExtension(et, data + pos, 1); pos += 1; if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; }
-		case 0xD5: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext2"); int8_t et = static_cast<int8_t>(data[pos++]); if (pos + 2 > dataLen) throw asvJSONError("MsgPack fixext2 overflow"); if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 2); pos += 2; if (!re) { auto v = asvJSONValue::makeExtension(et, data + pos - 2, 2); if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; } return re; } if (et == 4) return msgpackDecodeCustomTag(data, pos, 2, depth); auto v = asvJSONValue::makeExtension(et, data + pos, 2); pos += 2; if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; }
+		case 0xD4: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext1");
+			int8_t et = static_cast<int8_t>(data[pos++]);
+			if (pos >= dataLen) throw asvJSONError("MsgPack fixext1 overflow");
+			if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 1); pos += 1; if (!re) { auto v = asvJSONValue::makeExtension(et, data + pos - 1, 1); if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; } return re; } if (et == 4) return msgpackDecodeCustomTag(data, pos, 1, depth); auto v = asvJSONValue::makeExtension(et, data + pos, 1); pos += 1; if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; }
+		case 0xD5: { if (pos >= dataLen) throw asvJSONError("MsgPack fixext2");
+			int8_t et = static_cast<int8_t>(data[pos++]);
+			if (pos + 2 > dataLen) throw asvJSONError("MsgPack fixext2 overflow");
+			if (et == 2) { auto re = msgpackDecodeRegex(data + pos, 2); pos += 2; if (!re) { auto v = asvJSONValue::makeExtension(et, data + pos - 2, 2); if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; } return re; } if (et == 4) return msgpackDecodeCustomTag(data, pos, 2, depth); auto v = asvJSONValue::makeExtension(et, data + pos, 2); pos += 2; if (!v) throw asvJSONError("MsgPack extension alloc failed"); return v; }
 		case 0xD6: {
-			if (pos >= dataLen) throw asvJSONError("MsgPack fixext4"); int8_t et = static_cast<int8_t>(data[pos++]);
+			if (pos >= dataLen) throw asvJSONError("MsgPack fixext4");
+			int8_t et = static_cast<int8_t>(data[pos++]);
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack fixext4 overflow");
 			if (et == -1) {
 				// Timestamp 32
@@ -595,7 +602,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack array16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
-			if (n > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
+			// A 16-bit count is at most 65535, so it is always below
+			// MAX_ARRAY_SIZE (1e6) - no size guard is needed here (the 32-bit
+			// forms below carry the one that matters).
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
 			arr->arr->reserve(n);
@@ -610,7 +619,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack array32");
 			uint32_t n = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
-			if (n > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
+			if (static_cast<size_t>(n) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
 			arr->arr->reserve(n);
@@ -625,7 +634,9 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack map16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
-			if (n > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
+			// A 16-bit count is at most 65535, so it is always below
+			// MAX_OBJECT_SIZE (1e6) - no size guard is needed here (the 32-bit
+			// forms below carry the one that matters).
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("MsgPack map alloc failed");
 			for (uint16_t i = 0; i < n; i++) {
@@ -641,7 +652,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack map32");
 			uint32_t n = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
-			if (n > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
+			if (static_cast<size_t>(n) > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("MsgPack map alloc failed");
 			for (uint32_t i = 0; i < n; i++) {

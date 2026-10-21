@@ -899,7 +899,7 @@ inline std::string yamlProcessYamlEmbed(std::string raw) {
 	std::string sv = yamlScalarDocValue(raw, isScalar);
 	if (isScalar) return sv;
 	static thread_local int yamlYamlDepth = 0;
-	if (yamlYamlDepth >= MAX_YAML_DEPTH)
+	if (yamlYamlDepth >= static_cast<int>(MAX_YAML_DEPTH))
 		throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");
 	++yamlYamlDepth;
 	std::string nested;
@@ -3306,16 +3306,16 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			size_t kc = std::string::npos;
 			{
 				bool dq = false, sq = false;
-				int depth = 0;
+				int braceDepth = 0;
 				for (size_t i = 0; i < rest.size(); i++) {
 					char c = rest[i];
 					if (dq) { if (c == '\\' && i + 1 < rest.size()) i++; else if (c == '"') dq = false; continue; }
 					if (sq) { if (c == '\'' && i + 1 < rest.size() && rest[i + 1] == '\'') i++; else if (c == '\'') sq = false; continue; }
 					if (c == '"') { dq = true; continue; }
 					if (c == '\'') { sq = true; continue; }
-					if (c == '[' || c == '{') { depth++; continue; }
-					if (c == ']' || c == '}') { depth--; continue; }
-					if (c == ':' && depth == 0 && (i + 1 >= rest.size() || rest[i + 1] == ' ' || rest[i + 1] == '\t')) { kc = i; break; }
+					if (c == '[' || c == '{') { braceDepth++; continue; }
+					if (c == ']' || c == '}') { braceDepth--; continue; }
+					if (c == ':' && braceDepth == 0 && (i + 1 >= rest.size() || rest[i + 1] == ' ' || rest[i + 1] == '\t')) { kc = i; break; }
 				}
 			}
 

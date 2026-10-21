@@ -647,7 +647,7 @@ inline std::string toonToJson(std::string_view input) {
   int rootIndent = countIndent(lines[firstNonEmpty]);
 
   out = rootIsArr ? '[' : '{';
-	stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true});
+	stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true, 0, 0, {}, -1});
 
   for (size_t li = firstNonEmpty; li < lines.size(); li++) {
     auto& line = lines[li];
@@ -743,7 +743,7 @@ inline std::string toonToJson(std::string_view input) {
               if (!stack.empty()) stack.back().first = false;
               if (!keyRaw.empty()) out += '"' + toonDecodeKey(keyRaw) + "\":";
               out += '[';
-              stack.push_back({'A', true, indent, true, false});
+              stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
             }
 
             if (hasFields) {
@@ -865,7 +865,7 @@ inline std::string toonToJson(std::string_view input) {
         } else {
           // non-primitive list-form opener: leave frame open. Its deeper "- value"
           // items are validated against this declared length when the frame closes.
-          stack.push_back({'A', true, indent, true, false});
+          stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
           if (!stack.empty()) stack.back().declLen = arrLen;
         }
         continue;
@@ -879,7 +879,7 @@ inline std::string toonToJson(std::string_view input) {
       curFrame.first = false;
       if (curFrame.type == 'A') curFrame.itemCount++;   // one object element of the enclosing array
       out += '{';
-      stack.push_back({'O', true, indent, true, false});
+      stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
       continue;
     }
 
@@ -907,10 +907,10 @@ inline std::string toonToJson(std::string_view input) {
 
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
-        stack.push_back({'O', true, indent, true, false});
+        stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
       } else if (valPart == "[]") {
         out += '"' + keyStr + "\":[";
-        stack.push_back({'A', true, indent, true, false});
+        stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else {

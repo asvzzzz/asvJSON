@@ -238,6 +238,11 @@ inline void tronSerializeVal(const asvJSONValue* v,
         fmtExtVal(v->ext_type, v->bin_data.data(), v->bin_data.size(), out);
         out += '"';
         return;
+      default:
+        // Unreachable: the range check above admits only the six special
+        // types, and every one of them returns. The default only keeps the
+        // switch exhaustive for the compiler (-Wswitch).
+        break;
     }
   }
   // Standard JSON-serializable types

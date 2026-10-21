@@ -320,8 +320,12 @@ inline std::string protoSchemaLessTypeCode(const asvJSONValue* v) {
         else if (ec != c) return "A";
       }
       if (c.empty()) return "A";
-      if (c == "s") return "S"; if (c == "i") return "I"; if (c == "d") return "D";
-      if (c == "b") return "B"; if (c == "n") return "N"; if (c == "y") return "Y";
+      if (c == "s") return "S";
+      if (c == "i") return "I";
+      if (c == "d") return "D";
+      if (c == "b") return "B";
+      if (c == "n") return "N";
+      if (c == "y") return "Y";
       if (c == "m") return "M";
       return "A";
     }
@@ -753,7 +757,7 @@ inline ProtoLessMap protoExtractLessMap(const uint8_t* data, size_t begin, size_
 // Handles the schema-less name/type map (field 19000) and schema-driven names.
 inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data, size_t begin, size_t end,
                                                            const ProtoSchema* schema, int depth) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
   auto obj = asvJSONValue::makeObject();
   if (!obj) return nullptr;
   ProtoLessMap less;
@@ -883,7 +887,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
       size_t end = pos + static_cast<size_t>(len);
 
       if (type == "message" || type.empty()) {
-        if (depth > asvJSONValue::MAX_NESTING_DEPTH) { pos = end; return nullptr; }
+        if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) { pos = end; return nullptr; }
         if (type == "message") {
           auto obj = protoDecodeMessageBody(data, pos, end, schema, depth);
           if (!obj) { pos = end; return nullptr; }
@@ -971,7 +975,7 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
 }
 
 inline std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t size, const ProtoSchema* schema, int depth = 0) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) return nullptr;
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
   // Detect the array-root wrapper (marker field 19001 with varint value 1).
   // If the top level is a wrapped array of submessages, collect the repeated
   // field-1 elements into an ARRAY root; a plain message falls through to the
@@ -1037,7 +1041,8 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
     char c = text[pos++];
     if (c == q) return r;
     if (c == '\\') {
-      if (pos >= text.size()) break; char e = text[pos++];
+      if (pos >= text.size()) break;
+      char e = text[pos++];
       switch (e) {
         case 'a': r += '\a'; break; case 'b': r += '\b'; break;
         case 'f': r += '\f'; break; case 'n': r += '\n'; break;
@@ -1318,7 +1323,7 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
 inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth);
 
 inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSONValue* arr, int depth) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
     protoTextSkipNested(text, pos, "[", "]");
     return;
   }
@@ -1353,7 +1358,7 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
 }
 
 inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValue* parent, int depth = 0) {
-  if (depth > asvJSONValue::MAX_NESTING_DEPTH) {
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
     // Skip to the matching closing brace so the parent frame does not
     // mis-parse this body's fields as its own.
     protoTextSkipNested(text, pos, "{<", "}>");
