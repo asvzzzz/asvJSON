@@ -195,6 +195,11 @@ private:
     // "Empty input". Inside a container a value was expected but never came.
     if (pos_ >= input_.size())
       throw std::runtime_error(depth_ == 0 ? "empty input" : "Unexpected end of input");
+    // A byte >= 0x80 is rendered as a hex escape: a single raw byte would be
+    // an invalid UTF-8 sequence in the message (the lead byte of a multi-byte
+    // character alone), and a NUL would truncate it for a C-string consumer.
+    if (static_cast<unsigned char>(c) >= 0x80 || c == '\0')
+      throw std::runtime_error("Unexpected byte " + utf8SafeByteName(c));
     throw std::runtime_error(std::string("Unexpected: '") + c + "'");
   }
 
@@ -953,7 +958,13 @@ private:
       state_ = State::NUM;
       return processNumber();
     }
-    setError(std::string("Unexpected: '") + c + "'");
+    // A byte >= 0x80 is rendered as a hex escape: a single raw byte would be
+    // an invalid UTF-8 sequence in the message (the lead byte of a multi-byte
+    // character alone), and a NUL would truncate it for a C-string consumer.
+    if (static_cast<unsigned char>(c) >= 0x80 || c == '\0')
+      setError("Unexpected byte " + utf8SafeByteName(c));
+    else
+      setError(std::string("Unexpected: '") + c + "'");
     return false;
   }
 
