@@ -181,6 +181,25 @@ struct CppType {
 // Comment emission
 // ---------------------------------------------------------------------------
 
+// A block comment's text must not contain the `*/` terminator: it would end
+// the comment early and the rest of the text would become code, so the
+// generated file would not compile. The terminator is broken up (`* /`); the
+// text is otherwise kept intact.
+inline std::string cppEscapeBlockComment(const std::string& text) {
+  if (text.find("*/") == std::string::npos) return text;
+  std::string out;
+  out.reserve(text.size() + 4);
+  for (size_t i = 0; i < text.size(); i++) {
+    if (text[i] == '*' && i + 1 < text.size() && text[i + 1] == '/') {
+      out += "* /";
+      i++;
+      continue;
+    }
+    out += text[i];
+  }
+  return out;
+}
+
 inline void cppEmitComments(std::string& out, const std::vector<Comment>& list,
                             int indent, const CppWriteOptions& o) {
   if (!o.emitComments) return;
@@ -188,7 +207,7 @@ inline void cppEmitComments(std::string& out, const std::vector<Comment>& list,
                             static_cast<size_t>(o.indentWidth), ' ');
   for (const auto& c : list) {
     out += pad;
-    if (c.block) { out += "/*"; out += c.text; out += "*/\n"; }
+    if (c.block) { out += "/*"; out += cppEscapeBlockComment(c.text); out += "*/\n"; }
     else { out += "//"; out += c.text; out += '\n'; }
   }
 }
@@ -197,7 +216,7 @@ inline void cppEmitTrailing(std::string& out, const asvJSONValue* v, const CppWr
   if (!o.emitComments || !v || !v->comments) return;
   for (const auto& c : v->comments->trailing) {
     out += ' ';
-    if (c.block) { out += "/*"; out += c.text; out += "*/"; }
+    if (c.block) { out += "/*"; out += cppEscapeBlockComment(c.text); out += "*/"; }
     else { out += "//"; out += c.text; }
   }
 }
@@ -362,7 +381,10 @@ public:
 inline std::string CppGenerator::containerOf(const std::string& elem, size_t n,
                                              std::string& suffixOut) {
   if (isC()) {
-    suffixOut += "[" + std::to_string(n) + "]";
+    // The dimension is PREPENDED: `suffixOut` may already carry the inner
+    // dimensions of a nested array (`int m[2][3]` - the outer count comes
+    // first). Appending reversed the order, so a 2x3 array came out as 3x2.
+    suffixOut = "[" + std::to_string(n) + "]" + suffixOut;
     return elem;
   }
   if (opts_.useStdArray) return "std::array<" + elem + ", " + std::to_string(n) + ">";
@@ -543,7 +565,10 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
     if (cur.type != first.type || cur.suffix != first.suffix) same = false;
   }
   if (same) {
-    std::string suffix;
+    // A nested array keeps its inner dimensions in first.suffix (C style:
+    // `int m[2][3]`). Seed the suffix with them - a fresh empty string lost
+    // the inner `[3]` and the array was emitted as `int m[2]`.
+    std::string suffix = first.suffix;
     t.type = containerOf(first.type, n, suffix);
     t.suffix = suffix;
     t.elem = std::make_shared<CppType>(first);
@@ -1156,9 +1181,15 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         } else if (w == "ifdef" || w == "ifndef") {
           size_t k = q;
           while (k < logical.size() && (logical[k] == ' ' || logical[k] == '\t')) k++;
-          std::string nm = logical.substr(k);
-          while (!nm.empty() && (nm.back() == ' ' || nm.back() == '\t' || nm.back() == '\r'))
-            nm.pop_back();
+          // The macro name ends at the first character that cannot be part of
+          // an identifier. Taking the rest of the line made `#ifdef FOO //
+          // comment` look for a macro named "FOO // comment" - never defined,
+          // so the whole branch was skipped and `#ifndef` was always active.
+          // `#undef` already scanned the identifier, so the two directives
+          // disagreed.
+          size_t ne = k;
+          while (ne < logical.size() && cppRdIdentChar(logical[ne])) ne++;
+          std::string nm = logical.substr(k, ne - k);
           bool d = macros->count(nm) > 0;
           bool t = (w == "ifdef") ? d : !d;
           bool parentA = !condSkipped();
@@ -1701,6 +1732,11 @@ struct StructDef {
 struct EnumDef {
   std::string name;
   std::vector<std::string> members;
+  // The comments of the enumerators (parallel to `members`). toCpp() emits
+  // them (`//first value` above an enumerator, a same-line trail after it),
+  // so the reader has to keep them or the round-trip loses them.
+  std::vector<std::vector<Comment>> memberLeading;
+  std::vector<std::vector<Comment>> memberTrailing;
 };
 
 struct AliasDef {
@@ -1718,7 +1754,7 @@ inline bool cppRdIsQual(const std::string& s) {
   return s == "const" || s == "volatile" || s == "static" || s == "constexpr" ||
          s == "consteval" || s == "constinit" || s == "mutable" || s == "inline" ||
          s == "extern" || s == "register" || s == "typename" || s == "struct" ||
-         s == "class" || s == "enum" || s == "friend" ||
+         s == "class" || s == "enum" || s == "union" || s == "friend" ||
          s == "virtual" || s == "thread_local";
 }
 
@@ -2008,6 +2044,8 @@ struct Reader {
   // Variables declared alongside a file-scope struct: `struct Foo {...} a, b;`
   std::vector<FieldDef> fileScope;
   std::vector<Comment> pending;
+  // The source line of every pending comment (parallel to `pending`).
+  std::vector<int> pendingLines;
   int order = 0;
 
   Reader(const std::vector<Tok>& toks, const CppReadOptions& o) : t(toks), opts(o) {}
@@ -2021,8 +2059,10 @@ struct Reader {
 
   void skipTrivia() {
     while (t[p].kind == Tok::Comment) {
-      if (opts.includeComments && t[p].text.find("Generated by asvJSON++") == std::string::npos)
+      if (opts.includeComments && t[p].text.find("Generated by asvJSON++") == std::string::npos) {
         pending.push_back(Comment{t[p].text, t[p].block});
+        pendingLines.push_back(t[p].line);
+      }
       p++;
     }
   }
@@ -2030,6 +2070,18 @@ struct Reader {
   std::vector<Comment> takePending() {
     std::vector<Comment> r = std::move(pending);
     pending.clear();
+    pendingLines.clear();
+    return r;
+  }
+
+  // Take the pending comments together with their source lines. The line
+  // tells a comment that TRAILS the previous enumerator (it follows that
+  // enumerator's comma) from one that LEADS the next one.
+  std::vector<Comment> takePendingLines(std::vector<int>& lines) {
+    std::vector<Comment> r = std::move(pending);
+    lines = std::move(pendingLines);
+    pending.clear();
+    pendingLines.clear();
     return r;
   }
 
@@ -2072,7 +2124,8 @@ struct Reader {
 
   bool looksLikeNestedDef() const {
     if (!(t[p].kind == Tok::Ident &&
-          (t[p].text == "struct" || t[p].text == "class" || t[p].text == "enum")))
+          (t[p].text == "struct" || t[p].text == "class" || t[p].text == "enum" ||
+           t[p].text == "union")))
       return false;
     size_t q = p + 1;
     int ang = 0;
@@ -2122,14 +2175,22 @@ struct Reader {
       if (cur().kind == Tok::Ident) {
         const std::string s = cur().text;
         if (s == "template") { skipTemplateParams(); continue; }
-        if ((s == "struct" || s == "class") && looksLikeNestedDef()) {
+        if ((s == "struct" || s == "class" || s == "union") && looksLikeNestedDef()) {
           for (auto& f : parseStructDecl()) fileScope.push_back(std::move(f));
           continue;
         }
         if (s == "enum" && looksLikeNestedDef()) {
-          enumDeclVar_.clear();
-          enumDeclMembers_.clear();
           parseEnumDecl();
+          // A file-scope variable of an enum type (`enum E { A, B } var;`) is a
+          // declaration like any other.
+          if (!enumDeclVar_.empty()) {
+            FieldDef ef;
+            ef.name = enumDeclVar_;
+            TypeRef et;
+            et.kind = TypeRef::Enum;
+            et.name = enumDeclName_;
+            fileScope.push_back(std::move(ef));
+          }
           // NOTE: a standalone enum is a TYPE declaration, not a value - its
           // variants materialize where the type is used (`std::array<E,3> v`
           // -> the variant names). So no root member is created here: the
@@ -2460,7 +2521,6 @@ struct Reader {
         if (looksLikeNestedDef()) {
           if (s == "enum") {
             enumDeclVar_.clear();
-            enumDeclMembers_.clear();
             parseEnumDecl();
             if (!enumDeclVar_.empty()) {
               // `enum E { A, B } e;` - the enum AND a member of that type.
@@ -2603,6 +2663,13 @@ struct Reader {
       bool looksLikeDirectInit = false;
       size_t pi = npos, pc = npos;
       {
+        // The group is the FIRST top-level paren group - the parameter list of
+        // a method or the argument list of a direct-init. Taking the LAST "("
+        // before the first ")" picked the inner group of a function-pointer
+        // parameter (`void f(void (*cb)(int));` -> the group `(* cb`), which
+        // holds no type keyword and was therefore read as a direct-init: the
+        // member became a bogus field named after a parameter type.
+        int pdepth = 0;
         for (size_t k = start; k < t.size(); k++) {
           // Skip [[...]] attribute regions first: the parentheses of
           // `int x [[deprecated("y")]](5);` belong to the attribute, while
@@ -2620,8 +2687,17 @@ struct Reader {
             }
             continue; // the loop's own k++ steps past the closing ']'
           }
-          if (t[k].kind == Tok::Punct && t[k].text == "(") { pi = k; }
-          else if (t[k].kind == Tok::Punct && t[k].text == ")") { pc = k; break; }
+          if (t[k].kind == Tok::Punct && t[k].text == "(") {
+            if (pi == npos) { pi = k; pdepth = 1; }
+            else if (pdepth > 0) pdepth++;
+          }
+          else if (t[k].kind == Tok::Punct && t[k].text == ")") {
+            if (pi == npos) continue;
+            if (pdepth > 0) {
+              pdepth--;
+              if (pdepth == 0) { pc = k; break; }
+            }
+          }
         }
         if (pi != npos && pc != npos && pc > pi + 1) {
           bool hasTypeKeyword = false;
@@ -2926,7 +3002,7 @@ struct Reader {
     }
   }
 
-  void parseEnumDecl() {
+  void parseEnumDecl(bool typedefCtx = false) {
     takePending();
     adv(); // enum
     skipTrivia();
@@ -2939,17 +3015,37 @@ struct Reader {
       while (!eof() && !isP("{") && !isP(";")) adv();
       skipTrivia();
     }
-    if (isP(";")) { adv(); enumDeclVar_.clear(); return; }
-    if (!isP("{")) { skipToSemi(); enumDeclVar_.clear(); return; }
+    enumDeclVar_.clear();
+    enumDeclAlias_.clear();
+    if (isP(";")) { adv(); return; }
+    if (!isP("{")) { skipToSemi(); return; }
     adv(); // '{'
     EnumDef def;
     def.name = name;
+    int lastMemberLine = 0;
     while (!eof() && !isP("}")) {
       skipTrivia();
       if (isP("}")) break;
       if (isP(",")) { adv(); continue; }
       if (cur().kind == Tok::Ident) {
+        const int memberLine = cur().line;
+        // The comments collected so far: those on the PREVIOUS enumerator's
+        // line trail that enumerator (they follow its comma), the rest lead
+        // this one.
+        std::vector<int> lines;
+        std::vector<Comment> pend = takePendingLines(lines);
+        std::vector<Comment> lead;
+        for (size_t ci = 0; ci < pend.size(); ci++) {
+          if (lastMemberLine > 0 && ci < lines.size() && lines[ci] == lastMemberLine) {
+            if (!def.memberTrailing.empty()) def.memberTrailing.back().push_back(pend[ci]);
+            continue;
+          }
+          lead.push_back(pend[ci]);
+        }
         def.members.push_back(cur().text);
+        def.memberLeading.push_back(lead);
+        def.memberTrailing.push_back(std::vector<Comment>());
+        lastMemberLine = memberLine;
         adv();
         skipTrivia();
         if (isP("=")) {
@@ -2962,34 +3058,53 @@ struct Reader {
     }
     if (isP("}")) adv();
     skipTrivia();
-    if (def.name.empty() && cur().kind == Tok::Ident) { def.name = cur().text; adv(); skipTrivia(); }
-    else if (cur().kind == Tok::Ident) {
-      // `enum E { A, B } e;` declares a MEMBER of that enum type as well. The
-      // declarator is not part of the enum definition, so it must not be
-      // swallowed by the "skip to ;" below - the member was lost that way.
+    // The identifier after the body: in a typedef it is the ALIAS name
+    // (`typedef enum E { A, B } Alias;`), otherwise it is a DECLARATOR of a
+    // variable of that enum type (`enum E { A, B } var;`). An ANONYMOUS enum
+    // has no tag of its own, so the identifier there can only be a declarator
+    // - taking it as the type name made the variable disappear from the tree.
+    if (cur().kind == Tok::Ident) {
       size_t q = p + 1;
       while (q < t.size() && t[q].kind == Tok::Comment) q++;
-      if (q < t.size() && t[q].kind == Tok::Punct &&
-          (t[q].text == ";" || t[q].text == "=" || t[q].text == "[")) {
+      bool declFollows = q < t.size() && t[q].kind == Tok::Punct &&
+                         (t[q].text == ";" || t[q].text == "=" || t[q].text == "[");
+      if (typedefCtx) {
+        enumDeclAlias_ = cur().text;
+        adv();
+        skipTrivia();
+      } else if (declFollows) {
+        // `enum E { A, B } e;` declares a MEMBER of that enum type as well.
+        // The declarator is not part of the enum definition, so it must not be
+        // swallowed by the "skip to ;" below - the member was lost that way.
         enumDeclVar_ = cur().text;
-        enumDeclMembers_ = def.members;
         adv();
         skipTrivia();
       }
     }
     while (!eof() && !isP(";")) adv();
     if (isP(";")) adv();
+    if (def.name.empty()) {
+      // An anonymous enum has no tag - synthesize a name so the type can be
+      // referenced (by the variable declared with it, by a typedef alias).
+      def.name = "Enum" + std::to_string(++anonEnumSeq_);
+    }
     enumDeclName_ = def.name;
-    if (!def.name.empty()) enums.push_back(std::move(def));
+    enums.push_back(std::move(def));
   }
 
   // Set by parseEnumDecl when the enum definition is followed by a declarator
-  // name (`enum E { A, B } e;`): the member name and the variant list.
+  // name (`enum E { A, B } e;`): the member name. `enumDeclAlias_` holds the
+  // trailing name of a TYPEDEF (`typedef enum E { A, B } Alias;`), which is an
+  // alias, not a variable. `enumDeclName_` is the name the enum was
+  // registered under.
   std::string enumDeclVar_;
-  std::vector<std::string> enumDeclMembers_;
+  std::string enumDeclAlias_;
   std::string enumDeclName_;
+  // Counter for the synthesized names of anonymous enums.
+  int anonEnumSeq_ = 0;
 
-  void parseUsing() {    adv(); // using
+  void parseUsing() {
+    adv(); // using
     skipTrivia();
     if (isKw("namespace")) { skipToSemi(); return; }
     std::string name;
@@ -3028,7 +3143,7 @@ struct Reader {
     takePending();
     adv(); // typedef
     skipTrivia();
-    if (isKw("struct") || isKw("class") || isKw("enum")) {
+    if (isKw("struct") || isKw("class") || isKw("enum") || isKw("union")) {
       const bool isEnum = isKw("enum");
       // Look past the tag name: `typedef struct Foo Bar;` has a second name and
       // is a forward-declared alias, while `typedef struct Foo { ... }` and
@@ -3054,7 +3169,19 @@ struct Reader {
         skipToSemi();
         return;
       }
-      if (isEnum) { parseEnumDecl(); return; }
+      if (isEnum) {
+        // `typedef enum E { A, B } Alias;` - the trailing name is an ALIAS,
+        // not a variable. It was not registered, so `Alias x;` did not
+        // resolve and the member decoded to null.
+        parseEnumDecl(/*typedefCtx=*/true);
+        if (!enumDeclAlias_.empty()) {
+          TypeRef et;
+          et.kind = TypeRef::Enum;
+          et.name = enumDeclName_;
+          addWeakAlias(enumDeclAlias_, et);
+        }
+        return;
+      }
       std::vector<FieldDef> extras = parseStructDecl();
       // `typedef struct Foo { ... } Bar;` - the trailing names are aliases, not
       // variables (a typedef declares a type). Register each so `Bar` resolves.
@@ -3137,6 +3264,24 @@ struct Reader {
     return cppRdString(cppRdStripNumSuffix(raw));
   }
 
+  // The value of an enumerator: its name plus the comments that were read for
+  // it. toCpp() emits them, so they have to survive the round-trip.
+  static std::unique_ptr<asvJSONValue> enumVariant(const EnumDef* ed, size_t i) {
+    if (!ed || i >= ed->members.size()) throw asvJSONError("cpp: bad enumerator index");
+    auto sv = cppRdString(ed->members[i]);
+    if (!sv) throw asvJSONError("cpp: out of memory");
+    std::vector<Comment> lead, trail;
+    if (i < ed->memberLeading.size()) lead = ed->memberLeading[i];
+    if (i < ed->memberTrailing.size()) trail = ed->memberTrailing[i];
+    if (!lead.empty() || !trail.empty()) {
+      auto* c = new Comments();
+      c->leading = std::move(lead);
+      c->trailing = std::move(trail);
+      sv->comments.reset(c);
+    }
+    return sv;
+  }
+
   std::unique_ptr<asvJSONValue> materialize(const TypeRef& t,
                                             const std::vector<Tok>& init,
                                             bool hasInit, int depth) {
@@ -3192,11 +3337,8 @@ struct Reader {
       if (ed && !ed->members.empty()) {
         auto a = asvJSONValue::makeArray();
         if (!a || !a->arr) throw asvJSONError("cpp: out of memory");
-        for (const std::string& m : ed->members) {
-          auto sv = cppRdString(m);
-          if (!sv) throw asvJSONError("cpp: out of memory");
-          a->arr->push_back(std::move(sv));
-        }
+        for (size_t i = 0; i < ed->members.size(); i++)
+          a->arr->push_back(enumVariant(ed, i));
         return a;
       }
       return cppRdNonNull(asvJSONValue::makeNull());
@@ -3218,7 +3360,7 @@ struct Reader {
         if (!asvJSONValue::checkArraySize(rt.arrayLen)) throw asvJSONError("CPP array too large");
         for (size_t k = 0; k < rt.arrayLen; k++) {
           if (ed && ed->members.size() == rt.arrayLen)
-            a->arr->push_back(mkStr(ed->members[k]));
+            a->arr->push_back(enumVariant(ed, k));
           else {
             auto elemVal = materialize(elem, std::vector<Tok>(), false, depth + 1);
             if (!elemVal) throw asvJSONError("cpp: out of memory");

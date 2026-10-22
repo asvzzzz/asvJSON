@@ -19371,6 +19371,194 @@ TEST(testCppLiteralAndDeclGaps) {
   }
 }
 
+// Review fixes for cpp.hpp: the C-style nested array dimensions, the
+// preprocessor macro names, the anonymous-enum declarator, the typedef enum
+// alias, the function-pointer parameter, the enum comments, the union and the
+// block-comment terminator.
+TEST(testCppReviewRound2) {
+  // -- 1. A C-style nested array keeps every dimension (outer count first) --
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"m":[[1,2],[3,4]]})")));
+    CppWriteOptions o;
+    o.style = CppWriteOptions::Style::C;
+    std::string code = j.toCpp(o);
+    ASSERT(code.find("M[2][2]") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"m":[[1,2,3],[4,5,6]]})")));
+    CppWriteOptions o;
+    o.style = CppWriteOptions::Style::C;
+    std::string code = j.toCpp(o);
+    ASSERT(code.find("M[2][3]") != std::string::npos);
+  }
+  // The C++ style is unaffected: the element type already carries the nesting.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"m":[[1,2,3],[4,5,6]]})")));
+    CppWriteOptions o;
+    o.useStdArray = true;
+    std::string code = j.toCpp(o);
+    ASSERT(code.find("std::array<std::array<int, 3>, 2>") != std::string::npos);
+  }
+
+  // -- 2. The macro name of #ifdef/#ifndef ends at the identifier --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("#define FOO 1\n#ifdef FOO // comment\nstruct S { int a; };\n#endif"));
+    ASSERT(j.get("S") != nullptr);
+  }
+  {
+    // FOO is not defined, so the branch stays inactive.
+    asvJSON j;
+    ASSERT(!j.fromCpp("#ifdef FOO // comment\nstruct S { int a; };\n#endif"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("#ifndef FOO // comment\nstruct S { int a; };\n#endif"));
+    ASSERT(j.get("S") != nullptr);
+  }
+
+  // -- 3. An anonymous enum with a declarator keeps the member --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { enum { A, B } var; int a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* v = s->getConst("var");
+      ASSERT(v != nullptr);
+      if (v) {
+        ASSERT(v->type == asvJSONValue::ARRAY && v->size() == size_t(2));
+        if (v->type == asvJSONValue::ARRAY && v->size() == size_t(2))
+          ASSERT_EQ(std::string(v->get(1)->getString()), std::string("B"));
+      }
+      ASSERT(s->getConst("a") != nullptr);
+    }
+  }
+
+  // -- 4. A typedef enum registers its trailing name as an alias --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("typedef enum E { A, B } Alias;\nstruct S { Alias a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* a = s->getConst("a");
+      ASSERT(a != nullptr);
+      if (a) {
+        ASSERT(a->type == asvJSONValue::ARRAY && a->size() == size_t(2));
+        if (a->type == asvJSONValue::ARRAY && a->size() == size_t(2))
+          ASSERT_EQ(std::string(a->get(0)->getString()), std::string("A"));
+      }
+    }
+  }
+
+  // -- 5. A method with a function-pointer parameter is not a field --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { void f(void (*cb)(int)); int a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      ASSERT(s->getConst("f") == nullptr);
+      ASSERT(s->getConst("int") == nullptr);
+      ASSERT(s->getConst("a") != nullptr);
+    }
+  }
+  // A function-pointer MEMBER is still a member.
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { int (*fp)(int); int a; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      ASSERT(s->getConst("fp") != nullptr);
+      ASSERT(s->getConst("a") != nullptr);
+    }
+  }
+
+  // -- 6. The comments of the enumerators survive a toCpp -> fromCpp trip --
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"m":["a","b"]})")));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->obj != nullptr);
+    if (root && root->obj) {
+      auto it = root->obj->find("m");
+      ASSERT(it != root->obj->end());
+      if (it != root->obj->end() && it->second->arr && it->second->arr->size() == size_t(2)) {
+        auto* c = new Comments();
+        c->leading.push_back(Comment{"first value", false});
+        c->trailing.push_back(Comment{"on a", false});
+        (*it->second->arr)[0]->comments.reset(c);
+      }
+    }
+    CppWriteOptions o;
+    o.emitEnums = true;
+    o.enumPaths.push_back("m");
+    std::string code = j.toCpp(o);
+    ASSERT(code.find("first value") != std::string::npos);
+
+    asvJSON back;
+    ASSERT(back.fromCpp(code));
+    // The generated file has no struct - the root is the alias of the enum
+    // array, so the variants are the elements of the root array.
+    const asvJSONValue* r2 = back.getRoot();
+    ASSERT(r2 != nullptr && r2->type == asvJSONValue::ARRAY && r2->size() == size_t(2));
+    if (r2 && r2->type == asvJSONValue::ARRAY && r2->size() == size_t(2)) {
+      const asvJSONValue* el = r2->get(0);
+      ASSERT(el != nullptr && el->comments != nullptr);
+      if (el && el->comments) {
+        ASSERT(el->comments->leading.size() == size_t(1));
+        ASSERT(el->comments->trailing.size() == size_t(1));
+        if (el->comments->leading.size() == size_t(1))
+          ASSERT_EQ(std::string(el->comments->leading[0].text), std::string("first value"));
+        if (el->comments->trailing.size() == size_t(1))
+          ASSERT_EQ(std::string(el->comments->trailing[0].text), std::string("on a"));
+      }
+    }
+  }
+
+  // -- 7. A union is a declaration like a struct --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("union U { int a; float b; };"));
+    const asvJSONValue* u = j.get("U");
+    ASSERT(u != nullptr && u->type == asvJSONValue::OBJECT);
+    if (u && u->type == asvJSONValue::OBJECT) {
+      ASSERT(u->getConst("a") != nullptr);
+      ASSERT(u->getConst("b") != nullptr);
+    }
+  }
+
+  // -- 9. A block comment whose text holds a terminator stays valid code --
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a":1})")));
+    auto* root = j.getRoot();
+    ASSERT(root != nullptr && root->obj != nullptr);
+    if (root && root->obj) {
+      auto it = root->obj->find("a");
+      ASSERT(it != root->obj->end());
+      if (it != root->obj->end()) {
+        auto* c = new Comments();
+        c->leading.push_back(Comment{"terminator */ inside", true});
+        it->second->comments.reset(c);
+      }
+    }
+    std::string code = j.toCpp();
+    // The comment text must not contain a bare `*/` - it would end the
+    // comment early and the rest would become code.
+    size_t at = code.find("terminator");
+    ASSERT(at != std::string::npos);
+    if (at != std::string::npos) {
+      std::string chunk = code.substr(at, 40);
+      ASSERT(chunk.find("*/ inside") == std::string::npos);
+    }
+  }
+}
 TEST(testFromCpp) {
   // Modern C++ round-trip: flat object with scalar defaults.
   {
@@ -36223,6 +36411,7 @@ RUN(testRONReviewFixes);
 RUN(testRONCommentOrderAndPendants);
 RUN(testRootFootingComments);
   RUN(testToCpp);
+RUN(testCppReviewRound2);
 RUN(testFromCpp);
 RUN(testCppLiteralAndDeclGaps);
 RUN(testFromCppAudit);
