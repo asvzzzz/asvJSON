@@ -42,6 +42,9 @@
 //     express.
 //   - The type name of an ANONYMOUS enum is synthesized (`Enum1`, `Enum2`, ...)
 //     - the enum has no tag of its own.
+//   - A comment that follows the LAST enumerator (inside the braces) is
+//     attached to that enumerator as its trailing comment - the enum is a
+//     type, it has no node of its own to hold a "closing" comment.
 
 #include "../core.hpp"
 
