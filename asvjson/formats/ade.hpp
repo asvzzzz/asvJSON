@@ -265,7 +265,10 @@ inline std::vector<std::string> splitAdeDocuments(const std::string& text) {
 // Try to interpret a bare token as a number (decimal / hex / octal / binary).
 // Returns nullptr when the token is not a valid ADE number literal.
 // Supports digit separators ('_' between digits) and, on int64 overflow,
-// stores the exact literal as a STRING with raw_number set (so it round-trips).
+// stores the exact literal as a STRING (so it round-trips). A DECIMAL overflow
+// keeps the raw_number form (a decimal literal is a valid JSON number, and the
+// raw_number form is emitted bare); a hex/octal/binary overflow does NOT - a
+// hex literal is not a JSON number, so the bare output would not parse back.
 inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
   if (tok.empty()) return nullptr;
   // Validate digit separators: '_' must sit between two digits, where "digit"
@@ -316,16 +319,29 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
       for (; j < t.size(); j++) {
         int d = adeHexDigit(t[j]);
         if (d < 0 || d >= base) return nullptr;
-        if (v > (std::numeric_limits<unsigned long long>::max() - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) { overflow = true; break; }
+        if (v > (std::numeric_limits<unsigned long long>::max() - static_cast<unsigned long long>(d)) / static_cast<unsigned long long>(base)) {
+          // The rest of the literal must still be digits of this base: a
+          // non-digit tail ("0xFFFF...g") means the token is not a number at
+          // all, and must not be kept as a number literal.
+          for (size_t k = j + 1; k < t.size(); k++) {
+            int dk = adeHexDigit(t[k]);
+            if (dk < 0 || dk >= base) return nullptr;
+          }
+          overflow = true;
+          break;
+        }
         v = v * static_cast<unsigned long long>(base) + static_cast<unsigned long long>(d);
       }
       // '-' can represent exactly one extra magnitude (e.g. -0x8000000000000000 == INT64_MIN)
       unsigned long long maxV = neg ? (static_cast<unsigned long long>(INT64_MAX) + 1ULL)
                                     : static_cast<unsigned long long>(INT64_MAX);
       if (overflow || v > maxV) {
-        auto s = adeNonNull(asvJSONValue::makeStringView(tok));
-        s->raw_number = true;
-        return s;
+        // The literal does not fit an int64: the exact text is kept in a
+        // STRING (the spec says so, nothing is lost). It is NOT a raw_number:
+        // a hex/octal/binary literal is not a JSON number, and the raw_number
+        // form is emitted BARE by the JSON serializer - the JSON output would
+        // not parse back (`{"a":0xFFFF...}`).
+        return adeNonNull(asvJSONValue::makeStringView(tok));
       }
       if (neg && v == static_cast<unsigned long long>(INT64_MAX) + 1ULL)
         return adeNonNull(asvJSONValue::makeInt(std::numeric_limits<int64_t>::min()));
@@ -1701,6 +1717,12 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
         return coll;
       }
       if (c == '|' || c == '>') {
+        // A top-level block scalar is the whole document. After a key/value
+        // pair it cannot appear at all - returning it silently DROPPED the
+        // pairs parsed so far (`key: value` + a block scalar returned only the
+        // scalar). The collection branch above already refuses a second
+        // top-level value; the block scalar must do the same.
+        if (any) throw asvJSONError("ADE: unexpected top-level block scalar at line " + std::to_string(lineNum_));
         auto val = parseBlockScalar();
         skipWsAndComments();
         if (!eof()) throw asvJSONError("ADE: trailing content after block scalar");
