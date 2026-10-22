@@ -32,21 +32,29 @@ inline std::string jsonlinesPrefix(std::string_view s) {
            (static_cast<uint8_t>(s[cut]) & 0xC0) == 0x80)
         cut--;
     // The input may END in the middle of a character (a truncated document):
-    // drop an incomplete trailing sequence too, so the prefix is always valid
-    // UTF-8.
+    // find the start of the last character and drop it unless it is complete,
+    // so the prefix is always valid UTF-8. The last byte may be a LEAD byte
+    // ("hi" + E4) or a CONTINUATION of a character that started earlier and was
+    // cut ("hi" + E4 BD) - the second case needs the walk back to the lead.
     while (cut > 0) {
         unsigned char last = static_cast<unsigned char>(s[cut - 1]);
+        if (last < 0x80) break;  // ASCII - a character boundary
+        size_t start = cut - 1;
+        while (start > 0 && (static_cast<uint8_t>(s[start]) & 0xC0) == 0x80)
+            start--;  // back to the lead byte
+        unsigned char lead = static_cast<unsigned char>(s[start]);
         size_t need = 0;
-        if (last < 0x80) break;
-        else if ((last & 0xE0) == 0xC0) need = 1;
-        else if ((last & 0xF0) == 0xE0) need = 2;
-        else if ((last & 0xF8) == 0xF0) need = 3;
-        else break;  // not a lead byte - invalid input, leave it as it is
-        bool complete = cut > need;
-        for (size_t k = 1; complete && k <= need; k++)
-            if ((static_cast<unsigned char>(s[cut - 1 - k]) & 0xC0) != 0x80) complete = false;
-        if (complete) break;
-        cut--;
+        if (lead < 0x80) need = 1;
+        else if ((lead & 0xE0) == 0xC0) need = 2;
+        else if ((lead & 0xF0) == 0xE0) need = 3;
+        else if ((lead & 0xF8) == 0xF0) need = 4;
+        else {
+            // A continuation byte without a lead: drop it and re-check.
+            cut = start;
+            continue;
+        }
+        if (start + need == cut) break;  // the last character is complete
+        cut = start;                     // truncated - drop the whole character
     }
     return std::string(s.substr(0, cut));
 }

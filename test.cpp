@@ -16463,6 +16463,50 @@ TEST(testJSONLinesErrorMessage) {
     for (unsigned char c : err) ASSERT(c < 0x80);
     ASSERT(err.find("0xE4") != std::string::npos);
   }
+  // The prefix is ALWAYS valid UTF-8, whatever the input is: a truncated
+  // multi-byte sequence at the end of the line is dropped as a whole.
+  {
+    const char* inputs[] = {
+      "\xE4",          // a lone lead byte
+      "\xE4\xBD",      // a truncated 3-byte sequence
+      "\x80",          // a stray continuation byte
+      "\xF0\x9F\x98",  // a truncated 4-byte sequence
+      "\xC3",          // a truncated 2-byte sequence
+      "hi\xE4\xBD",   // a truncated sequence after ASCII text
+    };
+    for (const char* in : inputs) {
+      asvJSON j;
+      ASSERT(!j.fromJSONLines(std::string(in) + "\n"));
+      const std::string& err = j.getLastError();
+      size_t at = err.find("near: ");
+      ASSERT(at != std::string::npos);
+      if (at == std::string::npos) continue;
+      std::string prefix = err.substr(at + 6);
+      // Validate the prefix as UTF-8.
+      for (size_t i = 0; i < prefix.size(); ) {
+        unsigned char c = static_cast<unsigned char>(prefix[i]);
+        if (c < 0x80) { ++i; continue; }
+        size_t need = 0;
+        if ((c & 0xE0) == 0xC0) need = 1;
+        else if ((c & 0xF0) == 0xE0) need = 2;
+        else if ((c & 0xF8) == 0xF0) need = 3;
+        else { ASSERT(false); break; }         // an invalid lead byte
+        ASSERT(i + need < prefix.size());     // the sequence is complete
+        for (size_t k = 1; k <= need; k++)
+          ASSERT((static_cast<unsigned char>(prefix[i + k]) & 0xC0) == 0x80);
+        i += need + 1;
+      }
+    }
+  }
+  // A truncated sequence after ASCII text keeps the ASCII part.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines(std::string("hi\xE4\xBD") + "\n"));
+    const std::string& err = j.getLastError();
+    size_t at = err.find("near: ");
+    ASSERT(at != std::string::npos);
+    if (at != std::string::npos) ASSERT_EQ(err.substr(at + 6), std::string("hi"));
+  }
 }
 
 TEST(testJSONLinesUtf8SafeErrorMessage) {
