@@ -2199,6 +2199,12 @@ struct Reader {
             TypeRef et;
             et.kind = TypeRef::Enum;
             et.name = enumDeclName_;
+            ef.type = et;
+            // The comments between the closing brace and the declarator lead
+            // the declarator.
+            ef.leading = takePending();
+            ef.hasInit = enumDeclHasInit_;
+            ef.init = enumDeclInit_;
             fileScope.push_back(std::move(ef));
           }
           // NOTE: a standalone enum is a TYPE declaration, not a value - its
@@ -2541,6 +2547,11 @@ struct Reader {
               et.kind = TypeRef::Enum;
               et.name = enumDeclName_;
               ef.type = et;
+              // The comments between the closing brace and the declarator lead
+              // the member.
+              ef.leading = takePending();
+              ef.hasInit = enumDeclHasInit_;
+              ef.init = enumDeclInit_;
               def.fields.push_back(std::move(ef));
             }
           }
@@ -3026,7 +3037,9 @@ struct Reader {
       skipTrivia();
     }
     enumDeclVar_.clear();
-    enumDeclAlias_.clear();
+    enumDeclAliases_.clear();
+    enumDeclInit_.clear();
+    enumDeclHasInit_ = false;
     if (isP(";")) { adv(); return; }
     if (!isP("{")) { skipToSemi(); return; }
     adv(); // '{'
@@ -3066,10 +3079,19 @@ struct Reader {
         adv();
       }
     }
+    // The comments inside the body that follow the LAST enumerator belong to
+    // it (the emitter writes a trailing comment after the comma). They must
+    // not stay in `pending`: they would become the leading comments of the
+    // NEXT declaration - the enum is a type, it has no node of its own.
+    if (!def.memberTrailing.empty() && !pending.empty()) {
+      for (const Comment& c : pending) def.memberTrailing.back().push_back(c);
+      pending.clear();
+      pendingLines.clear();
+    }
     if (isP("}")) adv();
     skipTrivia();
-    // The identifier after the body: in a typedef it is the ALIAS name
-    // (`typedef enum E { A, B } Alias;`), otherwise it is a DECLARATOR of a
+    // The identifier after the body: in a typedef it is the ALIAS name(s)
+    // (`typedef enum E { A, B } A1, A2;`), otherwise it is a DECLARATOR of a
     // variable of that enum type (`enum E { A, B } var;`). An ANONYMOUS enum
     // has no tag of its own, so the identifier there can only be a declarator
     // - taking it as the type name made the variable disappear from the tree.
@@ -3079,9 +3101,15 @@ struct Reader {
       bool declFollows = q < t.size() && t[q].kind == Tok::Punct &&
                          (t[q].text == ";" || t[q].text == "=" || t[q].text == "[");
       if (typedefCtx) {
-        enumDeclAlias_ = cur().text;
-        adv();
-        skipTrivia();
+        // The trailing names of a typedef are ALIASES, not variables - the
+        // struct-typedef path registers all of them.
+        while (cur().kind == Tok::Ident) {
+          enumDeclAliases_.push_back(cur().text);
+          adv();
+          skipTrivia();
+          if (isP(",")) { adv(); skipTrivia(); continue; }
+          break;
+        }
       } else if (declFollows) {
         // `enum E { A, B } e;` declares a MEMBER of that enum type as well.
         // The declarator is not part of the enum definition, so it must not be
@@ -3089,6 +3117,23 @@ struct Reader {
         enumDeclVar_ = cur().text;
         adv();
         skipTrivia();
+        // The initializer of the declarator (`enum E { A, B } e = A;`).
+        if (isP("=")) {
+          adv();
+          enumDeclHasInit_ = true;
+          int depth = 0;
+          while (!eof()) {
+            if (t[p].kind == Tok::Punct) {
+              if (t[p].text == "{" || t[p].text == "(" || t[p].text == "[") depth++;
+              else if (t[p].text == "}" || t[p].text == ")" || t[p].text == "]") {
+                if (depth == 0) break;
+                depth--;
+              } else if (depth == 0 && (t[p].text == ";" || t[p].text == ",")) break;
+            }
+            enumDeclInit_.push_back(cur());
+            adv();
+          }
+        }
       }
     }
     while (!eof() && !isP(";")) adv();
@@ -3102,14 +3147,17 @@ struct Reader {
     enums.push_back(std::move(def));
   }
 
-  // Set by parseEnumDecl when the enum definition is followed by a declarator
-  // name (`enum E { A, B } e;`): the member name. `enumDeclAlias_` holds the
-  // trailing name of a TYPEDEF (`typedef enum E { A, B } Alias;`), which is an
-  // alias, not a variable. `enumDeclName_` is the name the enum was
-  // registered under.
+  // Set by parseEnumDecl when the enum definition is followed by declarators.
+  // `enumDeclVar_` holds the name of a VARIABLE of that enum type
+  // (`enum E { A, B } e;`), `enumDeclAliases_` the trailing names of a TYPEDEF
+  // (`typedef enum E { A, B } A1, A2;` - they are aliases, not variables).
+  // `enumDeclName_` is the name the enum was registered under.
   std::string enumDeclVar_;
-  std::string enumDeclAlias_;
+  std::vector<std::string> enumDeclAliases_;
   std::string enumDeclName_;
+  // The initializer of the declarator (`enum E { A, B } e = A;`).
+  std::vector<Tok> enumDeclInit_;
+  bool enumDeclHasInit_ = false;
   // Counter for the synthesized names of anonymous enums.
   int anonEnumSeq_ = 0;
 
@@ -3180,15 +3228,15 @@ struct Reader {
         return;
       }
       if (isEnum) {
-        // `typedef enum E { A, B } Alias;` - the trailing name is an ALIAS,
-        // not a variable. It was not registered, so `Alias x;` did not
+        // `typedef enum E { A, B } Alias;` - the trailing names are ALIASES,
+        // not variables. They were not registered, so `Alias x;` did not
         // resolve and the member decoded to null.
         parseEnumDecl(/*typedefCtx=*/true);
-        if (!enumDeclAlias_.empty()) {
+        for (const std::string& al : enumDeclAliases_) {
           TypeRef et;
           et.kind = TypeRef::Enum;
           et.name = enumDeclName_;
-          addWeakAlias(enumDeclAlias_, et);
+          addWeakAlias(al, et);
         }
         return;
       }
@@ -3335,8 +3383,12 @@ struct Reader {
     }
 
     if (rt.kind == TypeRef::Enum) {
-      if (hasInit && !grp) {
-        std::string v = cppRdLastIdent(init);
+      if (hasInit) {
+        // An initializer names ONE variant (`e = A;`, `e = {A};`) - the value
+        // is that variant's name, not the whole variant list.
+        std::string v;
+        if (!grp) v = cppRdLastIdent(init);
+        else if (!groups.empty()) v = cppRdLastIdent(groups[0]);
         if (!v.empty()) return cppRdString(std::move(v));
       }
       // Without an initializer the value is the enum's VARIANT LIST - the same
@@ -3515,6 +3567,13 @@ struct Reader {
       if (live.count(f.type.name)) continue;
       auto val = materialize(f.type, f.init, f.hasInit, 0);
       if (!val) throw asvJSONError("cpp: out of memory");
+      // The comments of a file-scope declarator are attached to its value, as
+      // they are for a struct member.
+      if (opts.includeComments && (!f.leading.empty() || !f.trailing.empty())) {
+        val->comments.reset(new Comments());
+        val->comments->leading = f.leading;
+        val->comments->trailing = f.trailing;
+      }
       out->obj->emplace(f.name, std::move(val));
     }
   }
