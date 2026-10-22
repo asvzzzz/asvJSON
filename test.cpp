@@ -28517,6 +28517,66 @@ TEST(testADEReviewFixes2) {
   }
 }
 
+// ADE review round 3: a top-level block scalar must not swallow the pairs
+// parsed before it, and an out-of-range hex/octal/binary literal must not
+// become a raw_number (the JSON serializer emits that form BARE, and a hex
+// literal is not a JSON number).
+TEST(testADEReviewFixes3) {
+  // A top-level block scalar after a key/value pair is an error - the pairs
+  // parsed so far used to be dropped silently.
+  {
+    asvJSON j;
+    ASSERT(!j.fromADE("key: value\n|\n body\n"));
+    ASSERT(j.lastError.find("block scalar") != std::string::npos);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromADE("a: 1\nb: 2\n>\n body\n"));
+  }
+  // A block scalar alone is still the whole document.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("|\n body\n"));
+    ASSERT_EQ(j.serialize(), std::string_view("\"body\\n\""));
+  }
+  // An out-of-range hex literal keeps its text as a plain STRING, and the
+  // JSON projection stays valid JSON.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("z: 0xFFFFFFFFFFFFFFFF\n"));
+    const asvJSONValue* v = j.get("z");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) {
+      ASSERT_EQ(std::string(v->getString()), std::string("0xFFFFFFFFFFFFFFFF"));
+      ASSERT(!v->raw_number);
+    }
+    std::string json = j.serialize();
+    asvJSON back;
+    ASSERT(back.parse(json));
+    ASSERT_EQ(back.serialize(), json);
+  }
+  // A non-digit tail after the overflow means the token is not a number.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("z: 0xFFFFFFFFFFFFFFFFFFFFFFg\n"));
+    const asvJSONValue* v = j.get("z");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) {
+      ASSERT_EQ(std::string(v->getString()), std::string("0xFFFFFFFFFFFFFFFFFFFFFFg"));
+      ASSERT(!v->raw_number);
+    }
+  }
+  // The decimal overflow keeps the raw_number form - a decimal literal IS a
+  // valid JSON number, so the bare output parses back.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("z: 99999999999999999999999\n"));
+    const asvJSONValue* v = j.get("z");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) ASSERT(v->raw_number);
+  }
+}
+
 TEST(testADEExtTypeRange) {
   // !ext carries a signed type in one byte; 300 and -129 used to wrap silently.
   {
@@ -34280,14 +34340,24 @@ TEST(testReauditRegression) {
 		ASSERT(j2.fromTOML(toml));
 		ASSERT_EQ(j.serialize(), j2.serialize());
 	}
-	// ADE: out-of-range positive hex/octal/binary literals stay raw instead of
-	// silently wrapping to a negative int64.
+	// ADE: out-of-range positive hex/octal/binary literals keep their exact
+	// text (instead of silently wrapping to a negative int64) and stay a
+	// plain STRING: a hex/octal/binary literal is not a JSON number, and the
+	// raw_number form is emitted BARE by the JSON serializer - the JSON
+	// output would not parse back (`{"z":0xFFFF...}`).
 	{
 		asvJSON j;
 		ASSERT(j.fromADE("z: 0xFFFFFFFFFFFFFFFF\n"));
 		asvJSONValue* v = j.getRoot()->get("z");
 		ASSERT(v != nullptr);
-		ASSERT(v->raw_number);
+		ASSERT(v->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(v->getString()), std::string("0xFFFFFFFFFFFFFFFF"));
+		ASSERT(!v->raw_number);
+		// The JSON projection must be valid JSON.
+		std::string json = j.serialize();
+		asvJSON back;
+		ASSERT(back.parse(json));
+		ASSERT_EQ(back.serialize(), json);
 	}
 	// GOON: '*' inside a tabular cell must survive (encoder quotes it; RLE is
 	// only an explicit user shorthand).
@@ -36604,6 +36674,7 @@ RUN(testADEBlockScalarKeepChomping);
 	RUN(testADETagNameValidation);
   RUN(testADEReviewFixes);
   RUN(testADEReviewFixes2);
+	RUN(testADEReviewFixes3);
 	RUN(testADEExtTypeRange);
 	RUN(testADEStringLengthLimit);
 	RUN(testADEMultiDocumentStreamRoundTrip);
