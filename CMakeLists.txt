@@ -17,6 +17,12 @@ target_include_directories(examples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(test test.cpp)
 target_include_directories(test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Minimal build: a representative set of ASVJSON_DISABLE_<FORMAT> flags. Guards
+# the core dispatchers (fromAny / readFromFileAny / writeToFileAny) against
+# referencing a format whose body was compiled out (link error).
+add_executable(test_minimal test_minimal.cpp)
+target_include_directories(test_minimal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # --- CLI converter ---
 add_executable(convert web/convert.cpp)
 target_include_directories(convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -36,7 +42,7 @@ add_custom_command(TARGET asvjserver POST_BUILD
           $<TARGET_FILE_DIR:asvjserver>/public)
 
 if(MSVC)
-  foreach(tgt examples test convert asvjserver)
+  foreach(tgt examples test test_minimal convert asvjserver)
     target_compile_options(${tgt} PRIVATE /MT$<$<CONFIG:Debug>:d>)
   endforeach()
 endif()

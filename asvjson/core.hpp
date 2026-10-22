@@ -1900,7 +1900,11 @@ public:
 			if (!v) return false;
 			arr->arr->emplace_back(std::move(v));
 		}
-		root->obj->emplace(std::string(key), std::move(arr));
+		// insert_or_assign, not emplace: ObjectMapT::emplace keeps an existing
+		// entry (std::map semantics), so a second putBinChunked("k", ...) used to
+		// return true while silently DROPPING the new payload - every other put*()
+		// (putString/putInt/putBinary -> setValue) replaces the value in place.
+		root->obj->insert_or_assign(std::string(key), std::move(arr));
 		dirty_ = true;
 		return true;
 	}
@@ -2148,7 +2152,12 @@ public:
 			if (hasEscape) {
 				segBuf.reserve(end - start);
 				for (size_t i = start; i < end; i++) {
-					if (path[i] == '\\' && i + 1 < path.size()) i++;
+					// Only "\." and "\\" are escapes - the same two pairs the scan
+					// above recognises. Unconditionally skipping the byte after any
+					// backslash also ate a literal one: the key "a.b\c" (path
+					// "a\.b\c") was looked up as "a.bc" and never found.
+					if (path[i] == '\\' && i + 1 < end &&
+					    (path[i + 1] == '.' || path[i + 1] == '\\')) i++;
 					segBuf += path[i];
 				}
 				seg = segBuf;
@@ -2420,12 +2429,20 @@ public:
 		// must not enter the array: every serializer walks elements without a
 		// null guard. Symmetric with the root-level overload above.
 		if (!val) return nullptr;
-		if (!root || root->type != asvJSONValue::OBJECT)
+		// Only an EMPTY document may be turned into an object here. An existing
+		// non-object root is NOT replaced - the root-level overload above
+		// documents exactly that rule ("the existing root is NOT replaced ...
+		// use setRoot()/clear() if replacement is intended"). This branch used
+		// to overwrite the root unconditionally, so arrayAddInt("k", 5) on
+		// [1,2,3] silently returned {"k":[5]} and the array was gone.
+		if (!root) {
 			root = asvJSONValue::makeObject();
-		if (!root || !root->obj)
+			if (!root) return nullptr;
+		}
+		if (root->type != asvJSONValue::OBJECT || !root->obj)
 			return nullptr;
 
-		auto it = root->obj->find(std::string(key));
+		auto it = mapFind(*root->obj, key);
 		asvJSONValue* arrPtr;
 		if (it != root->obj->end() && it->second->type == asvJSONValue::ARRAY) {
 			arrPtr = it->second.get();
@@ -2946,6 +2963,14 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 	// Both arrays  -  recurse by index
 	if (a.type == asvJSONValue::ARRAY && b.type == asvJSONValue::ARRAY && a.arr && b.arr) {
 		size_t maxLen = a.arr->size() > b.arr->size() ? a.arr->size() : b.arr->size();
+		// RFC 6902 section 4.2: a "remove" op SHIFTS every later element one slot
+		// to the left. Dropping a trailing run therefore has to be emitted from
+		// the END backwards - ascending indices made the patch unappliable as
+		// soon as more than one element was removed ([1,2,3,4] -> [1] used to
+		// produce remove /1, /2, /3, and the last one no longer existed after
+		// the first two shifts). Removals are collected here and flushed in
+		// reverse order after the loop.
+		std::vector<std::string> trailingRemoves;
 		for (size_t i = 0; i < maxLen; i++) {
 			std::string idxPath = path + "/" + std::to_string(i);
 			bool aHas = i < a.arr->size();
@@ -2973,12 +2998,15 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				op->emplace("value", std::move(cv));
 				patch.push(std::move(op));
 			} else if (aHas && !bHas) {
-				auto op = asvJSONValue::makeObject();
-				if (!op) return;
-				op->emplace("op", asvJSONValue::makeStringView("remove"));
-				op->emplace("path", asvJSONValue::makeString(idxPath.data(), idxPath.size()));
-				patch.push(std::move(op));
+				trailingRemoves.push_back(idxPath);
 			}
+		}
+		for (auto it = trailingRemoves.rbegin(); it != trailingRemoves.rend(); ++it) {
+			auto op = asvJSONValue::makeObject();
+			if (!op) return;
+			op->emplace("op", asvJSONValue::makeStringView("remove"));
+			op->emplace("path", asvJSONValue::makeString(it->data(), it->size()));
+			patch.push(std::move(op));
 		}
 		return;
 	}
@@ -3458,7 +3486,14 @@ inline std::vector<uint8_t> asvJSON::toBSON() const {
 			}
 		}
 	} else {
-		root->toBSON(sub);
+		// BSON has no scalar document: the root must be an OBJECT or an ARRAY
+		// (both are written as a document body). This branch used to call
+		// `root->toBSON(sub)`, which appends a bare ELEMENT (type byte + value)
+		// with no key - so `toBSON()` of a STRING/INT/DOUBLE/BOOL/null root
+		// produced a byte string that its OWN decoder rejected ("BSON missing
+		// key", "BSON double: unexpected end"). Report it instead of silently
+		// emitting a malformed document.
+		throw asvJSONError("BSON: root must be an object or an array");
 	}
 	sub.push_back(0);
 	if (sub.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) return {};
@@ -3476,8 +3511,17 @@ inline std::string asvJSON::toXML() const {
 	out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 	if (root) {
 		if (root->type == asvJSONValue::OBJECT && root->obj) {
-			for (const auto& [k, v] : *(root->obj))
-				v->toXML(out, k, 0);
+			if (root->obj->empty()) {
+				// An EMPTY object root used to emit the XML declaration alone,
+				// which is not a document (fromXML: "expected '<'"). Wrap it in
+				// a <root> element like the ARRAY and scalar roots do, so the
+				// output is a valid document: {} -> <root type="object"></root>
+				// -> {"root":{}}.
+				root->toXML(out);
+			} else {
+				for (const auto& [k, v] : *(root->obj))
+					v->toXML(out, k, 0);
+			}
 		} else {
 			root->toXML(out);
 		}
@@ -3494,7 +3538,9 @@ inline std::string asvJSON::toXML() const {
 //   - single non-"svg" key: wraps in <svg> to guarantee a single XML root.
 //   - multi-key root: wraps in <svg> to avoid multiple root elements (invalid XML).
 //   - empty-string key (""): renders as <element> (fallback name, not valid SVG).
-//   - @-only keys render invalid markup like <@x>...</@x>.
+//   - Element names go through xmlSanitizeElementName, so a key the XML name
+//     grammar forbids ("k[0]", "a b", "&a", "@x") cannot produce un-parseable
+//     markup (the same rule the XML encoder applies).
 //
 // Known limitations (see svg.hpp for details): NaN/Inf in text/scalar children are
 // skipped; non-scalar child types (OBJECT, ARRAY, DATETIME, BINARY, etc.) are dropped.

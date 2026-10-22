@@ -633,6 +633,12 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         return v;
       }
       if (info >= 28 && info <= 30) throw asvJSONError("CBOR: reserved encoding (additional information 28-30 are reserved by RFC 8949 s3.2)");
+      // Defense in depth: info == 31 with major 7 IS the 0xFF break byte and is
+      // rejected at the top of parseCBOR ("break byte outside indefinite-length
+      // item"), so this line is unreachable. It is here so the case cannot fall
+      // through into `default: unknown major type` - a misleading message for a
+      // KNOWN major type - and to keep -Wextra's -Wimplicit-fallthrough quiet.
+      throw asvJSONError("CBOR: unexpected break (0xFF) outside an indefinite-length item");
     }
     default:
       throw asvJSONError("CBOR: unknown major type");

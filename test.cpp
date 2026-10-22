@@ -1085,6 +1085,19 @@ TEST(testGetNested) {
 	result = json.getNested("level1.level2\\.key");
 	ASSERT(result != nullptr);
 	ASSERT_EQ(std::string(result->str_data.data(), result->str_data.size()), "Value");
+
+	// A LITERAL backslash in the key must survive: only "\." and "\\" are
+	// escapes, so "a\.b\c" addresses the member named "a.b\c". The unescape used
+	// to drop the byte after ANY backslash and looked up "a.bc".
+	json.parse(std::string("{\"a.b\\\\c\": \"Backslash\"}"));
+	result = json.getNested("a\\.b\\c");
+	ASSERT(result != nullptr);
+	ASSERT_EQ(std::string(result->str_data.data(), result->str_data.size()), "Backslash");
+	// "\\." addresses a key whose name ends with a backslash: "x\" + ".y".
+	json.parse(std::string("{\"x\\\\\": {\"y\": \"Doubled\"}}"));
+	result = json.getNested("x\\\\.y");
+	ASSERT(result != nullptr);
+	ASSERT_EQ(std::string(result->str_data.data(), result->str_data.size()), "Doubled");
 }
 
 TEST(testParseComments) {
@@ -1586,6 +1599,19 @@ TEST(testPutBinChunked) {
 		auto r = json3.getBinChunked(key);
 		ASSERT_EQ(r.size(), 50U);
 		for (size_t i = 0; i < 50; i++) ASSERT_EQ(r[i], data2[i]);
+	}
+	// Overwriting an existing key REPLACES the value (like putString/putBinary).
+	// ObjectMapT::emplace keeps the first entry, so the second call used to return
+	// true while silently dropping the new payload.
+	{
+		asvJSON j;
+		ASSERT(j.putBinChunked("k", data, 100, 76));
+		ASSERT(j.putBinChunked("k", data + 100, 50, 76));
+		auto r = j.getBinChunked("k");
+		ASSERT_EQ(r.size(), 50U);
+		ASSERT_EQ(r[0], static_cast<uint8_t>(100));
+		ASSERT_EQ(r[49], static_cast<uint8_t>(149));
+		ASSERT_EQ(j.getKeys().size(), 1U);
 	}
 }
 
@@ -30200,7 +30226,7 @@ TEST(testJSONPathExtras) {
 		ASSERT_EQ(step0.size(), size_t(1));
 		ASSERT_EQ(step0[0]->num, int64_t(3));
 		ASSERT_EQ(doc.query("$[99999999999999999999999999]").size(), size_t(0));
-		ASSERT_EQ(doc.query(R"($["\z"])").size(), size_t(0));
+		ASSERT_EQ(doc.query("$[\"\\z\"]").size(), size_t(0));
 	}
 	// -- regression: an invalid selector AFTER a comma must not leak the results of earlier valid items in the same bracket list --
 	{
@@ -33223,6 +33249,53 @@ TEST(testReadWriteFileAny) {
 		cleanup(path);
 	}
 
+	// --- SVG round-trip: the "svg" extension was missing from BOTH dispatchers,
+	// so a .svg file was written as JSON and read back as JSON - FormatType::SVG
+	// was unreachable through the file API.
+	{
+		std::string path = tmpFile("svg");
+		{
+			asvJSON w;
+			ASSERT(w.parse(R"({"svg":{"rect":{"@x":"1","@y":"2"}}})"));
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT(r.getFormatType() == FormatType::SVG);
+			const asvJSONValue* x = r.getByPointer("/svg/rect/@x");
+			ASSERT(x && x->type == asvJSONValue::STRING);
+			ASSERT_EQ(std::string(x->getString()), "1");
+		}
+		cleanup(path);
+	}
+
+	// --- C++ extensions must agree between the two dispatchers: the write side
+	// knew only hpp/h while the read side also took hxx/cpp/cc, so .cpp was
+	// written as JSON and then parsed as C++.
+	{
+		std::string path = tmpFile("cpp");
+		{
+			asvJSON w;
+			ASSERT(w.parse(R"({"S":{"a":1}})"));
+			ASSERT(w.writeToFileAny(path));
+		}
+		{
+			std::ifstream in(path);
+			std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			ASSERT(content.find("struct S") != std::string::npos);
+		}
+		{
+			asvJSON r;
+			ASSERT(r.readFromFileAny(path));
+			ASSERT(r.getFormatType() == FormatType::CPP);
+			const asvJSONValue* a = r.getByPointer("/S/a");
+			ASSERT(a && a->type == asvJSONValue::INT);
+			ASSERT_EQ(a->getInt(), 1);
+		}
+		cleanup(path);
+	}
+
 	// --- nonexistent file returns false ---
 	{
 		asvJSON r;
@@ -35683,7 +35756,13 @@ TEST(testProtobufEmptyLastError) {
 	{ asvJSON j; ASSERT(!j.fromProtobuf("", 0)); ASSERT(!j.getLastError().empty()); }
 	{ asvJSON j; ASSERT(!j.fromProtobufText("")); ASSERT(!j.getLastError().empty()); }
 	{ asvJSON j; ASSERT(!j.fromProtobufText("   \n\t ")); ASSERT(!j.getLastError().empty()); }
-	{ asvJSON j; ASSERT(!j.fromProtobufText("{}")); ASSERT(!j.getLastError().empty()); }
+	// An explicitly empty message IS a message: toProtobufText() writes "{\n}\n"
+	// for the empty object root, so the text decoder has to read it back.
+	{ asvJSON j; ASSERT(j.fromProtobufText("{}")); ASSERT(j.getRoot() && j.getRoot()->type == asvJSONValue::OBJECT && j.getRoot()->obj->empty()); }
+	{ asvJSON j; ASSERT(j.fromProtobufText("{ }")); ASSERT(j.getRoot() && j.getRoot()->obj && j.getRoot()->obj->empty()); }
+	{ asvJSON j; ASSERT(j.fromProtobufText("{\n}\n")); ASSERT(j.getRoot() && j.getRoot()->obj && j.getRoot()->obj->empty()); }
+	// A body that merely FAILED to produce fields is still an error, not {}.
+	{ asvJSON j; ASSERT(!j.fromProtobufText("x: -\n")); ASSERT(!j.getLastError().empty()); }
 }
 
 // Fuzzing (build-asan harness, 2026-10) found a container-overflow in the
@@ -36205,6 +36284,131 @@ TEST(testRootScalarEdgeRoundtrip) {
 			ASSERT(a.getRoot() && a.getRoot()->type == asvJSONValue::STRING);
 			ASSERT_EQ(std::string(a.getRoot()->getString()), std::string(m));
 		}
+	}
+}
+
+// A library-wide encode -> decode sweep (2026-10) found encoders whose output
+// their OWN decoder rejected, plus a diff()/applyPatch() mismatch. Every case
+// below was reproduced before the fix.
+TEST(testEncoderSelfConsistency) {
+	// 1. BSON has no scalar document. toBSON() used to append a bare ELEMENT
+	// (type byte + payload, no key), so a STRING/INT/DOUBLE/BOOL/null root
+	// produced bytes that fromBSON rejected ("BSON missing key",
+	// "BSON double: unexpected end"). It must refuse instead of emitting
+	// malformed BSON.
+	{
+		for (const char* js : {"0.0", "\"x\"", "false", "null", "3"}) {
+			asvJSON j;
+			ASSERT_MSG(j.parse(js), js);
+			bool threw = false;
+			try {
+				j.toBSON();
+			} catch (const asvJSONError&) {
+				threw = true;
+			}
+			ASSERT_MSG(threw, js);
+		}
+		// An OBJECT root still encodes and round-trips.
+		asvJSON obj;
+		ASSERT(obj.parse(R"({"a":1,"b":[true,null]})"));
+		std::vector<uint8_t> bytes = obj.toBSON();
+		ASSERT(!bytes.empty());
+		asvJSON back;
+		ASSERT(back.fromBSON(bytes.data(), bytes.size()));
+		ASSERT(back.serialize() == obj.serialize());
+	}
+	// 2. toXML() of the EMPTY object root emitted the XML declaration alone -
+	// not a document, so fromXML rejected it. It now wraps like the ARRAY and
+	// scalar roots do.
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		std::string xml = j.toXML();
+		ASSERT(xml.find("<root") != std::string::npos);
+		asvJSON d;
+		ASSERT(d.fromXML(xml));
+		ASSERT(d.serialize() == R"({"root":{}})");
+	}
+	// 3. toProtobufText() of the empty object root writes "{\n}\n"; the decoder
+	// dropped the empty result and reported "protobuf text: no value".
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		std::string pt = j.toProtobufText();
+		asvJSON d;
+		ASSERT(d.fromProtobufText(pt));
+		ASSERT(d.getRoot() && d.getRoot()->type == asvJSONValue::OBJECT);
+		ASSERT(d.getRoot()->obj && d.getRoot()->obj->empty());
+	}
+	// 4. fromCpp() must strip a UTF-8 BOM like every other text decoder: the
+	// lexer reads a byte >= 0x80 as part of an identifier, so the BOM used to
+	// glue itself to the first keyword ("\xEF\xBB\xBFstruct") and the file
+	// decoded as "no type declarations found".
+	{
+		asvJSON plain;
+		ASSERT(plain.fromCpp("struct S { int a; };"));
+		asvJSON withBom;
+		ASSERT(withBom.fromCpp("\xEF\xBB\xBFstruct S { int a; };"));
+		ASSERT(withBom.serialize() == plain.serialize());
+		ASSERT(withBom.serialize() == R"({"S":{"a":0}})");
+	}
+	// 5. SVG element names come from JSON keys. A key the XML name grammar
+	// forbids ("k[0]", "a b", "&a") was emitted verbatim, so the encoder
+	// produced markup that no XML parser accepts - fromSVG included.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"k[0]":1,"a b":2,"&a":3})"));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<k[0]>") == std::string::npos);
+		ASSERT(svg.find("<a b>") == std::string::npos);
+		ASSERT(svg.find("<&a>") == std::string::npos);
+		asvJSON d;
+		ASSERT(d.fromSVG(svg));
+		// A valid SVG element name is untouched.
+		asvJSON ok;
+		ASSERT(ok.parse(R"({"rect":{"@x":"1"}})"));
+		ASSERT(ok.toSVG().find("<rect x=\"1\"/>") != std::string::npos);
+	}
+	// 6. diff() dropped a shrinking array tail in ASCENDING index order, but an
+	// RFC 6902 "remove" shifts every later element left - so the patch failed to
+	// apply as soon as more than one element was removed.
+	{
+		asvJSON a, b;
+		ASSERT(a.parse("[1,2,3,4]"));
+		ASSERT(b.parse("[1]"));
+		asvJSON d = a.diff(b);
+		asvJSON applied = a;
+		ASSERT(applied.applyPatch(d));
+		ASSERT(applied.serialize() == "[1]");
+	}
+	{
+		asvJSON a, b;
+		ASSERT(a.parse("[1,2,3]"));
+		ASSERT(b.parse("[]"));
+		asvJSON d = a.diff(b);
+		asvJSON applied = a;
+		ASSERT(applied.applyPatch(d));
+		ASSERT(applied.serialize() == "[]");
+	}
+	// 7. arrayAddX(key, ...) replaced a NON-object root with a fresh object, so
+	// arrayAddInt("k", 5) on [1,2,3] returned {"k":[5]} and the array was gone.
+	// The root-level overload documents the opposite rule ("the existing root is
+	// NOT replaced ... use setRoot()/clear()"), and the keyed one must agree.
+	{
+		asvJSON j;
+		ASSERT(j.parse("[1,2,3]"));
+		ASSERT(j.arrayAddInt("k", 5) == nullptr);
+		ASSERT(j.serialize() == "[1,2,3]");
+
+		asvJSON s;
+		ASSERT(s.parse("\"txt\""));
+		ASSERT(s.arrayAddInt("k", 5) == nullptr);
+		ASSERT(s.serialize() == "\"txt\"");
+
+		// An empty document still becomes the object, as before.
+		asvJSON e;
+		ASSERT(e.arrayAddInt("k", 5) != nullptr);
+		ASSERT(e.serialize() == R"({"k":[5]})");
 	}
 }
 
@@ -36878,6 +37082,7 @@ RUN(testYamlAuditReview);
 	RUN(testJSONPathQuotedNameShorthand);
 	RUN(testBomStrippedByDecoders);
 	RUN(testXMLControlCharRejected);
+	RUN(testEncoderSelfConsistency);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

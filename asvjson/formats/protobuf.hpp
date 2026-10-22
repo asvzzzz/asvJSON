@@ -93,8 +93,10 @@
 //   encoded with a schema-less "m" type code / decoded from a zero-length LEN).
 // - The text format accepts a top-level message, a top-level array (the
 //   "[...]" protoTextSerializeVal writes for an ARRAY root, including "[]") and
-//   a top-level scalar; all three round-trip. The empty object root "{}" is
-//   still rejected by the parser, as it is by fromProtobuf.
+//   a top-level scalar; all three round-trip. The empty object root "{}" also
+//   round-trips through the TEXT format (it decodes to an empty OBJECT); the
+//   WIRE format still cannot represent it (an empty protobuf message is zero
+//   bytes, indistinguishable from "no message").
 // - Text-format float literals accept a trailing f/F suffix ("1.5f").
 
 #include "../core.hpp"
@@ -1630,8 +1632,17 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
       pos++;
       auto obj = asvJSONValue::makeObject();
       if (!obj) { lastError = "protobuf text: out of memory"; return false; }
+      // An explicitly EMPTY message ("{}" / "{ }") is a message, so it must
+      // decode to an empty OBJECT - toProtobufText() writes "{\n}\n" for the
+      // empty object root, and dropping the empty result made that output
+      // unparseable ("protobuf text: no value"). A body that merely FAILED to
+      // produce fields ("x: -", an over-long string) must keep erroring, so an
+      // empty result is accepted only when the body was syntactically empty.
+      size_t probe = pos;
+      protoTextSkipWS(text, probe);
+      bool explicitEmpty = (probe < text.size() && text[probe] == '}');
       protoTextParseBody(text, pos, obj.get(), 1);
-      if (obj->obj && !obj->obj->empty()) root = std::move(obj);
+      if (obj->obj && (!obj->obj->empty() || explicitEmpty)) root = std::move(obj);
     } else if (text[pos] == '[' && !protoTextIsBracketedName(text, pos)) {
       // Top-level array. protoTextSerializeVal writes a bare "[...]" for an
       // ARRAY root, so the parser has to accept that form; without this branch
@@ -1662,6 +1673,8 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
         auto obj = asvJSONValue::makeObject();
         if (!obj) { lastError = "protobuf text: out of memory"; return false; }
         protoTextParseBody(text, pos, obj.get(), 1);
+        // The implicit-object form ("a: 1") has no explicit empty spelling, so
+        // an empty result means every field was dropped - keep it an error.
         if (obj->obj && !obj->obj->empty()) root = std::move(obj);
       } else {
         pos = save;
