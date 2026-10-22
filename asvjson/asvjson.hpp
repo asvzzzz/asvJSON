@@ -192,7 +192,9 @@ inline bool asvJSON::fromAny(std::string_view input) {
           auto t = static_cast<unsigned char>(input[4]);
           if ((t >= 0x01 && t <= 0x08) || t == 0x0A ||
               (t >= 0x10 && t <= 0x13) || t == 0xFF) {
+  #ifndef ASVJSON_DISABLE_BSON
             if (fromBSON(std::string(input))) return true;
+  #endif
           }
         }
       }
@@ -203,8 +205,12 @@ inline bool asvJSON::fromAny(std::string_view input) {
         if (fromBencode(input)) return true;
       }
   #endif
+  #ifndef ASVJSON_DISABLE_MSG_PACK
       if (fromMessagePack(std::string(input))) return true;
+  #endif
+  #ifndef ASVJSON_DISABLE_CBOR
       if (fromCBOR(std::string(input))) return true;
+  #endif
       lastError = "Unable to detect binary format";
       return false;
     }
@@ -230,17 +236,23 @@ inline bool asvJSON::fromAny(std::string_view input) {
         if (fromPlist(s)) return true;
       }
   #endif
+  #ifndef ASVJSON_DISABLE_XML
       if (fromXML(s)) return true;
+  #endif
     }
 
     // JSON / JSON5: starts with '{' or '['
     if (f == '{' || f == '[') {
       if (parse(s)) return true;          // JSON
+  #ifndef ASVJSON_DISABLE_JSON5
       if (fromJSON5(s)) return true;      // JSON5 superset
+  #endif
+  #ifndef ASVJSON_DISABLE_JSONLINES
       // Multiple JSON lines: starts with '{'/'[' and has newlines
       if (s.find('\n') != std::string_view::npos) {
         if (fromJSONLines(s)) return true;
       }
+  #endif
     }
 
     // S-Expression: starts with '('
@@ -248,24 +260,32 @@ inline bool asvJSON::fromAny(std::string_view input) {
       // RON groups are parenthesized too. Heuristic: if the text contains a ':'
       // or ',' inside the group it is more likely a RON tuple/struct than an
       // S-expression.
+  #ifndef ASVJSON_DISABLE_RON
       if (s.find(':') != std::string_view::npos || s.find(',') != std::string_view::npos) {
         if (fromRON(s)) return true;
       }
+  #endif
+  #ifndef ASVJSON_DISABLE_SEXPR
       if (fromSexpr(s)) return true;
+  #endif
     }
 
     // RON: starts with '[' '{' or a bare identifier/enum variant. Fall back
     // after JSON/JSON5/JSONLines and other text formats.
+  #ifndef ASVJSON_DISABLE_RON
     if (f == '{' || f == '[') {
       if (fromRON(s)) return true;
     }
+  #endif
 
     // RON named structs / tuple structs / enum variants with data: `Name(...)`.
     // Try RON early when the input starts with an identifier followed by '(';
     // non-matching input fails quickly and falls through to other formats.
+  #ifndef ASVJSON_DISABLE_RON
     if ((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_') {
       if (s.find('(') != std::string_view::npos && fromRON(s)) return true;
     }
+  #endif
 
   #ifndef ASVJSON_DISABLE_BENCODE
     // Bencode dictionaries: `d<digits>:` signature (the whole key length is
@@ -279,18 +299,23 @@ inline bool asvJSON::fromAny(std::string_view input) {
   #endif
 
     // YAML document markers
+  #ifndef ASVJSON_DISABLE_YAML
     if (s.size() >= 3 && s[0] == '-' && s[1] == '-' && s[2] == '-') {
       if (fromYAML(s)) return true;
     }
     if (s.size() >= 5 && s.compare(0, 5, "%YAML") == 0) {
       if (fromYAML(s)) return true;
     }
+  #endif
 
+  #ifndef ASVJSON_DISABLE_ADE
     // ADE: "# ADE" header
     if (s.size() >= 5 && s.compare(0, 5, "# ADE") == 0) {
       if (fromADE(s)) return true;
     }
+  #endif
 
+  #ifndef ASVJSON_DISABLE_TRON
     // TRON: first non-ws line starts with "class "
     {
       size_t p = 0;
@@ -299,6 +324,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
         if (fromTRON(s)) return true;
       }
     }
+  #endif
 
     // TOML / INI: both have [section] headers and '=' signs.
     // Heuristic: quoted values ("...") or inline tables ({...}) -> TOML first.
@@ -308,11 +334,19 @@ inline bool asvJSON::fromAny(std::string_view input) {
       bool hasQuotedValues = (s.find('"') != std::string_view::npos);
       bool hasInlineTables = (s.find('{') != std::string_view::npos);
       if (hasQuotedValues || hasInlineTables) {
+  #ifndef ASVJSON_DISABLE_TOML
         if (fromTOML(s)) return true;
+  #endif
+  #ifndef ASVJSON_DISABLE_INI
         if (fromINI(s)) return true;
+  #endif
       } else {
+  #ifndef ASVJSON_DISABLE_INI
         if (fromINI(s)) return true;
+  #endif
+  #ifndef ASVJSON_DISABLE_TOML
         if (fromTOML(s)) return true;
+  #endif
       }
     }
 
@@ -321,6 +355,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
     // '['), not merely a '[' anywhere: TOON/GOON length headers like
     // "c[2]: 1,2" and "c[]:" used to satisfy the old s.find('[') test, so
     // fromAny() claimed the document as INI before reaching YAML/GOON/TOON.
+  #ifndef ASVJSON_DISABLE_INI
     {
       bool hasSectionHeader = false;
       size_t p = 0;
@@ -337,6 +372,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
         if (fromINI(s)) return true;
       }
     }
+  #endif
 
     // Dotenv: flat KEY=VALUE lines (no [section] headers). Only attempted after
     // the section-style TOML/INI paths above, so a `[section]` document is never
@@ -357,6 +393,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
     }
   #endif
 
+  #ifndef ASVJSON_DISABLE_CSV
     // CSV: multiple lines with high delimiter density
     {
       size_t nl = 0, dl = 0;
@@ -369,21 +406,32 @@ inline bool asvJSON::fromAny(std::string_view input) {
         if (fromCSV(s)) return true;
       }
     }
+  #endif
 
+  #ifndef ASVJSON_DISABLE_YAML
     // YAML (most flexible text format)
     if (fromYAML(s)) return true;
+  #endif
 
+  #ifndef ASVJSON_DISABLE_GOON
     // GOON (YAML-like with special syntax)
     if (fromGOON(s)) return true;
+  #endif
 
+  #ifndef ASVJSON_DISABLE_TOON
     // TOON (indentation-based)
     if (fromTOON(s)) return true;
+  #endif
 
+  #ifndef ASVJSON_DISABLE_JSONLINES
     // JSONLines: multiple JSON values, one per line
     if (fromJSONLines(s)) return true;
+  #endif
 
+  #ifndef ASVJSON_DISABLE_RON
     // RON (structs/maps/lists with Rust-like syntax)
     if (fromRON(s)) return true;
+  #endif
 
   #ifndef ASVJSON_DISABLE_BENCODE
     // Bencode (BitTorrent encoding). Last because its grammar is loose enough
@@ -439,37 +487,99 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
 
     auto ext = asvjsonExtractExt(filename);
 
+    // Every format branch below is compiled OUT together with the format itself.
+    // The decoder BODY lives in the format header, so a build that defines
+    // ASVJSON_DISABLE_<X> still saw the call site here and failed to LINK
+    // ("undefined reference to asvJSON::fromYAML") even though the program never
+    // touched YAML - readFromFileAny/writeToFileAny/fromAny are core API. A
+    // disabled format's extension now simply falls through to the content
+    // auto-detection below.
+
     // Binary formats - pass raw bytes
+#ifndef ASVJSON_DISABLE_BSON
     if (ext == "bson") { formatType = FormatType::BSON; return fromBSON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_MSG_PACK
     if (ext == "mp" || ext == "msgpack" || ext == "msg") { formatType = FormatType::MessagePack; return fromMessagePack(content); }
+#endif
+#ifndef ASVJSON_DISABLE_CBOR
     if (ext == "cbor") { formatType = FormatType::CBOR; return fromCBOR(content); }
+#endif
+#ifndef ASVJSON_DISABLE_UBJSON
     if (ext == "ubj" || ext == "ubjson") { formatType = FormatType::UBJSON; return fromUBJSON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_PROTOBUF
     if (ext == "pb" || ext == "protobuf" || ext == "proto") { formatType = FormatType::Protobuf; return fromProtobuf(content); }
+#endif
 
     // Text formats - use string_view dispatch
     if (ext == "json")  { formatType = FormatType::JSON;     return parse(content); }
+#ifndef ASVJSON_DISABLE_JSON5
     if (ext == "json5" || ext == "jsonc") { formatType = FormatType::JSON5;     return fromJSON5(content); }
+#endif
+#ifndef ASVJSON_DISABLE_JSONLINES
     if (ext == "jsonl" || ext == "ndjson") { formatType = FormatType::JSONLines; return fromJSONLines(content); }
+#endif
+#ifndef ASVJSON_DISABLE_YAML
     if (ext == "yaml" || ext == "yml") { formatType = FormatType::YAML;     return fromYAML(content); }
+#endif
+#ifndef ASVJSON_DISABLE_XML
     if (ext == "xml")  { formatType = FormatType::XML;      return fromXML(content); }
+#endif
+#ifndef ASVJSON_DISABLE_SVG
+    // .svg was missing from both file dispatchers: a .svg file used to be
+    // written as JSON and read back through fromAny as generic XML/JSON, so
+    // FormatType::SVG was unreachable through the file API.
+    if (ext == "svg")  { formatType = FormatType::SVG;      return fromSVG(content); }
+#endif
+#ifndef ASVJSON_DISABLE_CSV
     if (ext == "csv")  { formatType = FormatType::CSV;      return fromCSV(content); }
     if (ext == "tsv")  { formatType = FormatType::CSV;      return fromCSV(content); }
+#endif
+#ifndef ASVJSON_DISABLE_TOML
     if (ext == "toml") { formatType = FormatType::TOML;     return fromTOML(content); }
+#endif
+#ifndef ASVJSON_DISABLE_INI
     if (ext == "ini" || ext == "cfg" || ext == "conf") { formatType = FormatType::INI; return fromINI(content); }
+#endif
+#ifndef ASVJSON_DISABLE_SEXPR
     if (ext == "sexp" || ext == "sexpr" || ext == "scm") { formatType = FormatType::SExpr; return fromSexpr(content); }
+#endif
+#ifndef ASVJSON_DISABLE_TOON
     if (ext == "toon") { formatType = FormatType::TOON;     return fromTOON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_TRON
     if (ext == "tron") { formatType = FormatType::TRON;     return fromTRON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_GOON
     if (ext == "goon") { formatType = FormatType::GOON;     return fromGOON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_ADE
     if (ext == "ade")  { formatType = FormatType::ADE;      return fromADE(content); }
+#endif
+#ifndef ASVJSON_DISABLE_RON
     if (ext == "ron")  { formatType = FormatType::RON;      return fromRON(content); }
+#endif
+#ifndef ASVJSON_DISABLE_CPP
     if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") { formatType = FormatType::CPP; return fromCpp(content); }
+#endif
+#ifndef ASVJSON_DISABLE_PROTOBUF
     if (ext == "ptxt" || ext == "protobuf-text") { formatType = FormatType::ProtobufText; return fromProtobufText(content); }
+#endif
+#ifndef ASVJSON_DISABLE_DOTENV
     if (ext == "env" || ext == "dotenv") { formatType = FormatType::Dotenv; return fromDotenv(content); }
+#endif
+#ifndef ASVJSON_DISABLE_BENCODE
     if (ext == "torrent" || ext == "bencode" || ext == "benc") { formatType = FormatType::Bencode; return fromBencode(content); }
+#endif
+#ifndef ASVJSON_DISABLE_JAVAPROP
     if (ext == "properties" || ext == "props") { formatType = FormatType::JavaProp; return fromJavaProp(content); }
+#endif
+#ifndef ASVJSON_DISABLE_PLIST
     if (ext == "plist") { formatType = FormatType::Plist; return fromPlist(content); }
+#endif
 
-    // Unknown extension - auto-detect from content
+    // Unknown extension (or a format compiled out above) - auto-detect from content
     return fromAny(content);
   } catch (const asvJSONError& e) {
     lastError = e.what();
@@ -489,7 +599,10 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
   try {
     auto ext = asvjsonExtractExt(filename);
 
-    // Binary formats - write raw bytes
+    // Binary formats - write raw bytes. Guarded like readFromFileAny: the
+    // encoder body is part of the disabled header, so an unguarded call site
+    // broke the link in every ASVJSON_DISABLE_<X> build.
+#ifndef ASVJSON_DISABLE_BSON
     if (ext == "bson") {
       auto data = toBSON();
       std::ofstream out(filename, std::ios::binary);
@@ -497,6 +610,8 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
       out.write(reinterpret_cast<const char*>(data.data()), data.size());
       return out.good();
     }
+#endif
+#ifndef ASVJSON_DISABLE_MSG_PACK
     if (ext == "mp" || ext == "msgpack" || ext == "msg") {
       auto data = toMessagePack();
       std::ofstream out(filename, std::ios::binary);
@@ -504,6 +619,8 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
       out.write(reinterpret_cast<const char*>(data.data()), data.size());
       return out.good();
     }
+#endif
+#ifndef ASVJSON_DISABLE_CBOR
     if (ext == "cbor") {
       auto data = toCBOR();
       std::ofstream out(filename, std::ios::binary);
@@ -511,6 +628,8 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
       out.write(reinterpret_cast<const char*>(data.data()), data.size());
       return out.good();
     }
+#endif
+#ifndef ASVJSON_DISABLE_UBJSON
     if (ext == "ubj" || ext == "ubjson") {
       auto data = toUBJSON();
       std::ofstream out(filename, std::ios::binary);
@@ -518,6 +637,8 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
       out.write(reinterpret_cast<const char*>(data.data()), data.size());
       return out.good();
     }
+#endif
+#ifndef ASVJSON_DISABLE_PROTOBUF
     if (ext == "pb" || ext == "protobuf" || ext == "proto") {
       auto data = toProtobuf();
       std::ofstream out(filename, std::ios::binary);
@@ -525,30 +646,75 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
       out.write(reinterpret_cast<const char*>(data.data()), data.size());
       return out.good();
     }
+#endif
 
     // Text formats
     std::string content;
     if (ext == "json")  content = serialize(pretty);
+#ifndef ASVJSON_DISABLE_JSON5
     else if (ext == "json5" || ext == "jsonc") content = toJSON5(pretty);
+#endif
+#ifndef ASVJSON_DISABLE_JSONLINES
     else if (ext == "jsonl" || ext == "ndjson") content = toJSONLines();
+#endif
+#ifndef ASVJSON_DISABLE_YAML
     else if (ext == "yaml" || ext == "yml") content = toYAML(pretty);
+#endif
+#ifndef ASVJSON_DISABLE_XML
     else if (ext == "xml")  content = toXML();
+#endif
+#ifndef ASVJSON_DISABLE_SVG
+    else if (ext == "svg")  content = toSVG();
+#endif
+#ifndef ASVJSON_DISABLE_CSV
     else if (ext == "csv")  content = toCSV();
     else if (ext == "tsv")  content = toCSV();
+#endif
+#ifndef ASVJSON_DISABLE_TOML
     else if (ext == "toml") content = toTOML();
+#endif
+#ifndef ASVJSON_DISABLE_INI
     else if (ext == "ini" || ext == "cfg" || ext == "conf") content = toINI();
+#endif
+#ifndef ASVJSON_DISABLE_SEXPR
     else if (ext == "sexp" || ext == "sexpr" || ext == "scm") content = toSexpr();
+#endif
+#ifndef ASVJSON_DISABLE_TOON
     else if (ext == "toon") content = toTOON();
+#endif
+#ifndef ASVJSON_DISABLE_TRON
     else if (ext == "tron") content = toTRON();
+#endif
+#ifndef ASVJSON_DISABLE_GOON
     else if (ext == "goon") content = toGOON();
+#endif
+#ifndef ASVJSON_DISABLE_ADE
     else if (ext == "ade")  content = toADE();
+#endif
+#ifndef ASVJSON_DISABLE_RON
     else if (ext == "ron") content = toRON(pretty);
-    else if (ext == "hpp" || ext == "h") content = toCpp();
+#endif
+#ifndef ASVJSON_DISABLE_CPP
+    // The read side accepts hxx/cpp/cc as C++ too; the write side only knew
+    // hpp/h, so writeToFileAny("x.cpp") wrote JSON while readFromFileAny("x.cpp")
+    // parsed the file as C++ - the two dispatchers must agree.
+    else if (ext == "hpp" || ext == "h" || ext == "hxx" || ext == "cpp" || ext == "cc") content = toCpp();
+#endif
+#ifndef ASVJSON_DISABLE_PROTOBUF
     else if (ext == "ptxt" || ext == "protobuf-text") content = toProtobufText();
+#endif
+#ifndef ASVJSON_DISABLE_DOTENV
     else if (ext == "env" || ext == "dotenv") content = toDotenv();
+#endif
+#ifndef ASVJSON_DISABLE_BENCODE
     else if (ext == "torrent" || ext == "bencode" || ext == "benc") content = toBencode();
+#endif
+#ifndef ASVJSON_DISABLE_JAVAPROP
     else if (ext == "properties" || ext == "props") content = toJavaProp();
+#endif
+#ifndef ASVJSON_DISABLE_PLIST
     else if (ext == "plist") content = toPlist();
+#endif
     else content = serialize(pretty);
 
     std::ofstream out(filename, std::ios::binary);

@@ -3679,6 +3679,13 @@ struct Reader {
 
 inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts) {
   formatType = FormatType::Unknown;
+  // Every other text decoder strips a leading UTF-8 BOM; a C++ header saved by
+  // a Windows editor often has one. The lexer treats a byte >= 0x80 as an
+  // identifier character, so the BOM used to glue itself to the first token
+  // ("\xEF\xBB\xBFstruct") and the file decoded as "no type declarations found".
+  if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xEF &&
+      static_cast<unsigned char>(input[1]) == 0xBB && static_cast<unsigned char>(input[2]) == 0xBF)
+    input.remove_prefix(3);
   if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
   dirty_ = false;
   try {

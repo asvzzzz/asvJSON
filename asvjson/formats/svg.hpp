@@ -34,9 +34,13 @@
 //   - Non-OBJECT root: scalar/null/ARRAY roots are replaced by an empty
 //     <svg xmlns="..."></svg> - data is silently lost. Use an object root.
 //   - Multi-key root objects are wrapped in <svg> (guarantees single XML root).
-//   - Empty-string root key ("") produces element "<element>" (fallback name);
-//     @-only root objects produce invalid SVG with "@<attrname>" as element tag
-//     (e.g. {"@x":"1"} -> <@x>...</@x>). Neither is valid SVG markup.
+//   - Empty-string root key ("") produces element "<element>" (fallback name).
+//   - Element names are sanitized with xmlSanitizeElementName (the same rule the
+//     XML encoder uses): a key holding characters the XML name grammar forbids
+//     ("k[0]", "a b", "&a", "@x") maps them to '_', and a name starting with a
+//     digit or '-' gets an "item" prefix. Valid SVG names (rect, circle,
+//     clipPath, ...) are untouched, so this only changes keys that used to
+//     produce markup no XML parser accepts (fromSVG itself rejected it).
 //   - Non-serializable children of elements (DATETIME, BINARY, OBJECTID, REGEX,
 //     TIMESTAMP, EXTENSION, CUSTOM_TAG): the value is lost, the element is emitted
 //     as an empty <tag></tag>. OBJECT and ARRAY children are recursively serialized.
@@ -155,6 +159,14 @@ inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSON
 inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent) {
 	if (tag.empty()) return;
 
+	// The element name comes from a JSON key, which may hold characters the
+	// XML name grammar forbids ("k[0]", "a b", "&a"). Emitting them verbatim
+	// produced markup no XML parser accepts - not even fromSVG itself ("invalid
+	// attribute name"). Sanitize it the same way the XML encoder does: a valid
+	// SVG name (rect, circle, clipPath, ...) is untouched, an invalid character
+	// maps to '_' and a leading digit or '-' gets an "item" prefix.
+	std::string safeTag = xmlSanitizeElementName(tag);
+
 	// True void (self-closing) SVG elements only. Note: `image` and `use` are
 	// container elements per SVG spec and must NOT be in this list.
 	static const char* selfClosing[] = {
@@ -162,13 +174,13 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 	};
 	bool isSelfClosing = false;
 	for (const char** p = selfClosing; *p; ++p) {
-		if (*p == tag) { isSelfClosing = true; break; }
+		if (*p == safeTag) { isSelfClosing = true; break; }
 	}
 
 	if (v && v->type == asvJSONValue::OBJECT && v->obj) {
 		out += std::string((size_t)indent, ' ');
 		out += '<';
-		out += tag;
+		out += safeTag;
 		// Emit attributes first (@ prefixed keys)
 		for (const auto& [k, val] : *(v->obj)) {
 			appendSvgAttr(out, k, val.get());
@@ -238,7 +250,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			for (int i = 0; i < indent; ++i) out += ' ';
 		}
 		out += "</";
-		out += tag;
+		out += safeTag;
 		out += '>';
 		out += '\n';
 	} else if (v && v->type == asvJSONValue::ARRAY && v->arr) {
@@ -246,7 +258,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			// Void element with array children: ignore children, emit self-closing
 			out += std::string((size_t)indent, ' ');
 			out += '<';
-			out += tag;
+			out += safeTag;
 			out += "/>\n";
 			return;
 		}
@@ -254,7 +266,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		if (v->arr->empty()) {
 			out += std::string((size_t)indent, ' ');
 			out += '<';
-			out += tag;
+			out += safeTag;
 			out += "/>\n";
 			return;
 		}
@@ -265,12 +277,12 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		// element writes its own opening/closing tag at this level.
 		for (const auto& elem : *(v->arr)) {
 			if (!elem) continue;
-			svgSerializeElement(out, tag, elem.get(), indent);
+			svgSerializeElement(out, safeTag, elem.get(), indent);
 		}
 	} else if (v && v->type == asvJSONValue::STRING) {
 		out += std::string((size_t)indent, ' ');
 		out += '<';
-		out += tag;
+		out += safeTag;
 		if (isSelfClosing) {
 			out += "/>\n";
 			return;
@@ -278,14 +290,14 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		out += '>';
 		xmlEscapeTextInto(out, v->str_data);
 		out += "</";
-		out += tag;
+		out += safeTag;
 		out += '>';
 		out += '\n';
 	} else if (v && (v->type == asvJSONValue::INT || v->type == asvJSONValue::DOUBLE || v->type == asvJSONValue::BOOL_VAL)) {
 		// Scalar child values are emitted as text content (like #text)
 		out += std::string((size_t)indent, ' ');
 		out += '<';
-		out += tag;
+		out += safeTag;
 		if (isSelfClosing) {
 			out += "/>\n";
 			return;
@@ -301,21 +313,21 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			default: break;
 		}
 		out += "</";
-		out += tag;
+		out += safeTag;
 		out += '>';
 		out += '\n';
 	} else if (isSelfClosing) {
 		out += std::string((size_t)indent, ' ');
 		out += '<';
-		out += tag;
+		out += safeTag;
 		out += "/>\n";
 	} else {
 		out += std::string((size_t)indent, ' ');
 		out += '<';
-		out += tag;
+		out += safeTag;
 		out += '>';
 		out += "</";
-		out += tag;
+		out += safeTag;
 		out += '>';
 		out += '\n';
 	}
