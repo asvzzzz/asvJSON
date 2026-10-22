@@ -22,7 +22,12 @@
 //   - DATETIME/BINARY    -> datetimeType/binaryType; other specials -> string.
 //   - root {Name: {...}} -> `struct Name` (unwrapRootSingleKey).
 //
-// Comments are preserved as `//` / `/* */` lines and same-line trails.
+// Comments are preserved as `//` / `/* */` lines and same-line trails. The
+// comments of the ENUMERATORS are read as well (they are attached to the
+// variant values where the enum type is used), so a toCpp() -> fromCpp() trip
+// keeps them. A block comment whose text contains a `*/` terminator is emitted
+// with the terminator broken up (`* /`) - otherwise the comment would end
+// early and the rest of the text would become code.
 //
 // Known limitations:
 //   - Paren-init for struct types (`Foo f(1, 2);`) maps positional args to
@@ -32,6 +37,11 @@
 //     the size argument is not interpreted (container semantics differ: vector
 //     takes count, string takes count+char, map ignores). Use brace-init or
 //     explicit element listing for predictable output.
+//   - A `union` is read like a `struct` (its members become the fields); the
+//     alternatives share one storage in C++, which the value tree cannot
+//     express.
+//   - The type name of an ANONYMOUS enum is synthesized (`Enum1`, `Enum2`, ...)
+//     - the enum has no tag of its own.
 
 #include "../core.hpp"
 
