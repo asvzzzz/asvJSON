@@ -965,7 +965,7 @@ Features:
 - **Empty lines**: silently skipped during parsing
 - **Windows line endings**: `\r\n` handled transparently
 - **Round-trip**: `toJSONLines()` then `fromJSONLines()` returns the original array
-- **Error handling**: invalid JSON on any line rejects the entire input
+- **Error handling**: invalid JSON on any line rejects the entire input; the message names the line number, repeats the inner parser's diagnostic (`Expected ':'`, `Unexpected: }`) and quotes the first 30 bytes of the offending line (cut at a character boundary, so multi-byte text stays readable)
 
 ### S-Expression
 
