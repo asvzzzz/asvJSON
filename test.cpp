@@ -16406,16 +16406,71 @@ TEST(testFromJSONLines) {
 
 // JSON Lines UTF-8 safety: the error prefix must never split a multi-byte
 // sequence. Build an invalid line whose first 30 bytes straddle a 2-byte UTF-8
-// character (U+043F 'п' = 0xD0 0xBF). The "JSON Lines: invalid JSON near:"
-// prefix portion of lastError must itself be valid UTF-8. We isolate it by
-// stripping the inner parser's diagnostic suffix (everything after "near: ")
-// and validating only the prefix segment.
+// character (U+043F 'п' = 0xD0 0xBF). The prefix portion of lastError (after
+// "near: ") must itself be valid UTF-8, and so must the whole message.
+// The JSON Lines error message: the line number, the inner parser's own
+// diagnostic, and a prefix cut at a CHARACTER boundary. The old rule backed up
+// to the last ASCII byte, which threw away COMPLETE multi-byte characters -
+// a line of CJK characters lost all of them and the message showed an empty
+// prefix, so the user could not see which line broke.
+TEST(testJSONLinesErrorMessage) {
+  // The inner diagnostic is kept (it used to be dropped).
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines("{\"a\": }\n"));
+    const std::string& err = j.getLastError();
+    ASSERT(err.find("JSON Lines:") != std::string::npos);
+    ASSERT(err.find("near:") != std::string::npos);
+    ASSERT(err.find("Unexpected") != std::string::npos);
+  }
+  // The line number says WHICH line broke.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines("{\"a\":1}\n{\"b\":2}\n{\"c\": }\n"));
+    ASSERT(j.getLastError().find("line 3") != std::string::npos);
+  }
+  // A multi-byte line keeps COMPLETE characters in the prefix.
+  {
+    std::string line(28, 'a');
+    line += "\xCE\xB1";  // alpha (2 bytes)
+    line += "tail";
+    asvJSON j;
+    ASSERT(!j.fromJSONLines(line + "\n"));
+    const std::string& err = j.getLastError();
+    size_t at = err.find("near: ");
+    ASSERT(at != std::string::npos);
+    if (at != std::string::npos)
+      ASSERT_EQ(err.substr(at + 6), line.substr(0, 30));
+  }
+  // A purely multi-byte line is not reduced to an empty prefix.
+  {
+    std::string line;
+    for (int i = 0; i < 20; i++) line += "\xE4\xBD\xA0";  // 20 CJK = 60 bytes
+    asvJSON j;
+    ASSERT(!j.fromJSONLines(line + "\n"));
+    const std::string& err = j.getLastError();
+    size_t at = err.find("near: ");
+    ASSERT(at != std::string::npos);
+    if (at != std::string::npos)
+      ASSERT_EQ(err.substr(at + 6), line.substr(0, 30));
+  }
+  // The whole message stays ASCII even when the input is not: the offending
+  // byte is named as a hex escape, not as a raw byte.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines(std::string("\xE4") + "\n"));
+    const std::string& err = j.getLastError();
+    for (unsigned char c : err) ASSERT(c < 0x80);
+    ASSERT(err.find("0xE4") != std::string::npos);
+  }
+}
+
 TEST(testJSONLinesUtf8SafeErrorMessage) {
   // 29 ASCII chars + U+043F 'п' (D0 BF) + 'x' = 32 bytes total for the bad
-  // line. jsonlinesPrefix takes min(32,30)=30 -> "29 ASCII + D0" then backs
-  // up past the continuation D0 -> 29 ASCII chars. The message prefix is
-  // therefore valid UTF-8 even though the original input had a multi-byte
-  // char at byte 30.
+  // line. jsonlinesPrefix takes min(32,30)=30 -> "29 ASCII + D0"; the byte at
+  // the cut (0xBF) is a continuation byte, so the cut moves back to 29 and the
+  // prefix is 29 ASCII chars. The message prefix is therefore valid UTF-8 even
+  // though the original input had a multi-byte char at byte 30.
   std::string bad(29, 'a');
   bad.push_back('\xD0');
   bad.push_back('\xBF');
@@ -16423,11 +16478,10 @@ TEST(testJSONLinesUtf8SafeErrorMessage) {
   asvJSON j;
   ASSERT(!j.fromJSONLines(std::string_view(bad)));
   const std::string& err = j.getLastError();
-  // The error starts with "JSON Lines: invalid JSON near: ". Find that marker
-  // and validate only the prefix part (up to and including the truncated line).
-  // The inner parser may append its own garbage after "near: <prefix>", but
-  // the prefix we construct must be valid UTF-8.
-  const char* marker = "JSON Lines: invalid JSON near: ";
+  // The error carries the line number and the inner parser's diagnostic, then
+  // the prefix: "JSON Lines: invalid JSON at line N: <diagnostic> near:
+  // <prefix>". Find the marker and validate the prefix part.
+  const char* marker = "near: ";
   auto pos = err.find(marker);
   ASSERT(pos != std::string::npos);
   // Validate bytes from start of `err` through the end of the marker + prefix.
@@ -36538,6 +36592,7 @@ RUN(testGOONSpecialValues);
 
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
+	RUN(testJSONLinesErrorMessage);
 	RUN(testJSONLinesUtf8SafeErrorMessage);
 	RUN(testJSONLinesRoundTrip);
 

@@ -1277,6 +1277,14 @@ private:
 			if (json.compare(pos, 4, "-NaN") == 0) { pos += 4; if (pos < json.size() && isIdentChar()) throw asvJSONError("Invalid -NaN literal"); return asvJSONValue::makeDouble(-NAN); }
 		}
 		if (c == '-' || (c >= '0' && c <= '9')) return parseNumber();
+		// Name the offending character. A byte >= 0x80 is rendered as a hex
+		// escape: a single raw byte would be an invalid UTF-8 sequence in the
+		// message (the lead byte of a multi-byte character alone), and a NUL
+		// would truncate it for a C-string consumer. An ASCII character keeps
+		// the plain "Unexpected: '@'" form.
+		unsigned char uc = static_cast<unsigned char>(c);
+		if (uc >= 0x80 || uc == 0)
+			throw asvJSONError("Unexpected byte " + utf8SafeByteName(c));
 		throw asvJSONError(std::string("Unexpected: ") + c);
 	}
 

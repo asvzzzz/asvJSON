@@ -2,8 +2,26 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace asvJSONInternal {
+
+// Renders a byte for an error message: an ASCII character as itself, a byte
+// >= 0x80 (or a NUL) as a hex escape ("0xE4"). A single raw non-ASCII byte
+// would be an invalid UTF-8 sequence in the message (the lead byte of a
+// multi-byte character alone), and a raw NUL would truncate it for a
+// C-string consumer.
+inline std::string utf8SafeByteName(char c) {
+	unsigned char uc = static_cast<unsigned char>(c);
+	if (uc >= 0x80 || uc == 0) {
+		static const char kHex[] = "0123456789ABCDEF";
+		std::string s = "0x";
+		s += kHex[(uc >> 4) & 0xF];
+		s += kHex[uc & 0xF];
+		return s;
+	}
+	return std::string(1, c);
+}
 
 inline bool isValidUTF8(const uint8_t* data, size_t len) noexcept {
 	if (!data) return len == 0;
