@@ -19558,8 +19558,85 @@ TEST(testCppReviewRound2) {
       ASSERT(chunk.find("*/ inside") == std::string::npos);
     }
   }
-}
-TEST(testFromCpp) {
+// -- The LAST enumerator keeps its trailing comment, and the comment does
+  //    not leak into the next declaration --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("enum E { A, B, /*c*/ };\nstruct S { std::array<E,2> v; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* v = s->getConst("v");
+      ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->size() == size_t(2));
+      if (v && v->type == asvJSONValue::ARRAY && v->size() == size_t(2)) {
+        const asvJSONValue* last = v->get(1);
+        ASSERT(last != nullptr && last->comments != nullptr);
+        if (last && last->comments) {
+          ASSERT(last->comments->trailing.size() == size_t(1));
+          if (last->comments->trailing.size() == size_t(1))
+            ASSERT_EQ(std::string(last->comments->trailing[0].text), std::string("c"));
+        }
+      }
+    }
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("enum E { A, B, /*c*/ };\nstruct S { int x; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr);
+    if (s) {
+      // The enum is a type: its comments belong to it, not to the next
+      // declaration.
+      ASSERT(s->comments == nullptr || s->comments->leading.empty());
+    }
+  }
+  // -- A typedef enum registers EVERY trailing name --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("typedef enum E { X, Y } A1, A2;\nstruct S { A1 a; A2 b; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* a = s->getConst("a");
+      const asvJSONValue* b = s->getConst("b");
+      ASSERT(a != nullptr && b != nullptr);
+      if (a) ASSERT(a->type == asvJSONValue::ARRAY && a->size() == size_t(2));
+      if (b) ASSERT(b->type == asvJSONValue::ARRAY && b->size() == size_t(2));
+    }
+  }
+  // -- The initializer of an enum declarator names ONE variant --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("struct S { enum E { A, B } e = A; int x; };"));
+    const asvJSONValue* s = j.get("S");
+    ASSERT(s != nullptr && s->type == asvJSONValue::OBJECT);
+    if (s && s->type == asvJSONValue::OBJECT) {
+      const asvJSONValue* e = s->getConst("e");
+      ASSERT(e != nullptr && e->type == asvJSONValue::STRING);
+      if (e && e->type == asvJSONValue::STRING)
+        ASSERT_EQ(std::string(e->getString()), std::string("A"));
+    }
+  }
+  // -- A file-scope variable of an enum type keeps the variant list --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("enum E { A, B } var;\nstruct S { int x; };"));
+    const asvJSONValue* v = j.get("var");
+    ASSERT(v != nullptr && v->type == asvJSONValue::ARRAY && v->size() == size_t(2));
+  }
+  // -- The comment between the closing brace and the declarator leads it --
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("enum E { A, B } /* c */ var;\nstruct S { int x; };"));
+    const asvJSONValue* v = j.get("var");
+    ASSERT(v != nullptr && v->comments != nullptr);
+    if (v && v->comments) {
+      ASSERT(v->comments->leading.size() == size_t(1));
+      if (v->comments->leading.size() == size_t(1))
+        ASSERT_EQ(std::string(v->comments->leading[0].text), std::string(" c "));
+    }
+  }
+}TEST(testFromCpp) {
   // Modern C++ round-trip: flat object with scalar defaults.
   {
     asvJSON a;
