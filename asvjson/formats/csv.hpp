@@ -40,7 +40,10 @@
 // 5. A TIMESTAMP has no CSV cell syntax of its own: it is written as its bare
 //    epoch number and comes back as an INT (the type is lost), exactly like
 //    the other non-native types REGEX/BINARY/EXTENSION/OBJECTID, which keep
-//    only their text form. DATETIME is the one exception -- it has a native
+//    only their text form. CUSTOM_TAG keeps its Extended-JSON envelope text
+//    (`{"$customTag":{"name":...,"value":...}}`) and decodes back as a STRING
+//    holding that text (an empty cell would read as NULL and lose it wholly).
+//    DATETIME is the one exception -- it has a native
 //    bare ISO-8601 cell form that detects back as DATETIME. To keep a
 //    TIMESTAMP a TIMESTAMP, store its text in a STRING cell. The one DATETIME
 //    that cannot round-trip as DATETIME is a timestamp outside gmtimeSafe's
@@ -389,6 +392,14 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			}
 			case T2::TIMESTAMP: return std::to_string(v->num);
 			case T2::EXTENSION: return encodeBase64(v->bin_data.data(), v->bin_data.size());
+			case T2::CUSTOM_TAG: {
+				// No CSV cell syntax: the Extended-JSON envelope is the text form
+				// (the same convention INI/TOML/JavaProp use). Without this case
+				// the `default` branch returned an EMPTY cell, which decodes as
+				// NULL -- the whole tag payload vanished silently, and the
+				// re-encode of that NULL wrote the literal "null".
+				std::string s; v->serialize(s, false); return s;
+			}
 			case T2::ARRAY:
 			case T2::OBJECT: {
 				std::string s; v->serialize(s, false); return s;

@@ -25,7 +25,9 @@
 // (entities inside the section stay literal).
 //
 // plist has no null type: null values are written as an empty <string/> and
-// read back as an empty string (a documented lossy round-trip). Nested
+// read back as an empty string (a documented lossy round-trip). An empty
+// STRING is written the same way -- both decode to "", so they must not use
+// two different spellings (<string/> vs <string></string>). Nested
 // objects/arrays are first-class. Special types degrade to their underlying
 // representation: REGEX -> <string>, TIMESTAMP -> <integer>, OBJECTID and
 // EXTENSION -> <data>, CUSTOM_TAG -> its payload value (tag name dropped).
@@ -179,7 +181,12 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
   const std::string pad(static_cast<size_t>(indent * 2), ' ');
   switch (v->type) {
     case T::STRING:
-      out += pad + "<string>" + xmlEscapeContent(v->str_data) + "</string>\n";
+      // An empty STRING self-closes exactly like NULL (which plist renders as
+      // <string/>). Both decode back as "", so they must produce the SAME text:
+      // writing "" as <string></string> made enc(decode(enc(null))) differ from
+      // enc(null) even though the tree was unchanged.
+      if (v->str_data.empty()) out += pad + "<string/>\n";
+      else out += pad + "<string>" + xmlEscapeContent(v->str_data) + "</string>\n";
       break;
     case T::INT:
       out += pad + "<integer>" + std::to_string(v->num) + "</integer>\n";
