@@ -65,8 +65,15 @@
 //   round-trips in both directions.
 // - An EMPTY repeated array has no wire representation at all (protobuf3
 //   semantics: an empty repeated field is indistinguishable from an absent
-//   one), so toProtobuf()/fromProtobuf() drops the key: {"rep":[]} comes back
-//   without "rep". The same holds for the schema-less form.
+//   one), so with a JSON-driven SCHEMA the key is dropped: {"rep":[]} comes
+//   back without "rep". The SCHEMA-LESS form recovers it: the embedded name map
+//   stores the type code "A" for an empty array (and "n" for a null), so
+//   fromProtobuf() recreates the member from the code. Field numbers are
+//   assigned in the source tree's member order, so the recovered members are
+//   inserted in ascending field-number order -- i.e. exactly where they were.
+//   (The old code appended them in std::unordered_map order, which made the
+//   decoded key order implementation-defined and renumbered the fields of a
+//   second toProtobuf().)
 // - A top-level JSON array is wrapped into a synthetic message (marker field
 //   19001 + repeated field 1) so the elements survive a schema-less round-trip
 //   intact; non-object array elements cannot be represented in the wrapper and
@@ -105,6 +112,8 @@
 #include <cmath>
 #include <cinttypes>
 #include <functional>
+#include <algorithm>
+#include <vector>
 
 namespace asvJSONInternal {
 
@@ -828,24 +837,48 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
   // Schema-less: empty arrays and null values produce no wire bytes (protobuf
   // cannot represent them), so without the name map they'd silently vanish.
   // Recover them from the embedded type codes -- the wire field is absent
-  // precisely because the value was empty/null. ("N" null-arrays are left alone
-  // as their element count is not recoverable from the wire.)
+  // precisely because the value was empty/null. ("N" is recovered as an empty
+  // array: the element count is not on the wire.)
+  //
+  // The recovery REBUILDS the object in ascending field-number order. The
+  // encoder numbers fields by the source tree's member order, so ascending fnum
+  // IS the original key order. The old loop appended the recovered members in
+  // std::unordered_map iteration order -- an unspecified key order that differs
+  // between standard libraries, and that also made a second toProtobuf() assign
+  // different field numbers (enc(fromX(enc(t))) != enc(t)).
   if (!schema && less.present) {
-    for (const auto& [fnum, code] : less.types) {
-      if (code != "A" && code != "n" && code != "N") continue;
+    std::vector<int> fnums;
+    fnums.reserve(less.types.size());
+    for (const auto& entry : less.types) fnums.push_back(entry.first);
+    std::sort(fnums.begin(), fnums.end());
+    auto rebuilt = std::make_unique<asvJSONValue::ObjectMap>();
+    for (int fnum : fnums) {
       std::string fname = std::to_string(fnum);
       auto nit = less.names.find(fnum);
       if (nit != less.names.end()) fname = nit->second;
-      if (obj->obj->find(fname) != obj->obj->end()) continue;
+      auto it = obj->obj->find(fname);
+      if (it != obj->obj->end()) {
+        rebuilt->emplace(std::move(fname), std::move(it->second));
+        continue;
+      }
+      const std::string& code = less.types.find(fnum)->second;
       if (code == "A" || code == "N") {
         auto arr = asvJSONValue::makeArray();
-        if (arr) (*obj->obj)[fname] = std::move(arr);
-      } else {
+        if (!arr) throw asvJSONError("Protobuf empty array field alloc failed");
+        rebuilt->emplace(std::move(fname), std::move(arr));
+      } else if (code == "n") {
         auto nv = asvJSONValue::makeNull();
         if (!nv) throw asvJSONError("Protobuf null field alloc failed");
-        (*obj->obj)[fname] = std::move(nv);
+        rebuilt->emplace(std::move(fname), std::move(nv));
       }
     }
+    // Defensive: a member the name map does not describe keeps its place after
+    // the mapped fields (the decoder does not produce one today).
+    for (auto& kv : *obj->obj) {
+      if (rebuilt->find(kv.first) != rebuilt->end()) continue;
+      rebuilt->emplace(kv.first, std::move(kv.second));
+    }
+    obj->obj = std::move(rebuilt);
   }
   return obj;
 }

@@ -13,9 +13,10 @@
 // INI convention for numbers, booleans and null. Additionally a full ISO-8601
 // timestamp (`YYYY-MM-DDTHH:MM:SS[.fff][Z|+/-hh:mm]`) is inferred as DATETIME
 // (INI infers the same full-ISO form since v1.26.x; both formats leave a bare
-// date like `2024-01-01` -- too short for the ISO grammar -- a STRING) and this
-// is lossy on re-encode: DATETIME serializes as a quoted string and decodes
-// back as STRING (see below). A bare date like `2024-01-01` is too short for
+// date like `2024-01-01` -- too short for the ISO grammar -- a STRING).
+// DATETIME is therefore LOSSLESS on re-encode: toDotenv() writes the bare ISO
+// text (quoting it would make it decode as a STRING) and ms + timezone offset
+// come back. A bare date like `2024-01-01` is too short for
 // the parser and stays a STRING. Container braces are not INI syntax either:
 // `K={}` stays the string "{}". Single-quoted values are always literal strings; double-quoted
 // values process C-style escapes and may span multiple lines; a control byte
@@ -37,10 +38,12 @@
 // progressive space drift on round-trip).
 //
 // Nested objects and arrays have no dotenv syntax: toDotenv() writes their
-// compact JSON text as a quoted string (a documented lossy round-trip -- the
-// text survives but decodes back as a string). The same applies to DATETIME,
-// BINARY and EXTENSION, which serialize as quoted ISO/base64 text and decode
-// back as STRING.
+// compact JSON text (a documented lossy round-trip -- the text survives but
+// decodes back as a string). BINARY and EXTENSION are written as their base64
+// text and decode back as STRING. Those text forms are quoted only when a bare
+// cell would re-read as a different type (a '=' / '#' / space or a numeric
+// spelling), so the encoder is idempotent: decoding then re-encoding a value
+// reproduces the same line.
 //
 // Known lossy cases, all cosmetic rather than data-affecting:
 // - Blank lines are not part of the data model, so a blank line between a leading
@@ -254,36 +257,45 @@ inline void dotenvWriteCommentLines(std::string& out, const std::vector<Comment>
 
 inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
   using T = asvJSONValue::Type;
+  // Emit `text` bare when a bare value re-reads as `keep`, quoted otherwise.
+  // One rule for a STRING and for every value that has no dotenv syntax of its
+  // own (DATETIME/BINARY/EXTENSION/containers/specials): the decoded tree holds
+  // the TEXT, so it re-encodes through this same probe and must produce the
+  // same bytes. The old always-quoted special branches made
+  // enc(decode(enc(t))) differ from enc(t); DATETIME was needlessly lossy too,
+  // because a bare ISO value re-reads as DATETIME (dotenvParseVal infers it).
+  auto emitText = [&](std::string_view text, T keep, bool rawNumber) {
+    bool needQuote = text.empty();
+    for (char c : text) {
+      // ';' is not special here (unlike INI) and earns no quotes. Control
+      // bytes -- everything below 0x20 plus DEL (0x7F) -- force quoting
+      // because the escape table (dotenvEscape) only runs inside quotes;
+      // without this a NUL/bell/DEL would be written raw and could be
+      // truncated or mangled by an external reader (DEL behaviour varies
+      // across tr/sed/editors). '\n'/'\r'/'\t' are listed explicitly below
+      // and also caught by the range check.
+      if ((unsigned char)c < 0x20 || c == 0x7f || c == ' ' || c == '\t' ||
+          c == '#' || c == '=' || c == '"' || c == '\'' || c == '\\' ||
+          c == '\n' || c == '\r') {
+        needQuote = true;
+        break;
+      }
+    }
+    if (!needQuote && !rawNumber) {
+      auto bare = dotenvParseVal(std::string(text), false);
+      if (!bare || bare->type != keep) needQuote = true;
+    }
+    if (needQuote) {
+      out += '"';
+      out += dotenvEscape(text);
+      out += '"';
+    } else {
+      out.append(text.data(), text.size());
+    }
+  };
   switch (v->type) {
     case T::STRING: {
-      std::string_view sv(v->str_data);
-      bool needQuote = sv.empty();
-      for (char c : sv) {
-        // ';' is not special here (unlike INI) and earns no quotes. Control
-        // bytes -- everything below 0x20 plus DEL (0x7F) -- force quoting
-        // because the escape table (dotenvEscape) only runs inside quotes;
-        // without this a NUL/bell/DEL would be written raw and could be
-        // truncated or mangled by an external reader (DEL behaviour varies
-        // across tr/sed/editors). '\n'/'\r'/'\t' are listed explicitly below
-        // and also caught by the range check.
-        if ((unsigned char)c < 0x20 || c == 0x7f || c == ' ' || c == '\t' ||
-            c == '#' || c == '=' || c == '"' || c == '\'' || c == '\\' ||
-            c == '\n' || c == '\r') {
-          needQuote = true;
-          break;
-        }
-      }
-      if (!needQuote && !v->raw_number) {
-        auto bare = dotenvParseVal(std::string(sv), false);
-        if (bare && bare->type != T::STRING) needQuote = true;
-      }
-      if (needQuote) {
-        out += '"';
-        out += dotenvEscape(sv);
-        out += '"';
-      } else {
-        out += sv;
-      }
+      emitText(v->str_data, T::STRING, v->raw_number);
       break;
     }
     case T::INT: out += std::to_string(v->num); break;
@@ -313,30 +325,28 @@ inline void dotenvFormatVal(const asvJSONValue* v, std::string& out) {
     case T::DATETIME: {
       std::string s;
       fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
-      out += '"';
-      out += dotenvEscape(s);
-      out += '"';
+      // fmtDateTimeVal renders an unconvertible timestamp as the literal "null";
+      // the probe then reports NULL, so it is quoted and re-reads as the STRING
+      // "null" (the same degenerate-case convention as INI/TOML/CSV).
+      emitText(s, T::DATETIME, false);
       break;
     }
     case T::BINARY:
     case T::EXTENSION: {
-      out += '"';
-      out += encodeBase64(v->bin_data.data(), v->bin_data.size());
-      out += '"';
+      emitText(encodeBase64(v->bin_data.data(), v->bin_data.size()), T::STRING, false);
       break;
     }
     default: {
       // Objects, arrays and other special types have no dotenv syntax: emit
-      // their compact JSON text as a quoted string.
+      // their compact JSON text, quoted only when a bare cell would re-read as
+      // something other than that text.
       std::string s;
       try {
         v->serialize(s, false);
       } catch (const std::exception& e) {
         throw asvJSONError(std::string("dotenv: cannot serialize value: ") + e.what());
       }
-      out += '"';
-      out += dotenvEscape(s);
-      out += '"';
+      emitText(s, T::STRING, false);
       break;
     }
   }

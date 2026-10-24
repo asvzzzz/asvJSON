@@ -23127,13 +23127,15 @@ TEST(testINISpecialValues) {
     ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
     ASSERT_EQ(std::string(v->getString()), "AAH+/w==");
   }
-  // 6. OBJECTID: the 12 bytes as a quoted 24-hex STRING.
+  // 6. OBJECTID: the 12 bytes as a 24-hex STRING. The text is bare: it carries
+  //    no character from iniNeedsQuotes() and re-reads as the same STRING, so
+  //    quoting it would make enc(decode(enc(t))) differ from enc(t).
   {
     auto doc = asvJSONValue::makeObject();
     doc->obj->emplace("oid", asvJSONValue::makeObjectId("0123456789ab"));
     std::string ini;
     doc->toINI(ini);
-    ASSERT(ini.find("oid = \"303132333435363738396162\"") != std::string::npos);
+    ASSERT(ini.find("oid = 303132333435363738396162\n") != std::string::npos);
     asvJSON back;
     ASSERT(back.fromINI(ini));
     auto* v = back.getRoot()->get("oid");
@@ -23906,8 +23908,9 @@ TEST(testDotenvAuditFixes) {
   }
   // 6. Quoted strings funnel through dotenvParseVal too (single creation point
   // for STRING), and a full ISO-8601 timestamp infers as DATETIME -- unlike
-  // INI -- with the documented lossy re-encode back to STRING. A bare date is
-  // too short for the datetime parser and stays a STRING.
+  // INI. DATETIME is LOSSLESS on re-encode: toDotenv() writes the bare ISO text
+  // (quoting it would decode as a STRING), so the type, ms and offset survive.
+  // A bare date is too short for the datetime parser and stays a STRING.
   {
     asvJSON j;
     ASSERT(j.fromDotenv(std::string("D=2024-01-01T12:00:00Z\nB=2024-01-01\n")));
@@ -23916,7 +23919,10 @@ TEST(testDotenvAuditFixes) {
     ASSERT_EQ(std::string(j.getString("B")), std::string("2024-01-01"));
     asvJSON j2;
     ASSERT(j2.fromDotenv(j.toDotenv()));
-    ASSERT(j2.get("D") != nullptr && j2.get("D")->type == asvJSONValue::STRING);
+    ASSERT(j2.get("D") != nullptr && j2.get("D")->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(j2.get("D")->timestamp, j.get("D")->timestamp);
+    ASSERT_EQ(j2.get("D")->datetime_ms, j.get("D")->datetime_ms);
+    ASSERT_EQ(j2.get("D")->tz_offset_min, j.get("D")->tz_offset_min);
     ASSERT(j2.get("B") != nullptr && j2.get("B")->type == asvJSONValue::STRING);
   }
   // 7. Every control byte without a short escape (0x01-0x06, 0x0E-0x1F) and
@@ -36412,6 +36418,294 @@ TEST(testEncoderSelfConsistency) {
 	}
 }
 
+// The encoder -> OWN decoder -> tree-compare MATRIX: every toX() must produce a
+// document that its own fromX() decodes back to an EQUAL tree (operator==,
+// order-insensitive and type-strict). Payloads stay inside each format's
+// documented representable subset -- a text format with no null, no nested
+// object or no binary type is fed only what it can carry -- so a mismatch here
+// is an encoder/decoder disagreement, never a documented loss. Every case is
+// collected and reported together: the first failure must not hide the rest.
+//
+// The second phase is BYTE STABILITY, enc(dec(enc(t))) == enc(t). It is
+// stronger than tree equality (operator== cannot see key ORDER, which this
+// library preserves and serializes): after one round-trip the tree is already
+// in the format's image, so a second encode must reproduce identical bytes.
+// These found five real asymmetries, all fixed:
+//   - CSV wrote a CUSTOM_TAG as an empty cell (payload silently lost),
+//   - plist and SVG spelled an empty STRING differently from the decoded form
+//     (`<string></string>` vs `<string/>`), so the second encode differed,
+//   - INI quoted OBJECTID/BINARY/EXTENSION/REGEX/CUSTOM_TAG unconditionally,
+//   - dotenv did the same AND made DATETIME lossy (quoting turned the ISO text
+//     into a STRING on re-read),
+//   - the Protobuf decoder appended recovered null / empty-array fields in
+//     std::unordered_map order, so the key order (and therefore the field
+//     numbering of a second toProtobuf()) was implementation-defined.
+// A format that has no syntax for the rich tree's special types rejects it at
+// encode time (BSON and XML cannot serialize a CUSTOM_TAG); one that encodes
+// them but DROPS them by design cannot be stable on that tree either (the
+// protobuf wire format drops DATETIME/OBJECTID/REGEX/TIMESTAMP/CUSTOM_TAG, and
+// C++ has no binary literal -- toCpp() writes `{}`). Both groups are named
+// explicitly, so a NEW asymmetry cannot hide behind the fallback; the core tree
+// (ordinary scalars, null, empty containers, non-ASCII text) must be stable for
+// every format without exception.
+TEST(testEncoderDecoderMatrix) {
+	struct Case {
+		const char* name;
+		std::function<std::string(const asvJSON&)> enc;
+		std::function<bool(asvJSON&, const std::string&)> dec;
+		std::vector<const char*> payloads;
+	};
+	auto toBytes = [](const std::vector<uint8_t>& b) {
+		return std::string(reinterpret_cast<const char*>(b.data()), b.size());
+	};
+	auto asBytes = [](const std::string& s) { return reinterpret_cast<const uint8_t*>(s.data()); };
+	auto text = [](const char* n, std::function<std::string(const asvJSON&)> e,
+	               std::function<bool(asvJSON&, std::string_view)> d,
+	               std::vector<const char*> p) {
+		Case c;
+		c.name = n;
+		c.enc = std::move(e);
+		c.dec = [d](asvJSON& j, const std::string& s) { return d(j, std::string_view(s)); };
+		c.payloads = std::move(p);
+		return c;
+	};
+	auto binary = [](const char* n, std::function<std::string(const asvJSON&)> e,
+	                 std::function<bool(asvJSON&, const std::string&)> d,
+	                 std::vector<const char*> p) {
+		return Case{n, std::move(e), std::move(d), std::move(p)};
+	};
+
+	const char* CORE = R"({"a":1,"b":[true,null,"x"],"c":{"d":2.5},"e":"","f":[]})";
+	const char* U = R"({"u":"\u00e9\u65e5","arr":[],"o":{}})";
+
+	std::vector<Case> cases;
+	cases.push_back(text("JSON", [](const asvJSON& j) { return j.serialize(true); },
+	    [](asvJSON& j, std::string_view s) { return j.parse(s); },
+	    {CORE, U, R"({"ml":"a\nb\"c\\d","arr":[1,[2,[3]]]})", "null", "[]", "\"top\""}));
+	cases.push_back(text("JSON5", [](const asvJSON& j) { return j.toJSON5(true); },
+	    [](asvJSON& j, std::string_view s) { return j.fromJSON5(s); },
+	    {CORE, U, R"([1,{"k":"v"},[2,3]])"}));
+	cases.push_back(text("JSONLines", [](const asvJSON& j) { return j.toJSONLines(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromJSONLines(s); },
+	    {R"([{"a":1},{"b":[1,2]},3,"x",true,null])", R"([{"u":"\u00e9","o":{}}])", "[]"}));
+	cases.push_back(binary("BSON",
+	    [toBytes](const asvJSON& j) { return toBytes(j.toBSON()); },
+	    [asBytes](asvJSON& j, const std::string& s) { return j.fromBSON(asBytes(s), s.size()); },
+	    {CORE, U}));
+	cases.push_back(binary("MessagePack",
+	    [toBytes](const asvJSON& j) { return toBytes(j.toMessagePack()); },
+	    [asBytes](asvJSON& j, const std::string& s) { return j.fromMessagePack(asBytes(s), s.size()); },
+	    {CORE, U, "[]"}));
+	cases.push_back(binary("CBOR",
+	    [toBytes](const asvJSON& j) { return toBytes(j.toCBOR()); },
+	    [asBytes](asvJSON& j, const std::string& s) { return j.fromCBOR(asBytes(s), s.size()); },
+	    {CORE, U, "[]"}));
+	cases.push_back(binary("UBJSON",
+	    [toBytes](const asvJSON& j) { return toBytes(j.toUBJSON()); },
+	    [asBytes](asvJSON& j, const std::string& s) { return j.fromUBJSON(asBytes(s), s.size()); },
+	    {CORE, U, "[]"}));
+	cases.push_back(text("Bencode", [](const asvJSON& j) { return j.toBencode(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromBencode(s); },
+	    {R"({"a":1,"b":["x","y"],"c":{"d":-5},"e":""})", R"(["x",1,["y"]])", R"({"u":"\u00e9"})"}));
+	cases.push_back(text("Plist", [](const asvJSON& j) { return j.toPlist(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromPlist(s); },
+	    {R"({"a":1,"b":true,"c":2.5,"d":["x",1],"e":{"f":"g"}})", U}));
+	cases.push_back(text("XML", [](const asvJSON& j) { return j.toXML(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromXML(s); },
+	    {R"({"a":1,"b":["x","y"],"c":{"d":2.5},"e":""})",
+	     R"({"u":"\u00e9","g":{"@id":"x","#text":"hi"}})"}));
+	// SVG names the repeated elements after the JSON KEY, so its payloads are
+	// root-keyed `svg` documents (a bare `rect` root is not an SVG document).
+	cases.push_back(text("SVG", [](const asvJSON& j) { return j.toSVG(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromSVG(s); },
+	    {R"({"svg":{"@xmlns":"http://www.w3.org/2000/svg","g":{"rect":{"@x":"1","@y":"2"}}}})",
+	     R"({"svg":{"g":{"@id":"a","#text":"hi & bye"}}})",
+	     R"({"svg":{"g":"plain text"}})"}));
+	cases.push_back(text("YAML", [](const asvJSON& j) { return j.toYAML(true); },
+	    [](asvJSON& j, std::string_view s) { return j.fromYAML(s); },
+	    {CORE, R"({"u":"\u00e9\u65e5","ml":"a\nb","o":{},"arr":[]})", R"([1,"x",{"k":null}])"}));
+	cases.push_back(text("TOML", [](const asvJSON& j) { return j.toTOML(true); },
+	    [](asvJSON& j, std::string_view s) { return j.fromTOML(s); },
+	    {R"({"t":{"a":1,"b":2.5,"c":true},"arr":[1,2,3],"s":"x","nested":{"deep":{"k":"v"}}})",
+	     R"({"u":"\u00e9","tab":[{"a":1},{"a":2}]})"}));
+	cases.push_back(text("INI", [](const asvJSON& j) { return j.toINI(true); },
+	    [](asvJSON& j, std::string_view s) { return j.fromINI(s); },
+	    {R"({"sec":{"a":1,"b":"x","c":true},"root_k":"v"})",
+	     R"({"sec":{"u":"\u00e9","d":2.5},"arr":["a","b"]})"}));
+	// CSV always re-reads an object root as a one-row ARRAY (documented), so the
+	// payloads are already arrays of flat objects.
+	cases.push_back(text("CSV", [](const asvJSON& j) { return j.toCSV(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromCSV(s); },
+	    {R"([{"n":1,"d":2.5,"b":true,"z":null,"s":"1"}])",
+	     R"([{"a":"x","b":"y"},{"a":"1","b":"2.5"}])",
+	     R"([{"u":"\u00e9\u65e5","t":"a,b"}])"}));
+	cases.push_back(text("Dotenv", [](const asvJSON& j) { return j.toDotenv(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromDotenv(s); },
+	    {R"({"A":"x","B":"hello world"})", R"({"U":"\u00e9","E":""})"}));
+	cases.push_back(text("JavaProp", [](const asvJSON& j) { return j.toJavaProp(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromJavaProp(s); },
+	    {R"({"a":"text","b":1,"c":2.5,"d":true,"e":"hello world"})",
+	     R"({"u":"\u00e9\u65e5","k":"a:b=c"})"}));
+	cases.push_back(text("TRON", [](const asvJSON& j) { return j.toTRON(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromTRON(s); },
+	    {R"({"a":{"x":1,"y":2},"b":{"x":3,"y":4},"arr":[1,2,3],"s":"t"})",
+	     R"({"u":"\u00e9","arr":[{"x":1},{"x":2}]})"}));
+	cases.push_back(text("GOON", [](const asvJSON& j) { return j.toGOON(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromGOON(s); },
+	    {CORE, R"({"u":"\u00e9","arr":[{"x":1,"y":2},{"x":3,"y":4}]})", "[]"}));
+	cases.push_back(text("TOON", [](const asvJSON& j) { return j.toTOON(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromTOON(s); },
+	    {CORE, R"({"u":"\u00e9","arr":[{"x":1,"y":2},{"x":3,"y":4}]})", "[]"}));
+	cases.push_back(text("ADE", [](const asvJSON& j) { return j.toADE(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromADE(s); },
+	    {CORE, R"({"u":"\u00e9","a":{"b":{"c":1}}})"}));
+	cases.push_back(text("RON", [](const asvJSON& j) { return j.toRON(false); },
+	    [](asvJSON& j, std::string_view s) { return j.fromRON(s); },
+	    {R"({"a":1,"b":[1,2],"c":{"d":"x"}})", U}));
+	// S-Expressions have no object/list distinction: the even-length payloads
+	// below are the ones the encoder marks with SEXPR_ARRAY_MARK, the map ones
+	// decode to an object by the documented heuristic.
+	cases.push_back(text("SExpr", [](const asvJSON& j) { return j.toSexpr(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromSexpr(s); },
+	    {R"({"a":1,"b":2})", R"([1,2,3])", R"({"a":1,"b":{"c":"x"}})", R"([1,2,3,4])",
+	     R"({"u":"\u00e9"})"}));
+	cases.push_back(binary("Protobuf",
+	    [toBytes](const asvJSON& j) { return toBytes(j.toProtobuf()); },
+	    [asBytes](asvJSON& j, const std::string& s) { return j.fromProtobuf(s); },
+	    {R"({"a":1,"b":"x","c":{"d":true}})", R"({"u":"\u00e9","arr":[1,2],"nested":{"k":"v"}})",
+	     // A null and an empty array carry no wire bytes; the name map's type
+	     // codes restore them IN PLACE (field numbers are positional).
+	     R"({"a":[],"b":null,"c":1})", "[]"}));
+	cases.push_back(text("ProtobufText", [](const asvJSON& j) { return j.toProtobufText(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromProtobufText(std::string(s)); },
+	    {R"({"a":1,"b":"x","c":[1,2]})", R"({"u":"\u00e9","nested":{"k":"v"}})", "{}"}));
+	// A C++ "document" is a type declaration; the root struct wraps an object.
+	cases.push_back(text("C++", [](const asvJSON& j) { return j.toCpp(); },
+	    [](asvJSON& j, std::string_view s) { return j.fromCpp(s); },
+	    {R"({"S":{"a":1,"b":2.5,"c":true,"d":"x"}})",
+	     R"({"S":{"u":"\u00e9","arr":[1,2],"nested":{"k":"v"}}})"}));
+
+	std::string report;
+	int attempted = 0;
+	for (const auto& c : cases) {
+		for (const char* p : c.payloads) {
+			++attempted;
+			asvJSON exp;
+			if (!exp.parse(p)) {
+				report += std::string(c.name) + ": payload does not parse: " + p + "\n";
+				continue;
+			}
+			std::string encoded;
+			try {
+				encoded = c.enc(exp);
+			} catch (const std::exception& e) {
+				report += std::string(c.name) + " encode threw for " + p + ": " + e.what() + "\n";
+				continue;
+			}
+			asvJSON got;
+			bool decoded = false;
+			try {
+				decoded = c.dec(got, encoded);
+			} catch (const std::exception& e) {
+				report += std::string(c.name) + " decode threw for " + p + ": " + e.what() + "\n";
+				continue;
+			}
+			if (!decoded) {
+				report += std::string(c.name) + " decode failed for " + p + ": " + got.getLastError() +
+				          "\n   encoded: " + encoded.substr(0, 300) + "\n";
+				continue;
+			}
+			if (!exp.getRoot() || !got.getRoot() || !(*exp.getRoot() == *got.getRoot())) {
+				report += std::string(c.name) + " tree mismatch for " + p + "\n   expected: " +
+				          exp.serialize() + "\n   actual:   " +
+				          (got.getRoot() ? got.serialize() : std::string("(null root)")) +
+				          "\n   encoded:  " + encoded.substr(0, 300) + "\n";
+			}
+		}
+	}
+	// Guard the table itself: a payload accidentally dropped above would make
+	// the whole sweep silently narrower.
+	ASSERT_EQ(attempted, 73);
+
+	// Phase 2: byte stability. Tree A carries the special types, tree B is the
+	// core subset that every format has to encode.
+	auto parseTree = [](const char* json) {
+		auto j = std::make_unique<asvJSON>();
+		if (!j->parse(json)) throw std::runtime_error(std::string("matrix tree does not parse: ") + json);
+		return j;
+	};
+	auto rich = parseTree(R"({"s":"x","i":-7,"d":2.5,"b":true,"z":null,"arr":[1,2,3],)"
+	                      R"("obj":{"k":"v","e":{}},"u":"\u00e9\u65e5","ml":"a\nb",)"
+	                      R"("oid":{"$oid":"507f1f77bcf86cd799439011"},)"
+	                      R"("bin":{"$binary":{"base64":"AQID","subType":"00"}},)"
+	                      R"("ts":{"$timestamp":{"t":1700000000}},)"
+	                      R"("re":{"$regex":"a.*b","$options":"i"},)"
+	                      R"("ct":{"$customTag":{"name":"x","value":42}}})");
+	rich->setValue("dt", asvJSONValue::makeDateTime(1700000000LL, 123, 120));
+	rich->setValue("ext", asvJSONValue::makeExtension(7, reinterpret_cast<const uint8_t*>("\x01\x02"), 2));
+	auto core = parseTree(R"({"s":"x","i":-7,"d":2.5,"b":true,"z":null,"arr":[1,2,3],)"
+	                      R"("obj":{"k":"v","e":{}},"u":"\u00e9\u65e5","ml":"a\nb"})");
+
+	enum class Stab { Stable, Rejected, Unstable };
+	auto stability = [](const Case& c, const asvJSON& tree, std::string& err) -> Stab {
+		std::string e1;
+		try {
+			e1 = c.enc(tree);
+		} catch (const std::exception& e) {
+			err = std::string("encode threw: ") + e.what();
+			return Stab::Rejected;   // the format has no syntax for this tree
+		}
+		asvJSON mid;
+		bool decoded = false;
+		try {
+			decoded = c.dec(mid, e1);
+		} catch (const std::exception& e) {
+			err = std::string("decode threw: ") + e.what();
+			return Stab::Unstable;
+		}
+		if (!decoded) {
+			err = "decode failed: " + mid.getLastError();
+			return Stab::Unstable;
+		}
+		std::string e2;
+		try {
+			e2 = c.enc(mid);
+		} catch (const std::exception& e) {
+			err = std::string("re-encode threw: ") + e.what();
+			return Stab::Unstable;
+		}
+		if (e2 == e1) return Stab::Stable;
+		size_t i = 0;
+		while (i < e1.size() && i < e2.size() && e1[i] == e2[i]) ++i;
+		err = "differs at byte " + std::to_string(i) + " (len " + std::to_string(e1.size()) + " vs " +
+		      std::to_string(e2.size()) + ")";
+		return Stab::Unstable;
+	};
+
+	for (const auto& c : cases) {
+		std::string errRich, errCore;
+		Stab richStab = stability(c, *rich, errRich);
+		if (stability(c, *core, errCore) != Stab::Stable) {
+			report += std::string(c.name) + ": core tree not byte-stable (" + errCore + ")\n";
+			continue;
+		}
+		if (richStab == Stab::Stable) continue;
+		if (richStab == Stab::Rejected) {
+			// No CUSTOM_TAG form: the ENCODER says so instead of dropping it.
+			if (std::strcmp(c.name, "BSON") != 0 && std::strcmp(c.name, "XML") != 0)
+				report += std::string(c.name) + ": rejects the rich tree (" + errRich + ")\n";
+			continue;
+		}
+		// Documented drops: the protobuf wire format has no code for
+		// DATETIME/OBJECTID/REGEX/TIMESTAMP/CUSTOM_TAG, and C++ has no binary
+		// literal (toCpp writes `{}`), so the second encode cannot match.
+		if (std::strcmp(c.name, "Protobuf") != 0 && std::strcmp(c.name, "C++") != 0)
+			report += std::string(c.name) + ": rich tree not byte-stable (" + errRich + ")\n";
+	}
+
+	ASSERT_MSG(report.empty(), report);
+}
+
 int main() {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 	std::cout << "========================================" << std::endl;
@@ -37083,6 +37377,7 @@ RUN(testYamlAuditReview);
 	RUN(testBomStrippedByDecoders);
 	RUN(testXMLControlCharRejected);
 	RUN(testEncoderSelfConsistency);
+	RUN(testEncoderDecoderMatrix);
 
 	std::cout << "\n========================================" << std::endl;
 	std::cout << "Results: " << passed << " passed, " << failed << " failed" << std::endl;

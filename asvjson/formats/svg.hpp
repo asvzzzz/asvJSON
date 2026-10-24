@@ -43,10 +43,14 @@
 //     produce markup no XML parser accepts (fromSVG itself rejected it).
 //   - Non-serializable children of elements (DATETIME, BINARY, OBJECTID, REGEX,
 //     TIMESTAMP, EXTENSION, CUSTOM_TAG): the value is lost, the element is emitted
-//     as an empty <tag></tag>. OBJECT and ARRAY children are recursively serialized.
+//     as an empty <tag/>. OBJECT and ARRAY children are recursively serialized.
 //   - Non-OBJECT root values (scalars, ARRAY, and special types) are wrapped in
 //     <root>...</root> by free toSVG(const asvJSONValue*); scalar content is
 //     preserved but ARRAY/special-type contents are lost - documented limitation.
+//   - Empty content has ONE spelling: <tag/>. An empty STRING, an empty
+//     ARRAY/OBJECT, NULL and a lost special value all decode back as "" (see
+//     below), so every one of them self-closes -- mixing <tag/> with
+//     <tag></tag> made enc(decode(enc(t))) differ from enc(t).
 //   - Empty #text ("") on elements that round-trip as self-closing is silently
 //     dropped: {"g":{"@class":"x","#text":""}} -> <g class="x"/> -> {"g":{"@class":"x"}}.
 //     Semantically empty text == absent, but the shape changes from {#text:""} to absent.
@@ -283,7 +287,10 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		out += std::string((size_t)indent, ' ');
 		out += '<';
 		out += safeTag;
-		if (isSelfClosing) {
+		// An empty STRING self-closes like the empty containers: <tag/> decodes
+		// back as "", and <tag></tag> would make a second encode differ from the
+		// first even though the tree did not change.
+		if (isSelfClosing || v->str_data.empty()) {
 			out += "/>\n";
 			return;
 		}
@@ -316,20 +323,16 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		out += safeTag;
 		out += '>';
 		out += '\n';
-	} else if (isSelfClosing) {
+	} else {
+		// Void elements, NULL and the non-serializable special types: the value
+		// has no SVG spelling, so the element is emitted empty. Self-close it:
+		// <tag/> and <tag></tag> both decode back as the empty STRING "", so
+		// mixing the two spellings would make a re-encode depend on HOW the value
+		// was lost.
 		out += std::string((size_t)indent, ' ');
 		out += '<';
 		out += safeTag;
 		out += "/>\n";
-	} else {
-		out += std::string((size_t)indent, ' ');
-		out += '<';
-		out += safeTag;
-		out += '>';
-		out += "</";
-		out += safeTag;
-		out += '>';
-		out += '\n';
 	}
 }
 

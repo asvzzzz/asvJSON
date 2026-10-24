@@ -98,14 +98,17 @@
 //                     STRING "null", not the null value.
 //       TIMESTAMP   - bare epoch seconds; re-parses as an INT of the same
 //                     number (type identity lost).
-//       BINARY / EXTENSION - the payload as a QUOTED BASE64 string; type lost,
-//                     the value survives as text.
-//       OBJECTID    - the 12 bytes as a QUOTED 24-hex string.
+//       BINARY / EXTENSION - the payload as BASE64 text; type lost, the value
+//                     survives as text.
+//       OBJECTID    - the 12 bytes as a 24-hex string.
 //       REGEX       - the pattern text only (the options after the NUL are
-//                     dropped, like CSV/bencode/plist), QUOTED.
+//                     dropped, like CSV/bencode/plist).
 //       CUSTOM_TAG  - the {"$customTag":{"name":...,"value":...}} Extended-JSON
-//                     convention text (serialize()), QUOTED, so both the tag
-//                     name and its value survive as text.
+//                     convention text (serialize()), so both the tag name and
+//                     its value survive as text.
+//     All five are quoted under the same rule as a STRING (only when the text
+//     would otherwise re-read as a different type or needs escaping), so
+//     decoding then re-encoding reproduces the identical line.
 
 #include "../core.hpp"
 
@@ -388,37 +391,42 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
 // Format a value as INI text
 inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
   using T = asvJSONValue::Type;
+  // Emit plain text under the STRING quoting rule. Every special type that has
+  // no INI syntax of its own (BINARY/EXTENSION/OBJECTID/REGEX/CUSTOM_TAG) is
+  // written as text and decodes back as a STRING, so it must quote exactly like
+  // a STRING holding the same text -- the old unconditional '"' made
+  // enc(decode(enc(t))) differ from enc(t) even though the tree was unchanged.
+  auto emitText = [&](std::string_view sv, bool rawNumber) {
+    // Every character in the iniNeedsQuotes() set forces the quoted form:
+    // iniEscape only runs on a QUOTED value, so a bare value is copied
+    // verbatim and any escape sequence in it would survive as literal text.
+    // That covers the delimiters, the comment markers and quotes, and
+    // every control byte -- a raw NUL/0x01 truncates the line in any
+    // external INI reader or editor.
+    bool needsQuotes = iniNeedsQuotes(sv);
+    // A bare text that would decode as a different type (bool/int/double/null)
+    // must be quoted so the round-trip preserves the STRING type. raw_number
+    // literals (e.g. overflowed integers) stay bare so they re-decode via the
+    // overflow path. An empty string is quoted as "" (never a bare empty
+    // fragment followed by a dangling space on the line).
+    if (!needsQuotes && !rawNumber) {
+      if (sv.empty()) needsQuotes = true;
+      else {
+        auto bare = iniParseVal(std::string(sv), false);
+        if (bare && bare->type != T::STRING) needsQuotes = true;
+      }
+    }
+    if (needsQuotes) {
+      out += '"';
+      out += iniEscape(sv);
+      out += '"';
+    } else {
+      out += sv;
+    }
+  };
   switch (v->type) {
     case T::STRING:
-      {
-        std::string_view sv(v->str_data);
-        // Every character in the iniNeedsQuotes() set forces the quoted form:
-        // iniEscape only runs on a QUOTED value, so a bare value is copied
-        // verbatim and any escape sequence in it would survive as literal text.
-        // That covers the delimiters, the comment markers and quotes, and
-        // every control byte -- a raw NUL/0x01 truncates the line in any
-        // external INI reader or editor.
-        bool needsQuotes = iniNeedsQuotes(sv);
-        // A bare text that would decode as a different type (bool/int/double/null)
-        // must be quoted so the round-trip preserves the STRING type. raw_number
-        // literals (e.g. overflowed integers) stay bare so they re-decode via the
-        // overflow path. An empty string is quoted as "" (never a bare empty
-        // fragment followed by a dangling space on the line).
-        if (!needsQuotes && !v->raw_number) {
-          if (sv.empty()) needsQuotes = true;
-          else {
-            auto bare = iniParseVal(std::string(sv), false);
-            if (bare && bare->type != T::STRING) needsQuotes = true;
-          }
-        }
-        if (needsQuotes) {
-          out += '"';
-          out += iniEscape(sv);
-          out += '"';
-        } else {
-          out += sv;
-        }
-      }
+      emitText(v->str_data, v->raw_number);
       break;
     case T::INT:
       out += std::to_string(v->num);
@@ -474,23 +482,18 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
     case T::BINARY:
     case T::EXTENSION:
       {
-        // The payload as quoted BASE64 text, like the other text formats; on a
+        // The payload as BASE64 text, like the other text formats; on a
         // re-parse it is a plain STRING (no "base64:" prefix convention exists
         // in INI).
-        std::string b = encodeBase64(v->bin_data.data(), v->bin_data.size());
-        out += '"';
-        out += iniEscape(b);
-        out += '"';
+        emitText(encodeBase64(v->bin_data.data(), v->bin_data.size()), false);
       }
       break;
     case T::OBJECTID:
       {
-        // The 12 bytes as a quoted 24-hex string.
+        // The 12 bytes as a 24-hex string.
         std::string hex;
         fmtObjectIdHexVal(v->str_data, hex);
-        out += '"';
-        out += iniEscape(hex);
-        out += '"';
+        emitText(hex, false);
       }
       break;
     case T::REGEX:
@@ -501,21 +504,17 @@ inline void iniFormatVal(const asvJSONValue* v, std::string& out) {
         std::string_view pat = (sep == std::string_view::npos)
                                  ? std::string_view(v->str_data)
                                  : std::string_view(v->str_data.data(), sep);
-        out += '"';
-        out += iniEscape(pat);
-        out += '"';
+        emitText(pat, false);
       }
       break;
     case T::CUSTOM_TAG:
       {
         // No native INI form: keep the tag name AND value as the same
-        // Extended-JSON convention text serialize()/appendJsonToken emit, quoted
-        // so it re-parses as a STRING holding that JSON.
+        // Extended-JSON convention text serialize()/appendJsonToken emit, so it
+        // re-parses as a STRING holding that JSON.
         std::string payload;
         v->serialize(payload, false);
-        out += '"';
-        out += iniEscape(payload);
-        out += '"';
+        emitText(payload, false);
       }
       break;
     default:
