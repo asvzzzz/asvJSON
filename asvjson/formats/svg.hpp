@@ -60,6 +60,19 @@
 //     (the Char production excludes it and a character reference may not name it
 //     either), so toSVG() REPORTS it with an asvJSONError instead of writing it
 //     raw - the markup would otherwise be one that no conforming parser accepts.
+//     Every path is covered: element content, "#text", attribute values AND the
+//     scalar-root fallback ("<root>...</root>"), which used to copy the string
+//     byte by byte and let a control byte through raw.
+//   - An ARRAY attribute is emitted as its space-joined scalar items. A non-finite
+//     item is skipped; an array where nothing survives (only NaN/Inf items, or an
+//     empty array) still emits the attribute with an EMPTY value (coords=""),
+//     because the list itself is present. A SCALAR NaN/Inf attribute has no
+//     spelling at all and is omitted entirely. Both forms decode back as STRINGs,
+//     so the difference is in the emitted markup, not in the parsed tree.
+//   - A root-level "@name" key becomes an ordinary child element of the synthesized
+//     <svg> wrapper ({"@x":1,"y":2} -> <svg ...><_x>1</_x><y>2</y></svg>, see
+//     xmlSanitizeElementName), NOT an attribute of that wrapper. Attributes come
+//     from '@' keys of an object that IS an element: {"svg":{"@x":1}} -> <svg x="1"/>.
 //
 // Decoder: since SVG is XML, fromSVG reuses the shared XML document parser
 // (xmlParseDocument) but with collapseSameNamed=false. XML needs the collapse
@@ -336,7 +349,12 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 	}
 }
 
-// Point 7: escape text content in the fallback branch
+// Point 7: escape text content in the fallback branch.
+// The manual &/</> loop this used to be was a partial copy of
+// xmlEscapeTextInto: it let a C0 control byte through RAW, so a scalar-root
+// string "x\x01y" produced "<root>x\x01y</root>" - markup no conforming XML
+// parser accepts, while the very same byte inside an element threw. Delegating
+// to the shared helper keeps the escaping and the control-byte check together.
 inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out) {
 	if (!v) return;
 	if (v->type == asvJSONValue::OBJECT && v->obj) {
@@ -346,17 +364,9 @@ inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out) {
 	} else {
 		out += "<root>";
 		switch (v->type) {
-			case asvJSONValue::STRING: {
-				for (char c : v->str_data) {
-					switch (c) {
-						case '&': out += "&amp;"; break;
-						case '<': out += "&lt;"; break;
-						case '>': out += "&gt;"; break;
-						default:  out += c;
-					}
-				}
+			case asvJSONValue::STRING:
+				xmlEscapeTextInto(out, v->str_data);
 				break;
-			}
 			case asvJSONValue::INT:    out += std::to_string(v->num); break;
 			case asvJSONValue::DOUBLE:
 				if (std::isnan(v->dbl) || std::isinf(v->dbl)) break; // skip non-finite scalar root

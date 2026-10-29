@@ -7207,6 +7207,122 @@ TEST(testSVGReviewFixes) {
 	}
 }
 
+TEST(testSVGEncoderEdges) {
+	// 1. Scalar-root fallback (<root>...</root>) goes through the SHARED text
+	// escaper: a C0 control byte used to be copied raw there, producing markup no
+	// conforming XML parser accepts, while the same byte inside an element threw.
+	{
+		auto v = asvJSONValue::makeString("a&b<c>d", 7);
+		std::string out;
+		v->toSVG(out);
+		ASSERT_EQ(out, std::string("<root>a&amp;b&lt;c&gt;d</root>"));
+	}
+	{
+		// Quotes stay literal in text content (they are only escaped in attributes).
+		auto v = asvJSONValue::makeString(std::string("say \"hi\" & 'bye'"));
+		std::string out;
+		v->toSVG(out);
+		ASSERT_EQ(out, std::string("<root>say \"hi\" &amp; 'bye'</root>"));
+	}
+	{
+		// Tab, LF and CR are legal XML characters and must still be written.
+		auto v = asvJSONValue::makeString(std::string("a\tb\nc\rd"));
+		std::string out;
+		v->toSVG(out);
+		ASSERT_EQ(out, std::string("<root>a\tb\nc\rd</root>"));
+	}
+	{
+		// "\x01" has no legal XML 1.0 spelling: report it, do not write it raw.
+		auto v = asvJSONValue::makeString("x\x01""y", 3);
+		std::string out;
+		bool threw = false;
+		try {
+			v->toSVG(out);
+		} catch (const asvJSONError& e) {
+			threw = true;
+			ASSERT(std::string(e.what()).find("U+0001") != std::string::npos);
+		}
+		ASSERT(threw);
+		// Whatever was written before the bad byte carries no raw control byte.
+		ASSERT(out.find('\x01') == std::string::npos);
+	}
+	{
+		// The element path reports the same byte with the same message.
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace("a", asvJSONValue::makeString("x\x01""y", 3));
+		bool threw = false;
+		try {
+			j.toSVG();
+		} catch (const asvJSONError& e) {
+			threw = true;
+			ASSERT(std::string(e.what()).find("U+0001") != std::string::npos);
+		}
+		ASSERT(threw);
+	}
+
+	// 2. Non-finite values in an ARRAY attribute: the item is skipped; an array
+	// where nothing survives still emits the attribute, with an EMPTY value
+	// (the list itself is present), unlike a SCALAR NaN attribute, which is
+	// omitted entirely.
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"rect":{}})"));
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeDouble(nan));
+		j.getRoot()->get("rect")->obj->emplace("@coords", std::move(arr));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<rect coords=\"\"/>") != std::string::npos);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"rect":{}})"));
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(asvJSONValue::makeDouble(1.5));
+		arr->arr->push_back(asvJSONValue::makeDouble(nan));
+		arr->arr->push_back(asvJSONValue::makeDouble(2.5));
+		j.getRoot()->get("rect")->obj->emplace("@coords", std::move(arr));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("coords=\"1.5 2.5\"") != std::string::npos);
+		ASSERT(svg.find("nan") == std::string::npos);
+	}
+	{
+		// Empty array attribute: same empty-value spelling as the all-NaN one.
+		asvJSON j;
+		ASSERT(j.parse(R"({"rect":{"@coords":[]}})"));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<rect coords=\"\"/>") != std::string::npos);
+	}
+	{
+		// Scalar NaN attribute: no spelling -> omitted entirely.
+		asvJSON j;
+		ASSERT(j.parse(R"({"rect":{}})"));
+		j.getRoot()->get("rect")->obj->emplace("@x", asvJSONValue::makeDouble(nan));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<rect/>") != std::string::npos);
+		ASSERT(svg.find("nan") == std::string::npos);
+	}
+
+	// 3. Root-level "@name" keys are child elements of the synthesized <svg>
+	// wrapper (documented); attributes come from '@' keys of the object that IS
+	// the element. Pin both spellings so neither drifts silently.
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"@x":1,"y":2})"));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<_x>1</_x>") != std::string::npos);
+		ASSERT(svg.find("<y>2</y>") != std::string::npos);
+		ASSERT(svg.find("<svg x=") == std::string::npos);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.parse(R"({"svg":{"@x":1}})"));
+		std::string svg = j.toSVG();
+		ASSERT(svg.find("<svg x=\"1\"/>") != std::string::npos);
+	}
+}
+
 TEST(testToYAML) {
 	// Empty root
 	{
@@ -37059,6 +37175,7 @@ RUN(testCBORFloat16);
 	RUN(testToSVG);
 	RUN(testFromSVG);
 	RUN(testSVGReviewFixes);
+	RUN(testSVGEncoderEdges);
 
 	std::cout << "\n--- YAML Serialization Tests ---\n";
 	RUN(testToYAML);
