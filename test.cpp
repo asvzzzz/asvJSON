@@ -24666,6 +24666,77 @@ TEST(testJavaPropReviewFixes) {
     ASSERT(k.get("d")->type == asvJSONValue::DOUBLE);
     ASSERT(k.get("t")->type == asvJSONValue::DATETIME);
   }
+  // 8. The encoder writes non-Latin characters as raw UTF-8 bytes (only C0/DEL
+  //    are escaped via \uXXXX). The loader also reads UTF-8, so a self round-trip
+  //    preserves the tree; but a JDK `store` file expects ISO-8859-1 and would
+  //    misread those bytes (the JDK writer escapes non-Latin chars as \uXXXX).
+  {
+    asvJSON j;
+    ASSERT(j.parse(R"({"k":"café","k2":"Привет"})"));
+    std::string out = j.toJavaProp();
+    // é = U+00E9 -> C3 A9, Привет starts with Cyrillic P (U+041F) -> D0 9F.
+    ASSERT(out.find("\xC3\xA9") != std::string::npos);
+    ASSERT(out.find("\xD0\x9F") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromJavaProp(out));
+    ASSERT_EQ(std::string(k.getString("k")), std::string("café"));
+    ASSERT_EQ(std::string(k.getString("k2")), std::string("Привет"));
+  }
+  // 9. A comment whose text contains '\n' is emitted as one `#` line per physical
+  //    line, so it re-reads as several separate Comment entries rather than one
+  //    multi-line comment — the single-comment-to-multiple-comments loss mirrors
+  //    what INI/dotenv do with trailing comment text.
+  {
+    asvJSON j;
+    ASSERT(j.fromJavaProp("a=1\nb=2\n"));
+    auto c = std::unique_ptr<Comments>(new Comments());
+    c->trailing.push_back(Comment{"line1\nline2"});
+    j.getRoot()->get("a")->comments = std::move(c);
+    std::string out = j.toJavaProp();
+    ASSERT(out.find("# line1\n") != std::string::npos);
+    ASSERT(out.find("# line2\n") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromJavaProp(out));
+    auto* blead = k.getRoot()->get("b")->comments.get();
+    ASSERT(blead != nullptr);
+    ASSERT_EQ(blead->leading.size(), size_t(2));
+    ASSERT(std::string(blead->leading[0].text) == "line1");
+    ASSERT(std::string(blead->leading[1].text) == "line2");
+  }
+  // 10. Bare values accept a leading `+` for int/double (shared with INI/dotenv/
+  //     CSV); +05 stays STRING because the leading-zero guard fires after the
+  //     sign, and plain "+" is just text. NaN's sign bit is lost on encode (`-nan`)
+  //     while -Infinity keeps its negative sign — this mirrors INI/dotenv/plist.
+  {
+    const char* cases[] = {"+5", "-5", "+3.14", "+05", "+0x10", "+"};
+    for (const char* v : cases) {
+      asvJSON j;
+      ASSERT(j.fromJavaProp(std::string("k=") + v + "\n"));
+      auto* val = j.getRoot()->get("k");
+      if (std::string(v) == "+5" || std::string(v) == "-5")
+        ASSERT_EQ(val->type, asvJSONValue::INT);
+      else if (std::string(v) == "+3.14")
+        ASSERT_EQ(val->type, asvJSONValue::DOUBLE);
+      else
+        ASSERT_EQ(val->type, asvJSONValue::STRING);
+    }
+    // NaN sign: encoder always writes `nan`; strtod reads back positive.
+    {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      const double negnan = -nan;
+      asvJSON j;
+      ASSERT(j.parse(std::string("{}")));
+      j.getRoot()->obj->emplace("p", asvJSONValue::makeDouble(nan));
+      j.getRoot()->obj->emplace("n", asvJSONValue::makeDouble(negnan));
+      std::string out = j.toJavaProp();
+      ASSERT(out.find("p=nan\n") != std::string::npos);
+      ASSERT(out.find("n=nan\n") != std::string::npos);
+      asvJSON k;
+      ASSERT(k.fromJavaProp(out));
+      ASSERT(std::isnan(k.getDouble("p")));
+      ASSERT(std::isnan(k.getDouble("n")) && !std::signbit(k.getDouble("n")));
+    }
+  }
 }
 
 TEST(testFromPlist) {
