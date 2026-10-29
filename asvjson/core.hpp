@@ -3537,6 +3537,11 @@ inline std::string asvJSON::toXML() const {
 //   - single key "svg": emits directly - no double-wrap.
 //   - single non-"svg" key: wraps in <svg> to guarantee a single XML root.
 //   - multi-key root: wraps in <svg> to avoid multiple root elements (invalid XML).
+//     A root-level "@name" key is an ordinary child element of that wrapper
+//     ({"@x":1,"y":2} -> <svg ...><_x>1</_x><y>2</y></svg>), NOT an attribute of
+//     the wrapper: attributes are '@' keys of an object that is itself an element
+//     ({"svg":{"@x":1}} -> <svg x="1"/>). The wrapper is synthesized, so it takes
+//     no data-driven attributes.
 //   - empty-string key (""): renders as <element> (fallback name, not valid SVG).
 //   - Element names go through xmlSanitizeElementName, so a key the XML name
 //     grammar forbids ("k[0]", "a b", "&a", "@x") cannot produce un-parseable
