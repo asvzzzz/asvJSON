@@ -22,6 +22,10 @@
 // formally allows (`=value`), are rejected on BOTH sides: fromJavaProp() and
 // toJavaProp() each throw "javaprop: empty key", because the object store
 // cannot hold a nameless member and a parsed one could not be re-emitted.
+// Bare values accept a leading `+` as well (e.g. `+5` -> INT 5, `+3.14` -> DOUBLE);
+// the plain JSON grammar rejects a leading sign, and the JDK does not type at all,
+// but this library's bare-value inference follows the same lenient convention as
+// INI/dotenv/CSV -- the sign is part of the number token for strtod/from_chars.
 // Comments are preserved via the shared `Comments` metadata (leading, trailing,
 // footing) and re-emitted by toJavaProp(). The MARKUP normalizes, though: the
 // loader strips exactly one space after the marker, and the encoder always
@@ -49,11 +53,23 @@
 //     (`\u0035` decodes to `5` and is then typed INT), so the STRING-ness is
 //     unrecoverable. INI/dotenv avoid this with a quoted form; here it is a
 //     documented loss, like CSV/TOML.
+//   - the encoder writes non-Latin characters as raw UTF-8 bytes (only C0/DEL are
+//     escaped via `\uXXXX`); the loader reads those same bytes back as UTF-8 so a
+//     self round-trip is fine, but a JDK `store()` file expects ISO-8859-1 and will
+//     misread bytes >= 0x80 (the JDK writer escapes non-Latin characters as `\uXXXX`).
+//   - a comment whose text contains `\n` is emitted as one `#` line per physical
+//     line, so it re-reads as several separate Comment entries rather than one
+//     multi-line comment -- the single-comment-to-multiple-comments loss mirrors
+//     what INI/dotenv do with trailing comment text.
 // DATETIME is not lossy: it is written in ISO form and tryParseDateTime() gives
 // the type back on load. INT/DOUBLE/BOOL/NULL keep their inferred types (a
 // finite double whose fmtDoubleVal literal carries no '.', 'e' or 'E' gets a
-// ".0" suffix so it re-loads as DOUBLE, not INT; NaN/Infinity/-Infinity are
-// written bare as `nan`/`inf`/`-inf`, which strtod reads whole). One exception:
+// ".0" suffix so it re-loads as DOUBLE, not INT; NaN is written as the bare token
+// `nan` with no sign bit preserved -- `-NaN` decodes back as positive NaN, while
+// only `-Infinity` keeps its negative sign. This spelling (`nan`/`inf`/`-inf`)
+// matches the INI/dotenv/plist convention; the guard against stamping ".0" on top
+// (`nan.0`) is needed for both the strtod fallback and the `std::from_chars` fast
+// path, since from_chars stops at the first non-digit after `nan`). One exception:
 // a timestamp gmtimeSafe cannot convert to UTC (e.g. before 1970 or beyond the
 // platform's range) renders as the bare text `null` via fmtDateTimeVal and
 // loads back as NULL -- the type is lost there.
@@ -354,9 +370,12 @@ inline void javapropFormatVal(const asvJSONValue* v, std::string& out) {
     case T::DOUBLE: {
       // NaN/Infinity must be written bare: fmtDoubleVal renders them as
       // "nan"/"inf"/"-inf" (no '.', 'e' or 'E'), and stamping the ".0" suffix
-      // on top would produce "nan.0" that strtod only partially consumes (it
-      // reads "nan" and stops at the '.'), so the full-string check in
-      // javapropParseVal fails on load and the double degrades to a STRING.
+      // on top would produce "nan.0". strtod stops at the first non-digit after
+      // "nan", and std::from_chars (the fast path on C++17 toolchains with
+      // libc++/libstdc++ >= 11) also rejects it -- both paths leave the full
+      // string check failing, so the value would degrade to STRING. Note: NaN's
+      // sign bit is lost here (always `nan`, never `-nan`), matching the INI /
+      // dotenv / plist convention; only -Infinity preserves its negative sign.
       if (std::isnan(v->dbl)) { out += "nan"; break; }
       if (std::isinf(v->dbl)) { out += (v->dbl < 0 ? "-inf" : "inf"); break; }
       std::string tmp;
