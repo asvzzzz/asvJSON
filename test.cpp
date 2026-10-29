@@ -18743,6 +18743,59 @@ TEST(testToRON) {
     std::string s = j3.toRON(false);
     ASSERT_EQ(s, "(r:3..=7)");
   }
+  // Lone surrogate in braced \u escape must be rejected (ron.hpp fix: surrogate check).
+  // \u{D800} and \u{DFFF} are lone surrogates, not valid Unicode code points.
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("\"\\u{D800}\"")));
+    ASSERT(j.getLastError().find("invalid") != std::string::npos);
+    ASSERT(!j.fromRON(std::string_view("\"\\u{DFFF}\"")));
+    ASSERT(j.getLastError().find("invalid") != std::string::npos);
+    // Non-brace \uD800 is already rejected (separate code path).
+    ASSERT(!j.fromRON(std::string_view("\"\\uD800\"")));
+    // Valid emoji still works.
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view("\"normal \\u{1F600}\"")));
+    ASSERT_EQ(std::string(j2.getRoot()->getString()), std::string("normal ") + "\xF0\x9F\x98\x80");
+  }
+  // Char literal with lone surrogate must be rejected.
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("'\\u{D800}'")));
+    ASSERT(j.getLastError().find("invalid") != std::string::npos);
+  }
+  // Comment inside compound map key must be rejected, not silently dropped.
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{[/* c */1,2]: 3}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    // Plain string keys with comments still work (comments are allowed there).
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view("{\"a\": 1}")));
+    ASSERT_EQ(j2.getInt("a"), int64_t(1));
+  }
+  // Pretty array closing indent: ] must be indented even when closing comments exist.
+  // Use a non-ident key ("a b") to force map form [{...}] so the array emits [...] not (...).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"a b":[1]})")));
+    auto* arr = j.getRoot()->get("a b");
+    arr->comments = std::unique_ptr<Comments>(new Comments());
+    arr->comments->closing.push_back(Comment{"note", true});
+    std::string s = j.toRON(true);
+    // The ] must appear after indentation, not at column 0.
+    size_t pos = s.find(']');
+    ASSERT(pos != std::string::npos);
+    size_t col = pos;
+    while (col > 0 && s[col - 1] == ' ') --col;
+    size_t indent = pos - col; // number of spaces before ]
+    ASSERT_EQ(indent, size_t(2)); // depth 1 -> indent 2 spaces (array inside root map)
+    // Round-trip must preserve the comment.
+    asvJSON j2;
+    ASSERT(j2.fromRON(std::string_view(s)));
+    ASSERT(j2.getRoot()->get("a b")->comments != nullptr);
+    ASSERT_EQ(j2.getRoot()->get("a b")->comments->closing.size(), size_t(1));
+  }
 }
 
 TEST(testRONComments) {
