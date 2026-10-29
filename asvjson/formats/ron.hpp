@@ -398,7 +398,8 @@ struct RonParser {
                 throw asvJSONError("RON: invalid \\u{...} escape");
               unsigned long cp = 0;
               for (size_t k = hs; k < he; k++) cp = (cp << 4) | static_cast<unsigned long>(ronHexVal(in[k]));
-              if (cp > 0x10FFFF) throw asvJSONError("RON: invalid \\u{...} escape");
+              if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+                throw asvJSONError("RON: invalid \\u{...} escape");
               ronAppendUtf8(s, cp);
               i = he + 1;
               break;
@@ -493,7 +494,8 @@ struct RonParser {
               throw asvJSONError("RON: invalid \\u{...} char escape");
             unsigned long cp = 0;
             for (size_t k = hs; k < he; k++) cp = (cp << 4) | static_cast<unsigned long>(ronHexVal(in[k]));
-            if (cp > 0x10FFFF) throw asvJSONError("RON: invalid \\u{...} char escape");
+            if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+               throw asvJSONError("RON: invalid \\u{...} char escape");
             ronAppendUtf8(ch, cp);
             i = he + 1;
           } else {
@@ -950,6 +952,7 @@ struct RonParser {
     while (true) {
       skipWs();
       if (i >= in.size()) throw asvJSONError("RON: unterminated map");
+      size_t commentSnapshot = comments.size();
       std::string keyText = parseValue(depth + 1, ronJoinPath(path, "(KEY)"), false);
       std::string key;
       if (keyText.size() >= 2 && keyText[0] == '"') {
@@ -977,6 +980,10 @@ struct RonParser {
         childPath = ronJoinPath(path, rawKey);
       } else {
         childPath = ronJoinPath(path, keyText);
+      }
+      if (keyText.empty() || keyText[0] != '"') {
+        size_t newComments = comments.size() - commentSnapshot;
+        if (newComments > 0) throw asvJSONError("RON: comment inside compound map key");
       }
       skipWs();
       if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after map key");
@@ -1452,11 +1459,11 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           i++;
         }
       }
+      ronEmitClosing(out, v, depth, pretty);
       if (pretty && (v->arr && !v->arr->empty())) {
         if (out.back() != '\n') out += '\n';
         ronIndent(out, depth);
       }
-      ronEmitClosing(out, v, depth, pretty);
       out += ']';
       break;
     }
