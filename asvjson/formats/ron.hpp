@@ -947,7 +947,7 @@ struct RonParser {
     ++i; // '{'
     std::string out = "{";
     skipWs();
-    if (i < in.size() && in[i] == '}') { commitClosing(path); ++i; out += '}'; return out; }
+    if (i < in.size() && in[i] == '}') { if (commit) commitClosing(path); ++i; out += '}'; return out; }
     bool first = true;
     while (true) {
       size_t leadSnap = pendLead.size();
@@ -1008,10 +1008,10 @@ struct RonParser {
         ++i;
         skipWs();
         commitTrail(childPath);
-        if (i < in.size() && in[i] == '}') { commitClosing(path); ++i; out += '}'; return out; } // trailing comma
+        if (i < in.size() && in[i] == '}') { if (commit) commitClosing(path); ++i; out += '}'; return out; } // trailing comma
         continue;
       }
-      if (i < in.size() && in[i] == '}') { commitClosing(path); ++i; out += '}'; return out; }
+      if (i < in.size() && in[i] == '}') { if (commit) commitClosing(path); ++i; out += '}'; return out; }
       throw asvJSONError("RON: expected ',' or '}'");
     }
   }

@@ -18775,10 +18775,23 @@ TEST(testToRON) {
     ASSERT_EQ(j2.getInt("a"), int64_t(1));
   }
   // Outer lead comment before compound key is OK (belongs to the key, not inside it).
+  // Same-line comment after '{' goes to pendTrail — also OK (not inside the key).
   {
     asvJSON j;
-    ASSERT(j.fromRON(std::string_view("{/* own-line */\n[1,2]: 3}")));
+    ASSERT(j.fromRON(std::string_view("{/* same-line */\n[1,2]: 3}")));
     ASSERT_EQ(j.getInt("[1,2]"), int64_t(3));
+  }
+  // True own-line comment (on its own line after '{') goes to pendLead — also OK.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{\n/* own-line */\n[1,2]: 3}")));
+    ASSERT_EQ(j.getInt("[1,2]"), int64_t(3));
+  }
+  // Empty-map compound key with inner comment must be rejected.
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{{/* c */}: 3}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
   }
   // Comment between compound key and ':' must also be rejected.
   {
