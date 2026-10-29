@@ -862,7 +862,7 @@ struct RonParser {
     bool isStruct = ronGroupIsStruct();
     std::string out = isStruct ? "{" : "[";
     skipWs();
-    if (i < in.size() && in[i] == ')') { commitClosing(path); ++i; return "{}"; } // empty group -> empty object
+    if (i < in.size() && in[i] == ')') { if (commit) commitClosing(path); ++i; return "{}"; } // empty group -> empty object
     bool first = true;
     size_t seqIdx = 0;
     while (true) {
@@ -886,7 +886,7 @@ struct RonParser {
         out += val;
       } else {
         childPath = ronJoinPath(path, "[" + std::to_string(seqIdx) + "]");
-        commitLead(childPath);
+        if (commit) commitLead(childPath);
         std::string val = parseValue(depth + 1, childPath, commit);
         ++seqIdx;
         if (!first) out += ',';
@@ -894,18 +894,18 @@ struct RonParser {
         out += val;
       }
       skipWs();
-      commitTrail(childPath);
+      if (commit) commitTrail(childPath);
       if (i < in.size() && in[i] == ',') {
         ++i;
         skipWs();
         // A same-line comment after a separator is trailing of the entry that
         // just ended (skipWsFrom put it in pendTrail); a comment on its own
         // line stays in pendLead and will lead the following entry.
-        commitTrail(childPath);
-        if (i < in.size() && in[i] == ')') { commitClosing(path); ++i; out += isStruct ? '}' : ']'; return out; } // trailing comma
+        if (commit) commitTrail(childPath);
+        if (i < in.size() && in[i] == ')') { if (commit) commitClosing(path); ++i; out += isStruct ? '}' : ']'; return out; } // trailing comma
         continue;
       }
-      if (i < in.size() && in[i] == ')') { commitClosing(path); ++i; out += isStruct ? '}' : ']'; return out; }
+      if (i < in.size() && in[i] == ')') { if (commit) commitClosing(path); ++i; out += isStruct ? '}' : ']'; return out; }
       throw asvJSONError("RON: expected ',' or ')'");
     }
   }
@@ -915,29 +915,29 @@ struct RonParser {
     ++i; // '['
     std::string out = "[";
     skipWs();
-    if (i < in.size() && in[i] == ']') { commitClosing(path); ++i; out += ']'; return out; }
+    if (i < in.size() && in[i] == ']') { if (commit) commitClosing(path); ++i; out += ']'; return out; }
     bool first = true;
     size_t idx = 0;
     while (true) {
       skipWs();
       if (i >= in.size()) throw asvJSONError("RON: unterminated list");
       std::string childPath = ronJoinPath(path, "[" + std::to_string(idx) + "]");
-      commitLead(childPath);
+      if (commit) commitLead(childPath);
       std::string val = parseValue(depth + 1, childPath, commit);
       ++idx;
       if (!first) out += ',';
       first = false;
       out += val;
       skipWs();
-      commitTrail(childPath);
+      if (commit) commitTrail(childPath);
       if (i < in.size() && in[i] == ',') {
         ++i;
         skipWs();
-        commitTrail(childPath);
-        if (i < in.size() && in[i] == ']') { commitClosing(path); ++i; out += ']'; return out; } // trailing comma
+        if (commit) commitTrail(childPath);
+        if (i < in.size() && in[i] == ']') { if (commit) commitClosing(path); ++i; out += ']'; return out; } // trailing comma
         continue;
       }
-      if (i < in.size() && in[i] == ']') { commitClosing(path); ++i; out += ']'; return out; }
+      if (i < in.size() && in[i] == ']') { if (commit) commitClosing(path); ++i; out += ']'; return out; }
       throw asvJSONError("RON: expected ',' or ']'");
     }
   }
@@ -950,9 +950,10 @@ struct RonParser {
     if (i < in.size() && in[i] == '}') { commitClosing(path); ++i; out += '}'; return out; }
     bool first = true;
     while (true) {
+      size_t leadSnap = pendLead.size();
+      size_t trailSnap = pendTrail.size();
       skipWs();
       if (i >= in.size()) throw asvJSONError("RON: unterminated map");
-      size_t commentSnapshot = comments.size();
       std::string keyText = parseValue(depth + 1, ronJoinPath(path, "(KEY)"), false);
       std::string key;
       if (keyText.size() >= 2 && keyText[0] == '"') {
@@ -982,10 +983,15 @@ struct RonParser {
         childPath = ronJoinPath(path, keyText);
       }
       if (keyText.empty() || keyText[0] != '"') {
-        size_t newComments = comments.size() - commentSnapshot;
-        if (newComments > 0) throw asvJSONError("RON: comment inside compound map key");
+        size_t newLead = pendLead.size() - leadSnap;
+        size_t newTrail = pendTrail.size() - trailSnap;
+        if (newLead > 0 || newTrail > 0) throw asvJSONError("RON: comment inside compound map key");
       }
       skipWs();
+      if (keyText.empty() || keyText[0] != '"') {
+        size_t newTrail2 = pendTrail.size() - trailSnap;
+        if (newTrail2 > 0) throw asvJSONError("RON: comment inside compound map key");
+      }
       if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after map key");
       ++i;
       skipWs();

@@ -18774,6 +18774,18 @@ TEST(testToRON) {
     ASSERT(j2.fromRON(std::string_view("{\"a\": 1}")));
     ASSERT_EQ(j2.getInt("a"), int64_t(1));
   }
+  // Outer lead comment before compound key is OK (belongs to the key, not inside it).
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{/* own-line */\n[1,2]: 3}")));
+    ASSERT_EQ(j.getInt("[1,2]"), int64_t(3));
+  }
+  // Comment between compound key and ':' must also be rejected.
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{[1,2] /* c */: 3}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+  }
   // Pretty array closing indent: ] must be indented even when closing comments exist.
   // Use a non-ident key ("a b") to force map form [{...}] so the array emits [...] not (...).
   {
