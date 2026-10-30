@@ -804,7 +804,7 @@ struct RonParser {
           // in the Some(<value>) branch below: commitClosing turned an own-line
           // comment into a "closing" comment, and closing comments are only
           // emitted for containers, so `Some(\n // C\n)` dropped it entirely.
-          commitValueLead(path);
+          if (commit) commitValueLead(path);
           ++i;
           return "null";
         }
@@ -814,7 +814,7 @@ struct RonParser {
         // left it pending, and the inner parseValue/outer container would
         // otherwise commit it under their own path -- duplicating it or pushing
         // it out to the root.
-        commitValueLead(path);
+        if (commit) commitValueLead(path);
         std::string inner = parseValue(depth + 1, path, commit);
         skipWs();
         if (i >= in.size() || in[i] != ')') throw asvJSONError("RON: expected ')' after Some(<value>)");
@@ -877,7 +877,7 @@ struct RonParser {
          if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after field name");
          ++i;
          skipWs();
-         commitValueLead(childPath);
+         if (commit) commitValueLead(childPath);
          std::string val = parseValue(depth + 1, childPath, commit);
         if (!first) out += ',';
         first = false;
@@ -995,7 +995,7 @@ struct RonParser {
       if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after map key");
       ++i;
       skipWs();
-      commitValueLead(childPath);
+      if (commit) commitValueLead(childPath);
       std::string val = parseValue(depth + 1, childPath, commit);
       if (!first) out += ',';
       first = false;
@@ -1003,11 +1003,11 @@ struct RonParser {
       out += ':';
       out += val;
       skipWs();
-      commitTrail(childPath);
+      if (commit) commitTrail(childPath);
       if (i < in.size() && in[i] == ',') {
         ++i;
         skipWs();
-        commitTrail(childPath);
+        if (commit) commitTrail(childPath);
         if (i < in.size() && in[i] == '}') { if (commit) commitClosing(path); ++i; out += '}'; return out; } // trailing comma
         continue;
       }
