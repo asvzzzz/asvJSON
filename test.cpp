@@ -18793,6 +18793,30 @@ TEST(testToRON) {
     ASSERT(!j.fromRON(std::string_view("{{/* c */}: 3}")));
     ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
   }
+  // Struct-field compound key with inner comment (Gap A).
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{(a: /* c */ 1): 2}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+  }
+  // Map-field compound key with inner comment (Gap B).
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{{a: /* c */ 1}: 2}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+  }
+  // Comment after value in inner map key (Gap C).
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{{a: 1 /* c */}: 2}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+  }
+  // Some() with inner comment (Gap D).
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(std::string_view("{Some(/* c */ 5): 3}")));
+    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+  }
   // Comment between compound key and ':' must also be rejected.
   {
     asvJSON j;
