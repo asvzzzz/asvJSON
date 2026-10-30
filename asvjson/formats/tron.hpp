@@ -702,7 +702,7 @@ struct TronParseState {
 
 asvJSONValue* TronParseState::parseValue(int depth) {
   skipNewlines();
-  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
     throw asvJSONError("TRON: nesting too deep");
   auto& tok = peek();
   static const double tronNaN = std::numeric_limits<double>::quiet_NaN();
@@ -929,12 +929,14 @@ inline bool asvJSON::fromTRON(std::string_view input) {
       }
       state.classes[name] = {std::move(allProps)};
     }
-    // Parse root value
-    state.root = state.parseValue();
+    // Parse root value. Use a local unique_ptr so that if the trailing-token
+    // check throws, the parsed tree is still destroyed (state.root is a raw
+    // pointer and TronParseState has no destructor).
+    std::unique_ptr<asvJSONValue> parsedRoot(state.parseValue());
     state.skipNewlines();
     if (state.peek().type != TronTokType::END)
       throw asvJSONError("trailing tokens after root value");
-    root.reset(state.root);
+    root.reset(parsedRoot.release());
     formatType = FormatType::TRON;
     return true;
   } catch (const asvJSONError& e) {

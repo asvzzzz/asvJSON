@@ -18280,6 +18280,34 @@ TEST(testTRONReviewFixes) {
     ASSERT(j.parse(std::string_view(R"([{"a":1,"b":2},{"a":3,"b":4}])")));
     ASSERT(j.toTRON().find("class ") != std::string::npos);
   }
+  // 4. Trailing tokens after root value must not leak the parsed tree.
+  // Pre-fix: state.root (raw pointer) was assigned before the check, so a
+  // throw at "trailing tokens" left the parsed tree never reset -> leak.
+  // Post-fix: a local unique_ptr owns the result until root.reset() runs.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTRON(std::string_view(R"(1 2)")));
+    ASSERT(j.getLastError().find("trailing tokens") != std::string::npos);
+  }
+  // 5. Depth boundary: TRON now uses depth > MAX (same as sexpr), so a tree
+  // built at MAX-1 nesting levels round-trips through TRON.
+  {
+    asvJSON a;
+    ASSERT(a.parse(std::string_view("[]")));
+    auto* cur = a.getRoot();
+    cur->arr->push_back(asvJSONValue::makeInt(42));
+    for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1; i++) {
+      auto nxt = asvJSONValue::makeArray();
+      nxt->arr->push_back(std::move(cur->arr->back()));
+      cur->arr->clear();
+      cur->arr->push_back(std::move(nxt));
+      cur = cur->arr->back().get();
+    }
+    std::string s = a.toTRON();
+    asvJSON b;
+    ASSERT(b.fromTRON(std::string_view(s)));
+    ASSERT_EQ(b.serialize(), a.serialize());
+  }
 }
 
 
