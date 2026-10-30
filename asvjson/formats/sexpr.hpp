@@ -143,14 +143,19 @@ inline std::vector<SexprToken> sexprTokenize(std::string_view input) {
                 }
               };
               // Preserve an un-decodable escape verbatim (backslash included),
-              // advancing only over the digits we actually copied.
+              // advancing only over the hex digits we actually copied. Stop on
+              // the first non-hex character (including '"') so a truncated
+              // "\u12" or "\u00" does not swallow the closing quote and turn
+              // "unclosed string" into a different error.
               auto emitLiteral = [&]() -> size_t {
                 size_t copied = 0;
                 s += '\\'; s += isUpper ? 'U' : 'u';
                 for (int q = 0; q < count; q++) {
                   size_t p = i + 1 + static_cast<size_t>(q);
                   if (p >= input.size()) break;
-                  s += input[p];
+                  char c = input[p];
+                  if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) break;
+                  s += c;
                   copied++;
                 }
                 return copied;
@@ -407,11 +412,10 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
   // Fallback: if first item is a bare symbol key, emit {key: values}.
   // A quoted string in first position is data, not a key -- odd-length
   // groups are always lists, so ("a" "b" "c") stays an array.
-  if (!forceArray && !isObj && items.size() >= 2 && itemTypes[0] == SEXPR_SYMBOL) {
+  // Note: items.size() == 2 with itemTypes[0] == SEXPR_SYMBOL is already
+  // handled above (isObj = true), so the size==2 branch here is unreachable.
+  if (!forceArray && !isObj && items.size() >= 3 && itemTypes[0] == SEXPR_SYMBOL) {
     std::string key = items[0];
-    if (items.size() == 2) {
-      return '{' + key + ':' + valueJson(1) + '}';
-    }
     // Check if all remaining items are objects -- merge into single object
     bool allObj = true;
     for (size_t j = 1; j < items.size(); j++) {

@@ -17390,6 +17390,33 @@ TEST(testSexprReviewFixes) {
     asvJSON b;
     ASSERT(!b.fromSexpr(std::string_view(s)));
   }
+  // emitLiteral must not swallow the closing quote on a truncated \u escape.
+  // Pre-fix: "\u12" copied '1','2','"' into the literal, consuming the quote
+  // and turning the input into an "unclosed string". Post-fix stops on the
+  // first non-hex character ('"') so the quote stays intact and the rest of
+  // the text becomes a separate token.
+  {
+    // "\u12" followed by closing quote: pre-fix swallowed '"', post-fix does not.
+    std::string bad = R"(("abc\u12"def))";
+    asvJSON j;
+    ASSERT(j.fromSexpr(std::string_view(bad)));
+    // Quote preserved -> two separate strings, NOT "unclosed string".
+    ASSERT_EQ(j.getLastError(), "");
+    auto* arr = j.getRoot()->arr.get();
+    ASSERT_EQ(arr->size(), size_t(2));
+    ASSERT_EQ(arr->at(0)->str_data, "abc\\u12");
+    ASSERT_EQ(arr->at(1)->str_data, "def");
+  }
+  // A truncated \U with fewer than 8 hex digits must also stop at the first
+  // non-hex character instead of consuming arbitrary bytes.
+  {
+    std::string bad2 = R"(("abc\u12Gworld"))";
+    asvJSON j2;
+    ASSERT(j2.fromSexpr(std::string_view(bad2)));
+    auto* arr2 = j2.getRoot()->arr.get();
+    ASSERT_EQ(arr2->size(), size_t(1));
+    ASSERT_EQ(arr2->at(0)->str_data, "abc\\u12Gworld");
+  }
 }
 
 TEST(testTOONSpecialTypes) {
