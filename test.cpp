@@ -31063,6 +31063,80 @@ TEST(testJSONPathSpecFixes) {
 	}
 }
 
+// B1 fix: query() must rollback partial results when a filter contains a syntax
+// error (syntax that isValidPath rejects). Previously parseNot returned false on
+// double-NOT and negate+sawCmp without distinguishing from semantic non-match,
+// so jpExpandBracket could not roll back. The fix adds syntaxError_ +
+// hasSyntaxError() to JPFilterEval and checks it after evaluate().
+TEST(testJSONPathSyntaxErrorRollback) {
+	// Case A: malformed filter `?!@.a == 5` — negate followed by comparison-op
+	// is not a basic-expr per RFC 9535 §2.3.5.2.3, isValidPath rejects it.
+	// Pre-fix: parseNot returned false without flag, parser consumed to ']',
+	// filterEnd = RBRACKET → no rollback, selector 0 (value 10) survived.
+	// Post-fix: syntaxError_ set → rollback → empty result.
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10, 20])")));
+		ASSERT(!asvJSON::isValidPath("$[0, ?!@.a == 5]"));
+		auto r = doc.query("$[0, ?!@.a == 5]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+
+	// Case B: malformed filter "saved" by `||` — `?!@.a == 5 || @.b` on an object
+	// that has a truthy @.b. Pre-fix: parseNot returned false, || consumed and
+	// parsed @.b → true, evaluate() = true, result kept. Post-fix:
+	// !syntaxError_ gates the OR loop → position stays before || → rollback.
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":2}])")));
+		ASSERT(!asvJSON::isValidPath("$[?!@.a == 5 || @.b]"));
+		auto r = doc.query("$[?!@.a == 5 || @.b]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+
+	// Case C: double NOT `?!!@.a` — second ! in the same position is a syntax
+	// error per RFC 9535. Pre-fix: parseNot returned false after second !,
+	// position at @ (not consumed), filterEnd = @ → rollback via pre-existing
+	// filterEnd check. Post-fix: also caught by syntaxError_ flag — same result,
+	// tests the double-NOT branch of parseNot specifically.
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([1, 2])")));
+		ASSERT(!asvJSON::isValidPath("$[0, ?!!@.a]"));
+		auto r = doc.query("$[0, ?!!@.a]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+
+	// Case D: malformed filter "saved" by `&&` — same mechanism as Case B but
+	// with AND. Pre-fix would have the same bug if parseAnd consumed && and
+	// parsed the next term; post-fix gates AND loop too.
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":2}])")));
+		ASSERT(!asvJSON::isValidPath("$[?!@.a == 5 && @.b]"));
+		auto r = doc.query("$[?!@.a == 5 && @.b]");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+
+	// Sanity: a VALID filter still works normally (no rollback).
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([{"a":5},{"a":3}])")));
+		ASSERT(asvJSON::isValidPath("$[?@.a == 5]"));
+		auto r = doc.query("$[?@.a == 5]");
+		ASSERT_EQ(r.size(), size_t(1));
+	}
+
+	// Sanity: a malformed selector with trailing garbage still rolls back (old
+	// behaviour, confirmed regression-free).
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view(R"([10, 20])")));
+		auto r = doc.query("$[0, @.a)");
+		ASSERT_EQ(r.size(), size_t(0));
+	}
+}
+
 TEST(testJsonSax) {
 	// -- basic object --
 	{
@@ -37600,6 +37674,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testJSONPathExtras);
 	RUN(testJSONPathValidator);
 	RUN(testJSONPathSpecFixes);
+	RUN(testJSONPathSyntaxErrorRollback);
 
 	std::cout << "\n--- JSON SAX Parser Tests ---\n";
 	RUN(testJsonSax);
