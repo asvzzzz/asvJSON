@@ -31107,14 +31107,16 @@ TEST(testJSONPathSyntaxErrorRollback) {
 		ASSERT_EQ(r.size(), size_t(0));
 	}
 
-	// Case D: malformed filter "saved" by `&&` — same mechanism as Case B but
-	// with AND. Pre-fix would have the same bug if parseAnd consumed && and
-	// parsed the next term; post-fix gates AND loop too.
+	// Case D: malformed filter "saved" by `&& ... ||` — `?!@.a == 5 && @.b ||
+	// @.c`. Pre-fix: parseNot returns false (no flag), parseAnd sets l=false,
+	// then parseOr consumes || and evaluates @.c → true, so evaluate() = true
+	// and the object is kept (BUG). Post-fix: !syntaxError_ gates both && and
+	// || loops, position stays before &&, hasSyntaxError() triggers rollback.
 	{
 		asvJSON doc;
-		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":2}])")));
-		ASSERT(!asvJSON::isValidPath("$[?!@.a == 5 && @.b]"));
-		auto r = doc.query("$[?!@.a == 5 && @.b]");
+		ASSERT(doc.parse(std::string_view(R"([{"a":1,"b":2,"c":3}])")));
+		ASSERT(!asvJSON::isValidPath("$[?!@.a == 5 && @.b || @.c]"));
+		auto r = doc.query("$[?!@.a == 5 && @.b || @.c]");
 		ASSERT_EQ(r.size(), size_t(0));
 	}
 
