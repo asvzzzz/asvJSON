@@ -18768,7 +18768,7 @@ TEST(testToRON) {
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{[/* c */1,2]: 3}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
     // Plain string keys with comments still work (comments are allowed there).
     asvJSON j2;
     ASSERT(j2.fromRON(std::string_view("{\"a\": 1}")));
@@ -18791,37 +18791,37 @@ TEST(testToRON) {
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{{/* c */}: 3}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Struct-field compound key with inner comment (Gap A).
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{(a: /* c */ 1): 2}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Map-field compound key with inner comment (Gap B).
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{{a: /* c */ 1}: 2}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Comment after value in inner map key (Gap C).
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{{a: 1 /* c */}: 2}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Some() with inner comment (Gap D).
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{Some(/* c */ 5): 3}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Comment between compound key and ':' must also be rejected.
   {
     asvJSON j;
     ASSERT(!j.fromRON(std::string_view("{[1,2] /* c */: 3}")));
-    ASSERT(j.getLastError().find("comment inside compound map key") != std::string::npos);
+    ASSERT(j.getLastError().find("comment inside map key") != std::string::npos);
   }
   // Pretty array closing indent: ] must be indented even when closing comments exist.
   // Use a non-ident key ("a b") to force map form [{...}] so the array emits [...] not (...).

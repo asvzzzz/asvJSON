@@ -985,12 +985,12 @@ struct RonParser {
       if (keyText.empty() || keyText[0] != '"') {
         size_t newLead = pendLead.size() - leadSnap;
         size_t newTrail = pendTrail.size() - trailSnap;
-        if (newLead > 0 || newTrail > 0) throw asvJSONError("RON: comment inside compound map key");
+        if (newLead > 0 || newTrail > 0) throw asvJSONError("RON: comment inside map key");
       }
       skipWs();
       if (keyText.empty() || keyText[0] != '"') {
         size_t newTrail2 = pendTrail.size() - trailSnap;
-        if (newTrail2 > 0) throw asvJSONError("RON: comment inside compound map key");
+        if (newTrail2 > 0) throw asvJSONError("RON: comment inside map key");
       }
       if (i >= in.size() || in[i] != ':') throw asvJSONError("RON: expected ':' after map key");
       ++i;
