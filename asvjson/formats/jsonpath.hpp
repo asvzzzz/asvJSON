@@ -744,6 +744,7 @@ class JPFilterEval {
   std::vector<std::unique_ptr<asvJSONValue>> temp_vals_;
   bool lastOperandFromQuery_ = false;
   int filterDepth_ = 0;
+  bool syntaxError_ = false;
 
   const asvJSONValue* hold(std::unique_ptr<asvJSONValue> val) {
     // A literal node is owned for the duration of the evaluation; a null
@@ -768,7 +769,7 @@ class JPFilterEval {
 
   bool parseOr() {
     bool l = parseAnd();
-    while (lex_.peek().type == TokType::OR) {
+    while (lex_.peek().type == TokType::OR && !syntaxError_) {
       lex_.next();
       bool r = parseAnd();
       l = l || r;
@@ -778,7 +779,7 @@ class JPFilterEval {
 
   bool parseAnd() {
     bool l = parseNot();
-    while (lex_.peek().type == TokType::AND) {
+    while (lex_.peek().type == TokType::AND && !syntaxError_) {
       lex_.next();
       bool r = parseNot();
       l = l && r;
@@ -797,7 +798,7 @@ class JPFilterEval {
     bool negate = false;
     while (lex_.peek().type == TokType::NOT) {
       lex_.next();
-      if (negate) return false;
+      if (negate) { syntaxError_ = true; return false; }
       negate = true;
     }
     bool sawCmp = false;
@@ -805,7 +806,7 @@ class JPFilterEval {
     // logical-not-op binds a test-expr (or a paren-expr), and neither may be
     // followed by a comparison-op: `!@.a == 5` is not a basic-expr, so it must
     // not be evaluated as `!(@.a == 5)`. Kept in sync with the validator.
-    if (negate && sawCmp) return false;
+    if (negate && sawCmp) { syntaxError_ = true; return false; }
     return negate ? !r : r;
   }
 
@@ -1111,6 +1112,7 @@ public:
   JPFilterEval(PathLexer& lex, const asvJSONValue* cur, const asvJSONValue* root = nullptr)
     : lex_(lex), cur_(cur), root_(root) {}
   bool evaluate() { return parseOr(); }
+  bool hasSyntaxError() const { return syntaxError_; }
 };
 
 struct PathResult {
@@ -1286,7 +1288,9 @@ inline void jpExpandBracket(PathLexer& lex, const asvJSONValue* node,
       for (const asvJSONValue* child : children) {
         PathLexer filterLex(lex);
         JPFilterEval filterEval(filterLex, child, res.root);
-        if (filterEval.evaluate()) out.push_back(child);
+        bool matched = filterEval.evaluate();
+        if (filterEval.hasSyntaxError()) { closed = false; out.resize(before); return; }
+        if (matched) out.push_back(child);
         filterEnd = filterLex.peek();
         filterEndSet = true;
       }
