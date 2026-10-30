@@ -32947,6 +32947,27 @@ TEST(testSchemaAuditRegressions) {
 		ASSERT(v.validate(s, err));
 	}
 	rejectsWithSchemaError(R"("x")", R"({"format":5})");
+	// anyOf must not short-circuit oneOf / not / if — those are independent
+	// assertions per draft-07 §6.7. Before the fix anyOf matched and returned
+	// true, skipping everything below it.
+	{
+		// anyOf matches but oneOf has two matches -> must fail (oneOf).
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"anyOf":[{"type":"integer"}],"oneOf":[{"const":5},{"const":5}]})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("more than one schema in oneOf") != std::string::npos);
+	}
+	{
+		// anyOf matches but not rejects -> must fail (not).
+		asvJSON v, s;
+		ASSERT(v.parse("5"));
+		ASSERT(s.parse(R"({"anyOf":[{"type":"integer"}],"not":{"type":"integer"}})"));
+		std::string err;
+		ASSERT(!v.validate(s, err));
+		ASSERT(err.find("Matches the 'not' schema") != std::string::npos);
+	}
 }
 
 TEST(testSchemaRegexAndRefShapeFix) {

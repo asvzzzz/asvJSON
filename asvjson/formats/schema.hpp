@@ -1080,15 +1080,19 @@ private:
     if (schemaHas(schema, "anyOf")) {
       auto node = schemaGet(schema, "anyOf");
       if (node && node->type == asvJSONValue::ARRAY && node->arr) {
+        bool anyMatched = false;
         for (const auto& sub : *node->arr) {
           SchemaValidator subVal = makeFork();
-          if (subVal.validateNode(value, sub.get())) return true;
+          if (subVal.validateNode(value, sub.get())) { anyMatched = true; break; }
           // A malformed branch is not "this branch did not match" -- abort,
           // otherwise the schema error disappears behind the anyOf verdict.
           if (adoptShapeError(subVal)) return false;
         }
-        setError("Does not match any schema in anyOf");
-        return false;
+        if (!anyMatched) {
+          setError("Does not match any schema in anyOf");
+          return false;
+        }
+        // fall through to oneOf / not / if — these are independent assertions
       }
     }
 
