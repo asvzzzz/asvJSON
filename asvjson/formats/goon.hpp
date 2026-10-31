@@ -80,6 +80,9 @@
 namespace asvJSONInternal {
 
 inline constexpr size_t MAX_REPEAT_COUNT = 10000;
+// Cap on intermediate JSON output to prevent memory amplification from RLE /
+// tabular rows (a short GOON document can expand to gigabytes of JSON).
+inline constexpr size_t MAX_GOON_OUTPUT = 64u * 1024u * 1024u;
 
 class GoonDecodeError : public asvJSONError {
 public:
@@ -1010,7 +1013,7 @@ inline bool goonIsCompleteFlow(std::string_view s, char open, char close) {
 }
 
 // GOON -> JSON text converter (GOON decoder)
-inline std::string goonToJson(std::string_view input) {
+inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_OUTPUT) {
   auto lines = splitLines(input);
   if (lines.empty()) return "{}";
 
@@ -1092,6 +1095,14 @@ inline std::string goonToJson(std::string_view input) {
   std::string out;
   std::vector<FormatFrame> stack;
   int rootIndent = countIndent(lines[firstLine]);
+
+  // Guard against memory amplification: RLE / tabular rows can expand a short
+  // GOON document into gigabytes of intermediate JSON. Check after each major
+  // append in the hot loops so we reject before allocating unboundedly.
+  auto checkOut = [&](const char* ctx) {
+    if (maxOut != static_cast<size_t>(-1) && out.size() > maxOut)
+      throw GoonDecodeError(std::string("GOON: output exceeds ") + std::to_string(maxOut / 1024 / 1024) + " MB limit" + (ctx ? std::string(" at ") + ctx : ""));
+  };
 
   auto expandCell = [&](std::string_view raw) -> std::string {
     // A bare $N dictionary reference always denotes the dict *string* value,
@@ -1310,6 +1321,7 @@ inline std::string goonToJson(std::string_view input) {
 
   out = rootIsArr ? '[' : '{';
   stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true, 0, 0, {}, -1});
+  if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
 
   for (size_t li = firstLine; li < lines.size(); li++) {
     auto& line = lines[li];
@@ -1402,6 +1414,7 @@ inline std::string goonToJson(std::string_view input) {
             }
             out += '[';
             stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
+            if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
           }
           size_t afterColon = afterB + 1;
           while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
@@ -1534,7 +1547,12 @@ inline std::string goonToJson(std::string_view input) {
               std::vector<std::string> vals = rawVals;
               for (size_t fi = 0; fi < vals.size(); fi++)
                 vals[fi] = expandCell(vals[fi]);
-              while (vals.size() < fields.size()) { vals.push_back("null"); rawVals.push_back(""); }
+              // Pad vals (not rawVals) so missing trailing cells emit "null"
+              // without setting hasPrev — a bare ^ in a later row for that
+              // column must still error ("no previous value"), matching the
+              // pre-hoist behaviour where absent cells fell through to the
+              // else { out += "null"; } branch and left hasPrev untouched.
+              while (vals.size() < fields.size()) vals.push_back("null");
               for (int ri = 0; ri < repeat; ri++) {
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
@@ -1566,11 +1584,13 @@ inline std::string goonToJson(std::string_view input) {
                   }
                 }
                 out += '}';
+                checkOut("RLE row");
               }
             }
             if (lastRl > li) li = lastRl;
             if (!rootArr) {
               out += ']';
+              checkOut("tabular close");
               if (!stack.empty()) stack.pop_back();
             }
             continue;
@@ -1623,6 +1643,7 @@ inline std::string goonToJson(std::string_view input) {
             if (lastConsumedRl > li) li = lastConsumedRl;
             if (!rootArr) {
               out += ']';
+              checkOut("inline-list close");
               if (!stack.empty()) stack.pop_back();
             }
             continue;
@@ -1664,6 +1685,7 @@ inline std::string goonToJson(std::string_view input) {
             }
             if (!rootArr) {
               out += ']';
+              checkOut("deferred-list close");
               if (!stack.empty()) stack.pop_back();
             }
             continue;
@@ -1694,6 +1716,7 @@ inline std::string goonToJson(std::string_view input) {
       curFrame.first = false;
       out += '{';
       stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
+      if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
       continue;
     }
 
@@ -1722,6 +1745,7 @@ inline std::string goonToJson(std::string_view input) {
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
         stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
+        if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else if (valPart == "[]") {
@@ -1777,14 +1801,10 @@ inline bool asvJSON::fromGOON(std::string_view input) {
   // Security: reject inputs larger than 10 MB to prevent memory exhaustion.
   constexpr size_t MAX_GOON_INPUT = 10u * 1024u * 1024u;
   if (input.size() > MAX_GOON_INPUT) { lastError = "GOON input exceeds 10 MB limit"; return false; }
-  // Also cap intermediate JSON output to prevent memory amplification from
-  // RLE / tabular rows (a short GOON document can expand to gigabytes of JSON).
-  constexpr size_t MAX_GOON_OUTPUT = 64u * 1024u * 1024u;
   bool prevNaN = allowNaNInfinity;
   allowNaNInfinity = true;
   try {
     std::string json = goonToJson(input);
-    if (json.size() > MAX_GOON_OUTPUT) { lastError = "GOON output exceeds 64 MB limit"; return false; }
     bool ok = parse(std::string_view(json));
     allowNaNInfinity = prevNaN;
     if (ok) formatType = FormatType::GOON;
