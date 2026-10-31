@@ -556,6 +556,12 @@ inline bool toonQuoteLeftOpen(std::string_view s) {
   }
   return inQ;
 }
+// Known quirk: for an escaped-quote key like "a:b\": 1 the scan never sees a
+// closing quote, so toonQuoteLeftOpen returns true and the fallback find(':')
+// splits at the FIRST colon (position 2), yielding key="a" and value=b\": 1.
+// This is harmless for round-trip (the encoder never emits such keys) but
+// hand-written input with an unescaped ':' inside an unterminated quoted token
+// will silently truncate the key. Not a crash; documented as expected behaviour.
 // Note: this scans only quotes, not brackets -- a ':' inside an unquoted {a: 1}
 // value would be seen as unquoted. That is harmless because the FIRST unquoted
 // ':' is the separator, so for "key: {a: 1}" it lands right after "key" and the
@@ -668,7 +674,7 @@ inline std::string toonToJson(std::string_view input) {
 
     closeFrames(stack, out, indent);
     if (stack.empty()) break;
-    auto& curFrame = stack.back();   // captured before any push_back below; a later push may reallocate the vector and invalidate this reference.
+    FormatFrame* curFrame = &stack.back();   // pointer, not reference: safe to reassign after push_back.
 
     // array header: [optional key][N][{fields}]:  (spec Sec. 9.1-Sec. 9.4, Sec. 10)
     // The header's first unquoted ':' must occur after the [N]{fields} segment,
@@ -744,6 +750,7 @@ inline std::string toonToJson(std::string_view input) {
               if (!keyRaw.empty()) out += '"' + toonDecodeKey(keyRaw) + "\":";
               out += '[';
               stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
+              curFrame = &stack.back();   // reindex after push (vector may reallocate)
             }
 
             if (hasFields) {
@@ -829,8 +836,8 @@ inline std::string toonToJson(std::string_view input) {
     // trimmed before this test; it is not, and the claim was wrong.
     if (content.size() >= 2 && content[0] == '-' && content[1] == ' ') {
       addComma(stack, out);
-      curFrame.first = false;
-      if (curFrame.type == 'A') curFrame.itemCount++;   // one element of the enclosing array (scalar or nested)
+      curFrame->first = false;
+      if (curFrame->type == 'A') curFrame->itemCount++;   // one element of the enclosing array (scalar or nested)
       std::string_view val = content.substr(2);
       // nested array header form "- [M]: ..." / "- [M]" (spec Sec. 9.2/Sec. 9.4)
       size_t arrLen = 0;
@@ -866,6 +873,7 @@ inline std::string toonToJson(std::string_view input) {
           // non-primitive list-form opener: leave frame open. Its deeper "- value"
           // items are validated against this declared length when the frame closes.
           stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
+          curFrame = &stack.back();   // reindex after push (vector may reallocate)
           if (!stack.empty()) stack.back().declLen = arrLen;
         }
         continue;
@@ -876,10 +884,11 @@ inline std::string toonToJson(std::string_view input) {
     // bare "-" means an inline object list item
     if (content == "-") {
       addComma(stack, out);
-      curFrame.first = false;
-      if (curFrame.type == 'A') curFrame.itemCount++;   // one object element of the enclosing array
+      curFrame->first = false;
+      if (curFrame->type == 'A') curFrame->itemCount++;   // one object element of the enclosing array
       out += '{';
       stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
+      curFrame = &stack.back();   // reindex after push (vector may reallocate)
       continue;
     }
 
@@ -903,14 +912,16 @@ inline std::string toonToJson(std::string_view input) {
       while (!valPart.empty() && valPart.front() == ' ') valPart = valPart.substr(1);
 
       addComma(stack, out);
-      curFrame.first = false;
+      curFrame->first = false;
 
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
         stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
+        curFrame = &stack.back();   // reindex after push (vector may reallocate)
       } else if (valPart == "[]") {
         out += '"' + keyStr + "\":[";
         stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
+        curFrame = &stack.back();   // reindex after push (vector may reallocate)
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else {
@@ -946,6 +957,11 @@ inline std::string asvJSON::toTOON() const {
 inline bool asvJSON::fromTOON(std::string_view input) {
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Reject unbounded input: a multi-GB file would otherwise be copied into
+  // json (3× peak RAM). Symmetric with GOON's MAX_GOON_INPUT.
+  constexpr size_t MAX_TOON_INPUT = 10u * 1024u * 1024u;
+  if (input.size() > MAX_TOON_INPUT) { lastError = "TOON input exceeds 10 MB limit"; return false; }
   std::string json;
   try {
     // UTF-8 BOM, like every other from* decoder. Without this the BOM became the
