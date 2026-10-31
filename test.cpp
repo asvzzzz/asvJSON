@@ -35615,6 +35615,73 @@ TEST(testAuditGoonTronSpec) {
 		ASSERT_EQ(std::string(j2.getString("b")), "two");
 	}
 }
+// Regression tests for GOON security fixes (stack overflow guard, memory
+// amplification limit, bare literal handling, dirty_/root consistency).
+TEST(testGOONSecurityFixes) {
+	// Stack overflow guard in qgoonObj/qgoonArr: deeply nested inline flow must
+	// be rejected without crashing, even though it fits within MAX_GOON_INPUT.
+	{
+		std::string deep(5000, '[');
+		for (int i = 0; i < 5000; i++) deep += ']';
+		asvJSON j;
+		// Should not throw / crash; fromGOON returns false with a diagnostic.
+		bool ok = j.fromGOON(std::string_view(deep));
+		ASSERT(!ok);
+	}
+	// Bare JSON literals true/false/null in block context resolve to their
+	// correct types (JSON-superset promise), while quoted forms stay strings.
+	{
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view("a: true\nb: false\nc: null\n")));
+		ASSERT(j.get("a")->type == asvJSONValue::BOOL_VAL);
+		ASSERT(j.get("a")->getBool());
+		ASSERT(j.get("b")->type == asvJSONValue::BOOL_VAL);
+		ASSERT(!j.get("b")->getBool());
+		ASSERT(j.get("c")->type == asvJSONValue::NULL_VAL);
+		// Quoted forms must stay strings (goonNeedsQuotes guards them).
+		asvJSON j2;
+		ASSERT(j2.fromGOON(std::string_view("\"a\": \"true\"\n\"b\": \"false\"\n\"c\": \"null\"\n")));
+		ASSERT(j2.getConst("a")->type == asvJSONValue::STRING);
+		ASSERT_EQ(std::string(j2.getConst("a")->getString()), "true");
+		ASSERT(j2.getConst("b")->type == asvJSONValue::STRING);
+		ASSERT(j2.getConst("c")->type == asvJSONValue::STRING);
+	}
+	// fromGOON resets dirty_ even when the previous document was dirty.
+	{
+		asvJSON j;
+		j.parse(std::string_view("{\"a\":1}"));
+		j.setValue("b", asvJSONValue::makeInt(2));
+		ASSERT(j.isChanged());
+		ASSERT(j.fromGOON(std::string_view("x: 1\n")));
+		ASSERT(!j.isChanged());
+	}
+	// fromGOON nulls root on parse failure without throw.
+	{
+		asvJSON j;
+		// Valid GOON that parse() will reject (trailing content after root value).
+		j.fromGOON(std::string_view("{\"a\":1}\nb: 2\n"));
+		// Parse failed; root must be null, not stale from a prior document.
+		ASSERT(j.getRoot() == nullptr);
+	}
+	// Memory amplification limit: RLE with a large repeated cell must fail
+	// before allocating unbounded memory. A 7000-char string repeated 10000
+	// times produces ~70 MB of intermediate JSON, exceeding the 64 MB cap.
+	{
+		std::string cell(7000, 'x');
+		std::string goon2 = "t[1]{a}:\n" + cell + "*10000\n";
+		asvJSON j;
+		bool ok = j.fromGOON(std::string_view(goon2));
+		ASSERT(!ok);
+	}
+	// Caret after a padded (missing) cell resolves to null, not error — the
+	// padding does NOT set hasPrev, so ^ for that column in row 2 still errors.
+	{
+		asvJSON j;
+		// Row 1: only column 'a' present, 'b' is missing (padded to null).
+		// Row 2: '^' for 'b' — no previous REAL value for 'b', must error.
+		ASSERT(!j.fromGOON(std::string_view("t[2]{a,b}:\n1\n^,^\n")));
+	}
+}
 
 TEST(testArrayAddNullGuard) {
 	// Key-based arrayAddValue must reject a null value (an OOM/oversize factory
@@ -37794,6 +37861,7 @@ RUN(testYamlAuditReview);
 	RUN(testReauditRegression2);
 	RUN(testAuditMedLow);
 	RUN(testAuditGoonTronSpec);
+	RUN(testGOONSecurityFixes);
 	RUN(testArrayAddNullGuard);
 	RUN(testCoreNullNodeGuards);
 	RUN(testINIStringLimit);
