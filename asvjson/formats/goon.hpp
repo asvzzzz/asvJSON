@@ -823,10 +823,11 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
 // valid JSON (`{a:1}` -> `{"a":1}`). Nested objects/arrays and already-quoted
 // pairs are preserved. Returns the input unchanged if no quoting was needed or
 // the text is malformed (the caller then passes it through as-is).
-static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i);
-static bool qgoonArr(std::string_view s, std::string& r, std::size_t& i);
+static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i, int depth = 0);
+static bool qgoonArr(std::string_view s, std::string& r, std::size_t& i, int depth = 0);
 
-static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i) {
+static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i, int depth) {
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return false;
   r += s[i++];
   bool changed = false;
   while (i < s.size()) {
@@ -862,10 +863,10 @@ static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i) {
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) r += s[i++];
     if (i >= s.size()) return changed;
     if (s[i] == '{') {
-      if (!qgoonObj(s, r, i)) return false;
+      if (!qgoonObj(s, r, i, depth + 1)) return false;
       changed = true;
     } else if (s[i] == '[') {
-      if (!qgoonArr(s, r, i)) return false;
+      if (!qgoonArr(s, r, i, depth + 1)) return false;
       changed = true;
     } else if (s[i] == '"') {
       r += s[i++];
@@ -887,7 +888,8 @@ static bool qgoonObj(std::string_view s, std::string& r, std::size_t& i) {
   return changed;
 }
 
-static bool qgoonArr(std::string_view s, std::string& r, std::size_t& i) {
+static bool qgoonArr(std::string_view s, std::string& r, std::size_t& i, int depth) {
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return false;
   r += s[i++];
   bool changed = false;
   while (i < s.size()) {
@@ -897,10 +899,10 @@ static bool qgoonArr(std::string_view s, std::string& r, std::size_t& i) {
       return changed;
     }
     if (s[i] == '{') {
-      if (!qgoonObj(s, r, i)) return false;
+      if (!qgoonObj(s, r, i, depth + 1)) return false;
       changed = true;
     } else if (s[i] == '[') {
-      if (!qgoonArr(s, r, i)) return false;
+      if (!qgoonArr(s, r, i, depth + 1)) return false;
       changed = true;
     } else if (s[i] == '"') {
       r += s[i++];
@@ -1108,10 +1110,15 @@ inline std::string goonToJson(std::string_view input) {
       return '"' + r + '"';
     }
     // T->true, F->false, _->null, ~->""
+    // Also accept bare JSON literals true/false/null so block-form and
+    // inline-flow give the same type for the same text (JSON-superset promise).
     if (s == "T") return "true";
     if (s == "F") return "false";
     if (s == "_") return "null";
     if (s == "~") return "\"\"";
+    if (s == "true") return "true";
+    if (s == "false") return "false";
+    if (s == "null") return "null";
     // Number. Per the GOON number grammar a leading '+' is NOT part of a
     // number, so "+5" stays the string "+5" -- which is also what the encoder
     // writes (goonNeedsQuotes quotes a leading '+'). A sign inside the exponent
@@ -1497,39 +1504,47 @@ inline std::string goonToJson(std::string_view input) {
                 rowStr = rcont.substr(0, asterisk);
               }
 
-              for (int ri = 0; ri < repeat; ri++) {
-                std::vector<std::string> vals;
-                  {
-                    // Quote- AND brace-aware: a row cell may hold a balanced
-                    // JSON group (e.g. the {"$customTag":{...}} marker), whose
-                    // inner commas must not split it into extra cells.
-                    std::string cur2;
-                    bool inQ = false;
-                    bool escape = false;
-                    int depth = 0;
-                    for (size_t ci = 0; ci < rowStr.size(); ci++) {
-                      char c2 = rowStr[ci];
-                      if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
-                      if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
-                      escape = false;
-                      if (!inQ) {
-                        if (c2 == '{' || c2 == '[') depth++;
-                        else if (c2 == '}' || c2 == ']') { if (depth > 0) depth--; }
-                      }
-                      if (c2 == ',' && !inQ && depth == 0) { vals.push_back(cur2); cur2.clear(); continue; }
-                      cur2 += c2;
-                    }
-                  vals.push_back(cur2);
+              // Hoist cell splitting AND expansion out of the repeat loop:
+              // expandCell is deterministic and the same cell text is repeated,
+              // so we split and expand once and reuse. Prevents O(repeat)
+              // allocations per row.  Must keep RAW cells for caret detection
+              // (rawVals[fi] == "^") while prevValues stores EXPANDED values so
+              // that caret resolution yields already-expanded JSON text.
+              std::vector<std::string> rawVals;
+              {
+                std::string cur2;
+                bool inQ = false;
+                bool escape = false;
+                int depth = 0;
+                for (size_t ci = 0; ci < rowStr.size(); ci++) {
+                  char c2 = rowStr[ci];
+                  if (!escape && c2 == '\\') { escape = true; cur2 += c2; continue; }
+                  if (!escape && c2 == '"') { inQ = !inQ; cur2 += c2; continue; }
+                  escape = false;
+                  if (!inQ) {
+                    if (c2 == '{' || c2 == '[') depth++;
+                    else if (c2 == '}' || c2 == ']') { if (depth > 0) depth--; }
+                  }
+                  if (c2 == ',' && !inQ && depth == 0) { rawVals.push_back(cur2); cur2.clear(); continue; }
+                  cur2 += c2;
                 }
+              rawVals.push_back(cur2);
+              }
+              // Expand cells once, reuse for each repeat.
+              std::vector<std::string> vals = rawVals;
+              for (size_t fi = 0; fi < vals.size(); fi++)
+                vals[fi] = expandCell(vals[fi]);
+              while (vals.size() < fields.size()) { vals.push_back("null"); rawVals.push_back(""); }
+              for (int ri = 0; ri < repeat; ri++) {
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
                 out += '{';
                 for (size_t fi = 0; fi < fields.size(); fi++) {
                   if (fi > 0) out += ',';
                   out += '"' + goonEscKey(fields[fi]) + "\":";
-                  if (fi < vals.size()) {
-                    std::string cell = vals[fi];
-                    if (cell == "^") {
+                  if (fi < rawVals.size()) {
+                    std::string cell = vals[fi];   // expanded for output
+                    if (rawVals[fi] == "^") {
                       // Spec: '^' references the previous row's value; a quoted
                       // "^" is an ordinary literal string. Using '^' with no
                       // prior value (first row / first appearance of a column)
@@ -1540,10 +1555,12 @@ inline std::string goonToJson(std::string_view input) {
                         throw GoonDecodeError("GOON: column reference '^' with no previous value at line " + std::to_string(li + 1));
                       cell = prevValues[fi];
                     } else {
-                      prevValues[fi] = cell;
+                      // Store EXPANDED value in prevValues so caret in later rows
+                      // resolves against the expanded JSON text.
+                      prevValues[fi] = vals[fi];
                     }
                     hasPrev[fi] = true;
-                    out += expandCell(cell);
+                    out += cell;   // already expanded above or resolved from prevValues
                   } else {
                     out += "null";
                   }
@@ -1749,6 +1766,7 @@ inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
 }
 
 inline bool asvJSON::fromGOON(std::string_view input) {
+  dirty_ = false;
   formatType = FormatType::Unknown;
   if (input.empty()) { lastError = "empty input"; return false; }
   // UTF-8 BOM, like every other from* decoder: without this the BOM became the
@@ -1759,13 +1777,18 @@ inline bool asvJSON::fromGOON(std::string_view input) {
   // Security: reject inputs larger than 10 MB to prevent memory exhaustion.
   constexpr size_t MAX_GOON_INPUT = 10u * 1024u * 1024u;
   if (input.size() > MAX_GOON_INPUT) { lastError = "GOON input exceeds 10 MB limit"; return false; }
+  // Also cap intermediate JSON output to prevent memory amplification from
+  // RLE / tabular rows (a short GOON document can expand to gigabytes of JSON).
+  constexpr size_t MAX_GOON_OUTPUT = 64u * 1024u * 1024u;
   bool prevNaN = allowNaNInfinity;
   allowNaNInfinity = true;
   try {
     std::string json = goonToJson(input);
+    if (json.size() > MAX_GOON_OUTPUT) { lastError = "GOON output exceeds 64 MB limit"; return false; }
     bool ok = parse(std::string_view(json));
     allowNaNInfinity = prevNaN;
     if (ok) formatType = FormatType::GOON;
+    else root = nullptr;
     return ok;
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;
