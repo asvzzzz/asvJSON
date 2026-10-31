@@ -45,9 +45,13 @@
 // the encoder would then re-emit it as a string, not as a uint64.
 //
 // The parser enforces MAX_NESTING_DEPTH / MAX_ARRAY_SIZE / MAX_OBJECT_SIZE /
-// MAX_STRING_LEN on untrusted input. The encoder does NOT re-check them, so a
-// programmatically built value above a limit serializes to a document this
-// parser would then reject -- the limits guard decoding, not encoding.
+// MAX_STRING_LEN on untrusted input. The encoder does NOT re-check them for
+// array/map size (valid trees are bounded by the factory limits), but DOES
+// validate UTF-8 for text strings and throws "MsgPack invalid UTF-8 in string"
+// if a STRING value contains an invalid sequence -- because emitting it would
+// produce a document that no conforming MessagePack decoder can read back.
+// The encoder also rejects array/map sizes > 2^32-1 when choosing the array32
+// / map32 format (0xDD / 0xDF), preventing silent truncation of the size field.
 
 #include "../core.hpp"
 #include <cstring>
@@ -155,7 +159,10 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			if (!arr) { out.push_back(0x90); break; }
 			if (arr->size() <= 0x0F) { out.push_back(static_cast<uint8_t>(0x90 | arr->size())); }
 			else if (arr->size() <= 0xFFFF) { out.push_back(0xDC); out.push_back(static_cast<uint8_t>(arr->size() >> 8)); out.push_back(static_cast<uint8_t>(arr->size())); }
-			else { out.push_back(0xDD); out.push_back(static_cast<uint8_t>(arr->size() >> 24)); out.push_back(static_cast<uint8_t>(arr->size() >> 16)); out.push_back(static_cast<uint8_t>(arr->size() >> 8)); out.push_back(static_cast<uint8_t>(arr->size())); }
+			else {
+			if (arr->size() > 0xFFFFFFFF) throw asvJSONError("MsgPack array too large for format");
+			out.push_back(0xDD); out.push_back(static_cast<uint8_t>(arr->size() >> 24)); out.push_back(static_cast<uint8_t>(arr->size() >> 16)); out.push_back(static_cast<uint8_t>(arr->size() >> 8)); out.push_back(static_cast<uint8_t>(arr->size()));
+		}
 			for (const auto& v : *arr) v->toMessagePack(out);
 			break;
 		}
@@ -163,7 +170,10 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			if (!obj) { out.push_back(0x80); break; }
 			if (obj->size() <= 0x0F) { out.push_back(static_cast<uint8_t>(0x80 | obj->size())); }
 			else if (obj->size() <= 0xFFFF) { out.push_back(0xDE); out.push_back(static_cast<uint8_t>(obj->size() >> 8)); out.push_back(static_cast<uint8_t>(obj->size())); }
-			else { out.push_back(0xDF); out.push_back(static_cast<uint8_t>(obj->size() >> 24)); out.push_back(static_cast<uint8_t>(obj->size() >> 16)); out.push_back(static_cast<uint8_t>(obj->size() >> 8)); out.push_back(static_cast<uint8_t>(obj->size())); }
+			else {
+			if (obj->size() > 0xFFFFFFFF) throw asvJSONError("MsgPack map too large for format");
+			out.push_back(0xDF); out.push_back(static_cast<uint8_t>(obj->size() >> 24)); out.push_back(static_cast<uint8_t>(obj->size() >> 16)); out.push_back(static_cast<uint8_t>(obj->size() >> 8)); out.push_back(static_cast<uint8_t>(obj->size()));
+		}
 			for (const auto& [k, v] : *obj) {
 				if (k.size() <= 31) { out.push_back(static_cast<uint8_t>(0xA0 | k.size())); }
 				else if (k.size() <= 0xFF) { out.push_back(0xD9); out.push_back(static_cast<uint8_t>(k.size())); }

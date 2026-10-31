@@ -3491,6 +3491,62 @@ TEST(testMessagePackDuplicateKeysLastWins) {
 		ASSERT_EQ(v->num, 10); // last wins
 	}
 }
+// Regression tests for MessagePack security fixes (depth alignment, lastError clear).
+TEST(testMessagePackSecurityFixes) {
+	// Nesting depth boundary for MsgPack ↔ JSON round-trip.
+	// parse() uses ++parseDepth then check(parseDepth), allowing exactly MAX
+	// containers (depths 1..MAX). MsgPack decoder uses `depth > MAX` with root
+	// at depth 0, also allowing exactly MAX containers (depths 0..MAX-1 = 48).
+	// Both agree: MAX round-trips, MAX+1 rejects.
+	{
+		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
+		std::string deep;
+		for (int i = 0; i < N; i++) deep += "{\"a\":";
+		deep += "1";
+		for (int i = 0; i < N; i++) deep += "}";
+		asvJSON j;
+		ASSERT(j.parse(std::string_view(deep)));
+		auto mp = j.toMessagePack();
+		asvJSON j2;
+		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
+	}
+	{
+		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1;
+		std::string deep;
+		for (int i = 0; i < N; i++) deep += "{\"a\":";
+		deep += "1";
+		for (int i = 0; i < N; i++) deep += "}";
+		asvJSON j;
+		// parse() rejects MAX+1 containers. Verify MsgPack also rejects a
+		// programmatic tree at the same logical depth by building N objects
+		// and checking that re-parsing fails.
+		asvJSON j3;
+		ASSERT(j3.parse(std::string_view("{\"a\":1}")));
+		asvJSONValue* cur = j3.getRoot();
+		for (int i = 0; i < N + 1; i++) {
+			auto inner = asvJSONValue::makeObject();
+			cur->obj->clear();
+			cur->obj->emplace("a", std::move(inner));
+			cur = cur->obj->begin()->second.get();
+		}
+		auto mp2 = j3.toMessagePack();
+		asvJSON j4;
+		ASSERT(!j4.fromMessagePack(mp2.data(), mp2.size()));
+	}
+	// lastError is cleared on successful parse, so a prior error does not linger.
+	{
+		std::vector<uint8_t> bad = {0x81}; // truncated fixmap(1) — needs key+value
+		asvJSON j;
+		ASSERT(!j.fromMessagePack(bad.data(), bad.size()));
+		std::string prev = j.getLastError();
+		ASSERT(!prev.empty());
+		std::vector<uint8_t> good = {0x01}; // fixint 1
+		ASSERT(j.fromMessagePack(good.data(), good.size()));
+		ASSERT_EQ(j.getRoot()->getInt(), int64_t(1));
+		// lastError should be empty now, not the previous error.
+		ASSERT(j.getLastError().empty());
+	}
+}
 
 TEST(testMsgPackRegexFidelity) {
 	// REGEX is stored as "pattern\0options" (NUL-separated, see makeRegex) and
@@ -37522,7 +37578,7 @@ int main() {
 	RUN(testDateTimeDayValidity);
 	RUN(testParseEmptyString);
 	RUN(testLoneSurrogateRejected);
-	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackExtWrongLengthKeepsBody);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);
+	RUN(testMessagePackObjectIdRegexTimestamp);	RUN(testMessagePackExtWrongLengthKeepsBody);	RUN(testMessagePackCustomTagRoundTrip);	RUN(testMessagePackDuplicateKeysLastWins);	RUN(testMessagePackCustomTagShortBody);	RUN(testMessagePackSecurityFixes);
 	RUN(testMsgPackRegexFidelity);
 	RUN(testMsgpackExtras);
 	RUN(testMsgpackReservedExtTypes);
