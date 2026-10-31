@@ -3493,13 +3493,12 @@ TEST(testMessagePackDuplicateKeysLastWins) {
 }
 // Regression tests for MessagePack security fixes (depth alignment, lastError clear).
 TEST(testMessagePackSecurityFixes) {
-	// Nesting depth boundary: MsgPack decoder uses `depth >= MAX` before
-	// reading the tag, allowing exactly MAX containers (depths 0..MAX-1).
-	// parse() uses ++parseDepth then check(parseDepth), also allowing MAX.
-	// Both reject at MAX+1. Note: the encoder has NO depth check, so a
-	// programmatic tree deeper than MAX serializes fine but fails on re-parse.
-	// String form is aligned (both parsers use the same JSON tree); programmatic
-	// trees bypass the encoder guard and expose the decoder boundary directly.
+	// Nesting depth boundary: Option B checks `depth >= MAX` only inside
+	// container branches (fixarray/fixmap/array16/array32/map16/map32).
+	// Scalars do NOT increment depth, so a tree of exactly MAX containers
+	// with a scalar leaf at the deepest level round-trips through both parsers.
+	// 49+ containers are rejected by both. The encoder has NO depth check —
+	// programmatic trees deeper than MAX serialize fine but fail on re-parse.
 	{
 		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1;
 		std::string deep;

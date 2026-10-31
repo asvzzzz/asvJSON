@@ -305,7 +305,6 @@ inline std::unique_ptr<asvJSONValue> msgpackDecodeRegex(const uint8_t* data, siz
 inline std::unique_ptr<asvJSONValue> msgpackDecodeCustomTag(const uint8_t* data, size_t& pos, size_t len, size_t depth);
 
 inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_t& pos, size_t dataLen, size_t depth) {
-	if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 	if (pos >= dataLen) throw asvJSONError("MsgPack unexpected end");
 	uint8_t tag = data[pos++];
 	if (tag <= 0x7F) { return asvJSONValue::makeInt(tag); }
@@ -320,6 +319,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		return val;
 	}
 	if (tag >= 0x90 && tag <= 0x9F) {
+		if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 		uint32_t n = tag & 0x0F;
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) throw asvJSONError("MsgPack array alloc failed");
@@ -332,6 +332,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 		return arr;
 	}
 	if (tag >= 0x80 && tag <= 0x8F) {
+		if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 		uint32_t n = tag & 0x0F;
 		auto obj = asvJSONValue::makeObject();
 		if (!obj) throw asvJSONError("MsgPack map alloc failed");
@@ -613,6 +614,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack array16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
+			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			// A 16-bit count is at most 65535, so it is always below
 			// MAX_ARRAY_SIZE (1e6) - no size guard is needed here (the 32-bit
 			// forms below carry the one that matters).
@@ -630,6 +632,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack array32");
 			uint32_t n = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
+			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			if (static_cast<size_t>(n) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
@@ -645,6 +648,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 2 > dataLen) throw asvJSONError("MsgPack map16");
 			uint16_t n = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
 			pos += 2;
+			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			// A 16-bit count is at most 65535, so it is always below
 			// MAX_OBJECT_SIZE (1e6) - no size guard is needed here (the 32-bit
 			// forms below carry the one that matters).
@@ -663,6 +667,7 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			if (pos + 4 > dataLen) throw asvJSONError("MsgPack map32");
 			uint32_t n = (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) | (static_cast<uint32_t>(data[pos + 2]) << 8) | data[pos + 3];
 			pos += 4;
+			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			if (static_cast<size_t>(n) > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("MsgPack map alloc failed");
