@@ -805,7 +805,7 @@ inline std::string toonToJson(std::string_view input) {
             } else {
               // list form: frame left open; deeper "- value" items fill it. Record the
               // declared length so the item count can be validated when this frame closes.
-              if (!stack.empty()) stack.back().declLen = arrLen;
+              stack.back().declLen = arrLen;
               continue;
             }
           }
@@ -874,7 +874,7 @@ inline std::string toonToJson(std::string_view input) {
           // items are validated against this declared length when the frame closes.
           stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
           curFrame = &stack.back();   // reindex after push (vector may reallocate)
-          if (!stack.empty()) stack.back().declLen = arrLen;
+          stack.back().declLen = arrLen;
         }
         continue;
       }
@@ -959,9 +959,9 @@ inline bool asvJSON::fromTOON(std::string_view input) {
   formatType = FormatType::Unknown;
   lastError.clear();
   // Reject unbounded input: a multi-GB file would otherwise be copied into
-  // json (3× peak RAM). Symmetric with GOON's MAX_GOON_INPUT.
+  // json (3x peak RAM). Symmetric with GOON's MAX_GOON_INPUT.
   constexpr size_t MAX_TOON_INPUT = 10u * 1024u * 1024u;
-  if (input.size() > MAX_TOON_INPUT) { lastError = "TOON input exceeds 10 MB limit"; return false; }
+  if (input.size() > MAX_TOON_INPUT) { lastError = "TOON input exceeds 10 MB limit"; root = nullptr; return false; }
   std::string json;
   try {
     // UTF-8 BOM, like every other from* decoder. Without this the BOM became the
