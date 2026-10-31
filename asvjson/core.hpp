@@ -3405,6 +3405,7 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	lastError.clear();
 	if (!data || size < 1) { lastError = "Empty input"; return false; }
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
