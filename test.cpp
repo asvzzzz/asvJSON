@@ -35673,13 +35673,44 @@ TEST(testGOONSecurityFixes) {
 		bool ok = j.fromGOON(std::string_view(goon2));
 		ASSERT(!ok);
 	}
-	// Caret after a padded (missing) cell resolves to null, not error — the
-	// padding does NOT set hasPrev, so ^ for that column in row 2 still errors.
+	// Padding a missing cell does NOT set hasPrev, so ^ in the next row for
+	// that column still errors ("no previous value"). Row 1 provides only 'a';
+	// row 2 uses ^ for both columns — 'a' resolves to the prior 1, 'b' errors.
 	{
 		asvJSON j;
-		// Row 1: only column 'a' present, 'b' is missing (padded to null).
-		// Row 2: '^' for 'b' — no previous REAL value for 'b', must error.
 		ASSERT(!j.fromGOON(std::string_view("t[2]{a,b}:\n1\n^,^\n")));
+	}
+	// Dict-ref amplification: a large dict value referenced many times must
+	// be rejected before allocating unbounded intermediate JSON.
+	{
+		std::string big(500 * 1024, 'X');  // 500 KB dict payload
+		std::string goon = "$: $0=\"" + big + "\"\n";
+		for (int i = 0; i < 200; i++) goon += "x: $0\n";
+		asvJSON j;
+		bool ok = j.fromGOON(std::string_view(goon));
+		ASSERT(!ok);
+	}
+	// Nesting-depth boundary: GOON must accept documents at exactly MAX depth
+	// and reject those one deeper, matching JSON/TRON/sexpr behaviour.
+	{
+		std::string deep;
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++)
+			deep += "{\"a\":";
+		deep += "1";
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++)
+			deep += "}";
+		asvJSON j;
+		ASSERT(j.fromGOON(std::string_view(deep)));
+	}
+	{
+		std::string deep;
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1; i++)
+			deep += "{\"a\":";
+		deep += "1";
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1; i++)
+			deep += "}";
+		asvJSON j;
+		ASSERT(!j.fromGOON(std::string_view(deep)));
 	}
 }
 
