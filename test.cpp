@@ -17664,6 +17664,31 @@ TEST(testToonExtras) {
     ASSERT_EQ(dt->tz_offset_min, 120);
   }
 }
+// Regression tests for TOON security fixes (input size limit, lastError clear).
+TEST(testTOONSecurityFixes) {
+  // fromTOON rejects inputs larger than MAX_TOON_INPUT (10 MB) without
+  // allocating unbounded memory. Symmetric with GOON's MAX_GOON_INPUT.
+  {
+    std::string big(11 * 1024 * 1024, 'x');  // 11 MB — over the limit
+    asvJSON j;
+    bool ok = j.fromTOON(std::string_view(big));
+    ASSERT(!ok);
+    ASSERT_EQ(std::string(j.getLastError()), "TOON input exceeds 10 MB limit");
+  }
+  // lastError is cleared on successful parse, so a prior error does not
+  // linger after fromTOON succeeds. Use a tabular mismatch which definitely
+  // fails to parse.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOON(std::string_view("t[2]{a,b}:\n1\n")));
+    std::string prev = j.getLastError();
+    ASSERT(!prev.empty());
+    ASSERT(j.fromTOON(std::string_view("a: 1\n")));
+    ASSERT(j.getRoot()->getConst("a")->getInt() == int64_t(1));
+    // lastError should be empty now, not the previous error.
+    ASSERT(j.getLastError().empty());
+  }
+}
 
 TEST(testTRONExtras) {
   // DATETIME preserves tz_offset_min across a TRON round-trip (encoder used to
@@ -37637,7 +37662,8 @@ RUN(testTOONReviewFixes);
 	RUN(testTOONReviewFixes2);
 	RUN(testTOONSpecialTypes);
 	RUN(testToonExtras);
-	
+	RUN(testTOONSecurityFixes);
+
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);
 	RUN(testToTRONAdvanced);
