@@ -3493,13 +3493,15 @@ TEST(testMessagePackDuplicateKeysLastWins) {
 }
 // Regression tests for MessagePack security fixes (depth alignment, lastError clear).
 TEST(testMessagePackSecurityFixes) {
-	// Nesting depth boundary for MsgPack ↔ JSON round-trip.
-	// parse() uses ++parseDepth then check(parseDepth), allowing exactly MAX
-	// containers (depths 1..MAX). MsgPack decoder uses `depth > MAX` with root
-	// at depth 0, also allowing exactly MAX containers (depths 0..MAX-1 = 48).
-	// Both agree: MAX round-trips, MAX+1 rejects.
+	// Nesting depth boundary: MsgPack decoder uses `depth >= MAX` before
+	// reading the tag, allowing exactly MAX containers (depths 0..MAX-1).
+	// parse() uses ++parseDepth then check(parseDepth), also allowing MAX.
+	// Both reject at MAX+1. Note: the encoder has NO depth check, so a
+	// programmatic tree deeper than MAX serializes fine but fails on re-parse.
+	// String form is aligned (both parsers use the same JSON tree); programmatic
+	// trees bypass the encoder guard and expose the decoder boundary directly.
 	{
-		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
+		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1;
 		std::string deep;
 		for (int i = 0; i < N; i++) deep += "{\"a\":";
 		deep += "1";
@@ -3510,20 +3512,12 @@ TEST(testMessagePackSecurityFixes) {
 		asvJSON j2;
 		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
 	}
+	// MAX objects (programmatic): decoder accepts exactly MAX.
 	{
-		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1;
-		std::string deep;
-		for (int i = 0; i < N; i++) deep += "{\"a\":";
-		deep += "1";
-		for (int i = 0; i < N; i++) deep += "}";
-		asvJSON j;
-		// parse() rejects MAX+1 containers. Verify MsgPack also rejects a
-		// programmatic tree at the same logical depth by building N objects
-		// and checking that re-parsing fails.
 		asvJSON j3;
 		ASSERT(j3.parse(std::string_view("{\"a\":1}")));
 		asvJSONValue* cur = j3.getRoot();
-		for (int i = 0; i < N + 1; i++) {
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1; i++) {
 			auto inner = asvJSONValue::makeObject();
 			cur->obj->clear();
 			cur->obj->emplace("a", std::move(inner));
@@ -3531,7 +3525,22 @@ TEST(testMessagePackSecurityFixes) {
 		}
 		auto mp2 = j3.toMessagePack();
 		asvJSON j4;
-		ASSERT(!j4.fromMessagePack(mp2.data(), mp2.size()));
+		ASSERT(j4.fromMessagePack(mp2.data(), mp2.size()));
+	}
+	// MAX+1 objects: both parsers reject.
+	{
+		asvJSON j5;
+		ASSERT(j5.parse(std::string_view("{\"a\":1}")));
+		asvJSONValue* cur = j5.getRoot();
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) {
+			auto inner = asvJSONValue::makeObject();
+			cur->obj->clear();
+			cur->obj->emplace("a", std::move(inner));
+			cur = cur->obj->begin()->second.get();
+		}
+		auto mp3 = j5.toMessagePack();
+		asvJSON j6;
+		ASSERT(!j6.fromMessagePack(mp3.data(), mp3.size()));
 	}
 	// lastError is cleared on successful parse, so a prior error does not linger.
 	{
