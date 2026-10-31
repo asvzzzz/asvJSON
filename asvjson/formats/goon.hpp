@@ -1013,6 +1013,10 @@ inline bool goonIsCompleteFlow(std::string_view s, char open, char close) {
 }
 
 // GOON -> JSON text converter (GOON decoder)
+// GOON -> JSON text converter (GOON decoder).
+// `maxOut` caps intermediate JSON to prevent memory amplification from RLE /
+// tabular rows / dict-references. Pass SIZE_MAX to disable the cap (useful for
+// testing; the default is MAX_GOON_OUTPUT = 64 MB).
 inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_OUTPUT) {
   auto lines = splitLines(input);
   if (lines.empty()) return "{}";
@@ -1321,7 +1325,10 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
 
   out = rootIsArr ? '[' : '{';
   stack.push_back({rootIsArr ? 'A' : 'O', true, rootIndent, true, true, 0, 0, {}, -1});
-  if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
+  // stack starts with the root frame at depth 0. After N pushes, size == N+1
+  // and depth == N. JSON/sexpr/TRON allow containers up to depth MAX, so we
+  // must allow size == MAX+1 and reject only at MAX+2 (depth == MAX+1).
+  if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw GoonDecodeError("GOON: nesting too deep");
 
   for (size_t li = firstLine; li < lines.size(); li++) {
     auto& line = lines[li];
@@ -1414,7 +1421,7 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
             }
             out += '[';
             stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
-            if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
+            if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw GoonDecodeError("GOON: nesting too deep");
           }
           size_t afterColon = afterB + 1;
           while (afterColon < content.size() && content[afterColon] == ' ') afterColon++;
@@ -1706,6 +1713,7 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
       addComma(stack, out);
       curFrame.first = false;
       out += expandCell(content.substr(2));
+      checkOut("- value");
       continue;
     }
     // Bare "-" means an inline object
@@ -1716,7 +1724,7 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
       curFrame.first = false;
       out += '{';
       stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
-      if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
+      if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw GoonDecodeError("GOON: nesting too deep");
       continue;
     }
 
@@ -1745,13 +1753,14 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
         stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
-        if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH) throw GoonDecodeError("GOON: nesting too deep");
+        if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw GoonDecodeError("GOON: nesting too deep");
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else if (valPart == "[]") {
         out += '"' + keyStr + "\":[]";
       } else {
         out += '"' + keyStr + "\":" + expandCell(valPart);
+        checkOut("key: value");
       }
     } else {
       // toGOON() emits an empty root object/array as a bare `{}`/`[]` line
