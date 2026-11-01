@@ -3500,7 +3500,9 @@ TEST(testMessagePackSecurityFixes) {
 	// 49+ containers are rejected by both. The encoder has NO depth check —
 	// programmatic trees deeper than MAX serialize fine but fail on re-parse.
 	{
-		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1;
+		// String form: N=MAX opens → MAX containers, leaf "1" at depth MAX.
+		// Both parsers accept exactly MAX containers and reject MAX+1.
+		const int N = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
 		std::string deep;
 		for (int i = 0; i < N; i++) deep += "{\"a\":";
 		deep += "1";
@@ -3511,7 +3513,10 @@ TEST(testMessagePackSecurityFixes) {
 		asvJSON j2;
 		ASSERT(j2.fromMessagePack(mp.data(), mp.size()));
 	}
-	// MAX objects (programmatic): decoder accepts exactly MAX.
+	// MAX containers + scalar leaf (programmatic): the regression case that
+	// broke with top-level `>= MAX`. 47 iterations + base object = 48 total.
+	// The innermost is a scalar, not an empty container — this exercises the
+	// "scalars don't check depth" path of Option B.
 	{
 		asvJSON j3;
 		ASSERT(j3.parse(std::string_view("{\"a\":1}")));
@@ -3522,11 +3527,13 @@ TEST(testMessagePackSecurityFixes) {
 			cur->obj->emplace("a", std::move(inner));
 			cur = cur->obj->begin()->second.get();
 		}
+		cur->obj->clear();
+		cur->obj->emplace("a", asvJSONValue::makeInt(1));
 		auto mp2 = j3.toMessagePack();
 		asvJSON j4;
 		ASSERT(j4.fromMessagePack(mp2.data(), mp2.size()));
 	}
-	// MAX+1 objects: both parsers reject.
+	// MAX+1 containers: both parsers reject.
 	{
 		asvJSON j5;
 		ASSERT(j5.parse(std::string_view("{\"a\":1}")));
