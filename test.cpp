@@ -22029,6 +22029,56 @@ TEST(testJSON5CommentPaths) {
   }
 }
 
+TEST(testJSON5SecurityFixes) {
+  // Input size limit — symmetric with GOON/TOON's MAX_*_INPUT.
+  {
+    std::string big(10u * 1024u * 1024u + 1, ' ');
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view(big)));
+    ASSERT_EQ(j.getLastError(), std::string("JSON5 input exceeds 10 MB limit"));
+  }
+  // Exactly at the boundary: a 10 MB document of whitespace + leaf parses.
+  {
+    std::string big(10u * 1024u * 1024u - 1, ' ');
+    big += "1";
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view(big)));
+    ASSERT_EQ(j.getRoot()->getInt(), int64_t(1));
+  }
+  // U+1680 OGHAM SPACE MARK and U+202F NARROW NO-BREAK SPACE are JSON5
+  // whitespace (Sec 8). They must not be swallowed into identifiers.
+  {
+    // U+1680 between key and value — should parse as separate tokens.
+    const std::string src1 = "{" + std::string("\xE1\x9A\x80") + "K:1\n}";
+    asvJSON j;
+    ASSERT(j.fromJSON5(src1));
+    ASSERT_EQ(j.getInt("K"), 1);
+    // U+202F between key and value.
+    const std::string src2 = "{" + std::string("\xE2\x80\xAF") + "K:1\n}";
+    asvJSON k;
+    ASSERT(k.fromJSON5(src2));
+    ASSERT_EQ(k.getInt("K"), 1);
+    // U+202F inside a key should be treated as whitespace, not part of the name.
+    const std::string src3 = "{a" + std::string("\xE2\x80\xAF") + "b: 1\n}";
+    asvJSON m;
+    ASSERT(m.fromJSON5(src3));
+    // The key should be "ab" (whitespace stripped) not "a\u202Fb".
+    const asvJSONValue* v = m.get("ab");
+    ASSERT(v && v->type == asvJSONValue::INT && v->getInt() == 1);
+  }
+  // lastError is cleared on successful parse, so a prior error does not linger.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSON5(std::string_view("not json5")));
+    std::string prev = j.getLastError();
+    ASSERT(!prev.empty());
+    ASSERT(j.fromJSON5(std::string_view("{a:1}")));
+    ASSERT_EQ(j.getInt("a"), int64_t(1));
+    // lastError should be empty now, not the previous error.
+    ASSERT(j.getLastError().empty());
+  }
+}
+
 TEST(testToINI) {
   // Simple object
   {
@@ -37809,6 +37859,7 @@ RUN(testCppReviewFixes);
     RUN(testJSON5Audit);
     RUN(testJSON5Extras);
   RUN(testJSON5CommentPaths);
+  RUN(testJSON5SecurityFixes);
 
 	std::cout << "\n--- INI Serialization Tests ---\n";
 	RUN(testToINI);
