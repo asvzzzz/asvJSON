@@ -1052,7 +1052,7 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
 // Returns true when the output ended with a newline.
 inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, int depth, bool pretty, bool commaNeeded) {
   json5SerializeVal(v, out, depth, pretty);
-  if (!v->comments || v->comments->trailing.empty()) return false;
+  if (!v || !v->comments || v->comments->trailing.empty()) return false;
   const std::vector<Comment>& list = v->comments->trailing;
   bool sawLine = false;
   for (size_t i = 0; i < list.size(); i++) {
