@@ -22058,13 +22058,11 @@ TEST(testJSON5SecurityFixes) {
     asvJSON k;
     ASSERT(k.fromJSON5(src2));
     ASSERT_EQ(k.getInt("K"), 1);
-    // U+202F inside a key should be treated as whitespace, not part of the name.
+    // U+202F inside a key is whitespace per JSON5 Sec 8, so "a\u202Fb" splits into two
+    // identifiers with no ':' between them — syntax error.
     const std::string src3 = "{a" + std::string("\xE2\x80\xAF") + "b: 1\n}";
     asvJSON m;
-    ASSERT(m.fromJSON5(src3));
-    // The key should be "ab" (whitespace stripped) not "a\u202Fb".
-    const asvJSONValue* v = m.get("ab");
-    ASSERT(v && v->type == asvJSONValue::INT && v->getInt() == 1);
+    ASSERT(!m.fromJSON5(src3));
   }
   // lastError is cleared on successful parse, so a prior error does not linger.
   {
