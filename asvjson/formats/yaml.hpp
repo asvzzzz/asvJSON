@@ -54,6 +54,8 @@ namespace asvJSONInternal {
 
 inline constexpr size_t MAX_YAML_ANCHORS = 100000;
 inline constexpr size_t MAX_YAML_DEPTH = 64;
+// Input size limit — symmetric with GOON/TOON/JSON5's MAX_*_INPUT.
+inline constexpr size_t MAX_YAML_INPUT = 10u * 1024u * 1024u;
 
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
@@ -1532,6 +1534,8 @@ inline std::string yamlResolveAlias(std::string_view aliasName,
 inline bool yamlAnchorRefsSelf(std::string_view text, std::string_view name) {
 	auto pc = yamlPrecomputeQuotes(text);
 	for (size_t i = 0; i + 1 < text.size(); i++) {
+		// Stop at a trailing comment: "*name" inside "# ..." is not a real alias.
+		if (text[i] == '#' && !pc.inQuote[i] && (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\t')) break;
 		if (text[i] != '*' || pc.inQuote[i]) continue;
 		if (name.size() > text.size() - (i + 1)) continue;
 		if (text.compare(i + 1, name.size(), name) != 0) continue;
@@ -2177,6 +2181,7 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 		if (lines[li].find('&') == std::string_view::npos) continue;
 		int indent = countIndent(lines[li]);
 		std::string_view content = stripIndent(lines[li]);
+		content = yamlStripComment(content);
 		if (content.empty() || content[0] == '#') continue;
 
 		auto pc = yamlPrecomputeQuotes(content);
@@ -3154,12 +3159,12 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 	if (rootIsArr) {
 		out += '[';
 		FormatFrame f; f.type = 'A'; f.align = rootIndent; f.first = true; f.hasVal = true; f.isRoot = true;
-		if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+		if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 		stack.push_back(f);
 	} else {
 		out += '{';
 		FormatFrame f; f.type = 'O'; f.align = rootIndent; f.first = true; f.hasVal = true; f.isRoot = true;
-		if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+		if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 		stack.push_back(f);
 	}
 
@@ -3352,7 +3357,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			if (stack.empty() || stack.back().type != 'O') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
-				if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+				if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 				out += '{';
 				FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
@@ -3419,7 +3424,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			if (stack.empty() || stack.back().type != 'A') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
-				if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+				if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 				out += '[';
 				FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
@@ -3462,13 +3467,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 				if (sc < lines.size() && countIndent(lines[sc]) > indent) {
 					std::string_view scv = stripIndent(lines[sc]);
 					if (yamlIsBlockMappingStart(scv)) {
-						if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+						if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 						out += '{';
 						FormatFrame f; f.type = 'O'; f.align = indent + 1; f.first = true; f.hasVal = true; f.isRoot = false;
 						stack.push_back(f);
 						opened = true;
 					} else if (yamlIsDashStart(scv)) {
-						if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+						if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 						out += '[';
 						FormatFrame f; f.type = 'A'; f.align = indent + 1; f.first = true; f.hasVal = true; f.isRoot = false;
 						stack.push_back(f);
@@ -3586,7 +3591,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 			if (stack.empty() || stack.back().type != 'O') {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
-				if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+				if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 				out += '{';
 				FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 				stack.push_back(f);
@@ -3705,7 +3710,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					li = scan; // skip flow lines
 					stack.back().hasVal = true;
 				} else if (isArrayValue) {
-					if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+					if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 					out += '[';
 					FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 					stack.push_back(f);
@@ -3743,7 +3748,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 					// The value is a mapping whose entries follow on deeper lines:
 					//   key:
 					//     sub: value
-					if (stack.size() >= MAX_YAML_DEPTH) throw asvJSONError("YAML: maximum nesting depth exceeded");
+					if (stack.size() > asvJSONValue::MAX_NESTING_DEPTH + 1) throw asvJSONError("YAML: maximum nesting depth exceeded");
 					out += '{';
 					FormatFrame f; f.type = 'O'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
 					stack.push_back(f);
@@ -4242,9 +4247,13 @@ std::vector<std::tuple<size_t, size_t, bool, bool>> docs; // {start, end, explic
 }
 
 inline bool asvJSON::fromYAML(std::string_view input) {
+	lastError.clear();
+	root = nullptr;
+	dirty_ = false;
 	formatType = FormatType::Unknown;
 	bool prevNaN = allowNaNInfinity;
 	allowNaNInfinity = true;
+	if (input.size() > MAX_YAML_INPUT) { lastError = "YAML input exceeds 10 MB limit"; return false; }
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 		// UTF-8 BOM, like every other from* decoder. Without this the BOM became
@@ -4263,6 +4272,8 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 		return ok;
 	} catch (const asvJSONError& e) {
 		allowNaNInfinity = prevNaN;
+		root = nullptr;
+		dirty_ = false;
 		lastError = e.what();
 		return false;
 	} catch (const std::exception& e) {
@@ -4271,6 +4282,8 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 		// Restore the permissive flag here too -- a leaked allowNaNInfinity
 		// would silently change later parses (same lesson as fromJSON5).
 		allowNaNInfinity = prevNaN;
+		root = nullptr;
+		dirty_ = false;
 		lastError = e.what();
 		return false;
 	}
