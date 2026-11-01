@@ -13,6 +13,10 @@
 //   - Comments // /* */ # (already handled by JSON parser)
 // NOTE: unescaped U+000A/U+000D inside strings is accepted (lenient, per json5ToJson)
 // and escaped to \n / \r via escapeControl; spec sec 5.2 forbids them -- use line-continuation
+// Input size limit — symmetric with GOON/TOON's MAX_GOON_INPUT / MAX_TOON_INPUT.
+namespace asvJSONInternal {
+  constexpr size_t MAX_JSON5_INPUT = 10u * 1024u * 1024u;
+} // namespace asvJSONInternal
 // with backslash for actual multi-line strings.
 //
 // Comments (`//`, `/* */`, `#`) round-trip: json5CollectComments walks the
@@ -46,8 +50,23 @@
 namespace asvJSONInternal {
 
 inline std::string json5ToJson(std::string_view input) {
+  // Strip invisible JSON5 whitespace (U+1680 OGHAM SPACE MARK, U+202F NARROW NO-BREAK SPACE)
+  // from the input before processing. These are legal whitespace in JSON5 but their
+  // UTF-8 bytes would otherwise be misinterpreted as identifier continuation bytes.
+  std::string stripped;
+  stripped.reserve(input.size());
+  for (size_t p = 0; p < input.size(); ) {
+    auto uc = static_cast<unsigned char>(input[p]);
+    if (uc == 0xC2 && p + 1 < input.size() && static_cast<unsigned char>(input[p + 1]) == 0xA0) { p += 2; continue; } // NBSP U+00A0
+    if (uc == 0xE1 && p + 2 < input.size() && static_cast<unsigned char>(input[p + 1]) == 0x9A &&
+        static_cast<unsigned char>(input[p + 2]) == 0x80) { p += 3; continue; } // U+1680 OGHAM SPACE MARK
+    if (uc == 0xE2 && p + 2 < input.size() && static_cast<unsigned char>(input[p + 1]) == 0x80 &&
+        static_cast<unsigned char>(input[p + 2]) == 0xAF) { p += 3; continue; } // U+202F NARROW NO-BREAK SPACE
+    stripped += input[p++];
+  }
+  input = stripped;
   std::string out;
-  out.reserve(input.size() + input.size() / 8);
+  out.reserve(stripped.size() + stripped.size() / 8);
 
   enum StrState { NONE, SINGLE, DOUBLE };
   StrState str = NONE;
@@ -79,7 +98,6 @@ inline std::string json5ToJson(std::string_view input) {
 
   for (size_t i = 0; i < input.size(); i++) {
     char c = input[i];
-
     if (str == DOUBLE) {
       if (c == '\\' && i + 1 < input.size()) {
         char n = input[i + 1];
@@ -295,6 +313,10 @@ inline std::string json5ToJson(std::string_view input) {
             static_cast<unsigned char>(input[j + 2]) >= 0x80 && static_cast<unsigned char>(input[j + 2]) <= 0x8A) { j += 3; continue; }
         if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x81 &&
             static_cast<unsigned char>(input[j + 2]) == 0x9F) { j += 3; continue; }
+        if (unc == 0xE1 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x9A &&
+            static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; } // U+1680 OGHAM SPACE MARK
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) == 0xAF) { j += 3; continue; } // U+202F NARROW NO-BREAK SPACE
         if (unc == 0xE3 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
             static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; }
         if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
@@ -355,7 +377,6 @@ inline std::string json5ToJson(std::string_view input) {
       radixJustEnded = false;
       size_t start = i;
       while (i < input.size() && isIdCont(input[i])) {
-        // Stop at multibyte whitespace (which the identifier continuation rule would otherwise swallow)
         auto uc = static_cast<unsigned char>(input[i]);
         if (uc == 0xC2 && i + 1 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xA0) break;
         if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
@@ -368,6 +389,7 @@ inline std::string json5ToJson(std::string_view input) {
             static_cast<unsigned char>(input[i + 2]) == 0x80) break;
         if (uc == 0xEF && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
             static_cast<unsigned char>(input[i + 2]) == 0xBF) break;
+
         i++;
       }
       std::string_view ident(input.data() + start, i - start);
@@ -493,6 +515,10 @@ inline std::string json5ToJson(std::string_view input) {
             static_cast<unsigned char>(input[j + 2]) >= 0x80 && static_cast<unsigned char>(input[j + 2]) <= 0x8A) { j += 3; continue; }
         if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x81 &&
             static_cast<unsigned char>(input[j + 2]) == 0x9F) { j += 3; continue; }
+        if (unc == 0xE1 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x9A &&
+            static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; } // U+1680 OGHAM SPACE MARK
+        if (unc == 0xE2 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[j + 2]) == 0xAF) { j += 3; continue; } // U+202F NARROW NO-BREAK SPACE
         if (unc == 0xE3 && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0x80 &&
             static_cast<unsigned char>(input[j + 2]) == 0x80) { j += 3; continue; }
         if (unc == 0xEF && j + 2 < input.size() && static_cast<unsigned char>(input[j + 1]) == 0xBB &&
@@ -819,6 +845,10 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
     if (static_cast<unsigned char>(c) == 0xC2 && i + 1 < n && static_cast<unsigned char>(input[i + 1]) == 0xA0) { i += 2; continue; }
     if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
         (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) { i += 3; continue; }
+    if (static_cast<unsigned char>(c) == 0xE1 && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x9A &&
+        static_cast<unsigned char>(input[i + 2]) == 0x80) { i += 2; continue; } // U+1680 OGHAM SPACE MARK
+    if (static_cast<unsigned char>(c) == 0xE2 && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
+        static_cast<unsigned char>(input[i + 2]) == 0xAF) { i += 2; continue; } // U+202F NARROW NO-BREAK SPACE
     if (static_cast<unsigned char>(c) == 0xEF && i + 2 < n && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
         static_cast<unsigned char>(input[i + 2]) == 0xBF) { i += 3; continue; }
     // Comments.
@@ -1089,15 +1119,15 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       out += '{';
       if (pretty && v->obj && !v->obj->empty()) out += '\n';
       size_t i = 0;
-      const size_t n = v->obj->size();
+      const size_t n = v->obj ? v->obj->size() : 0;
       bool prevNl = false; // previous field ended with a // comment -> comma already placed
       for (const auto& [k, child] : *(v->obj)) {
         if (i > 0 && !prevNl) {
-          bool leadCmt = child->comments && !child->comments->leading.empty();
+          bool leadCmt = child && child->comments && !child->comments->leading.empty();
           out += (pretty || leadCmt) ? ",\n" : ",";
         }
         prevNl = false;
-        if (child->comments) {
+        if (child && child->comments) {
           for (const auto& c : child->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
             if (c.block) { out += "/*"; out += c.text; out += "*/"; }
@@ -1139,13 +1169,14 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
       bool prevNl = false; // previous element ended with a // comment
       const size_t ne = v->arr ? v->arr->size() : 0;
       for (size_t i = 0; i < ne; i++) {
+        auto* elem = v->get(i);
         if (i > 0 && !prevNl) {
-          bool leadCmt = v->get(i)->comments && !v->get(i)->comments->leading.empty();
+          bool leadCmt = elem && elem->comments && !elem->comments->leading.empty();
           out += (pretty || leadCmt) ? ",\n" : ",";
         }
         prevNl = false;
         if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-        if (v->get(i)->comments) {
+        if (elem && elem->comments) {
           for (const auto& c : v->get(i)->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
             if (c.block) { out += "/*"; out += c.text; out += "*/"; }
@@ -1295,6 +1326,10 @@ inline std::string asvJSON::toJSON5(bool pretty) const {
 
 inline bool asvJSON::fromJSON5(std::string_view input) {
   formatType = FormatType::Unknown;
+  lastError.clear();
+  root = nullptr;
+  dirty_ = false;
+  if (input.size() > MAX_JSON5_INPUT) { lastError = "JSON5 input exceeds 10 MB limit"; return false; }
   if (input.empty()) { lastError = "empty input"; return false; }
   bool prevNaN = allowNaNInfinity;
   allowNaNInfinity = true;
@@ -1312,6 +1347,8 @@ inline bool asvJSON::fromJSON5(std::string_view input) {
     return ok;
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;
+    root = nullptr;
+    dirty_ = false;
     lastError = e.what();
     return false;
   } catch (const std::exception& e) {
@@ -1324,6 +1361,8 @@ inline bool asvJSON::fromJSON5(std::string_view input) {
     // must be restored here too, or the object keeps the permissive flag after
     // a failed parse.
     allowNaNInfinity = prevNaN;
+    root = nullptr;
+    dirty_ = false;
     lastError = e.what();
     return false;
   }
