@@ -397,19 +397,23 @@ namespace asvJSONInternal {
 // after the JSON key ({"defs":{"clipPath":[a,b]}} -> <defs><clipPath/>x2</defs>),
 // so XML's same-named-only collapse would drop the key on the way back.
 inline bool asvJSON::fromSVG(std::string_view input) {
+	lastError.clear();
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	if (input.size() > MAX_XML_INPUT) { lastError = "XML input exceeds 10 MB limit"; return false; }
 	try {
 		auto obj = xmlParseDocument(input, /*collapseSameNamed=*/false);
 		root = std::move(obj);
 		formatType = FormatType::SVG;
 		return true;
 	} catch (const asvJSONError& e) {
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;
 	} catch (const std::exception& e) {
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;

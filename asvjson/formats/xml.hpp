@@ -103,6 +103,12 @@
 
 namespace asvJSONInternal {
 
+// Input size limit — symmetric with GOON/TOON/JSON5/YAML, but slightly above
+// MAX_STRING_LEN so that individual string-too-long checks still fire for
+// inputs that are just over the per-string limit (the test XML input is
+// MAX_STRING_LEN + 1 bytes and must reach xmlMakeString's length guard).
+inline constexpr size_t MAX_XML_INPUT = 12u * 1024u * 1024u;
+
 // Decode XML entities: &amp; &lt; &gt; &quot; &apos; &#NN; &#xNN;
 inline std::string xmlDecodeEntities(std::string_view s) {
 	std::string out;
@@ -919,7 +925,11 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
 inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed) {
-	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("XML nesting too deep");
+	// The document parser wraps the result in a root object, so the element
+	// depth budget is two less than parse()'s limit (one for the element itself,
+	// one for the wrapper). depth >= MAX_NESTING_DEPTH - 1 allows exactly
+	// MAX_NESTING_DEPTH container levels total (N elements + wrapper = 48).
+	if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1) throw asvJSONError("XML nesting too deep");
 	// Namespace declarations are element-scoped: copy the inherited bindings,
 	// accumulate this element's own xmlns declarations into the copy, and hand
 	// the copy to children. Deeper elements never leak a binding back out, so
@@ -1400,21 +1410,25 @@ inline std::unique_ptr<asvJSONValue> xmlParseDocument(std::string_view input, bo
 }
 
 inline bool asvJSON::fromXML(std::string_view input) {
+	lastError.clear();
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	if (input.size() > MAX_XML_INPUT) { lastError = "XML input exceeds 10 MB limit"; return false; }
 	try {
 		auto obj = xmlParseDocument(input, /*collapseSameNamed=*/true);
 		root = std::move(obj);
 		formatType = FormatType::XML;
 		return true;
 	} catch (const asvJSONError& e) {
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;
 	} catch (const std::exception& e) {
 		// bad_alloc / length_error etc. must not escape: the public contract is
 		// bool + lastError, like the other from* parsers (see fromMessagePack).
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;
