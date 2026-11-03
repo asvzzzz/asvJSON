@@ -929,7 +929,12 @@ private:
 
   std::unique_ptr<asvJSONValue> parseArray(int depth) {
     pos_++; // consume '['
-    if (!asvJSONValue::checkNestingDepth(depth))
+    // depth here is the CALLER's depth; the array itself is one level deeper.
+    // checkNestingDepth(depth - 1) means: a call with depth=N is allowed when
+    // N-1 <= MAX (i.e. N <= MAX+1). parseArray(2) from parseValue(1) → check(1)
+    // OK for the first container; parseArray(49) → check(48) OK; parseArray(50)
+    // → check(49) FAIL. Matches core parse() which allows 48 containers.
+    if (!asvJSONValue::checkNestingDepth(depth - 1))
       throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
     auto arr = asvJSONValue::makeArray();
     if (!arr || !arr->arr) throw asvJSONError("ADE: out of memory");
@@ -957,7 +962,7 @@ private:
 
   std::unique_ptr<asvJSONValue> parseObject(int depth) {
     pos_++; // consume '{'
-    if (!asvJSONValue::checkNestingDepth(depth))
+    if (!asvJSONValue::checkNestingDepth(depth - 1))
       throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
     auto obj = asvJSONValue::makeObject();
     if (!obj || !obj->obj) throw asvJSONError("ADE: out of memory");
@@ -978,7 +983,7 @@ private:
         // object levels so parseValue's depth budget reflects the real tree.
         int valDepth = depth;
         if (!pk.segs.empty() && adeDottedKeyExpandable(pk.segs))
-          valDepth = std::max(valDepth, static_cast<int>(pk.segs.size()));
+          valDepth += static_cast<int>(pk.segs.size()) - 1;
         val = parseValue(valDepth);
       }
       if (!val) throw asvJSONError("ADE: out of memory");
@@ -1726,7 +1731,7 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
       char c = peek();
       if (c == '[' || c == '{') {
         if (any) throw asvJSONError("ADE: unexpected top-level collection at line " + std::to_string(lineNum_));
-        auto coll = (c == '[') ? parseArray(2) : parseObject(2);
+        auto coll = (c == '[') ? parseArray(1) : parseObject(1);
         skipWsAndComments();
         if (!eof()) throw asvJSONError("ADE: trailing content after top-level collection");
         return coll;
@@ -1756,7 +1761,10 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
         if (strict_) throw asvJSONError("ADE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
-        val = parseValue(1);
+        int valDepth = 1;
+        if (!key.segs.empty() && adeDottedKeyExpandable(key.segs))
+          valDepth += static_cast<int>(key.segs.size()) - 1;
+        val = parseValue(valDepth);
       }
       if (!val) throw asvJSONError("ADE: out of memory");
       // YAML-style merge key: "<<: *default" (only the unquoted form merges).
@@ -2488,7 +2496,7 @@ inline bool asvJSON::fromADE(std::string_view input, bool strict) {
   dirty_ = false;
   formatType = FormatType::Unknown;
   root = nullptr;
-  if (input.size() > MAX_ADE_INPUT) { lastError = "ADE input exceeds 10 MB limit"; return false; }
+  if (input.size() > MAX_ADE_INPUT) { lastError = "ADE input exceeds 32 MB limit"; return false; }
   try {
     auto parsed = asvJSONInternal::parseADE(std::string(input), strict);
     if (!parsed) {
