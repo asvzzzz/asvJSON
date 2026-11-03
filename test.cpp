@@ -16806,6 +16806,35 @@ TEST(testJSONLinesRoundTrip) {
   }
 }
 
+TEST(testJSONLinesSecurityFixes) {
+  // lastError.clear() on entry: a prior error must not linger after a successful parse.
+  {
+    asvJSON j;
+    ASSERT(!j.fromJSONLines("not json\n"));
+    std::string prev = j.lastError;
+    ASSERT(j.fromJSONLines("1\n"));
+    ASSERT_EQ(j.getRoot()->size(), size_t(1));
+    ASSERT(j.lastError.empty());
+  }
+  // MAX_JSONLINES_INPUT: input exceeding the limit is rejected with a clear message.
+  {
+    asvJSON j;
+    std::string big = "1\n";
+    big.append(33 * 1024 * 1024, 'x');
+    ASSERT(!j.fromJSONLines(big));
+    ASSERT(j.lastError.find("32 MB limit") != std::string::npos);
+  }
+  // MAX_ARRAY_SIZE exceeded: too many lines must be rejected (not silently accepted).
+  {
+    asvJSON j;
+    std::string big = "null\n";
+    for (size_t i = 0; i < asvJSONValue::MAX_ARRAY_SIZE + 1024; i++)
+      big += "null\n";
+    ASSERT(!j.fromJSONLines(big));
+    ASSERT(j.lastError.find("too many lines") != std::string::npos);
+  }
+}
+
 TEST(testToSexpr) {
   // Basic object round-trip
   {
@@ -37822,6 +37851,7 @@ RUN(testGOONSpecialValues);
 	RUN(testJSONLinesErrorMessage);
 	RUN(testJSONLinesUtf8SafeErrorMessage);
 	RUN(testJSONLinesRoundTrip);
+	RUN(testJSONLinesSecurityFixes);
 
 	std::cout << "\n--- S-Expression Serialization Tests ---\n";
 	RUN(testToSexpr);

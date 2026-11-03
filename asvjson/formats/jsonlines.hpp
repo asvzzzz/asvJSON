@@ -18,6 +18,9 @@
 
 namespace asvJSONInternal {
 
+// Input size limit — symmetric with other from* parsers.
+inline constexpr size_t MAX_JSONLINES_INPUT = 32u * 1024u * 1024u;
+
 inline std::string jsonlinesPrefix(std::string_view s) {
     // Return up to 30 bytes of `s`, cut at a CHARACTER boundary.
     //
@@ -75,9 +78,11 @@ inline std::string asvJSON::toJSONLines() const {
 }
 
 inline bool asvJSON::fromJSONLines(std::string_view input) {
+	lastError.clear();
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	if (input.size() > MAX_JSONLINES_INPUT) { lastError = "JSON Lines input exceeds 32 MB limit"; return false; }
 	try {
 		auto arr = asvJSONValue::makeArray();
 		if (!arr) { lastError = "out of memory"; return false; }
@@ -102,7 +107,11 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 					throw asvJSONError("JSON Lines: invalid JSON at line " + std::to_string(lineNum) +
 					                   ": " + why + " near: " + jsonlinesPrefix(line));
 				}
-				arr->arr->push_back(tmp.releaseRoot());
+				auto parsed = tmp.releaseRoot();
+				if (!parsed) throw asvJSONError("JSON Lines: out of memory");
+				if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+					throw asvJSONError("JSON Lines: too many lines");
+				arr->arr->push_back(std::move(parsed));
 			}
 			pos = end + 1;
 		}
@@ -110,10 +119,12 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 		formatType = FormatType::JSONLines;
 		return true;
 	} catch (const asvJSONError& e) {
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;
 	} catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers.
+		dirty_ = false;
 		lastError = e.what();
 		root = nullptr;
 		return false;
