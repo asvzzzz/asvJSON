@@ -50,6 +50,11 @@ inline std::string adeToLower(std::string_view s) {
 // on OOM. The ADE decoder builds the tree directly, so a null unique_ptr must
 // become a reported error instead of entering a container (a serializer would
 // dereference it). Mirrors makeAdeString's explicit check.
+// Input size limit — symmetric with GOON/TOON/JSON5/YAML/XML, but well above
+// MAX_STRING_LEN and the 12 MB string-too-long test inputs so those still reach
+// adeMakeString's length guard. Also above the 1M-key object test (~25 MB).
+inline constexpr size_t MAX_ADE_INPUT = 32u * 1024u * 1024u;
+
 inline std::unique_ptr<asvJSONValue> adeNonNull(std::unique_ptr<asvJSONValue> v) {
   if (!v) throw asvJSONError("ADE: out of memory");
   return v;
@@ -693,8 +698,9 @@ private:
   std::unique_ptr<asvJSONValue> parseValue(int depth) {
     skipWsAndComments();
     if (eof()) throw asvJSONError("ADE: expected value at line " + std::to_string(lineNum_));
-    if (!asvJSONValue::checkNestingDepth(depth))
-      throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
+    // Depth check moved to parseArray/parseObject so scalars don't consume a
+    // nesting slot. A 48-container-deep scalar leaf must round-trip through
+    // core parse() which also counts only containers, not scalar leaves.
     char c = peek();
     if (c == '"') return parseQuotedString();
     if (c == '\'') return parseSingleQuotedString();
@@ -923,6 +929,8 @@ private:
 
   std::unique_ptr<asvJSONValue> parseArray(int depth) {
     pos_++; // consume '['
+    if (!asvJSONValue::checkNestingDepth(depth))
+      throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
     auto arr = asvJSONValue::makeArray();
     if (!arr || !arr->arr) throw asvJSONError("ADE: out of memory");
     while (true) {
@@ -949,6 +957,8 @@ private:
 
   std::unique_ptr<asvJSONValue> parseObject(int depth) {
     pos_++; // consume '{'
+    if (!asvJSONValue::checkNestingDepth(depth))
+      throw asvJSONError("ADE: nesting too deep at line " + std::to_string(lineNum_));
     auto obj = asvJSONValue::makeObject();
     if (!obj || !obj->obj) throw asvJSONError("ADE: out of memory");
     while (true) {
@@ -964,7 +974,12 @@ private:
         if (strict_) throw asvJSONError("ADE: missing value after ':' at line " + std::to_string(lineNum_));
         val = asvJSONValue::makeNull();
       } else {
-        val = parseValue(depth);
+        // Dotted keys expand into nested objects; account for the intermediate
+        // object levels so parseValue's depth budget reflects the real tree.
+        int valDepth = depth;
+        if (!pk.segs.empty() && adeDottedKeyExpandable(pk.segs))
+          valDepth = std::max(valDepth, static_cast<int>(pk.segs.size()));
+        val = parseValue(valDepth);
       }
       if (!val) throw asvJSONError("ADE: out of memory");
       // YAML-style merge key inside inline objects: "{<<: *default}".
@@ -2207,7 +2222,10 @@ inline void adeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int 
 }
 
 inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
-  if (!asvJSONValue::checkNestingDepth(indent))
+  // align with the decoder: checkNestingDepth uses depth starting at 1 for the
+  // first container (matching parse() semantics). The serializer's indent starts
+  // at 0 for root, so add 1 to compare against the same limit.
+  if (!asvJSONValue::checkNestingDepth(indent + 1))
     throw asvJSONError("ADE: maximum nesting depth exceeded");
   if (indent == 0) {
     bool first = true;
@@ -2235,7 +2253,7 @@ inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, 
 }
 
 inline void adeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, bool multiline, bool strict) {
-  if (!asvJSONValue::checkNestingDepth(indent))
+  if (!asvJSONValue::checkNestingDepth(indent + 1))
     throw asvJSONError("ADE: maximum nesting depth exceeded");
   if (!v->arr || v->arr->empty()) { os << "[]"; return; }
   bool allObjs = true;
@@ -2466,9 +2484,11 @@ inline std::string asvJSON::toADE(bool strict) const {
 }
 
 inline bool asvJSON::fromADE(std::string_view input, bool strict) {
+  lastError.clear();
   dirty_ = false;
   formatType = FormatType::Unknown;
   root = nullptr;
+  if (input.size() > MAX_ADE_INPUT) { lastError = "ADE input exceeds 10 MB limit"; return false; }
   try {
     auto parsed = asvJSONInternal::parseADE(std::string(input), strict);
     if (!parsed) {
@@ -2479,10 +2499,12 @@ inline bool asvJSON::fromADE(std::string_view input, bool strict) {
     formatType = FormatType::ADE;
     return true;
   } catch (const asvJSONError& e) {
+    dirty_ = false;
     lastError = e.what();
     root = nullptr;
     return false;
   } catch (const std::exception& e) {
+    dirty_ = false;
     lastError = e.what();
     root = nullptr;
     return false;
