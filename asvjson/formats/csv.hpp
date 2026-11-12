@@ -238,8 +238,13 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 }
 
 inline bool asvJSON::fromCSV(std::string_view input) {
+	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	lastError.clear();
+	// Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+	constexpr size_t MAX_CSV_INPUT = 32u * 1024u * 1024u;
+	if (input.size() > MAX_CSV_INPUT) { lastError = "CSV input exceeds 32 MB limit"; return false; }
 	try {
 		if (input.empty()) throw asvJSONError("empty input");
 
@@ -328,8 +333,12 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 				// makeString returns nullptr when the cell exceeds MAX_STRING_LEN;
 				// storing a null value would crash on later access.
 				if (!val) throw asvJSONError("CSV: string too long");
+				if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+					throw asvJSONError("CSV: object too large");
 				obj->obj->emplace(headers[fi], std::move(val));
 			}
+			if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+				throw asvJSONError("CSV: too many rows");
 			arr->arr->push_back(std::move(obj));
 		}
 
@@ -465,32 +474,32 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 		std::unordered_set<std::string> keySeen;
 		std::unordered_set<const asvJSONValue*> visited;
 		auto collect = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
-						   std::unordered_set<const asvJSONValue*>& vis) -> void {
-			if (!v) return;
+						   std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
+			if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
 			if (vis.count(v)) return;
 			vis.insert(v);
 			if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 				for (const auto& [k, val] : *v->obj)
-					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
+					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis, depth + 1);
 			} else {
 				std::string key = prefix;
 				if (keySeen.insert(key).second) keys.push_back(std::move(key));
 			}
 		};
-		for (const auto& item : items) collect(collect, item.get(), "", visited);
+		for (const auto& item : items) collect(collect, item.get(), "", visited, 0);
 		for (size_t i = 0; i < keys.size(); i++) { if (i > 0) out += ','; out += csvEscape(keys[i], keys[i].empty()); }
 		out += '\n';
 		for (const auto& item : items) {
 			std::map<std::string, std::string> flat;
 			std::unordered_set<const asvJSONValue*> fillVisited;
 			auto fill = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
-							std::unordered_set<const asvJSONValue*>& vis) -> void {
-				if (!v) return;
+							std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
+				if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
 				if (vis.count(v)) return;
 				vis.insert(v);
 				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)
-						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
+						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis, depth + 1);
 				} else {
 					std::string key = prefix;
 					// Two different paths flattening onto one column would
@@ -499,7 +508,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
 				}
 			};
-			fill(fill, item.get(), "", fillVisited);
+			fill(fill, item.get(), "", fillVisited, 0);
 			for (size_t i = 0; i < keys.size(); i++) {
 				if (i > 0) out += ',';
 				auto it = flat.find(keys[i]);
@@ -519,13 +528,13 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			std::unordered_set<std::string> flatSeen;
 			std::unordered_set<const asvJSONValue*> flattenVisited;
 			auto flatten = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
-							   std::unordered_set<const asvJSONValue*>& vis) -> void {
-				if (!v) return;
+							   std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
+				if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
 				if (vis.count(v)) return;
 				vis.insert(v);
 				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)
-						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis);
+						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis, depth + 1);
 				} else {
 					std::string key = prefix;
 					// Two different paths flattening onto one column would
@@ -535,7 +544,7 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					flat.emplace_back(std::move(key), csvCell(v));
 				}
 			};
-			flatten(flatten, this, "", flattenVisited);
+			flatten(flatten, this, "", flattenVisited, 0);
 			for (size_t i = 0; i < flat.size(); i++) {
 				if (i > 0) out += ',';
 				out += csvEscape(flat[i].first, flat[i].first.empty());
