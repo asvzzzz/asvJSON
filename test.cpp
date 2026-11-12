@@ -5130,6 +5130,128 @@ TEST(testObjectKeyEscapes) {
 	}
 }
 
+TEST(testCBORSecurityFixes) {
+	// Encoder depth symmetry for tag-based types: the encoder must not emit bytes
+	// that its own decoder rejects. Decoder increments depth for the tag AND for
+	// the inner element (DATETIME/TIMESTAMP/REGEX/OBJECTID/EXTENSION), so the
+	// encoder must match or a 48-level tree would encode fine but fail on
+	// re-parse via fromCBOR. CUSTOM_TAG wraps [name, value] -> depth+2.
+	{
+		// Build a DATETIME at exactly MAX_NESTING_DEPTH (48) — should succeed.
+		auto deepDateTime = [](size_t depth) {
+			asvJSONValue::makeObject(); // just to get the type; we'll build manually
+			auto v = asvJSONValue::makeDateTime(1700000000, 500);
+			// Wrap in 'depth' nested arrays so the datetime sits at depth N.
+			for (size_t i = 0; i < depth; i++) {
+				auto arr = asvJSONValue::makeArray();
+				arr->arr->push_back(std::move(v));
+				v = std::move(arr);
+			}
+			return v;
+		};
+		// Depth 47: datetime is at depth 48 (0-indexed), encoder check is
+		// depth+1 > MAX => 48 > 48 false. Decoder parses tag at 47, then float
+		// at 48 which passes (48 > 48 false). Round-trip must succeed.
+		auto v47 = deepDateTime(47);
+		std::vector<uint8_t> out47;
+		v47->toCBOR(out47); // should not throw
+		asvJSON json47;
+		ASSERT(json47.fromCBOR(out47.data(), out47.size()));
+
+		// Depth 48: datetime is at depth 49, encoder check is 49 > 48 true.
+		// Encoder must reject before emitting bytes that decoder would also reject.
+		auto v48 = deepDateTime(48);
+		bool threwEncoder = false;
+		try {
+			std::vector<uint8_t> out;
+			v48->toCBOR(out);
+		} catch (const asvJSONError&) {
+			threwEncoder = true;
+		}
+		if (!threwEncoder) throw std::runtime_error("encoder must reject DATETIME at depth 49");
+	}
+	{
+		// EXTENSION at depth 46: wraps [extType, bytes] -> elements at depth 48.
+		// Encoder check is depth+2 > MAX => 48 > 48 false → OK.
+		auto v = asvJSONValue::makeExtension(1, reinterpret_cast<const uint8_t*>("x"), 1);
+		for (size_t i = 0; i < 46; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(v));
+			v = std::move(arr);
+		}
+		std::vector<uint8_t> out;
+		v->toCBOR(out); // should not throw
+
+		// EXTENSION at depth 47: elements would be at depth 49 → reject.
+		auto v2 = asvJSONValue::makeExtension(1, reinterpret_cast<const uint8_t*>("x"), 1);
+		for (size_t i = 0; i < 47; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(v2));
+			v2 = std::move(arr);
+		}
+		bool threw = false;
+		try {
+			std::vector<uint8_t> out2;
+			v2->toCBOR(out2);
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		if (!threw) throw std::runtime_error("encoder must reject EXTENSION at depth 49");
+	}
+	{
+		// CUSTOM_TAG with non-null value: wraps [name, value] -> value at depth+2.
+		auto v = asvJSONValue::makeObject(); // dummy for the chain
+		auto tagVal = std::make_unique<asvJSONValue>();
+		tagVal->type = asvJSONValue::CUSTOM_TAG;
+		tagVal->str_data = "tag";
+		tagVal->custom_value = asvJSONValue::makeInt(42);
+		for (size_t i = 0; i < 46; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(tagVal));
+			tagVal = std::move(arr);
+		}
+		std::vector<uint8_t> out;
+		tagVal->toCBOR(out); // should not throw
+
+		// Depth 47: value at depth 49 → reject.
+		auto tagVal2 = std::make_unique<asvJSONValue>();
+		tagVal2->type = asvJSONValue::CUSTOM_TAG;
+		tagVal2->str_data = "tag";
+		tagVal2->custom_value = asvJSONValue::makeInt(42);
+		for (size_t i = 0; i < 47; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(tagVal2));
+			tagVal2 = std::move(arr);
+		}
+		bool threw = false;
+		try {
+			std::vector<uint8_t> out2;
+			tagVal2->toCBOR(out2);
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		if (!threw) throw std::runtime_error("encoder must reject CUSTOM_TAG at depth 49");
+	}
+	// fromCBOR contract: lastError.clear() on entry, MAX_CBOR_INPUT limit.
+	{
+		asvJSON j;
+		ASSERT(!j.fromCBOR("", 0)); // empty input
+		std::string prev = j.lastError;
+		uint8_t one[] = { 0x01 };
+		ASSERT(j.fromCBOR(one, 1));
+		// Prior error must not linger after a successful parse.
+		if (!j.lastError.empty()) throw std::runtime_error("lastError should be empty after successful parse");
+	}
+	{
+		asvJSON j;
+		std::string big(11 * 1024 * 1024, 'x'); // > 10 MB
+		bool ok = j.fromCBOR(big.data(), big.size());
+		ASSERT(!ok);
+		if (j.lastError.find("10 MB limit") == std::string::npos)
+			throw std::runtime_error("expected '10 MB limit' in error message");
+	}
+}
+
 TEST(testToXML) {
 	// Empty root
 	{
