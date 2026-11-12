@@ -52,6 +52,8 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <cstddef>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -1297,7 +1299,14 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
     if (c == '/' && i + 1 < n && in[i + 1] == '/') {
       i += 2;
       size_t s = i;
-      while (i < n && in[i] != '\n') i++;
+      // C++ translation phase 2 strips `\` + newline before tokenization, so a
+      // line continuation inside a line comment joins the next line into the
+      // same comment text. Mirror that behavior.
+      while (i < n) {
+        if (in[i] == '\\' && i + 1 < n && in[i + 1] == '\n') { i += 2; line++; continue; }
+        if (in[i] == '\n') break;
+        i++;
+      }
       if (!skipTok) {
         Tok t; t.kind = Tok::Comment; t.line = line; t.block = false;
         t.text.assign(in.data() + s, i - s);
@@ -1364,6 +1373,10 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
                 if (d < 0) break;
                 hv = hv * 16 + d; i++; cnt++;
               }
+              // \x with zero hex digits is invalid C++ ("\\x" at EOF or "\\xg").
+              // cnt == 1 is valid (\x1 = \x01). Append only when at least one
+              // digit was consumed, otherwise the silent NUL would corrupt data.
+              if (cnt == 0) throw asvJSONError("cpp: invalid \\x escape at line " + std::to_string(sl));
               val += static_cast<char>(hv);
               break;
             }
@@ -2373,7 +2386,9 @@ struct Reader {
     }
   }
 
-  std::vector<FieldDef> parseStructDecl() {
+  std::vector<FieldDef> parseStructDecl(int depth = 0) {
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("cpp: struct nesting too deep");
     std::vector<Comment> lead = takePending();
     adv(); // struct / class
     skipTrivia();
@@ -2394,10 +2409,10 @@ struct Reader {
     StructDef def;
     def.name = name;
     def.leading = std::move(lead);
-    return parseStructBody(def);
+    return parseStructBody(def, depth + 1);
   }
 
-  std::vector<FieldDef> parseStructBody(StructDef& def) {
+  std::vector<FieldDef> parseStructBody(StructDef& def, int depth = 0) {
     adv(); // '{'
     while (!eof()) {
       skipTrivia();
@@ -2559,7 +2574,7 @@ struct Reader {
             }
           }
           else {
-            auto flds = parseStructDecl();
+            auto flds = parseStructDecl(depth + 1);
             for (auto& f : flds) def.fields.push_back(std::move(f));
           }
           continue;
@@ -3068,6 +3083,8 @@ struct Reader {
           }
           lead.push_back(pend[ci]);
         }
+        if (!asvJSONValue::checkObjectSize(def.members.size() + 1))
+          throw asvJSONError("cpp: too many enum members");
         def.members.push_back(cur().text);
         def.memberLeading.push_back(lead);
         def.memberTrailing.push_back(std::vector<Comment>());
@@ -3346,7 +3363,11 @@ struct Reader {
   std::unique_ptr<asvJSONValue> materialize(const TypeRef& t,
                                             const std::vector<Tok>& init,
                                             bool hasInit, int depth) {
-    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    // depth starts at 0 for root scalar; each container increments by 1.
+    // checkNestingDepth uses depth starting at 1 (parse() increments first),
+    // so depth >= MAX means we're about to create the (MAX+1)-th container —
+    // reject. Allows exactly MAX containers (depth 0..MAX-1).
+    if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
       throw asvJSONError("cpp: nesting too deep");
     TypeRef rt = t;
     resolve(rt);
@@ -3417,6 +3438,8 @@ struct Reader {
       const EnumDef* ed = (elem.kind == TypeRef::Enum) ? findEnum(elem.name) : nullptr;
       if (grp && !onlyEmptyGroup) {
         for (auto& g : groups) {
+          if (!asvJSONValue::checkArraySize(a->arr->size() + 1))
+            throw asvJSONError("CPP array too large");
           auto elemVal = materialize(elem, g, !g.empty(), depth + 1);
           if (!elemVal) throw asvJSONError("cpp: out of memory");
           a->arr->push_back(std::move(elemVal));
@@ -3677,7 +3700,13 @@ struct Reader {
 
 } // namespace cppread
 
+// Input size limit — symmetric with other from* parsers.
+inline constexpr size_t MAX_CPP_INPUT = 32u * 1024u * 1024u;
+
 inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts) {
+  lastError.clear();
+  root = nullptr;
+  dirty_ = false;
   formatType = FormatType::Unknown;
   // Every other text decoder strips a leading UTF-8 BOM; a C++ header saved by
   // a Windows editor often has one. The lexer treats a byte >= 0x80 as an
@@ -3686,8 +3715,8 @@ inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts)
   if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xEF &&
       static_cast<unsigned char>(input[1]) == 0xBB && static_cast<unsigned char>(input[2]) == 0xBF)
     input.remove_prefix(3);
-  if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
-  dirty_ = false;
+  if (input.empty()) { lastError = "empty input"; return false; }
+  if (input.size() > MAX_CPP_INPUT) { lastError = "CPP input exceeds 32 MB limit"; return false; }
   try {
     std::map<std::string, std::vector<cppread::Tok>> macros;
     std::vector<cppread::Tok> toks = cppread::cppRdLex(input, &macros);
@@ -3698,7 +3727,7 @@ inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts)
     cppread::Reader rd(toks, opts);
     rd.parseAll();
     std::unique_ptr<asvJSONValue> val = rd.buildRoot();
-    if (!val) { lastError = "cpp: no type declarations found"; return false; }
+    if (!val) { lastError = "cpp: no type declarations found"; root = nullptr; return false; }
     root = std::move(val);
     dirty_ = false;
     formatType = FormatType::CPP;
