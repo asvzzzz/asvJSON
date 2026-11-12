@@ -1319,9 +1319,13 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         // should match what the compiler sees — without the backslash and line
         // break. Build it explicitly rather than slicing raw bytes.
         std::string txt;
+        // Bounds mirror the outer loop's continuation scan (same \n and \r\n
+        // rules). Guard order: check index BEFORE access --- k + 2 < i is strict
+        // so in[k+2] is always within [s, i), avoiding OOB on a truncated
+        // trailing `\r` at EOF.
         for (size_t k = s; k < i; ) {
           if (in[k] == '\\' && k + 1 < i && in[k + 1] == '\n') { k += 2; continue; }
-          if (k + 2 <= i && in[k] == '\\' && in[k + 1] == '\r' && in[k + 2] == '\n') { k += 3; continue; }
+          if (in[k] == '\\' && k + 2 < i && in[k + 1] == '\r' && in[k + 2] == '\n') { k += 3; continue; }
           txt += in[k++];
         }
         t.text = std::move(txt);

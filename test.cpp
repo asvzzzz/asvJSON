@@ -20562,6 +20562,7 @@ TEST(testCppSecurityFixes) {
     ok += ";";
     asvJSON j48;
     ASSERT(j48.fromCpp(ok));
+    ASSERT(j48.lastError.empty());
   }
   {
     // 49 nested structs: max depth = 48, which fails (48 >= 48).
