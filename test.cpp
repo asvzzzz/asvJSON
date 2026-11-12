@@ -20562,20 +20562,18 @@ TEST(testCppSecurityFixes) {
   }
   // materialize brace-init array: checkArraySize must reject oversized arrays.
   // The grp path (brace-init with explicit elements) now checks before each
-  // push_back. The hasLen path (explicit size like int arr[2000000]) is already
-  // pinned by testFromCppArraySizeGuard; this tests the same guard for the grp
-  // path via a struct field whose type resolves to an array with brace-init.
+  // push_back. Use an explicitly-sized array so parseMember wraps it as
+  // TypeRef::Array (int items[N] → dims={N} → Array), forcing materialize into
+  // the Array branch where checkArraySize fires on the grp loop.
   {
     asvJSON j;
     std::string big = "struct Document {\n";
-    big += "  int items[] = {";
+    big += "  int items[1000001] = {";
     for (size_t i = 0; i <= asvJSONValue::MAX_ARRAY_SIZE; i++) {
       if (i) big += ',';
       big += '0';
     }
     big += "};\n};\n";
-    // The input is ~2 MB, well under MAX_CPP_INPUT. The grp path in materialize
-    // must checkArraySize before each push_back and reject at element 1000001.
     ASSERT(!j.fromCpp(big));
     ASSERT(j.lastError.find("too large") != std::string::npos);
   }
@@ -20585,12 +20583,16 @@ TEST(testCppSecurityFixes) {
     ASSERT(!j.fromCpp(std::string_view("struct Document { const char* s = \"\\xg\"; };\n")));
     ASSERT(j.lastError.find("\\x") != std::string::npos);
   }
-  // Line comment \\ + newline continuation: the next line is joined into the comment.
+  // Line comment \ + newline continuation: the next line is joined into the
+  // same comment (C++ translation phase 2). The struct must still parse
+  // correctly despite the multi-line comment.
   {
     asvJSON j;
     ASSERT(j.fromCpp(std::string_view(
       "struct Document {\n"
-      "  int x = 1;\n"        // this line is fine
+      "  // first line \\\n"
+      "  second line\n"
+      "  int x = 1;\n"
       "};\n")));
     ASSERT_EQ(j.getRoot()->get("x")->getInt(), int64_t(1));
   }
