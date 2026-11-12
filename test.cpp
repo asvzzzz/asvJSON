@@ -5139,7 +5139,6 @@ TEST(testCBORSecurityFixes) {
 	{
 		// Build a DATETIME at exactly MAX_NESTING_DEPTH (48) — should succeed.
 		auto deepDateTime = [](size_t depth) {
-			asvJSONValue::makeObject(); // just to get the type; we'll build manually
 			auto v = asvJSONValue::makeDateTime(1700000000, 500);
 			// Wrap in 'depth' nested arrays so the datetime sits at depth N.
 			for (size_t i = 0; i < depth; i++) {
@@ -5171,6 +5170,42 @@ TEST(testCBORSecurityFixes) {
 		if (!threwEncoder) throw std::runtime_error("encoder must reject DATETIME at depth 49");
 	}
 	{
+		// OBJECTID uses tag 4 + byte string (1 tag level, not 2). Encoder must
+		// allow OBJECTID at depth 47 (bytes at 48, decoder accepts) and reject at
+		// depth 48. This caught the depth+2/depth+1 confusion.
+		uint8_t oid_bytes[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+		auto oid = asvJSONValue::makeObjectId(std::string_view((const char*)oid_bytes, 12));
+		for (int i = 0; i < 47; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(oid));
+			oid = std::move(arr);
+		}
+		std::vector<uint8_t> out;
+		try { oid->toCBOR(out); }
+		catch (const asvJSONError& e) {
+			throw std::runtime_error(std::string("OBJECTID at depth 47 must encode: ") + e.what());
+		}
+		asvJSON j;
+		ASSERT(j.fromCBOR(out.data(), out.size()));
+
+		// Depth 48: bytes would be at depth 49 → reject.
+		uint8_t oid_bytes2[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+		auto oid2 = asvJSONValue::makeObjectId(std::string_view((const char*)oid_bytes2, 12));
+		for (int i = 0; i < 48; i++) {
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(oid2));
+			oid2 = std::move(arr);
+		}
+		bool threw = false;
+		try {
+			std::vector<uint8_t> out2;
+			oid2->toCBOR(out2);
+		} catch (const asvJSONError&) {
+			threw = true;
+		}
+		if (!threw) throw std::runtime_error("encoder must reject OBJECTID at depth 49");
+	}
+	{
 		// EXTENSION at depth 46: wraps [extType, bytes] -> elements at depth 48.
 		// Encoder check is depth+2 > MAX => 48 > 48 false → OK.
 		auto v = asvJSONValue::makeExtension(1, reinterpret_cast<const uint8_t*>("x"), 1);
@@ -5200,7 +5235,6 @@ TEST(testCBORSecurityFixes) {
 	}
 	{
 		// CUSTOM_TAG with non-null value: wraps [name, value] -> value at depth+2.
-		auto v = asvJSONValue::makeObject(); // dummy for the chain
 		auto tagVal = std::make_unique<asvJSONValue>();
 		tagVal->type = asvJSONValue::CUSTOM_TAG;
 		tagVal->str_data = "tag";

@@ -195,8 +195,9 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
     }
     case T::OBJECTID: {
       // Encode ObjectId as tag 4 (MongoDB convention) + byte string.
-      // Decoder increments depth for tag (+1) then again for the inner byte string (+1), so inner element lands at depth+2. Check both levels here.
-      if (depth + 2 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
+      // Decoder increments depth ONCE for the tag (the byte string is at depth+1).
+      // Matches DATETIME/TIMESTAMP/REGEX, NOT EXTENSION/CUSTOM_TAG (those wrap an array -> +2).
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
       if (str_data.size() == 12) {
         out.push_back(0xC4); // tag 4
         cborWriteUint(out, 2, str_data.size());
