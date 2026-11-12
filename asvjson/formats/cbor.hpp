@@ -181,29 +181,36 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
       cborWriteText(out, str_data);
       break;
     }
-    case T::BINARY:
-    case T::OBJECTID:
     case T::EXTENSION: {
-      if (type == T::EXTENSION) {
-        // Encode extension as tag 257 + array [extType, byteString]; keeps
-        // the type even when the payload is empty (no data-loss to null).
-        out.push_back(0xD9); out.push_back(0x01); out.push_back(0x01); // tag 257
-        out.push_back(0x82); // array of 2 items
-        cborWriteSigned(out, ext_type);
-        cborWriteUint(out, 2, bin_data.size());
-        out.insert(out.end(), bin_data.begin(), bin_data.end());
-      } else if (type == T::OBJECTID && str_data.size() == 12) {
-        // Encode ObjectId as tag 4 (MongoDB convention) + byte string
+      // Encode extension as tag 257 + array [extType, byteString]; keeps
+      // the type even when the payload is empty (no data-loss to null).
+      // Decoder increments depth for tag (+1) and again for the inner array (+1), so inner elements land at depth+2. Check both levels here.
+      if (depth + 2 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
+      out.push_back(0xD9); out.push_back(0x01); out.push_back(0x01); // tag 257
+      out.push_back(0x82); // array of 2 items
+      cborWriteSigned(out, ext_type);
+      cborWriteUint(out, 2, bin_data.size());
+      out.insert(out.end(), bin_data.begin(), bin_data.end());
+      break;
+    }
+    case T::OBJECTID: {
+      // Encode ObjectId as tag 4 (MongoDB convention) + byte string.
+      // Decoder increments depth for tag (+1) then again for the inner byte string (+1), so inner element lands at depth+2. Check both levels here.
+      if (depth + 2 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
+      if (str_data.size() == 12) {
         out.push_back(0xC4); // tag 4
         cborWriteUint(out, 2, str_data.size());
         out.insert(out.end(), str_data.begin(), str_data.end());
-      } else if (type == T::BINARY) {
-        cborWriteUint(out, 2, bin_data.size());
-        out.insert(out.end(), bin_data.begin(), bin_data.end());
       } else {
         // Null fallback -- in practice only reachable if an OBJECTID node somehow carries a non-12-byte payload. makeObjectId() enforces exactly 12 bytes and no other code path assigns type=OBJECTID, so this is defensive against externally-corrupted nodes rather than normal input; emitting null (rather than throwing from a pure serializer) matches how the other special types degrade here.
         out.push_back(0xF6); // null fallback
       }
+      break;
+    }
+    case T::BINARY: {
+      // No tag, no depth increment beyond this value's own level — just write raw bytes.
+      cborWriteUint(out, 2, bin_data.size());
+      out.insert(out.end(), bin_data.begin(), bin_data.end());
       break;
     }
     case T::ARRAY: {
@@ -225,6 +232,8 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
     }
     case T::DATETIME: {
       // CBOR tag 1 (epoch-based date/time) + float64 (seconds.ms). Note: tz_offset_min is intentionally NOT encoded -- tag 1 represents an absolute UTC instant, so the original local-timezone offset cannot be recovered on a round-trip and will come back as the default. This matches how every other epoch-seconds based format here behaves; it's expected data loss, not a bug.
+      // Depth check: decoder increments depth for tag + 1 for inner float64, so we must match or it would emit bytes that its own decoder rejects at depth >= 48.
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
       out.push_back(0xC1); // tag 1
       double totalSec = static_cast<double>(timestamp) + static_cast<double>(datetime_ms) / 1000.0;
       out.push_back(0xFB);
@@ -242,25 +251,27 @@ inline void asvJSONValue::toCBOR(std::vector<uint8_t>& out, int depth) const {
     }
     case T::TIMESTAMP: {
       // Encode as tag 1 + integer (seconds)
+      // Same depth symmetry with decoder as DATETIME.
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
       out.push_back(0xC1); // tag 1
       cborWriteSigned(out, num);
       break;
     }
     case T::REGEX: {
       // CBOR tag 35 (regular expression) + text string "pattern\0options" (see makeRegex)
+      // Decoder increments depth for the tag then again for the inner text string.
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
       out.push_back(0xD8); out.push_back(0x23); // tag 35
       cborWriteText(out, str_data);
       break;
     }
     case T::CUSTOM_TAG: {
       // CBOR tag 258 + array [name(string), value] -- mirrors EXTENSION's tag-257 layout, so the annotation survives round-trips instead of falling through to undefined (0xF7 -> null) as before. The name is always present; a JSON-null custom_value emits an explicit null element.
+      // Decoder increments depth for tag + 1 for the array, so inner value lands at depth+2. Check both levels here.
+      if (depth + 2 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("CBOR nesting too deep");
       out.push_back(0xD9); out.push_back(0x01); out.push_back(0x02); // tag 258 (uint16 argument)
       out.push_back(0x82); // array of 2 items
       cborWriteText(out, str_data);
-      // Tag 258 wraps the array [name, value]; the parser's depth counter
-      // increments once for the tag and again for the array, so the inner
-      // value sits two levels deeper. Match that to avoid a false "nesting
-      // too deep" on a 48-level chain of custom tags.
       if (custom_value) custom_value->toCBOR(out, depth + 2); else out.push_back(0xF6); // null value -> explicit CBOR null
       break;
     }

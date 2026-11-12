@@ -3424,7 +3424,14 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	lastError.clear();
+	// Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+	// 10 MB matches the text format cap; CBOR is compact binary so a 10 MB
+	// input can expand to ~3x peak RAM (input + intermediate decode + output)
+	// but stays within safe bounds for all supported arrays/maps.
+	constexpr size_t MAX_CBOR_INPUT = 10u * 1024u * 1024u;
 	if (!data || size < 1) { lastError = "CBOR: empty input"; return false; }
+	if (size > MAX_CBOR_INPUT) { lastError = "CBOR input exceeds 10 MB limit"; return false; }
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
 		size_t pos = 0;
