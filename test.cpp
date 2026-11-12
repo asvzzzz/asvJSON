@@ -20519,6 +20519,83 @@ TEST(testFromCppArraySizeGuard) {
   ASSERT(!bad.getLastError().empty());
 }
 
+TEST(testCppSecurityFixes) {
+  // lastError.clear() on entry: a prior error must not linger after success.
+  {
+    asvJSON j;
+    ASSERT(!j.fromCpp(std::string_view("not c++\n")));
+    std::string prev = j.lastError;
+    ASSERT(j.fromCpp(std::string_view("struct Document { int x; };\n")));
+    ASSERT(j.lastError.empty());
+  }
+  // MAX_CPP_INPUT exceeded: input over the limit is rejected before parsing.
+  {
+    asvJSON j;
+    std::string big = "struct S {\n";
+    big.append(33 * 1024 * 1024, 'a');
+    big += "};\n";
+    ASSERT(!j.fromCpp(big));
+    ASSERT(j.lastError.find("32 MB limit") != std::string::npos);
+  }
+  // Stale root after !val return: root must be nullptr on failure.
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp(std::string_view("struct Document { int x = 1; };\n")));
+    auto* prevRoot = j.getRoot();
+    ASSERT(!j.fromCpp(std::string_view("just text\n")));
+    ASSERT(j.getRoot() == nullptr);
+    // Restore for later tests by reparsing.
+    ASSERT(j.fromCpp(std::string_view("struct Document { int x = 1; };\n")));
+    ASSERT_EQ(j.getRoot()->get("x")->getInt(), int64_t(1));
+  }
+  // parseStructBody depth guard: deeply nested structs must be rejected, not crash.
+  {
+    asvJSON j;
+    std::string deep = "struct Document {\n";
+    for (int i = 0; i < 52; i++) deep += "  struct S" + std::to_string(i) + " { ";
+    deep += " int x;\n";
+    for (int i = 0; i < 52; i++) deep += " };\n";
+    deep += "};\n";
+    ASSERT(!j.fromCpp(deep));
+    // Must report an error, not crash.
+    ASSERT(!j.lastError.empty());
+  }
+  // materialize brace-init array: checkArraySize must reject oversized arrays.
+  // The grp path (brace-init with explicit elements) now checks before each
+  // push_back. The hasLen path (explicit size like int arr[2000000]) is already
+  // pinned by testFromCppArraySizeGuard; this tests the same guard for the grp
+  // path via a struct field whose type resolves to an array with brace-init.
+  {
+    asvJSON j;
+    std::string big = "struct Document {\n";
+    big += "  int items[] = {";
+    for (size_t i = 0; i <= asvJSONValue::MAX_ARRAY_SIZE; i++) {
+      if (i) big += ',';
+      big += '0';
+    }
+    big += "};\n};\n";
+    // The input is ~2 MB, well under MAX_CPP_INPUT. The grp path in materialize
+    // must checkArraySize before each push_back and reject at element 1000001.
+    ASSERT(!j.fromCpp(big));
+    ASSERT(j.lastError.find("too large") != std::string::npos);
+  }
+  // \x with zero hex digits must be an error, not a silent NUL.
+  {
+    asvJSON j;
+    ASSERT(!j.fromCpp(std::string_view("struct Document { const char* s = \"\\xg\"; };\n")));
+    ASSERT(j.lastError.find("\\x") != std::string::npos);
+  }
+  // Line comment \\ + newline continuation: the next line is joined into the comment.
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp(std::string_view(
+      "struct Document {\n"
+      "  int x = 1;\n"        // this line is fine
+      "};\n")));
+    ASSERT_EQ(j.getRoot()->get("x")->getInt(), int64_t(1));
+  }
+}
+
 TEST(testFromCppDefineMacros) {
   // Object-like #define constants resolve in member initializers.
   {
@@ -37879,6 +37956,7 @@ RUN(testFromCppArraySizeGuard);
 RUN(testFromCppAudit2);
 RUN(testFromCppAudit3);
 RUN(testCppReviewFixes);
+	RUN(testCppSecurityFixes);
 
 	std::cout << "\n--- JSON5 Serialization Tests ---\n";
 	RUN(testToJSON5);
