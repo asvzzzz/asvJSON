@@ -2,7 +2,7 @@
 
 Библиотека C++17 для работы с JSON, поддерживающая бинарные данные, DateTime, Base64, BSON, MessagePack, CBOR, JSON Pointer, JSON Merge Patch, XML, YAML, CSV, TOON, TRON, GOON, ADE, Protobuf, TOML, JSON Lines (NDJSON), S-Expression, SVG, валидацию по JSON Schema, JSONPath (RFC 9535), SAX/потоковое парсинг JSON и генерацию C++ struct/enum.
 
-**Автор:** Сергей Андик asvzzz@narod.ru
+**Автор:** Сергей Андык asvzzz@narod.ru
 
 ## Онлайн-конвертер
 
