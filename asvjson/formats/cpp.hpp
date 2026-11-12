@@ -1303,7 +1303,12 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       // line continuation inside a line comment joins the next line into the
       // same comment text. Mirror that behavior.
       while (i < n) {
-        if (in[i] == '\\' && i + 1 < n && in[i + 1] == '\n') { i += 2; line++; continue; }
+        // C++ translation phase 1 maps \r\n → \n before phase 2, so both \n
+        // and \r\n after a backslash are line continuations.
+        if (in[i] == '\\') {
+          if (i + 1 < n && in[i + 1] == '\n') { i += 2; line++; continue; }
+          if (i + 2 < n && in[i + 1] == '\r' && in[i + 2] == '\n') { i += 3; line++; continue; }
+        }
         if (in[i] == '\n') break;
         i++;
       }
@@ -2387,7 +2392,11 @@ struct Reader {
   }
 
   std::vector<FieldDef> parseStructDecl(int depth = 0) {
-    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    // depth starts at 0 for the outermost struct. checkNestingDepth uses depth
+    // starting at 1 (parse() increments first), so depth >= MAX means we're
+    // about to create the (MAX+1)-th container — reject. Allows exactly MAX
+    // levels (depth 0..MAX-1).
+    if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
       throw asvJSONError("cpp: struct nesting too deep");
     std::vector<Comment> lead = takePending();
     adv(); // struct / class
@@ -2409,7 +2418,11 @@ struct Reader {
     StructDef def;
     def.name = name;
     def.leading = std::move(lead);
-    return parseStructBody(def, depth + 1);
+    // depth here is the caller's depth; the body is at the same level (the
+    // struct declaration itself counts as one container, checked above). The
+    // nested struct inside the body gets depth + 1. This keeps the increment
+    // at 1 per nesting level, matching parse() semantics.
+    return parseStructBody(def, depth);
   }
 
   std::vector<FieldDef> parseStructBody(StructDef& def, int depth = 0) {
