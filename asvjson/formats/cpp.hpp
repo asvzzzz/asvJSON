@@ -1299,6 +1299,7 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
     if (c == '/' && i + 1 < n && in[i + 1] == '/') {
       i += 2;
       size_t s = i;
+      int startLine = line;
       // C++ translation phase 2 strips `\` + newline before tokenization, so a
       // line continuation inside a line comment joins the next line into the
       // same comment text. Mirror that behavior.
@@ -1313,8 +1314,17 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
         i++;
       }
       if (!skipTok) {
-        Tok t; t.kind = Tok::Comment; t.line = line; t.block = false;
-        t.text.assign(in.data() + s, i - s);
+        Tok t; t.kind = Tok::Comment; t.line = startLine; t.block = false;
+        // C++ phase 2 strips `\` + newline in comments too, so the token text
+        // should match what the compiler sees — without the backslash and line
+        // break. Build it explicitly rather than slicing raw bytes.
+        std::string txt;
+        for (size_t k = s; k < i; ) {
+          if (in[k] == '\\' && k + 1 < i && in[k + 1] == '\n') { k += 2; continue; }
+          if (k + 2 <= i && in[k] == '\\' && in[k + 1] == '\r' && in[k + 2] == '\n') { k += 3; continue; }
+          txt += in[k++];
+        }
+        t.text = std::move(txt);
         out.push_back(std::move(t));
       }
       continue;

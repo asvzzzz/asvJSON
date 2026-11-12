@@ -20548,17 +20548,31 @@ TEST(testCppSecurityFixes) {
     ASSERT(j.fromCpp(std::string_view("struct Document { int x = 1; };\n")));
     ASSERT_EQ(j.getRoot()->get("x")->getInt(), int64_t(1));
   }
-  // parseStructBody depth guard: deeply nested structs must be rejected, not crash.
+  // parseStructBody depth guard: exactly 48 levels must parse OK, 49 must reject.
+  // Nested struct declarations inside a struct body increment the parser's
+  // depth counter; the guard rejects when depth >= MAX_NESTING_DEPTH (48).
   {
-    asvJSON j;
-    std::string deep = "struct Document {\n";
-    for (int i = 0; i < 52; i++) deep += "  struct S" + std::to_string(i) + " { ";
-    deep += " int x;\n";
-    for (int i = 0; i < 52; i++) deep += " };\n";
-    deep += "};\n";
-    ASSERT(!j.fromCpp(deep));
-    // Must report an error, not crash.
-    ASSERT(!j.lastError.empty());
+    // 48 nested structs: each "struct Li { ... }" is parsed inside the previous,
+    // incrementing depth by 1. The outermost Document is parseStructDecl(0),
+    // then 47 more levels → max depth = 47, which passes (47 < 48).
+    std::string ok = "struct Document {";
+    for (int i = 0; i < 47; i++) ok += " struct L" + std::to_string(i) + " {";
+    ok += " int x;";
+    for (int i = 0; i < 48; i++) ok += " }";
+    ok += ";";
+    asvJSON j48;
+    ASSERT(j48.fromCpp(ok));
+  }
+  {
+    // 49 nested structs: max depth = 48, which fails (48 >= 48).
+    std::string bad = "struct Document {";
+    for (int i = 0; i < 48; i++) bad += " struct L" + std::to_string(i) + " {";
+    bad += " int x;";
+    for (int i = 0; i < 49; i++) bad += " }";
+    bad += ";";
+    asvJSON j49;
+    ASSERT(!j49.fromCpp(bad));
+    ASSERT(j49.lastError.find("nesting too deep") != std::string::npos);
   }
   // materialize brace-init array: checkArraySize must reject oversized arrays.
   // The grp path (brace-init with explicit elements) now checks before each
