@@ -646,10 +646,18 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
   if (!val) throw asvJSONError("INI: out of memory");
   auto it = target->obj->find(key);
   if (it == target->obj->end()) {
+    // Guard against DoS: a sequence of unique keys key1, key2, ... creates
+    // siblings under target. checkObjectSize prevents the map from growing
+    // beyond MAX_OBJECT_SIZE.
+    if (!asvJSONValue::checkObjectSize(target->obj->size() + 1))
+      throw asvJSONError("INI: object too large");
     target->obj->emplace(key, std::move(val));
   } else {
     // Convert to array if not already
     if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
+      // Guard against DoS: repeated key = v1; key = v2; ... grows the array.
+      if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
+        throw asvJSONError("INI: array too large");
       it->second->arr->push_back(std::move(val));
     } else {
       // A null EXISTING node means an earlier insert already broke the
@@ -657,6 +665,8 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
       if (!it->second) throw asvJSONError("INI: out of memory");
       auto arr = asvJSONValue::makeArray();
       if (!arr || !arr->arr) throw asvJSONError("INI: out of memory");
+      if (!asvJSONValue::checkArraySize(2))
+        throw asvJSONError("INI: array too large");
       arr->arr->push_back(std::move(it->second));
       arr->arr->push_back(std::move(val));
       it->second = std::move(arr);
@@ -1180,8 +1190,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   // than MAX_NESTING_DEPTH. Core parse() allows exactly MAX containers (1..MAX),
   // so we degrade to null at the boundary instead of recursing forever.
   if (!asvJSONValue::checkNestingDepth(depth)) {
-    out += "<null>"; // sentinel for oversized subtree
-    return;
+    throw asvJSONError("INI: nesting too deep");
   }
 
   // Check if this level has direct (bare-line-producing) keys
@@ -1306,8 +1315,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
   // Depth guard: same convention as iniEmitObject.
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
   if (!asvJSONValue::checkNestingDepth(depth)) {
-    out += "<null>";
-    return;
+    throw asvJSONError("INI: nesting too deep");
   }
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *obj->obj) {
@@ -1343,7 +1351,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
           if (!out.empty() && out.back() != '\n') out += '\n';
           if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
-          iniEmitElement(e.get(), out, np);
+          iniEmitElement(e.get(), out, np, depth + 1);
         }
       }
     }
@@ -1354,8 +1362,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
   if (!elem || elem->type != asvJSONValue::OBJECT || !elem->obj) return;
   // Depth guard: same convention as iniEmitObject.
   if (!asvJSONValue::checkNestingDepth(depth)) {
-    out += "<null>";
-    return;
+    throw asvJSONError("INI: nesting too deep");
   }
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *elem->obj) {
@@ -1583,6 +1590,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
     auto lines = splitLines(input);
     std::vector<std::string> sectionPath;
     asvJSONValue* currentArrayElement = nullptr;
+    int currentArrayElementDepth = 1; // depth of the array element node (root=1, each container +1)
     bool inSection = false;
 
     for (size_t lineNum = 0; lineNum < lines.size(); lineNum++) {
@@ -1653,13 +1661,17 @@ inline bool asvJSON::fromINI(std::string_view input) {
           std::string arrKey = newPath.back();
           newPath.pop_back();
           asvJSONValue* parent = root.get();
+          // Track depth: root is 1, each object segment adds 1, each array wrapper adds 2.
+          int pathDepth = 1;
           // Walk the enclosing path. When a path node is an array (e.g. "items"
           // in "[[items.host]]"), descend into its last element: the new table
           // array belongs inside that element, not at document scope (the old
           // code silently dropped such headers entirely).
           auto descendArrays = [&]() -> void {
-            while (parent && parent->type == asvJSONValue::ARRAY && parent->arr && !parent->arr->empty())
+            while (parent && parent->type == asvJSONValue::ARRAY && parent->arr && !parent->arr->empty()) {
               parent = parent->arr->back().get();
+              pathDepth++; // array element adds one level
+            }
           };
           descendArrays();
           for (const auto& seg : newPath) {
@@ -1677,6 +1689,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
             } else {
               parent = it->second.get();
             }
+            pathDepth++; // object segment adds one level
             descendArrays();
           }
           if (!parent || parent->type != asvJSONValue::OBJECT)
@@ -1693,6 +1706,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
             if (!asvJSONValue::checkArraySize(arrPtr->arr->size() + 1))
               throw asvJSONError("INI: array too large");
             arrPtr->arr->push_back(std::move(newObj));
+            // Track depth for this new array element.
+            currentArrayElementDepth = static_cast<int>(pathDepth) + 2;
           } else if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
             auto newObj = asvJSONValue::makeObject();
             if (!newObj) throw asvJSONError("INI: out of memory");
@@ -1700,6 +1715,9 @@ inline bool asvJSON::fromINI(std::string_view input) {
             if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
               throw asvJSONError("INI: array too large");
             it->second->arr->push_back(std::move(newObj));
+            // Track depth for this array element: parent was at `currentArrayElementDepth`
+            // (depth of the object holding the array), +1 for the array, +1 for the new element.
+            currentArrayElementDepth = currentArrayElementDepth + 2;
           } else {
             // Reject instead of silently overwriting the existing value.
             throw asvJSONError("array section conflicts with existing value for \"" + arrKey + "\"");
@@ -1708,6 +1726,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
         } else {
           sectionPath = std::move(newPath);
           currentArrayElement = nullptr;
+          currentArrayElementDepth = 1;
           inSection = true;
         }
         continue;
@@ -1820,16 +1839,14 @@ inline bool asvJSON::fromINI(std::string_view input) {
           std::vector<std::string> keyPath = iniSplitDottedPath(key);
           std::string leafKey = keyPath.back();
           keyPath.pop_back();
-          // currentDepth for target: root is depth 1, each section segment adds 1.
-          int targetDepth = 1 + static_cast<int>(sectionPath.size());
+          // Compute targetDepth: root=1, section segments +1 each, array element depth tracked separately.
+          int targetDepth = currentArrayElement ? currentArrayElementDepth
+                    : (inSection && !sectionPath.empty() ? 1 + static_cast<int>(sectionPath.size()) : 1);
           asvJSONValue* parent = iniNavigate(target, keyPath, true, targetDepth);
           if (parent) {
             iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted));
           }
         } else {
-          // Root-level or section-level plain key: target is at known depth.
-          int targetDepth = inSection && !sectionPath.empty()
-              ? 1 + static_cast<int>(sectionPath.size()) : 1;
           iniSetValue(target, iniUnescapeSectionKey(key), iniParseVal(valueStr, quoted));
         }
       }
