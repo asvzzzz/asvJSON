@@ -293,6 +293,8 @@ inline std::string iniEscapeKey(std::string_view s) {
 inline std::string iniEscapeSectionKey(std::string_view s) {
   if (s.empty())
     throw asvJSONError("cannot represent empty key in INI"); // "[]" would be rejected by the decoder
+  if (!asvJSONValue::checkStringLen(s.size()))
+    throw asvJSONError("INI: key too long");
   return iniEscapeKey(s);
 }
 
@@ -333,6 +335,8 @@ inline std::string iniUnescapeSectionKey(std::string_view s) {
 inline std::string iniEscapeFlatKey(std::string_view s) {
   if (s.empty())
     throw asvJSONError("cannot represent empty key in INI"); // {"": ...} has no INI spelling
+  if (!asvJSONValue::checkStringLen(s.size()))
+    throw asvJSONError("INI: key too long");
   return iniEscapeKey(s);
 }
 
@@ -357,15 +361,12 @@ inline std::vector<std::string> iniSplitDottedPath(std::string_view s) {
 }
 
 // Navigate or create nested path in the object tree
-inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::string>& pathParts, bool create) {
-  // Depth check: each segment adds one container level. The caller (fromINI)
-  // passes sectionPath or keyPath that are resolved from the current target;
-  // the total depth is the sum of all ancestor levels plus pathParts.size().
-  // We conservatively check here because iniSetValue also does its own check,
-  // and the dotted-key path in fromINI calls iniNavigate(target, ...) where
-  // target may already be deep. This check prevents pathological cases where
-  // a long sectionPath + long keyPath would exceed MAX_NESTING_DEPTH.
-  if (create && static_cast<int>(pathParts.size()) > asvJSONValue::MAX_NESTING_DEPTH)
+inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::string>& pathParts, bool create, int currentDepth) {
+  // Depth check: each segment adds one container level. Total depth =
+  // currentDepth + pathParts.size() (root is at currentDepth, each new child
+  // increments by 1). Core parse() allows exactly MAX containers (parseDepth
+  // goes 1..MAX), so we reject when the resulting tree would exceed that.
+  if (create && currentDepth + static_cast<int>(pathParts.size()) > asvJSONValue::MAX_NESTING_DEPTH)
     throw asvJSONError("INI: nesting too deep");
   asvJSONValue* cur = root;
   for (const auto& seg : pathParts) {
@@ -373,9 +374,14 @@ inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
       if (!create) return nullptr;
       throw asvJSONError("cannot navigate through non-object");
     }
+    // Guard against DoS: a pathological sequence like [a.b1], [a.b2], ...
+    // creates many siblings under `a`. checkObjectSize prevents the map from
+    // growing beyond MAX_OBJECT_SIZE.
     auto it = cur->obj->find(seg);
     if (it == cur->obj->end()) {
       if (!create) return nullptr;
+      if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
+        throw asvJSONError("INI: object too large");
       auto newObj = asvJSONValue::makeObject();
       if (!newObj) throw asvJSONError("INI: out of memory");
       auto* raw = newObj.get();
@@ -1166,10 +1172,17 @@ inline void iniWriteRepeatedLines(std::string& out, const std::string& keyEq, co
   }
 }
 
-inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix);
+inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix, int depth = 1);
 inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::string& prefix,
-                           bool emitHeader, bool pretty = true) {
+                           bool emitHeader, bool pretty = true, int depth = 1) {
   if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
+  // Depth guard: prevent stack overflow on programmatically-built trees deeper
+  // than MAX_NESTING_DEPTH. Core parse() allows exactly MAX containers (1..MAX),
+  // so we degrade to null at the boundary instead of recursing forever.
+  if (!asvJSONValue::checkNestingDepth(depth)) {
+    out += "<null>"; // sentinel for oversized subtree
+    return;
+  }
 
   // Check if this level has direct (bare-line-producing) keys
   bool hasDirectKeys = false;
@@ -1257,7 +1270,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
         }
       }
       writeLeading();
-      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty);
+      iniEmitObject(val.get(), out, newPrefix, subHasDirect || !val->obj || val->obj->empty(), pretty, depth + 1);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool isObj = true;
       for (const auto& elem : *val->arr) {
@@ -1271,7 +1284,7 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           writeLeading();
           if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
           out += "[[" + newPrefix + "]]\n";
-          if (elem->type == asvJSONValue::OBJECT) iniEmitElement(elem.get(), out, newPrefix);
+          if (elem->type == asvJSONValue::OBJECT) iniEmitElement(elem.get(), out, newPrefix, depth + 1);
         }
       }
     }
@@ -1289,7 +1302,13 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
 // Flatten object descendants of an array element into dotted leaf keys; nested
 // arrays-of-objects become [[prefix.dotted]] headers resolved back into the
 // element by the array-aware decoder.
-inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, std::string& out, const std::string& prefix) {
+inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, std::string& out, const std::string& prefix, int depth = 1) {
+  // Depth guard: same convention as iniEmitObject.
+  if (!obj || obj->type != asvJSONValue::OBJECT || !obj->obj) return;
+  if (!asvJSONValue::checkNestingDepth(depth)) {
+    out += "<null>";
+    return;
+  }
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *obj->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
@@ -1314,7 +1333,7 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
     std::string flatKey = iniEscapeFlatKey(key);
     std::string full = dk.empty() ? flatKey : dk + "." + flatKey;
     if (val->type == asvJSONValue::OBJECT && val->obj) {
-      iniEmitElementFlat(val.get(), full, out, prefix);
+      iniEmitElementFlat(val.get(), full, out, prefix, depth + 1);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool allObjects = true;
       for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
@@ -1331,8 +1350,13 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
   }
 }
 
-inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix) {
+inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix, int depth) {
   if (!elem || elem->type != asvJSONValue::OBJECT || !elem->obj) return;
+  // Depth guard: same convention as iniEmitObject.
+  if (!asvJSONValue::checkNestingDepth(depth)) {
+    out += "<null>";
+    return;
+  }
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *elem->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
@@ -1355,7 +1379,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
   for (const auto& [key, val] : *elem->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
     if (val->type == asvJSONValue::OBJECT && val->obj) {
-      iniEmitElementFlat(val.get(), flatKey, out, prefix);
+      iniEmitElementFlat(val.get(), flatKey, out, prefix, depth + 1);
     } else if (val->type == asvJSONValue::ARRAY && val->arr) {
       bool allObjects = true;
       for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
@@ -1365,7 +1389,7 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
           if (!out.empty() && out.back() != '\n') out += '\n';
           if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
-          iniEmitElement(e.get(), out, np);
+          iniEmitElement(e.get(), out, np, depth + 1);
         }
       }
     }
@@ -1402,7 +1426,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         // Pass 2: objects and object-arrays
         for (const auto& [key, val] : *obj) {
           if (val->type == T::OBJECT) {
-            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), false, false);
+            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), false, false, 2);
           } else if (val->type == T::ARRAY && val->arr) {
             bool allObjects = true;
             for (const auto& elem : *val->arr)
@@ -1414,7 +1438,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT)
-                  iniEmitElement(elem.get(), out, escKey);
+                  iniEmitElement(elem.get(), out, escKey, 2);
               }
             }
           }
@@ -1447,7 +1471,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (iniIsBareChild(sv.get())) { hasDirect = true; break; }
               }
             }
-            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty(), true);
+            iniEmitObject(val.get(), out, iniEscapeSectionKey(key), hasDirect || !val->obj || val->obj->empty(), true, 2);
           } else if (val->type == T::ARRAY && val->arr) {
             bool allObjects = true;
             for (const auto& elem : *val->arr) {
@@ -1460,7 +1484,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT) {
-                  iniEmitElement(elem.get(), out, escKey);
+                  iniEmitElement(elem.get(), out, escKey, 2);
                 }
               }
             }
@@ -1512,7 +1536,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         if (!out.empty() && out.back() != '\n') out += '\n';
         if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
         out += "[[value]]\n";
-        if (elem->type == T::OBJECT) iniEmitElement(elem.get(), out, "value");
+        if (elem->type == T::OBJECT) iniEmitElement(elem.get(), out, "value", 2);
       }
     }
     if (comments) iniWriteCommentLines(out, comments->footing);
@@ -1715,6 +1739,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
       std::string_view valView = iniTrim(line.substr(delim + 1));
       if (keyView.empty()) continue;
       std::string key(keyView);
+      if (!asvJSONValue::checkStringLen(key.size()))
+        throw asvJSONError("INI: key too long at line " + std::to_string(lineNum + 1));
 
       std::string valueStr;
       bool quoted = false;
@@ -1782,7 +1808,7 @@ inline bool asvJSON::fromINI(std::string_view input) {
       if (currentArrayElement) {
         target = currentArrayElement;
       } else if (inSection && !sectionPath.empty()) {
-        target = iniNavigate(root.get(), sectionPath, true);
+        target = iniNavigate(root.get(), sectionPath, true, 1);
       } else {
         target = root.get();
       }
@@ -1794,11 +1820,16 @@ inline bool asvJSON::fromINI(std::string_view input) {
           std::vector<std::string> keyPath = iniSplitDottedPath(key);
           std::string leafKey = keyPath.back();
           keyPath.pop_back();
-          asvJSONValue* parent = iniNavigate(target, keyPath, true);
+          // currentDepth for target: root is depth 1, each section segment adds 1.
+          int targetDepth = 1 + static_cast<int>(sectionPath.size());
+          asvJSONValue* parent = iniNavigate(target, keyPath, true, targetDepth);
           if (parent) {
             iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted));
           }
         } else {
+          // Root-level or section-level plain key: target is at known depth.
+          int targetDepth = inSection && !sectionPath.empty()
+              ? 1 + static_cast<int>(sectionPath.size()) : 1;
           iniSetValue(target, iniUnescapeSectionKey(key), iniParseVal(valueStr, quoted));
         }
       }
