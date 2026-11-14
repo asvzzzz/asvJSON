@@ -367,6 +367,8 @@ inline void asvJSONValue::toDotenv(std::string& out) const {
     for (char c : key)
       if (!dotenvKeyCharOk(c))
         throw asvJSONError("dotenv: invalid character in key \"" + key + "\"");
+    if (!asvJSONValue::checkStringLen(key.size()))
+      throw asvJSONError("dotenv: key too long");
     if (val->comments && !val->comments->leading.empty())
       dotenvWriteCommentLines(out, val->comments->leading);
     out += key;
@@ -410,12 +412,20 @@ inline std::string asvJSON::toDotenv() const {
 }
 
 inline bool asvJSON::fromDotenv(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_DOTENV_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_DOTENV_INPUT) { lastError = "Dotenv input exceeds 32 MB limit"; return false; }
   try {
+    // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF &&
         (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
       input = input.substr(3);
+
+    if (input.empty()) throw asvJSONError("empty input");
 
     auto obj = asvJSONValue::makeObject();
     if (!obj) throw asvJSONError("out of memory");
@@ -448,6 +458,8 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
       for (char c : key)
         if (!dotenvKeyCharOk(c))
           throw asvJSONError("dotenv: invalid character in key at line " + std::to_string(li + 1));
+      if (!asvJSONValue::checkStringLen(key.size()))
+        throw asvJSONError("dotenv: key too long at line " + std::to_string(li + 1));
 
       std::string_view rest = dotenvTrimL(body.substr(eq + 1));
       std::unique_ptr<asvJSONValue> val;
