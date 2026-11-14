@@ -178,6 +178,12 @@ inline bool plistLooksLike(std::string_view s) {
 // <key> lines, which are emitted by the OBJECT case directly).
 inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
   using T = asvJSONValue::Type;
+  // Depth guard: match fromPlist's limit so toPlist output is always decodable.
+  if (!asvJSONValue::checkNestingDepth(indent)) {
+    const std::string pad(static_cast<size_t>(indent * 2), ' ');
+    out += pad + "<string/>\n"; // degrade to null (empty string) at max depth
+    return;
+  }
   const std::string pad(static_cast<size_t>(indent * 2), ' ');
   switch (v->type) {
     case T::STRING:
@@ -409,7 +415,10 @@ struct PlistReader {
 };
 
 inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
-  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) fail("nesting too deep");
+  // Use >= so that exactly MAX_NESTING_DEPTH (48) container levels are accepted,
+  // matching core parse()'s limit. With > the parser would accept 49 containers
+  // while parse() rejects at 49, breaking plist -> JSON -> parse round-trip.
+  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) fail("nesting too deep");
   skipWs();
   if (atEnd() || s[pos] != '<') fail("expected element");
   auto [name, sc] = openTag();
@@ -539,12 +548,20 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseArray(int depth) {
 }
 
 inline bool asvJSON::fromPlist(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_PLIST_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_PLIST_INPUT) { lastError = "Plist input exceeds 32 MB limit"; return false; }
   try {
+    // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF &&
         (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
       input = input.substr(3);
+
+    if (input.empty()) throw asvJSONError("empty input");
 
     PlistReader r(input, 0);
     r.skipWs();
