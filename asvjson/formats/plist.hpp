@@ -178,12 +178,6 @@ inline bool plistLooksLike(std::string_view s) {
 // <key> lines, which are emitted by the OBJECT case directly).
 inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
   using T = asvJSONValue::Type;
-  // Depth guard: match fromPlist's limit so toPlist output is always decodable.
-  if (!asvJSONValue::checkNestingDepth(indent)) {
-    const std::string pad(static_cast<size_t>(indent * 2), ' ');
-    out += pad + "<string/>\n"; // degrade to null (empty string) at max depth
-    return;
-  }
   const std::string pad(static_cast<size_t>(indent * 2), ' ');
   switch (v->type) {
     case T::STRING:
@@ -257,12 +251,22 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
       else out += pad + "<string/>\n";
       break;
     case T::ARRAY: {
+      // Core parse() uses ++parseDepth before check (1-based), encoder indent is
+      // 0-based. child indent = indent + 1, so check indent + 1 to match.
+      if (!asvJSONValue::checkNestingDepth(indent + 1)) {
+        out += pad + "<string/>\n"; // degrade to null at limit
+        break;
+      }
       out += pad + "<array>\n";
       for (const auto& item : *v->arr) plistWriteVal(item.get(), out, indent + 1);
       out += pad + "</array>\n";
       break;
     }
     case T::OBJECT: {
+      if (!asvJSONValue::checkNestingDepth(indent + 1)) {
+        out += pad + "<string/>\n"; // degrade to null at limit
+        break;
+      }
       out += pad + "<dict>\n";
       for (const auto& [k, val] : *v->obj) {
         out += pad + "  <key>" + xmlEscapeContent(k) + "</key>\n";
@@ -415,10 +419,9 @@ struct PlistReader {
 };
 
 inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
-  // Use >= so that exactly MAX_NESTING_DEPTH (48) container levels are accepted,
-  // matching core parse()'s limit. With > the parser would accept 49 containers
-  // while parse() rejects at 49, breaking plist -> JSON -> parse round-trip.
-  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) fail("nesting too deep");
+  // No top-level depth check here: scalars at depth == MAX are legal (core
+  // parse() does not increment depth for leaf values). The container checks
+  // below enforce the limit only when a dict/array is encountered.
   skipWs();
   if (atEnd() || s[pos] != '<') fail("expected element");
   auto [name, sc] = openTag();
@@ -499,9 +502,15 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     return asvJSONValue::makeBinary(bytes.data(), bytes.size());
   }
 
-  if (name == "dict") return sc ? asvJSONValue::makeObject() : parseDict(depth);
+  if (name == "dict") {
+    if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) fail("nesting too deep");
+    return sc ? asvJSONValue::makeObject() : parseDict(depth);
+  }
 
-  if (name == "array") return sc ? asvJSONValue::makeArray() : parseArray(depth);
+  if (name == "array") {
+    if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) fail("nesting too deep");
+    return sc ? asvJSONValue::makeArray() : parseArray(depth);
+  }
 
   fail("unexpected element <" + name + ">");
 }
