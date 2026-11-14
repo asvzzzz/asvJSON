@@ -358,6 +358,15 @@ inline std::vector<std::string> iniSplitDottedPath(std::string_view s) {
 
 // Navigate or create nested path in the object tree
 inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::string>& pathParts, bool create) {
+  // Depth check: each segment adds one container level. The caller (fromINI)
+  // passes sectionPath or keyPath that are resolved from the current target;
+  // the total depth is the sum of all ancestor levels plus pathParts.size().
+  // We conservatively check here because iniSetValue also does its own check,
+  // and the dotted-key path in fromINI calls iniNavigate(target, ...) where
+  // target may already be deep. This check prevents pathological cases where
+  // a long sectionPath + long keyPath would exceed MAX_NESTING_DEPTH.
+  if (create && static_cast<int>(pathParts.size()) > asvJSONValue::MAX_NESTING_DEPTH)
+    throw asvJSONError("INI: nesting too deep");
   asvJSONValue* cur = root;
   for (const auto& seg : pathParts) {
     if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) {
@@ -1525,9 +1534,15 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
 // -- Decoder ----------------------------------------------------------------
 
 inline bool asvJSON::fromINI(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_INI_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_INI_INPUT) { lastError = "INI input exceeds 32 MB limit"; return false; }
   try {
+    // Empty input is an empty object (the only valid INI document with no data).
     if (input.empty()) {
       root = asvJSONValue::makeObject();
       if (!root) throw asvJSONError("INI: out of memory");
@@ -1628,6 +1643,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
               throw asvJSONError("cannot navigate through non-object");
             auto it = parent->obj->find(seg);
             if (it == parent->obj->end()) {
+              if (!asvJSONValue::checkObjectSize(parent->obj->size() + 1))
+                throw asvJSONError("INI: object too large");
               auto newObj = asvJSONValue::makeObject();
               if (!newObj) throw asvJSONError("INI: out of memory");
               auto* raw = newObj.get();
@@ -1649,11 +1666,15 @@ inline bool asvJSON::fromINI(std::string_view input) {
             auto newObj = asvJSONValue::makeObject();
             if (!newObj) throw asvJSONError("INI: out of memory");
             currentArrayElement = newObj.get();
+            if (!asvJSONValue::checkArraySize(arrPtr->arr->size() + 1))
+              throw asvJSONError("INI: array too large");
             arrPtr->arr->push_back(std::move(newObj));
           } else if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
             auto newObj = asvJSONValue::makeObject();
             if (!newObj) throw asvJSONError("INI: out of memory");
             currentArrayElement = newObj.get();
+            if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
+              throw asvJSONError("INI: array too large");
             it->second->arr->push_back(std::move(newObj));
           } else {
             // Reject instead of silently overwriting the existing value.
