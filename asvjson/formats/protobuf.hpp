@@ -287,16 +287,24 @@ inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique
   if (it != obj->obj->end()) {
     // Repeated field -- convert to array if not already
     if (it->second->type == asvJSONValue::ARRAY && it->second->arr) {
+      // Guard against DoS: repeated key = v1; key = v2; ... grows the array.
+      if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
+        throw asvJSONError("Protobuf: array too large");
       it->second->arr->push_back(std::move(val));
     } else {
       auto arr = asvJSONValue::makeArray();
       if (arr && arr->arr) {
+        if (!asvJSONValue::checkArraySize(2))
+          throw asvJSONError("Protobuf: array too large");
         arr->arr->push_back(std::move(it->second));
         arr->arr->push_back(std::move(val));
         it->second = std::move(arr);
       }
     }
   } else {
+    // Guard against DoS: fieldnum: 0, wt: 0 repeated creates siblings.
+    if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+      throw asvJSONError("Protobuf: object too large");
     (*obj->obj)[key] = std::move(val);
   }
 }
@@ -454,10 +462,14 @@ inline void protoEncodeScalar(std::vector<uint8_t>& out, const asvJSONValue* val
   }
 }
 
-inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field);
+inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field, int depth = 1);
 
-inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoSchema* schema) {
+inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoSchema* schema, int depth = 1) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) return;
+  // Depth guard: prevent stack overflow on programmatically-built trees deeper
+  // than MAX_NESTING_DEPTH. Core parse() allows exactly MAX containers (1..MAX),
+  // so we stop encoding at the boundary.
+  if (!asvJSONValue::checkNestingDepth(depth)) return;
   if (schema) {
     for (const auto& [key, fieldVal] : *val->obj) {
       if (!fieldVal) continue;
@@ -486,7 +498,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
             if (wt == 2) {
               ProtoField tmpF = field;
               std::vector<uint8_t> fv;
-              protoEncodeFieldValue(fv, elem.get(), tmpF);
+              protoEncodeFieldValue(fv, elem.get(), tmpF, depth + 1);
               out.insert(out.end(), fv.begin(), fv.end());
             } else {
               protoEncodeScalar(out, elem.get(), field.type);
@@ -501,7 +513,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         if (wt == 2) {
           ProtoField tmpF = field;
           std::vector<uint8_t> fv;
-          protoEncodeFieldValue(fv, fieldVal.get(), tmpF);
+          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth + 1);
           out.insert(out.end(), fv.begin(), fv.end());
         } else {
           protoEncodeScalar(out, fieldVal.get(), field.type);
@@ -587,7 +599,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
       case asvJSONValue::OBJECT:
         protoWriteTag(out, fnum, 2);
         { std::vector<uint8_t> sub;
-          protoEncodeMessage(sub, fieldVal, nullptr);
+          protoEncodeMessage(sub, fieldVal, nullptr, depth + 1);
           protoWriteVarint(out, sub.size()); out.insert(out.end(), sub.begin(), sub.end()); }
         break;
       case asvJSONValue::ARRAY:
@@ -611,7 +623,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
                 break;
               case asvJSONValue::OBJECT:
                 protoWriteTag(out, fnum, 2);
-                { std::vector<uint8_t> sub; protoEncodeMessage(sub, elem.get(), nullptr);
+                { std::vector<uint8_t> sub; protoEncodeMessage(sub, elem.get(), nullptr, depth + 1);
                   protoWriteVarint(out, sub.size()); out.insert(out.end(), sub.begin(), sub.end()); }
                 break;
               case asvJSONValue::BINARY:
@@ -639,7 +651,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
   }
 }
 
-inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field) {
+inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoField& field, int depth) {
   if (!val) return;
   if (field.type == "string") {
     if (val->type != asvJSONValue::STRING)
@@ -664,7 +676,7 @@ inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue*
     if (!val->obj || val->obj->empty())
       throw asvJSONError("Protobuf encode: message field holds an empty object");
     std::vector<uint8_t> sub;
-    protoEncodeMessage(sub, val, field.schema.get());
+    protoEncodeMessage(sub, val, field.schema.get(), depth + 1);
     protoWriteVarint(out, sub.size());
     out.insert(out.end(), sub.begin(), sub.end());
   } else {
@@ -676,7 +688,7 @@ inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
   std::vector<uint8_t> out;
   if (!root) return out;
   if (root->type == asvJSONValue::OBJECT) {
-    protoEncodeMessage(out, root, schema);
+    protoEncodeMessage(out, root, schema, 1);
   } else if (root->type == asvJSONValue::ARRAY && root->arr) {
     // A top-level array of objects can not be represented by a stream of
     // concatenated messages (their fields would merge and the schema-less name
@@ -690,7 +702,7 @@ inline std::vector<uint8_t> protoEncodeRoot(const asvJSONValue* root, const Prot
       if (!elem || elem->type != asvJSONValue::OBJECT) continue;
       protoWriteTag(out, 1, 2);
       std::vector<uint8_t> sub;
-      protoEncodeMessage(sub, elem.get(), schema);
+      protoEncodeMessage(sub, elem.get(), schema, 2);
       protoWriteVarint(out, sub.size());
       out.insert(out.end(), sub.begin(), sub.end());
     }
@@ -768,7 +780,10 @@ inline ProtoLessMap protoExtractLessMap(const uint8_t* data, size_t begin, size_
 // Handles the schema-less name/type map (field 19000) and schema-driven names.
 inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data, size_t begin, size_t end,
                                                            const ProtoSchema* schema, int depth) {
-  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
+  // Use >= so exactly MAX_NESTING_DEPTH (48) container levels are accepted,
+  // matching core parse()'s limit. With > the decoder would accept 49 containers
+  // while parse() rejects at 49, breaking protobuf -> JSON -> parse round-trip.
+  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return nullptr;
   auto obj = asvJSONValue::makeObject();
   if (!obj) return nullptr;
   ProtoLessMap less;
@@ -853,6 +868,11 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
     std::sort(fnums.begin(), fnums.end());
     auto rebuilt = std::make_unique<asvJSONValue::ObjectMap>();
     for (int fnum : fnums) {
+      // Guard against DoS: name map with >MAX_OBJECT_SIZE entries would make
+      // the rebuilt object exceed the limit. Rejected early rather than after
+      // a long loop of emplace calls.
+      if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
+        throw asvJSONError("Protobuf: object too large");
       std::string fname = std::to_string(fnum);
       auto nit = less.names.find(fnum);
       if (nit != less.names.end()) fname = nit->second;
@@ -1071,6 +1091,9 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
   char q = text[pos];
   if (q != '"' && q != '\'') return {};
   pos++;
+  // Reserve a reasonable buffer so we do not reallocate on every character.
+  // checkStringLen is enforced after the loop (via makeString), but we keep
+  // this note for anyone adding a second early-return path here.
   std::string r;
   while (pos < text.size()) {
     char c = text[pos++];
@@ -1140,6 +1163,9 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
       }
     } else r += c;
   }
+  // Enforce MAX_STRING_LEN so a 20 MB quoted literal does not allocate 20 MB
+  // and then silently drop via makeString returning nullptr.
+  if (!asvJSONValue::checkStringLen(r.size())) throw asvJSONError("Protobuf text: string too long");
   return r;
 }
 
@@ -1475,10 +1501,13 @@ inline void protoTextQuote(const std::string& s, std::string& out) {
   out += '"';
 }
 
-inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent);
+inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent, int depth = 1);
 
-inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent) {
+inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int indent, int depth = 1) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) { out += "{}"; return; }
+  // Depth guard: prevent stack overflow on programmatically-built trees deeper
+  // than MAX_NESTING_DEPTH.
+  if (!asvJSONValue::checkNestingDepth(depth)) { out += "{}"; return; }
   auto isValidProtoIdent = [](const std::string& k) -> bool {
     if (k.empty()) return false;
     if (!(std::isalpha(static_cast<unsigned char>(k[0])) || k[0] == '_')) return false;
@@ -1494,7 +1523,7 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
     // a bare "k: " line with no value behind. The return value is the signal
     // ("cannot represent"), not an emptiness test on the buffer.
     std::string vs;
-    if (!protoTextSerializeVal(fv.get(), vs, indent + 1)) continue;
+    if (!protoTextSerializeVal(fv.get(), vs, indent + 1, depth + 1)) continue;
     for (int i = 0; i < indent + 1; i++) out += "  ";
     if (isValidProtoIdent(k)) out += k;
     else {
@@ -1521,8 +1550,10 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
 // format cannot represent (null, and any type with no case below) writes
 // nothing, and callers use the return value to avoid leaving a dangling
 // separator behind -- an element that wrote nothing must not consume ", ".
-inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent) {
+inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent, int depth) {
   if (!val || val->type == asvJSONValue::NULL_VAL) return false;
+  // Depth guard: same convention as protoEncodeMessage.
+  if (val->type == asvJSONValue::OBJECT && !asvJSONValue::checkNestingDepth(depth)) return false;
   switch (val->type) {
     case asvJSONValue::BOOL_VAL: out += val->flag ? "true" : "false"; break;
     case asvJSONValue::INT: { char buf[32]; snprintf(buf, sizeof(buf), "%" PRId64, val->num); out += buf; break; }
@@ -1537,7 +1568,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
       auto bin = val->getBinary();
       protoTextQuote(std::string(bin.begin(), bin.end()), out); break;
     }
-    case asvJSONValue::OBJECT: protoTextSerializeMsg(val, out, indent); break;
+    case asvJSONValue::OBJECT: protoTextSerializeMsg(val, out, indent, depth + 1); break;
     case asvJSONValue::ARRAY: {
       if (!val->arr || val->arr->empty()) { out += "[]"; break; }
       bool allMsg = true;
@@ -1554,7 +1585,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
           if (!e) continue;
           if (!body.empty()) body += ",\n";
           for (int j = 0; j < indent + 1; j++) body += "  ";
-          protoTextSerializeMsg(e.get(), body, indent + 1);
+          protoTextSerializeMsg(e.get(), body, indent + 1, depth + 1);
         }
         out += "[\n";
         out += body;
@@ -1569,7 +1600,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
           if (firstWritten) out += ", ";
           // A null element writes nothing; roll the separator back so the
           // result is "[1, 2]" and never the invalid "[1, , 2]".
-          if (!protoTextSerializeVal((*val->arr)[i].get(), out, indent)) {
+          if (!protoTextSerializeVal((*val->arr)[i].get(), out, indent, depth)) {
             if (firstWritten) out.resize(out.size() - 2);
             continue;
           }
@@ -1600,7 +1631,11 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_PROTOBUF_INPUT = 32u * 1024u * 1024u;
   if (!data || size < 1) { lastError = "protobuf: empty input"; return false; }
+  if (size > MAX_PROTOBUF_INPUT) { lastError = "Protobuf input exceeds 32 MB limit"; return false; }
   try {
     std::shared_ptr<ProtoSchema> schema;
     if (!schemaJson.empty()) {
@@ -1618,7 +1653,7 @@ inline std::string asvJSON::toProtobufText() const {
   // Only terminate the document when a value was actually written: a NULL root
   // has no text representation, and a bare "\n" would be a document that
   // fromProtobufText() then rejects.
-  if (root && protoTextSerializeVal(root.get(), out, 0)) out += '\n';
+  if (root && protoTextSerializeVal(root.get(), out, 0, 1)) out += '\n';
   return out;
 }
 
@@ -1654,6 +1689,10 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_PROTOBUF_TEXT_INPUT = 32u * 1024u * 1024u;
+  if (text.size() > MAX_PROTOBUF_TEXT_INPUT) { lastError = "Protobuf text input exceeds 32 MB limit"; return false; }
   try {
     size_t pos = 0;
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
@@ -1734,6 +1773,10 @@ inline std::string asvJSON::stringFromProtobuf(const uint8_t* data, size_t size)
 }
 
 inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& schemaJson) {
+  root = nullptr;
+  dirty_ = false;
+  formatType = FormatType::Unknown;
+  lastError.clear();
   try {
     // Auto-detect base64 (common usage: passing base64-encoded protobuf) but only
     // when the string is made of base64 alphabet chars, its length is a multiple

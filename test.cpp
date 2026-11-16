@@ -14323,6 +14323,55 @@ TEST(testProtobufAuditFixesRound3) {
 	}
 }
 
+TEST(testProtobufSecurityFixes) {
+	// 1. Basic round-trip works.
+	{
+		asvJSON j;
+		j.parse(std::string(R"({"a":1})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+	}
+	// 2. lastError.clear() on entry — prior error does not linger.
+	{
+		asvJSON j;
+		j.lastError = "prior garbage";
+		j.parse(std::string(R"({"a":1})"));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.lastError.empty());
+	}
+	// 3. Input size limit: 32 MB rejected.
+	{
+		constexpr size_t MAX_PROTOBUF = 32u * 1024u * 1024u;
+		std::vector<uint8_t> big(MAX_PROTOBUF + 1, 0);
+		asvJSON j;
+		ASSERT(!j.fromProtobuf(big.data(), big.size()));
+	}
+	// 4. Depth guard: encoder must not crash on deep trees.
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		asvJSONValue* cur = j.getRoot();
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 10; i++) {
+			auto next = asvJSONValue::makeObject();
+			if (!cur->obj || !next->obj) break;
+			cur->obj->clear();
+			cur->obj->emplace("n", std::move(next));
+			cur = cur->obj->begin()->second.get();
+		}
+		auto buf = j.toProtobuf();
+		(void)buf;
+	}
+	// 5. Text string length guard.
+	{
+		std::string huge(10 * 1024 * 1024, 'x');
+		std::string txt = "k: \"" + huge + "\"\n";
+		asvJSON j;
+		ASSERT(!j.fromProtobufText(txt));
+	}
+}
 TEST(testProtobufReviewFixes) {
 	// 1. DOUBLE text-round-trip must keep the ".0" suffix so re-parsing is not a bare INT.
 	{
@@ -37998,6 +38047,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufAuditFixes);
 	RUN(testProtobufAuditFixesRound2);
 	RUN(testProtobufAuditFixesRound3);
+	RUN(testProtobufSecurityFixes);
 
 	std::cout << "\n--- XML Serialization Tests ---\n";
 	RUN(testToXML);
