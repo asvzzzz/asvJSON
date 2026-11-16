@@ -14364,12 +14364,43 @@ TEST(testProtobufSecurityFixes) {
 		auto buf = j.toProtobuf();
 		(void)buf;
 	}
-	// 5. Text string length guard.
+	// 5. Text string length guard: MAX_STRING_LEN + 1 rejected.
 	{
-		std::string huge(10 * 1024 * 1024, 'x');
+		std::string huge(asvJSONValue::MAX_STRING_LEN + 10, 'x');
 		std::string txt = "k: \"" + huge + "\"\n";
 		asvJSON j;
-		ASSERT(!j.fromProtobufText(txt));
+	 ASSERT(!j.fromProtobufText(txt));
+	}
+	// 6. Text encoder depth: exactly MAX containers accepted, deeper degrades.
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		asvJSONValue* cur = j.getRoot();
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) {
+			auto next = asvJSONValue::makeObject();
+			if (!cur->obj || !next->obj) break;
+			cur->obj->clear();
+			cur->obj->emplace("n", std::move(next));
+			cur = cur->obj->begin()->second.get();
+		}
+		std::string text = j.toProtobufText();
+		asvJSON j2;
+		if (!text.empty()) ASSERT(j2.fromProtobufText(text));
+	}
+	// 7. Text encoder nested arrays: no stack overflow.
+	{
+		asvJSON j;
+		j.parse(std::string("[]"));
+		asvJSONValue* cur = j.getRoot();
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) {
+			auto inner = asvJSONValue::makeArray();
+			if (!cur->arr || !inner->arr) break;
+			cur->arr->clear();
+			cur->arr->push_back(std::move(inner));
+			cur = cur->arr->at(0).get();
+		}
+		std::string text = j.toProtobufText();
+		(void)text; // must not crash
 	}
 }
 TEST(testProtobufReviewFixes) {

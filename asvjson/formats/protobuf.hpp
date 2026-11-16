@@ -498,7 +498,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
             if (wt == 2) {
               ProtoField tmpF = field;
               std::vector<uint8_t> fv;
-              protoEncodeFieldValue(fv, elem.get(), tmpF, depth + 1);
+              protoEncodeFieldValue(fv, elem.get(), tmpF, depth);
               out.insert(out.end(), fv.begin(), fv.end());
             } else {
               protoEncodeScalar(out, elem.get(), field.type);
@@ -513,7 +513,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         if (wt == 2) {
           ProtoField tmpF = field;
           std::vector<uint8_t> fv;
-          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth + 1);
+          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth);
           out.insert(out.end(), fv.begin(), fv.end());
         } else {
           protoEncodeScalar(out, fieldVal.get(), field.type);
@@ -1552,8 +1552,10 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
 // separator behind -- an element that wrote nothing must not consume ", ".
 inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int indent, int depth) {
   if (!val || val->type == asvJSONValue::NULL_VAL) return false;
-  // Depth guard: same convention as protoEncodeMessage.
-  if (val->type == asvJSONValue::OBJECT && !asvJSONValue::checkNestingDepth(depth)) return false;
+  // Depth guard: prevent stack overflow on programmatically-built trees deeper
+  // than MAX_NESTING_DEPTH. Both OBJECT and ARRAY count as one container level.
+  if ((val->type == asvJSONValue::OBJECT || val->type == asvJSONValue::ARRAY)
+      && !asvJSONValue::checkNestingDepth(depth)) return false;
   switch (val->type) {
     case asvJSONValue::BOOL_VAL: out += val->flag ? "true" : "false"; break;
     case asvJSONValue::INT: { char buf[32]; snprintf(buf, sizeof(buf), "%" PRId64, val->num); out += buf; break; }
@@ -1568,7 +1570,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
       auto bin = val->getBinary();
       protoTextQuote(std::string(bin.begin(), bin.end()), out); break;
     }
-    case asvJSONValue::OBJECT: protoTextSerializeMsg(val, out, indent, depth + 1); break;
+    case asvJSONValue::OBJECT: protoTextSerializeMsg(val, out, indent, depth); break;
     case asvJSONValue::ARRAY: {
       if (!val->arr || val->arr->empty()) { out += "[]"; break; }
       bool allMsg = true;
@@ -1600,7 +1602,7 @@ inline bool protoTextSerializeVal(const asvJSONValue* val, std::string& out, int
           if (firstWritten) out += ", ";
           // A null element writes nothing; roll the separator back so the
           // result is "[1, 2]" and never the invalid "[1, , 2]".
-          if (!protoTextSerializeVal((*val->arr)[i].get(), out, indent, depth)) {
+          if (!protoTextSerializeVal((*val->arr)[i].get(), out, indent, depth + 1)) {
             if (firstWritten) out.resize(out.size() - 2);
             continue;
           }
