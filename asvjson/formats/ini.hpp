@@ -1659,6 +1659,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
 
         if (isArraySection) {
           std::string arrKey = newPath.back();
+          if (!asvJSONValue::checkStringLen(arrKey.size()))
+            throw asvJSONError("INI: key too long");
           newPath.pop_back();
           asvJSONValue* parent = root.get();
           // Track depth: root is 1, each object segment adds 1, each array wrapper adds 2.
@@ -1696,6 +1698,9 @@ inline bool asvJSON::fromINI(std::string_view input) {
             throw asvJSONError("cannot navigate through non-object");
           auto it = parent->obj->find(arrKey);
           if (it == parent->obj->end()) {
+            // Guard against DoS: [[a.b1]], [[a.b2]], ... creates siblings under a.
+            if (!asvJSONValue::checkObjectSize(parent->obj->size() + 1))
+              throw asvJSONError("INI: object too large");
             auto newArr = asvJSONValue::makeArray();
             if (!newArr || !newArr->arr) throw asvJSONError("INI: out of memory");
             auto* arrPtr = newArr.get();
@@ -1706,8 +1711,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
             if (!asvJSONValue::checkArraySize(arrPtr->arr->size() + 1))
               throw asvJSONError("INI: array too large");
             arrPtr->arr->push_back(std::move(newObj));
-            // Track depth for this new array element.
-            currentArrayElementDepth = static_cast<int>(pathDepth) + 2;
+            // Track depth for this new array element: parent at pathDepth, array at +1, element at +2.
+            currentArrayElementDepth = pathDepth + 2;
           } else if (it->second && it->second->type == asvJSONValue::ARRAY && it->second->arr) {
             auto newObj = asvJSONValue::makeObject();
             if (!newObj) throw asvJSONError("INI: out of memory");
@@ -1715,9 +1720,8 @@ inline bool asvJSON::fromINI(std::string_view input) {
             if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
               throw asvJSONError("INI: array too large");
             it->second->arr->push_back(std::move(newObj));
-            // Track depth for this array element: parent was at `currentArrayElementDepth`
-            // (depth of the object holding the array), +1 for the array, +1 for the new element.
-            currentArrayElementDepth = currentArrayElementDepth + 2;
+            // Same depth regardless of whether array was newly created or existing.
+            currentArrayElementDepth = pathDepth + 2;
           } else {
             // Reject instead of silently overwriting the existing value.
             throw asvJSONError("array section conflicts with existing value for \"" + arrKey + "\"");
