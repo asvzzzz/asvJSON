@@ -634,6 +634,10 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			pos += 4;
 			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			if (static_cast<size_t>(n) > asvJSONValue::MAX_ARRAY_SIZE) throw asvJSONError("MsgPack array too large");
+			// Each element needs at least one tag byte, so a count larger than
+			// the remaining input is impossible: reject BEFORE the reserve()
+			// (a forged header claimed 1e6 elements and reserved 8 MB first).
+			if (static_cast<size_t>(n) > dataLen - pos) throw asvJSONError("MsgPack array longer than input");
 			auto arr = asvJSONValue::makeArray();
 			if (!arr) throw asvJSONError("MsgPack array alloc failed");
 			arr->arr->reserve(n);
@@ -669,6 +673,10 @@ inline std::unique_ptr<asvJSONValue> parseMessagePack(const uint8_t* data, size_
 			pos += 4;
 			if (depth >= asvJSONValue::MAX_NESTING_DEPTH) throw asvJSONError("MsgPack nesting too deep");
 			if (static_cast<size_t>(n) > asvJSONValue::MAX_OBJECT_SIZE) throw asvJSONError("MsgPack map too large");
+			// Each pair needs at least two tag bytes (key + value), so a count
+			// larger than (remaining input)/2 is impossible: reject before any
+			// pair allocation (same guard class as the array32 one above).
+			if (static_cast<size_t>(n) > (dataLen - pos) / 2) throw asvJSONError("MsgPack map longer than input");
 			auto obj = asvJSONValue::makeObject();
 			if (!obj) throw asvJSONError("MsgPack map alloc failed");
 			for (uint32_t i = 0; i < n; i++) {

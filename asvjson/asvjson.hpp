@@ -129,7 +129,10 @@
 namespace asvJSONInternal {
 
 inline bool asvJSON::fromAny(std::string_view input) {
+  root = nullptr;
+  dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
   try {
     if (input.empty()) { lastError = "empty input"; return false; }
 
@@ -193,7 +196,7 @@ inline bool asvJSON::fromAny(std::string_view input) {
           if ((t >= 0x01 && t <= 0x08) || t == 0x0A ||
               (t >= 0x10 && t <= 0x13) || t == 0xFF) {
   #ifndef ASVJSON_DISABLE_BSON
-            if (fromBSON(std::string(input))) return true;
+            if (fromBSON(input.data(), input.size())) return true;
   #endif
           }
         }
@@ -206,10 +209,12 @@ inline bool asvJSON::fromAny(std::string_view input) {
       }
   #endif
   #ifndef ASVJSON_DISABLE_MSG_PACK
-      if (fromMessagePack(std::string(input))) return true;
+      // The pointer overloads borrow the caller's buffer: the old std::string
+      // temporaries copied the whole (up to multi-MB) input per probe.
+      if (fromMessagePack(input.data(), input.size())) return true;
   #endif
   #ifndef ASVJSON_DISABLE_CBOR
-      if (fromCBOR(std::string(input))) return true;
+      if (fromCBOR(input.data(), input.size())) return true;
   #endif
       lastError = "Unable to detect binary format";
       return false;
@@ -477,11 +482,23 @@ static inline std::string asvjsonExtractExt(const std::string& filename) {
 }
 
 inline bool asvJSON::readFromFileAny(const std::string& filename) {
+  lastError.clear();
   // The bool + lastError contract: std::string building here (content,
   // ext, the lastError concat) must never escape as an exception.
   try {
+    // Size cap BEFORE reading: every format's MAX_*_INPUT is <= 32 MB, so a
+    // larger file can only be rejected - reading it first is the DoS.
+    constexpr size_t MAX_FILE_INPUT = 64u * 1024u * 1024u;
     std::ifstream in(filename, std::ios::binary);
     if (!in.is_open()) { lastError = "Failed to open file: " + filename; return false; }
+    in.seekg(0, std::ios::end);
+    const std::streamoff sz = in.tellg();
+    in.seekg(0, std::ios::beg);
+    if (sz < 0 || static_cast<size_t>(sz) > MAX_FILE_INPUT) {
+      lastError = "File too large: " + filename;
+      in.close();
+      return false;
+    }
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
 
@@ -593,6 +610,7 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
 }
 
 inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) const {
+  lastError.clear();
   // The bool + lastError contract: encoders (toBencode nesting, toXML NaN
   // attributes, ...) and the std::string building below must never escape
   // as an exception past this API.
@@ -732,6 +750,7 @@ inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) co
 
 #ifndef ASVJSON_DISABLE_JSONSAX
 inline bool asvJSON::parseSax(std::string_view input, JsonSaxHandler& handler) {
+  lastError.clear();
   try {
     JsonSaxParser parser;
     parser.allowNaNInfinity = allowNaNInfinity;

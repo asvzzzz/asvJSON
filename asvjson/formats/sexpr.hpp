@@ -666,6 +666,10 @@ inline bool asvJSON::fromSexpr(std::string_view input) {
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit, symmetric with the other text decoders (32 MB).
+  constexpr size_t MAX_SEXPR_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_SEXPR_INPUT) { lastError = "S-expression input exceeds 32 MB limit"; return false; }
   try {
     if (input.empty()) throw asvJSONError("empty input");
     if (input.size() >= 3 && static_cast<unsigned char>(input[0]) == 0xEF &&
@@ -683,11 +687,15 @@ inline bool asvJSON::fromSexpr(std::string_view input) {
     return ok;
   } catch (const asvJSONError& e) {
     lastError = e.what();
+    root = nullptr;
+    dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
     // bool + lastError, like the other from* parsers (see fromCpp).
     lastError = e.what();
+    root = nullptr;
+    dirty_ = false;
     return false;
   }
 }

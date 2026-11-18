@@ -1628,6 +1628,7 @@ public:
 		root = nullptr;
 		dirty_ = false;
 		formatType = FormatType::Unknown;
+		lastError.clear();
 		// Strip UTF-8 BOM (EF BB BF) if present
 		if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s.remove_prefix(3);
 		if (validateUTF8 && !isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
@@ -1709,6 +1710,7 @@ public:
 	}
 
 	bool writeToFile(const std::string& filename, bool pretty = false) const {
+		lastError.clear();
 		try {
 			std::ofstream out(filename);
 			if (!out.is_open()) { lastError = "Failed to open file: " + filename; return false; }
@@ -1723,9 +1725,22 @@ public:
 	}
 
 	bool readFromFile(const std::string& filename) {
+		lastError.clear();
 		try {
+			// Size cap BEFORE reading: the format decoders reject oversized
+			// inputs anyway (MAX_*_INPUT <= 32 MB), so slurping a multi-GB
+			// file is the DoS itself.
+			constexpr size_t MAX_FILE_INPUT = 64u * 1024u * 1024u;
 			std::ifstream in(filename);
 			if (!in.is_open()) { lastError = "Failed to open file: " + filename; return false; }
+			in.seekg(0, std::ios::end);
+			const std::streamoff sz = in.tellg();
+			in.seekg(0, std::ios::beg);
+			if (sz < 0 || static_cast<size_t>(sz) > MAX_FILE_INPUT) {
+				lastError = "File too large: " + filename;
+				in.close();
+				return false;
+			}
 			std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 			in.close();
 			return parse(content);
@@ -3406,6 +3421,10 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 	dirty_ = false;
 	formatType = FormatType::Unknown;
 	lastError.clear();
+	// Input size limit, symmetric with CBOR/BSON/UBJSON (12 MB: just above
+	// MAX_STRING_LEN so the string-length guards fire before the cap does).
+	constexpr size_t MAX_MSGPACK_INPUT = 12u * 1024u * 1024u;
+	if (size > MAX_MSGPACK_INPUT) { lastError = "MessagePack input exceeds 12 MB limit"; return false; }
 	if (!data || size < 1) { lastError = "Empty input"; return false; }
 	const uint8_t* u = static_cast<const uint8_t*>(data);
 	try {
@@ -3626,6 +3645,11 @@ inline bool asvJSON::fromBSON(const void* data, size_t size) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	lastError.clear();
+	// Input size limit, symmetric with CBOR/UBJSON/Bencode (12 MB: just above
+	// MAX_STRING_LEN so the string-length guards fire before the cap does).
+	constexpr size_t MAX_BSON_INPUT = 12u * 1024u * 1024u;
+	if (size > MAX_BSON_INPUT) { lastError = "BSON input exceeds 12 MB limit"; return false; }
 	if (!data || size < 1) { lastError = "Empty input"; return false; }
 	// A BSON document is at least 5 bytes (int32 length + terminator).
 	if (size < 5) { lastError = "BSON: document too small (need 5 bytes)"; return false; }

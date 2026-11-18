@@ -18026,6 +18026,106 @@ TEST(testTOONSecurityFixes) {
   }
 }
 
+TEST(testAuditSweepContracts) {
+  // Cross-library sweep: input-size caps and lastError contracts on the
+  // decoders that were missing them (bencode/ubjson/bson/msgpack/ron/sexpr/
+  // toml/tron), the MsgPack array32/map32 reserve amplification guard, and
+  // the readFromFile / readFromFileAny file size cap.
+
+  // 1. Input size caps (one oversized buffer reused for the 12 MB binary caps).
+  {
+    const std::string big12(12 * 1024 * 1024 + 1, 'x');
+    const std::string big32(32 * 1024 * 1024 + 1, 'x');
+    { asvJSON j; ASSERT(!j.fromBencode(std::string_view(big12)));
+      ASSERT_EQ(std::string(j.getLastError()), "Bencode input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromUBJSON(big12.data(), big12.size()));
+      ASSERT_EQ(std::string(j.getLastError()), "UBJSON input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromBSON(big12.data(), big12.size()));
+      ASSERT_EQ(std::string(j.getLastError()), "BSON input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromMessagePack(big12.data(), big12.size()));
+      ASSERT_EQ(std::string(j.getLastError()), "MessagePack input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromCBOR(big12.data(), big12.size()));
+      ASSERT_EQ(std::string(j.getLastError()), "CBOR input exceeds 10 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromXML(std::string_view(big12)));
+      ASSERT_EQ(std::string(j.getLastError()), "XML input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromSVG(std::string_view(big12)));
+      ASSERT_EQ(std::string(j.getLastError()), "SVG input exceeds 12 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromRON(std::string_view(big32)));
+      ASSERT_EQ(std::string(j.getLastError()), "RON input exceeds 32 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromSexpr(std::string_view(big32)));
+      ASSERT_EQ(std::string(j.getLastError()), "S-expression input exceeds 32 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromTOML(std::string_view(big32)));
+      ASSERT_EQ(std::string(j.getLastError()), "TOML input exceeds 32 MB limit"); }
+    { asvJSON j; ASSERT(!j.fromTRON(std::string_view(big32)));
+      ASSERT_EQ(std::string(j.getLastError()), "TRON input exceeds 32 MB limit"); }
+  }
+
+  // 2. lastError cleared on entry: an error must not linger after a success.
+  {
+    asvJSON j;
+    ASSERT(!j.fromBencode("i01x"));               // rejected (leading zero)
+    ASSERT(!j.getLastError().empty());
+    ASSERT(j.fromBencode("i42e"));
+    ASSERT(j.getLastError().empty());
+    ASSERT(j.fromTOML("k = 1\n"));
+    ASSERT(!j.fromTOML("k = \n"));                 // missing value
+    ASSERT(!j.getLastError().empty());
+    ASSERT(j.fromTOML("k = 2\n"));
+    ASSERT(j.getLastError().empty());
+    // core parse(): stale error from a failed parse must be gone after success
+    ASSERT(!j.parse("{"));
+    ASSERT(!j.getLastError().empty());
+    ASSERT(j.parse("{\"a\":1}"));
+    ASSERT(j.getLastError().empty());
+  }
+
+  // 3. MsgPack array32/map32: a forged length beyond the remaining input is
+  // rejected BEFORE reserve() (the CBOR guard class).
+  {
+    std::string arr;
+    arr += static_cast<char>(0xDD);
+    arr += static_cast<char>((1000000u >> 24) & 0xFF);  // n = 1e6, body absent
+    arr += static_cast<char>((1000000u >> 16) & 0xFF);
+    arr += static_cast<char>((1000000u >> 8) & 0xFF);
+    arr += static_cast<char>(1000000u & 0xFF);
+    asvJSON j;
+    ASSERT(!j.fromMessagePack(arr.data(), arr.size()));
+    ASSERT_EQ(std::string(j.getLastError()), "MsgPack array longer than input");
+
+    std::string map;
+    map += static_cast<char>(0xDF);
+    map += static_cast<char>((1000000u >> 24) & 0xFF);
+    map += static_cast<char>((1000000u >> 16) & 0xFF);
+    map += static_cast<char>((1000000u >> 8) & 0xFF);
+    map += static_cast<char>(1000000u & 0xFF);
+    ASSERT(!j.fromMessagePack(map.data(), map.size()));
+    ASSERT_EQ(std::string(j.getLastError()), "MsgPack map longer than input");
+  }
+
+  // 4. readFromFile / readFromFileAny: files above MAX_FILE_INPUT (64 MB) are
+  // rejected BEFORE being slurped into memory; normal files still work.
+  {
+    const std::string tmpDir = std::string(getenv("TEMP") ? getenv("TEMP") : ".");
+    std::string small = tmpDir + "\\asvjson_audit_small.json";
+    { asvJSON w; w.putInt("v", 7); ASSERT(w.writeToFile(small)); }
+    { asvJSON r; ASSERT(r.readFromFile(small));
+      ASSERT_EQ(r.getInt("v"), 7);
+      std::remove(small.c_str()); }
+    std::string huge = tmpDir + "\\asvjson_audit_huge.json";
+    {
+      std::ofstream f(huge, std::ios::binary);
+      f.seekp(64 * 1024 * 1024 + 16);
+      f.put('1');
+      f.close();
+    }
+    { asvJSON r; ASSERT(!r.readFromFile(huge));
+      ASSERT(std::string(r.getLastError()).find("File too large") != std::string::npos); }
+    { asvJSON r; ASSERT(!r.readFromFileAny(huge));
+      ASSERT(std::string(r.getLastError()).find("File too large") != std::string::npos); }
+    std::remove(huge.c_str());
+  }
+}
+
 TEST(testTRONExtras) {
   // DATETIME preserves tz_offset_min across a TRON round-trip (encoder used to
   // call fmtDateTimeVal with 3 args and the decoder ignored the offset).
@@ -38142,6 +38242,7 @@ RUN(testTOONReviewFixes);
 	RUN(testTOONSpecialTypes);
 	RUN(testToonExtras);
 	RUN(testTOONSecurityFixes);
+	RUN(testAuditSweepContracts);
 
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);

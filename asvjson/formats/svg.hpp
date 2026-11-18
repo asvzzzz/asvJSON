@@ -401,7 +401,7 @@ inline bool asvJSON::fromSVG(std::string_view input) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
-	if (input.size() > MAX_XML_INPUT) { lastError = "XML input exceeds 10 MB limit"; return false; }
+	if (input.size() > MAX_XML_INPUT) { lastError = "SVG input exceeds 12 MB limit"; return false; }
 	try {
 		auto obj = xmlParseDocument(input, /*collapseSameNamed=*/false);
 		root = std::move(obj);
