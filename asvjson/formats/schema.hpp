@@ -38,6 +38,13 @@
 // matches nothing, so inside a fork it reads as "branch did not match" rather
 // than "schema is broken".
 //
+// Recursion depth is capped (MAX_VALIDATION_DEPTH): parsed schemas/instances
+// are bounded by MAX_NESTING_DEPTH, but programmatically built trees are not,
+// and an unbounded descent overflowed the stack. A pathological product of
+// deeply nested schema keywords and deeply nested data can overflow it too --
+// hitting the cap fails validation as a schema-internal error (forks abort on
+// it), never a crash.
+//
 // Deliberate strictness (draft-07 states a SHOULD, not a MUST, for these):
 //   - An EMPTY `enum`, `type`, `allOf`, `anyOf` or `oneOf` is a malformed
 //     schema. An empty `enum`/`type`/`anyOf`/`oneOf` matches nothing and an
@@ -173,9 +180,23 @@ private:
   // the schema as a null value would. This matches the draft-07 semantics where
   // an absent instance is equivalent to JSON null - so {"type":"object"} fails
   // on an empty document, while true-schema or {} succeeds.
+  // Hard cap on the validateNode recursion depth (per validation, continuing
+  // across anyOf/oneOf/not/if/contains forks). Parsed inputs sit far below it:
+  // data nests at most MAX_NESTING_DEPTH = 48 levels, and even a recursive
+  // schema consumes only ~3 frames per data level. A pathological PRODUCT of
+  // deeply nested schema keywords x deeply nested data (a 48x48 allOf/items
+  // chain) would need ~7000 frames and overflow the default 1 MB stack all
+  // by itself -- such combinations are REPORTED through failInternal
+  // (shapeFailed_, so fork keywords abort on it) instead of crashing. Only a
+  // programmatically built (raw-API) schema or instance can nest deeper than
+  // the parsers allow, and there the unbounded recursion overflowed the stack.
+  static constexpr int MAX_VALIDATION_DEPTH = 512;
+  int nodeDepth_ = 0;
+
   bool validateImpl(const asvJSONValue* value, const asvJSONValue* schema) {
     if (!schema) return true;
     static const asvJSONValue kNull; // default-constructed node is NULL_VAL
+    nodeDepth_ = 0; // a reused validator must not inherit a stale depth
     rootSchema_ = schema;
     refStack_ = std::make_shared<RefStack>();
     patternCache_ = std::make_shared<PatternCache>();
@@ -209,6 +230,7 @@ private:
     sub.patternCache_ = patternCache_;
     sub.shapeCache_ = shapeCache_;
     sub.refCache_ = refCache_;
+    sub.nodeDepth_ = nodeDepth_; // the depth budget continues across forks
     return sub;
   }
 
@@ -973,6 +995,19 @@ private:
   }
 
   bool validateNode(const asvJSONValue* value, const asvJSONValue* schema) {
+    // Depth guard wrapper: every recursion edge (keyword nesting, $ref hop,
+    // data descent) goes through here, and so do the forked sub-validators
+    // (makeFork carries nodeDepth_ over). failInternal sets shapeFailed_:
+    // an abandoned check is not an instance verdict.
+    if (nodeDepth_ >= MAX_VALIDATION_DEPTH)
+      return failInternal("Schema validation nesting too deep");
+    ++nodeDepth_;
+    const bool ok = validateNodeDeep(value, schema);
+    --nodeDepth_;
+    return ok;
+  }
+
+  bool validateNodeDeep(const asvJSONValue* value, const asvJSONValue* schema) {
     if (isBoolTrue(schema)) return true;
     if (isBoolFalse(schema)) { setError("False schema rejects all values"); return false; }
     if (!schema || schema->type != asvJSONValue::OBJECT) return true;
