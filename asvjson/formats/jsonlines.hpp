@@ -5,6 +5,9 @@
 // a single line; the encoder writes one line per array element, or a single
 // line for a non-array root.
 // Empty lines are skipped. Trailing CR / space / tab on each line is trimmed.
+// allowNaNInfinity is honored by BOTH sides: the encoder writes the JSON5-style
+// literals and the per-line parser accepts them (the flag is copied to the
+// per-line asvJSON instance).
 // An invalid line aborts the WHOLE parse with "JSON Lines: invalid JSON at
 // line N: <the inner parser's diagnostic> near: <first 30 bytes of the
 // offending line>" (the prefix is cut at a character boundary, never
@@ -97,6 +100,11 @@ inline bool asvJSON::fromJSONLines(std::string_view input) {
 				line.remove_suffix(1);
 			if (!line.empty()) {
 				asvJSON tmp;
+				// The encoder writes NaN/Infinity when the flag is set, so the
+				// per-line parse must honor it too: enc -> dec of the same
+				// document has to agree on the flag (the fromYAML/fromGOON
+				// save/restore pattern - here tmp is fresh, so a plain copy).
+				tmp.allowNaNInfinity = allowNaNInfinity;
 				if (!tmp.parse(line)) {
 					// The inner parser's own diagnostic ("Expected ':'",
 					// "Invalid escape in string", ...) is the useful part - it
