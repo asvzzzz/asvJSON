@@ -30927,6 +30927,56 @@ TEST(testSchemaJsonPointerRefs) {
 	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
 }
 
+TEST(testSchemaDepthGuard) {
+	// validateNode recursed without a bound: schemas/instances from a parser
+	// are capped at MAX_NESTING_DEPTH, but programmatically built ones are
+	// not, and a deep allOf chain or a recursive schema over a deep instance
+	// overflowed the stack. Now capped at MAX_VALIDATION_DEPTH and reported
+	// as an internal schema error (forks would abort on it too).
+	{ // 1) 100k-deep allOf chain schema
+		std::unique_ptr<asvJSONValue> sch = asvJSONValue::makeObject();
+		sch->obj->emplace("type", asvJSONValue::makeStringView("string"));
+		for (int i = 0; i < 100000; i++) {
+			auto wrap = asvJSONValue::makeObject();
+			auto arr = asvJSONValue::makeArray();
+			arr->arr->push_back(std::move(sch));
+			wrap->obj->emplace("allOf", std::move(arr));
+			sch = std::move(wrap);
+		}
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("\"x\"")));
+		asvJSON schema;
+		schema.setRoot(std::move(sch));
+		std::string err;
+		ASSERT(!doc.validate(schema, err));
+		ASSERT(err.find("nesting too deep") != std::string::npos);
+	}
+	{ // 2) recursive schema over a 100k-deep programmatic instance: descent
+	  // is legitimate per data level, but still bounded by the cap
+		std::unique_ptr<asvJSONValue> inst = asvJSONValue::makeArray();
+		for (int i = 0; i < 100000; i++) {
+			auto w = asvJSONValue::makeArray();
+			w->arr->push_back(std::move(inst));
+			inst = std::move(w);
+		}
+		asvJSON instDoc;
+		instDoc.setRoot(std::move(inst));
+		asvJSON rec;
+		ASSERT(rec.parse(std::string_view(R"({"items":{"$ref":"#"}})")));
+		std::string err;
+		ASSERT(!instDoc.validate(rec, err));
+		ASSERT(err.find("nesting too deep") != std::string::npos);
+	}
+	{ // 3) sanity: a recursive schema on normal parsed data still validates
+		asvJSON data;
+		ASSERT(data.parse(std::string_view(R"([1,[2,[3]]])")));
+		asvJSON rec;
+		ASSERT(rec.parse(std::string_view(R"({"items":{"$ref":"#"}})")));
+		std::string err;
+		ASSERT(data.validate(rec, err));
+	}
+}
+
 TEST(testDeepTreeEqualityAndDiff) {
 	// operator== used to recurse: two equal 100k-deep programmatically built
 	// trees overflowed the comparison stack (a crash inside a noexcept
@@ -38611,6 +38661,7 @@ RUN(testADEBlockScalarKeepChomping);
 RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
+	RUN(testSchemaDepthGuard);
 	RUN(testDeepTreeEqualityAndDiff);
 	RUN(testJSONPathDeepDescent);
 	RUN(testJSONPath);
