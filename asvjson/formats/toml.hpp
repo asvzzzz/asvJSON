@@ -191,7 +191,7 @@ inline std::string tomlQuoteKey(const std::string& key) {
   return out;
 }
 
-inline std::string tomlVal(const asvJSONValue* v) {
+inline std::string tomlVal(const asvJSONValue* v, int depth = 1) {
   if (!v) return "";
   using T = asvJSONValue::Type;
   switch (v->type) {
@@ -258,11 +258,16 @@ inline std::string tomlVal(const asvJSONValue* v) {
       return s;
     }
     case T::ARRAY: {
+      // Inline arrays/tables recurse; a programmatic tree deeper than the
+      // parser's limit must throw, not overflow the stack (the TOML decoder
+      // rejects the same depth on the way back).
+      if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("TOML: nesting too deep");
       if (!v->arr) return "[]";
       std::string out = "[";
       bool first = true;
       for (size_t i = 0; i < v->arr->size(); i++) {
-        std::string elem = tomlVal((*v->arr)[i].get());
+        std::string elem = tomlVal((*v->arr)[i].get(), depth + 1);
         if (elem.empty()) continue;
         if (!first) out += ", ";
         first = false;
@@ -272,11 +277,13 @@ inline std::string tomlVal(const asvJSONValue* v) {
       return out;
     }
     case T::OBJECT: {
+      if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("TOML: nesting too deep");
       if (!v->obj || v->obj->empty()) return "{}";
       std::string out = "{";
       bool first = true;
       for (const auto& [k, val] : *v->obj) {
-        std::string vs = tomlVal(val.get());
+        std::string vs = tomlVal(val.get(), depth + 1);
         if (vs.empty()) continue;
         if (!first) out += ", ";
         first = false;
@@ -1206,7 +1213,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
 }
 
 // --- Encoder ---
-inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool needHeader, std::string& out, bool pretty = true) {
+inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool needHeader, std::string& out, bool pretty = true, int depth = 1) {
   using T = asvJSONValue::Type;
   if (!v) return;
 
@@ -1219,11 +1226,13 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
   };
 
   if (v->type == T::OBJECT && v->obj) {
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("TOML: nesting too deep");
     if (!pretty) {
       // Compact: inline all nested objects as {key = val} tables
       for (const auto& [k, val] : *v->obj) {
         std::string qk = tomlQuoteKey(k);
-        std::string vs = tomlVal(val.get());
+        std::string vs = tomlVal(val.get(), depth + 1);
         if (!vs.empty()) out += qk + " = " + vs + "\n";
       }
     } else {
@@ -1249,7 +1258,7 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
       for (const auto& [k, val] : *v->obj) {
         if (isSubtable(val.get())) continue;
         std::string qk = tomlQuoteKey(k);
-        std::string vs = tomlVal(val.get());
+        std::string vs = tomlVal(val.get(), depth + 1);
         if (!vs.empty()) {
           out += qk + " = " + vs + "\n";
         }
@@ -1260,7 +1269,7 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
         std::string qk = tomlQuoteKey(k);
         std::string fullKey = prefix.empty() ? qk : prefix + "." + qk;
         if (val->type == T::OBJECT) {
-          tomlEmitVal(val.get(), fullKey, true, out, true);
+          tomlEmitVal(val.get(), fullKey, true, out, true, depth + 1);
         } else {
           // Array of tables: one `[[path]]` header per element. Elements may
           // carry subtables with the same name -- TOML resolves every reference
@@ -1270,18 +1279,20 @@ inline void tomlEmitVal(const asvJSONValue* v, const std::string& prefix, bool n
           // fallback is needed for that case.
           for (const auto& elem : *val->arr) {
             emitHeader(fullKey, true);
-            tomlEmitVal(elem.get(), fullKey, false, out, true);
+            tomlEmitVal(elem.get(), fullKey, false, out, true, depth + 1);
           }
         }
       }
     }
   } else if (v->type == T::ARRAY && v->arr) {
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("TOML: nesting too deep");
     // Only tables carry `[key]` headers, never arrays. This branch is reached
     // (when at all) with `needHeader` already false -- the callers hand in an
     // OBJECT or OBJECT-array elements -- so forward it explicitly as false
     // rather than re-forwarding the parameter.
     for (const auto& elem : *v->arr)
-      tomlEmitVal(elem.get(), prefix, false, out, pretty);
+      tomlEmitVal(elem.get(), prefix, false, out, pretty, depth + 1);
   }
 }
 

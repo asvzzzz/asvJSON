@@ -18126,6 +18126,100 @@ TEST(testAuditSweepContracts) {
   }
 }
 
+TEST(testSerializeDepthGuard) {
+  // A programmatically built tree deeper than MAX_NESTING_DEPTH used to make
+  // the recursive serialize()/serializePretty() overflow the stack (parsers
+  // cap at 48 containers; the tree itself is unbounded). Both encoders now
+  // degrade deeper containers to null.
+  std::unique_ptr<asvJSONValue> v = asvJSONValue::makeInt(5);
+  for (int i = 0; i < 100000; i++) {
+    auto wrap = asvJSONValue::makeArray();
+    wrap->arr->push_back(std::move(v));
+    v = std::move(wrap);
+  }
+  std::string out;
+  v->serialize(out);
+  size_t opens = 0, closes = 0;
+  for (char c : out) { if (c == '[') opens++; else if (c == ']') closes++; }
+  ASSERT_EQ(opens, static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH));
+  ASSERT_EQ(closes, opens);
+  ASSERT(out.find("null") != std::string::npos);
+  std::string pretty;
+  v->serializePretty(pretty);
+  opens = 0; closes = 0;
+  for (char c : pretty) { if (c == '[') opens++; else if (c == ']') closes++; }
+  ASSERT_EQ(opens, static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH));
+  ASSERT_EQ(closes, opens);
+  // A tree at exactly the limit must serialize verbatim (no degradation).
+  std::unique_ptr<asvJSONValue> exact = asvJSONValue::makeInt(1);
+  for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) {
+    auto wrap = asvJSONValue::makeArray();
+    wrap->arr->push_back(std::move(exact));
+    exact = std::move(wrap);
+  }
+  std::string eout;
+  exact->serialize(eout);
+  ASSERT(eout.find("null") == std::string::npos);
+  opens = 0;
+  for (char c : eout) if (c == '[') opens++;
+  ASSERT_EQ(opens, static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH));
+}
+
+TEST(testEncoderDepthGuards) {
+  // Same class as the serialize() guard: programmatically built trees nest past
+  // what any parser accepts, and the per-format recursive encoders must throw
+  // (or degrade), never overflow the stack. Boundaries pinned per format:
+  // XML/SVG cap at the decoder's 47 element levels (MAX-1), YAML/TOML at 48.
+  auto chain = [](int levels) -> std::unique_ptr<asvJSONValue> {
+    std::unique_ptr<asvJSONValue> v = asvJSONValue::makeInt(7);
+    for (int i = 0; i < levels; i++) {
+      auto wrap = asvJSONValue::makeObject();
+      wrap->obj->emplace("a", std::move(v));
+      v = std::move(wrap);
+    }
+    return v;
+  };
+  const int MAXD = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
+
+  auto mustThrow = [&](const char* what, auto&& fn) {
+    bool threw = false;
+    try { fn(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+    (void)what;
+  };
+
+  { // XML: 47 element levels encode, the 48th throws
+    auto ok = chain(MAXD - 1);
+    std::string s; ok->toXML(s); ASSERT(!s.empty());
+    auto bad = chain(MAXD);
+    mustThrow("XML", [&] { std::string s2; bad->toXML(s2); });
+  }
+  { // SVG: same shared-XML decoder cap
+    auto ok = chain(MAXD - 1);
+    std::string s; ok->toSVG(s, "r", 0); ASSERT(!s.empty());
+    auto bad = chain(MAXD);
+    mustThrow("SVG", [&] { std::string s2; bad->toSVG(s2, "r", 0); });
+  }
+  { // YAML block: 48 container levels encode, the 49th throws
+    auto ok = chain(MAXD);
+    std::string s; ok->toYAML(s); ASSERT(!s.empty());
+    auto bad = chain(MAXD + 1);
+    mustThrow("YAML block", [&] { std::string s2; bad->toYAML(s2); });
+    // Flow style goes through yamlFlowVal/yamlTryFlowVal, same cap
+    mustThrow("YAML flow", [&] {
+      YamlWriteOptions o; o.style = YamlWriteOptions::Style::Flow;
+      std::string s2; bad->toYAML(s2, o);
+    });
+  }
+  { // TOML: [table] headers and inline tables both guarded at 48
+    auto ok = chain(MAXD);
+    std::string s; ok->toTOML(s, true); ASSERT(!s.empty());
+    auto bad = chain(MAXD + 1);
+    mustThrow("TOML pretty", [&] { std::string s2; bad->toTOML(s2, true); });
+    mustThrow("TOML compact", [&] { std::string s2; bad->toTOML(s2, false); });
+  }
+}
+
 TEST(testTRONExtras) {
   // DATETIME preserves tz_offset_min across a TRON round-trip (encoder used to
   // call fmtDateTimeVal with 3 args and the decoder ignored the offset).
@@ -38243,6 +38337,8 @@ RUN(testTOONReviewFixes);
 	RUN(testToonExtras);
 	RUN(testTOONSecurityFixes);
 	RUN(testAuditSweepContracts);
+	RUN(testSerializeDepthGuard);
+	RUN(testEncoderDepthGuards);
 
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);
