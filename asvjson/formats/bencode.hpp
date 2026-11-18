@@ -318,8 +318,15 @@ inline std::string asvJSON::toBencode() const {
 }
 
 inline bool asvJSON::fromBencode(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit, symmetric with the other binary decoders (CBOR 10 MB,
+  // XML 12 MB): kept just above MAX_STRING_LEN so the string-too-long guards
+  // still fire for ~10 MB payloads instead of the cap swallowing them.
+  constexpr size_t MAX_BENCODE_INPUT = 12u * 1024u * 1024u;
+  if (input.size() > MAX_BENCODE_INPUT) { lastError = "Bencode input exceeds 12 MB limit"; return false; }
   try {
     size_t pos = 0;
     auto v = bencodeParseValue(input, pos, 0);

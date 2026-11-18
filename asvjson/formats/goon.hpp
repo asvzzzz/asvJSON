@@ -1799,8 +1799,10 @@ inline std::string asvJSON::toGOON(const GoonWriteOptions& opts) const {
 }
 
 inline bool asvJSON::fromGOON(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
   if (input.empty()) { lastError = "empty input"; return false; }
   // UTF-8 BOM, like every other from* decoder: without this the BOM became the
   // first key's leading bytes ("\xEF\xBB\xBFkey").

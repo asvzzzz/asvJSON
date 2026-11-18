@@ -600,6 +600,11 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
   root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit, symmetric with CBOR/BSON/MessagePack (12 MB: just above
+  // MAX_STRING_LEN so the string-length guards fire before the cap does).
+  constexpr size_t MAX_UBJSON_INPUT = 12u * 1024u * 1024u;
+  if (size > MAX_UBJSON_INPUT) { lastError = "UBJSON input exceeds 12 MB limit"; return false; }
   if (!data || size < 1) { lastError = "UBJSON: empty input"; return false; }
   const uint8_t* u = static_cast<const uint8_t*>(data);
   try {

@@ -1384,8 +1384,14 @@ inline std::string tomlCanonicalPath(const asvJSONValue* root,
 }
 
 inline bool asvJSON::fromTOML(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit, symmetric with INI/CSV/ADE/Dotenv (32 MB -- well above
+  // MAX_STRING_LEN so the string-too-long guards fire first).
+  constexpr size_t MAX_TOML_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_TOML_INPUT) { lastError = "TOML input exceeds 32 MB limit"; return false; }
   try {
     if (input.empty()) {
       root = asvJSONValue::makeObject();

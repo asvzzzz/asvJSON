@@ -868,8 +868,13 @@ asvJSONValue* TronParseState::parseValue(int depth) {
 }
 
 inline bool asvJSON::fromTRON(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit, symmetric with the other text decoders (32 MB).
+  constexpr size_t MAX_TRON_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_TRON_INPUT) { lastError = "TRON input exceeds 32 MB limit"; return false; }
   if (input.empty()) { lastError = "empty input"; root = nullptr; return false; }
   // UTF-8 BOM, like every other from* decoder: without this the lexer hit the
   // BOM bytes as an unexpected character and the whole document was rejected.
