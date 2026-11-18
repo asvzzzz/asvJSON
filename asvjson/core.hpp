@@ -1177,7 +1177,7 @@ enum class FormatType {
 struct JsonSaxHandler; // forward declaration for parseSax()
 
 // forward declarations for diff
-inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch);
+inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch, int depth = 0);
 
 // forward declaration for getDateTimeString() (defined at the bottom of this file)
 inline void fmtDateTimeVal(time_t ts, int ms, std::string& out, int tzOffsetMin = 0);
@@ -2927,47 +2927,65 @@ inline std::unique_ptr<asvJSONValue> cloneValue(const asvJSONValue* v, int depth
 // Structural equality for asvJSONValue
 
 inline bool operator==(const asvJSONValue& a, const asvJSONValue& b) noexcept {
-	if (a.type != b.type) return false;
-	switch (a.type) {
-		case asvJSONValue::NULL_VAL: return true;
-		case asvJSONValue::BOOL_VAL: return a.flag == b.flag;
-		case asvJSONValue::INT: return a.num == b.num;
-		case asvJSONValue::DOUBLE: return a.dbl == b.dbl;
-		case asvJSONValue::STRING: return a.str_data == b.str_data && a.raw_number == b.raw_number;
-		case asvJSONValue::DATETIME: return a.timestamp == b.timestamp && a.datetime_ms == b.datetime_ms && a.tz_offset_min == b.tz_offset_min;
-		case asvJSONValue::BINARY: return a.bin_data == b.bin_data;
-		case asvJSONValue::OBJECTID: return a.str_data == b.str_data;
-		case asvJSONValue::REGEX: return a.str_data == b.str_data;
-		case asvJSONValue::TIMESTAMP: return a.num == b.num;
-		case asvJSONValue::EXTENSION: return a.ext_type == b.ext_type && a.bin_data == b.bin_data;
-		case asvJSONValue::CUSTOM_TAG:
-			if (a.str_data != b.str_data) return false;
-			if (static_cast<bool>(a.custom_value) != static_cast<bool>(b.custom_value)) return false;
-			if (a.custom_value) return *a.custom_value == *b.custom_value;
-			return true;
-		case asvJSONValue::ARRAY: {
-			if (!a.arr || !b.arr) return a.arr == b.arr;
-			if (a.arr->size() != b.arr->size()) return false;
-			for (size_t i = 0; i < a.arr->size(); i++) {
-				if (!(*a.arr)[i] || !(*b.arr)[i]) { if ((*a.arr)[i] != (*b.arr)[i]) return false; continue; }
-				if (*(*a.arr)[i] != *(*b.arr)[i]) return false;
+	// Iterative comparison with an explicit pair stack: the recursive form
+	// overflowed the stack on deeply nested programmatically built trees
+	// (only the parsers cap at MAX_NESTING_DEPTH; raw-API trees are
+	// unbounded). An allocation failure returns false (conservative) rather
+	// than crashing, matching the noexcept promise.
+	using JP = std::pair<const asvJSONValue*, const asvJSONValue*>;
+	std::vector<JP> work;
+	try {
+		work.emplace_back(&a, &b);
+		while (!work.empty()) {
+			const asvJSONValue& x = *work.back().first;
+			const asvJSONValue& y = *work.back().second;
+			work.pop_back();
+			if (x.type != y.type) return false;
+			switch (x.type) {
+				case asvJSONValue::NULL_VAL: break;
+				case asvJSONValue::BOOL_VAL: if (x.flag != y.flag) return false; break;
+				case asvJSONValue::INT: if (x.num != y.num) return false; break;
+				case asvJSONValue::DOUBLE: if (x.dbl != y.dbl) return false; break;
+				case asvJSONValue::STRING: if (x.str_data != y.str_data || x.raw_number != y.raw_number) return false; break;
+				case asvJSONValue::DATETIME: if (x.timestamp != y.timestamp || x.datetime_ms != y.datetime_ms || x.tz_offset_min != y.tz_offset_min) return false; break;
+				case asvJSONValue::BINARY: if (x.bin_data != y.bin_data) return false; break;
+				case asvJSONValue::OBJECTID: if (x.str_data != y.str_data) return false; break;
+				case asvJSONValue::REGEX: if (x.str_data != y.str_data) return false; break;
+				case asvJSONValue::TIMESTAMP: if (x.num != y.num) return false; break;
+				case asvJSONValue::EXTENSION: if (x.ext_type != y.ext_type || x.bin_data != y.bin_data) return false; break;
+				case asvJSONValue::CUSTOM_TAG:
+					if (x.str_data != y.str_data) return false;
+					if (static_cast<bool>(x.custom_value) != static_cast<bool>(y.custom_value)) return false;
+					if (x.custom_value) work.emplace_back(x.custom_value.get(), y.custom_value.get());
+					break;
+				case asvJSONValue::ARRAY: {
+					if (!x.arr || !y.arr) { if (x.arr != y.arr) return false; break; }
+					if (x.arr->size() != y.arr->size()) return false;
+					for (size_t i = 0; i < x.arr->size(); i++) {
+						if (!(*x.arr)[i] || !(*y.arr)[i]) { if ((*x.arr)[i] != (*y.arr)[i]) return false; continue; }
+						work.emplace_back((*x.arr)[i].get(), (*y.arr)[i].get());
+					}
+					break;
+				}
+				case asvJSONValue::OBJECT: {
+					if (x.yaml_set != y.yaml_set) return false;
+					if (!x.obj || !y.obj) { if (x.obj != y.obj) return false; break; }
+					if (x.obj->size() != y.obj->size()) return false;
+					for (const auto& [k, v] : *x.obj) {
+						auto it = mapFind(*y.obj, k);
+						if (it == y.obj->end()) return false;
+						if (!v || !it->second) { if (v != it->second) return false; continue; }
+						work.emplace_back(v.get(), it->second.get());
+					}
+					break;
+				}
+				default: return false;
 			}
-			return true;
 		}
-		case asvJSONValue::OBJECT: {
-			if (a.yaml_set != b.yaml_set) return false;
-			if (!a.obj || !b.obj) return a.obj == b.obj;
-			if (a.obj->size() != b.obj->size()) return false;
-			for (const auto& [k, v] : *a.obj) {
-				auto it = mapFind(*b.obj, k);
-				if (it == b.obj->end()) return false;
-				if (!v || !it->second) { if (v != it->second) return false; continue; }
-				if (*v != *it->second) return false;
-			}
-			return true;
-		}
-		default: return false;
+	} catch (...) {
+		return false; // work-stack allocation failed: conservative inequality
 	}
+	return true;
 }
 
 inline bool operator!=(const asvJSONValue& a, const asvJSONValue& b) noexcept {
@@ -2988,8 +3006,14 @@ inline std::string jsonPointerEscaped(std::string_view seg) {
 }
 
 // Diff implementation: records operations needed to transform 'a' into 'b'
-inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch) {
+inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string path, asvJSONValue& patch, int depth) {
 	if (a == b) return;
+	// The recursion follows PAIRED containers; programmatically deep trees
+	// (raw API, no MAX_NESTING_DEPTH cap) used to overflow the stack here.
+	// Past the parsers' limit the subtree could not be cloned into an
+	// operation anyway (cloneValue fails past MAX), so stop descending,
+	// same silent-degradation style as the `if (!op) return;` guards.
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
 
 	// If both are objects, recurse into shared keys
 	if (a.type == asvJSONValue::OBJECT && b.type == asvJSONValue::OBJECT && a.obj && b.obj) {
@@ -3020,7 +3044,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 				op->emplace("value", std::move(cv));
 				patch.push(std::move(op));
 			} else if (it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-				diffImpl(*it->second, *v, childPath, patch);
+				diffImpl(*it->second, *v, childPath, patch, depth + 1);
 			} else if (*it->second != *v) {
 				auto cv = cloneValue(v.get());
 				if (!cv) return;
@@ -3051,7 +3075,7 @@ inline void diffImpl(const asvJSONValue& a, const asvJSONValue& b, std::string p
 			bool bHas = i < b.arr->size();
 			if (aHas && bHas && (*a.arr)[i] && (*b.arr)[i]) {
 				if ((*a.arr)[i]->type == asvJSONValue::OBJECT && (*b.arr)[i]->type == asvJSONValue::OBJECT) {
-					diffImpl(*(*a.arr)[i], *(*b.arr)[i], idxPath, patch);
+					diffImpl(*(*a.arr)[i], *(*b.arr)[i], idxPath, patch, depth + 1);
 				} else if (*(*a.arr)[i] != *(*b.arr)[i]) {
 					auto cv = cloneValue((*b.arr)[i].get());
 					if (!cv) return;
