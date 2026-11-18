@@ -30927,6 +30927,42 @@ TEST(testSchemaJsonPointerRefs) {
 	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
 }
 
+TEST(testDeepTreeEqualityAndDiff) {
+	// operator== used to recurse: two equal 100k-deep programmatically built
+	// trees overflowed the comparison stack (a crash inside a noexcept
+	// function). It is now an iterative pair-stack.
+	auto chain = [](int64_t leaf) -> std::unique_ptr<asvJSONValue> {
+		std::unique_ptr<asvJSONValue> v = asvJSONValue::makeObject();
+		v->obj->emplace("a", asvJSONValue::makeInt(leaf));
+		for (int i = 0; i < 100000; i++) {
+			auto wrap = asvJSONValue::makeObject();
+			wrap->obj->emplace("a", std::move(v));
+			v = std::move(wrap);
+		}
+		return v;
+	};
+	auto t1 = chain(1);
+	auto t2 = chain(1);
+	auto t3 = chain(2);
+	ASSERT(*t1 == *t2);
+	ASSERT(*t1 != *t3);
+	// diff() recursed through paired OBJECTs: a deep chain differing only at
+	// the far leaf overflowed the stack; the cap stops the descent (the
+	// subtree could not be clone-embedded past MAX anyway).
+	asvJSON d1, d2;
+	d1.setRoot(chain(1));
+	d2.setRoot(chain(2));
+	asvJSON p = d1.diff(d2);
+	(void)p;
+	// Sanity: a shallow diff still emits the replace op.
+	asvJSON s1, s2;
+	ASSERT(s1.parse(std::string_view(R"({"x":{"y":1}})")));
+	ASSERT(s2.parse(std::string_view(R"({"x":{"y":2}})")));
+	asvJSON sp = s1.diff(s2);
+	ASSERT(sp.getRootArray() != nullptr);
+	ASSERT_EQ(sp.getRootArray()->size(), size_t(1));
+}
+
 TEST(testJSONPathDeepDescent) {
 	// A programmatically deep document must not blow the descendant
 	// traversal's stack: jpVisitAll/jpDescChildrenAll/jpDescChildrenName
@@ -38575,6 +38611,7 @@ RUN(testADEBlockScalarKeepChomping);
 RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
+	RUN(testDeepTreeEqualityAndDiff);
 	RUN(testJSONPathDeepDescent);
 	RUN(testJSONPath);
 	RUN(testJSONPathExtras);
