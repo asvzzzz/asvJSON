@@ -498,7 +498,10 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
             if (wt == 2) {
               ProtoField tmpF = field;
               std::vector<uint8_t> fv;
-              protoEncodeFieldValue(fv, elem.get(), tmpF, depth + 1);
+              // protoEncodeFieldValue is a wrapper: it increments depth itself
+              // when descending into a sub-message, so pass depth (not depth + 1)
+              // to keep schema-driven binary depth symmetric with the decoder.
+              protoEncodeFieldValue(fv, elem.get(), tmpF, depth);
               out.insert(out.end(), fv.begin(), fv.end());
             } else {
               protoEncodeScalar(out, elem.get(), field.type);
@@ -513,7 +516,9 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         if (wt == 2) {
           ProtoField tmpF = field;
           std::vector<uint8_t> fv;
-          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth + 1);
+          // protoEncodeFieldValue increments depth when descending into a
+          // sub-message, so pass depth (not depth + 1) here.
+          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth);
           out.insert(out.end(), fv.begin(), fv.end());
         } else {
           protoEncodeScalar(out, fieldVal.get(), field.type);

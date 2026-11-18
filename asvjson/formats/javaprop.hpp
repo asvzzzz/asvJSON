@@ -420,9 +420,29 @@ inline void asvJSONValue::toJavaProp(std::string& out) const {
   // footing; only footing used to be written here, silently dropping them.
   if (comments && !comments->leading.empty())
     javapropWriteCommentLines(out, comments->leading);
+  auto javapropDepthOf = [](auto&& self, const asvJSONValue* v, int d) -> int {
+    if (!v || d > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return d;
+    int m = d;
+    if (v->type == asvJSONValue::OBJECT && v->obj) {
+      for (const auto& kv : *v->obj) {
+        int cd = self(self, kv.second.get(), d + 1);
+        if (cd > m) m = cd;
+      }
+    } else if (v->type == asvJSONValue::ARRAY && v->arr) {
+      for (const auto& e : *v->arr) {
+        int cd = self(self, e.get(), d + 1);
+        if (cd > m) m = cd;
+      }
+    }
+    return m;
+  };
   for (const auto& [key, val] : *obj) {
     if (key.empty())
       throw asvJSONError("javaprop: empty key");
+    if (!asvJSONValue::checkStringLen(key.size()))
+      throw asvJSONError("javaprop: key too long");
+    if (javapropDepthOf(javapropDepthOf, val.get(), 1) > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+      throw asvJSONError("javaprop: nesting too deep");
     if (val->comments && !val->comments->leading.empty())
       javapropWriteCommentLines(out, val->comments->leading);
     out += javapropEscapeKey(key);
@@ -548,7 +568,11 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
           while (q < line.size()) {
             if (line[q] != '\\') break;
             if (q + 1 >= line.size()) break;
-            if (line[q + 1] == 'u' && q + 5 < line.size()) {
+            if (line[q + 1] == 'u' && q + 5 < line.size()
+                && javapropHexDigit(line[q + 2]) >= 0
+                && javapropHexDigit(line[q + 3]) >= 0
+                && javapropHexDigit(line[q + 4]) >= 0
+                && javapropHexDigit(line[q + 5]) >= 0) {
               segLen += 6;
               q += 6;
             } else {
@@ -617,8 +641,13 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
       }
 
       auto it = obj->obj->find(key);
-      if (it == obj->obj->end()) obj->obj->emplace(key, std::move(val));
-      else it->second = std::move(val);
+      if (it == obj->obj->end()) {
+        if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+          throw asvJSONError("javaprop: object too large");
+        obj->obj->emplace(key, std::move(val));
+      } else {
+        it->second = std::move(val);
+      }
     }
 
     if (!pending.empty()) {
