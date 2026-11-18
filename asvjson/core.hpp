@@ -577,9 +577,52 @@ struct asvJSONValue {
 		str_data.clear();
 		bin_data.clear();
 		comments.reset();
-		if (type == OBJECT) { obj.reset(); }
-		else if (type == ARRAY) { arr.reset(); }
-		else if (type == CUSTOM_TAG) { custom_value.reset(); }
+		if (obj || arr || custom_value) {
+			// Iterative teardown: trees built programmatically can nest far
+			// deeper than any parser accepts (parsers cap at MAX_NESTING_DEPTH,
+			// direct tree building does not), and the recursive destruction of
+			// that chain overflows the stack. Move every child into a work
+			// stack first so each asvJSONValue dies with EMPTY containers.
+			try {
+				std::vector<std::unique_ptr<asvJSONValue>> work;
+				auto pump = [&](asvJSONValue* node) {
+					if (node->obj) {
+						for (auto it = node->obj->begin(); it != node->obj->end(); ++it)
+							if (it->second) work.push_back(std::move(it->second));
+					}
+					if (node->arr) {
+						for (auto& e : *node->arr)
+							if (e) work.push_back(std::move(e));
+					}
+					if (node->custom_value) work.push_back(std::move(node->custom_value));
+				};
+				pump(this);
+				obj.reset();
+				arr.reset();
+				custom_value.reset();
+				while (!work.empty()) {
+					auto v = std::move(work.back());
+					work.pop_back();
+					if (v->obj || v->arr || v->custom_value) {
+						pump(v.get());
+						// Drop the (now drained) container OBJECTS here: the
+						// map/vector still holds the moved-from null slots, and
+						// if they survived, v's own destroy() at the end of the
+						// iteration would re-pump those nulls into `work`, and
+						// the popped null would be dereferenced.
+						v->obj.reset();
+						v->arr.reset();
+						v->custom_value.reset();
+					}
+				}
+			} catch (...) {
+				// The work stack could not allocate (OOM): fall back to the
+				// plain recursive teardown, same as before.
+				obj.reset();
+				arr.reset();
+				custom_value.reset();
+			}
+		}
 		type = NULL_VAL;
 		datetime_ms = 0;
 	}
@@ -793,14 +836,14 @@ struct asvJSONValue {
 		return bin_data;
 	}
 
-	void serialize(std::string& out, bool allowNaNInfinity = false) const;
+	void serialize(std::string& out, bool allowNaNInfinity = false, int depth = 1) const;
 	void serializePretty(std::string& out, int indent = 0, bool allowNaNInfinity = false) const;
 	void toMessagePack(std::vector<uint8_t>& out) const;
 	void toCBOR(std::vector<uint8_t>& out, int depth = 0) const;
 	void toBSON(std::vector<uint8_t>& out) const;
 	void toUBJSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
-	void toXML(std::string& out, const std::string& name, int indent) const;
+	void toXML(std::string& out, const std::string& name, int indent, int depth = 0) const;
 	void toSVG(std::string& out) const;
 	void toSVG(std::string& out, const std::string& name, int indent) const;
 	void toYAML(std::string& out, bool pretty = true) const;
@@ -945,10 +988,10 @@ inline void appendJsonEscaped(std::string& out, std::string_view s) {
 	if (run < end) out.append(run, static_cast<size_t>(end - run));
 }
 
-void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity);
+void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity, int depth = 1);
 void parseMsgPackToken(const asvJSONValue* v, std::string& out, bool allowNaNInfinity);
 
-inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) const {
+inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity, int depth) const {
 	switch (type) {
 		case NULL_VAL:
 		case STRING:
@@ -962,9 +1005,14 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 		case TIMESTAMP:
 		case EXTENSION:
 		case CUSTOM_TAG:
-			appendJsonToken(out, this, allowNaNInfinity);
+			appendJsonToken(out, this, allowNaNInfinity, depth);
 			break;
 		case OBJECT: {
+			// Trees built programmatically can exceed what any parser accepts
+			// (MAX_NESTING_DEPTH containers). Recursing into them would overflow
+			// the stack: degrade deeper containers to null, the same convention
+			// as the TRON/GOON encoders.
+			if (depth > static_cast<int>(MAX_NESTING_DEPTH)) { out += "null"; break; }
 			if (yaml_set) {
 				// YAML set marker form: {"$set":["a","b"]}. Member keys are the
 				// array strings; insertion order is the object order.
@@ -988,19 +1036,20 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity) con
 				out.push_back('"');
 				appendJsonEscaped(out, key);
 				out += "\":";
-				val->serialize(out, allowNaNInfinity);
+				val->serialize(out, allowNaNInfinity, depth + 1);
 				first = false;
 			}
 			out.push_back('}');
 			break;
 		}
 		case ARRAY: {
+			if (depth > static_cast<int>(MAX_NESTING_DEPTH)) { out += "null"; break; }
 			if (arr->size() < SIZE_MAX / 16) out.reserve(out.size() + arr->size() * 16);
 			out.push_back('[');
 			bool first = true;
 			for (const auto& v : *arr) {
 				if (!first) out.push_back(',');
-				v->serialize(out, allowNaNInfinity);
+				v->serialize(out, allowNaNInfinity, depth + 1);
 				first = false;
 			}
 			out.push_back(']');
@@ -1038,9 +1087,11 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 		case TIMESTAMP:
 		case EXTENSION:
 		case CUSTOM_TAG:
-			appendJsonToken(out, this, allowNaNInfinity);
+			appendJsonToken(out, this, allowNaNInfinity, indent + 1);
 			break;
 		case OBJECT: {
+			// Same stack-overflow guard as serialize(): depth == indent + 1.
+			if (indent >= static_cast<int>(MAX_NESTING_DEPTH)) { out += "null"; break; }
 			if (yaml_set) { serialize(out, allowNaNInfinity); break; }
 			out.push_back('{');
 			if (!obj->empty()) {
@@ -1062,6 +1113,7 @@ inline void asvJSONValue::serializePretty(std::string& out, int indent, bool all
 			break;
 		}
 		case ARRAY: {
+			if (indent >= static_cast<int>(MAX_NESTING_DEPTH)) { out += "null"; break; }
 			out.push_back('[');
 			if (!arr->empty()) {
 				out.push_back('\n');
@@ -2683,7 +2735,7 @@ inline void fmtExtVal(int8_t type, const uint8_t* data, size_t len, std::string&
 	out += encodeBase64(data, len);
 }
 
-inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity) {
+inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowNaNInfinity, int depth) {
 	switch (v->type) {
 		case asvJSONValue::NULL_VAL: out += "null"; break;
 		case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); break;
@@ -2778,7 +2830,7 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			out += "{\"$customTag\":{\"name\":\"";
 			appendJsonEscaped(out, v->str_data);
 			out += "\",\"value\":";
-			if (v->custom_value) v->custom_value->serialize(out, allowNaNInfinity);
+			if (v->custom_value) v->custom_value->serialize(out, allowNaNInfinity, depth + 1);
 			else out += "null";
 			out += "}}";
 			break;

@@ -60,10 +60,10 @@ inline constexpr size_t MAX_YAML_INPUT = 10u * 1024u * 1024u;
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
                          const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc,
-                         bool isRoot = false);
+                         bool isRoot = false, int depth = 0);
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow,
-                        bool isRoot = false);
+                        bool isRoot = false, int depth = 0);
 
 // Options-aware quoting helpers
 inline std::string yamlQuoteStr(std::string_view s, const YamlWriteOptions& o) {
@@ -179,8 +179,15 @@ inline void yamlFmtRegexVal(std::string_view s, std::string& out) {
 }
 
 // Try to emit value inline (for flow mode). Returns true if successful.
-inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWriteOptions& o, bool forceFlow) {
+inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWriteOptions& o, bool forceFlow,
+                           int depth = 0) {
 	using T = asvJSONValue::Type;
+	// Trees built programmatically can nest deeper than any parser accepts
+	// (MAX_NESTING_DEPTH containers); the mutual encoder recursion must stop
+	// with an error instead of overflowing the stack.
+	if ((v->type == T::OBJECT || v->type == T::ARRAY) &&
+	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		throw asvJSONError("YAML: nesting too deep");
 	switch (v->type) {
 		case T::NULL_VAL: out += "~"; return true;
 		case T::BOOL_VAL: out += (v->flag ? "true" : "false"); return true;
@@ -240,7 +247,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			// "!name <value>"; the value is kept inline (force-flow) so the
 			// single-line tagged form reparses through yamlParseTaggedValue.
 			std::string childOut;
-			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
+			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true, depth + 1)) {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
 				out += "!" + nm + " " + childOut;
@@ -269,7 +276,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			bool first = true;
 			for (const auto& [k, val] : *v->obj) {
 				std::string childOut;
-				if (!yamlTryFlowVal(val.get(), childOut, o, forceFlow)) return false;
+				if (!yamlTryFlowVal(val.get(), childOut, o, forceFlow, depth + 1)) return false;
 				if (!first) inner += ", ";
 				first = false;
 				inner += yamlKeyOpt(k, o) + ": " + childOut;
@@ -284,7 +291,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			bool first = true;
 			for (const auto& item : *v->arr) {
 				std::string childOut;
-				if (!yamlTryFlowVal(item.get(), childOut, o, forceFlow)) return false;
+				if (!yamlTryFlowVal(item.get(), childOut, o, forceFlow, depth + 1)) return false;
 				if (!first) inner += ", ";
 				first = false;
 				inner += childOut;
@@ -300,8 +307,13 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 // Emit a value in block style at the given indent.
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
                          const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc,
-                         bool isRoot) {
+                         bool isRoot, int depth) {
 	using T = asvJSONValue::Type;
+	// Container nesting cap: programmatically built trees may exceed what the
+	// YAML parser accepts; throw rather than recurse into a stack overflow.
+	if ((v->type == T::OBJECT || v->type == T::ARRAY) &&
+	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		throw asvJSONError("YAML: nesting too deep");
 	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
@@ -478,10 +490,10 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			}
 			if (!v->obj || v->obj->empty()) { out += prefix() + "{}" + yamlTrail(v, wc) + "\n"; break; }
 			if (isRoot) {
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc, false, depth + 1);
 			} else {
 				out += prefix() + yamlTrail(v, wc) + "\n";
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o, wc);
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o, wc, false, depth + 1);
 			}
 			break;
 		}
@@ -489,7 +501,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			if (!v->arr || v->arr->empty()) { out += prefix() + "[]" + yamlTrail(v, wc) + "\n"; break; }
 			if (isRoot) {
 				out += "---\n";
-				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o, wc);
+				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o, wc, false, depth + 1);
 				break;
 			}
 			out += prefix() + yamlTrail(v, wc) + "\n";
@@ -497,7 +509,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			// items one level deeper than its dash, otherwise the block parser
 			// cannot tell parent items from child items ("m: [[1],[2]]").
 			int childIndent = isArrayItem ? indent + 1 : indent;
-			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o, wc);
+			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o, wc, false, depth + 1);
 			break;
 		}
 		default:
@@ -508,8 +520,11 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 // Try flow mode: emit objects/arrays inline when they fit, fall back to block.
 inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
                         const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool forceFlow,
-                        bool isRoot) {
+                        bool isRoot, int depth) {
 	using T = asvJSONValue::Type;
+	if ((v->type == T::OBJECT || v->type == T::ARRAY) &&
+	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		throw asvJSONError("YAML: nesting too deep");
 	const int iw = yamlIndentWidth(o);
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
@@ -532,7 +547,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 		if (!fitsLine(trial, inner)) {
 			// Too long for one line: emit the set in block form instead of
 			// silently ignoring the length budget.
-			yamlBlockVal(v, out, indent, key, isArrayItem, o, true, isRoot);
+			yamlBlockVal(v, out, indent, key, isArrayItem, o, true, isRoot, depth);
 			return;
 		}
 		if (isRoot) out += inner + "\n";
@@ -547,10 +562,10 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 			else out += trial + inner + "\n";
 		} else {
 			if (isRoot) {
-				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false, o, forceFlow, false);
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false, o, forceFlow, false, depth + 1);
 			} else {
 				out += prefix() + "\n";
-				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false, o, forceFlow, false);
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false, o, forceFlow, false, depth + 1);
 			}
 		}
 	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
@@ -561,14 +576,14 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 			else out += trial + inner + "\n";
 		} else {
 			out += prefix() + "\n";
-			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow, false);
+			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow, false, depth + 1);
 		}
 	} else {
 		// The fallback handles scalars (including root ones) and empty
 		// collections. A root scalar has an empty key and !isArrayItem, which
 		// is also the shape of an empty-key object member: isRoot keeps the
 		// root value bare instead of wrapping it into "'': value".
-		yamlBlockVal(v, out, indent, key, isArrayItem, o, false, isRoot);
+		yamlBlockVal(v, out, indent, key, isArrayItem, o, false, isRoot, depth);
 	}
 }
 

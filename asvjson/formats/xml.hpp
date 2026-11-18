@@ -273,8 +273,15 @@ inline void asvJSONValue::toXML(std::string& out) const {
 	toXML(out, "root", 0);
 }
 
-inline void asvJSONValue::toXML(std::string& out, const std::string& name, int indent) const {
+inline void asvJSONValue::toXML(std::string& out, const std::string& name, int indent, int depth) const {
 	using T = asvJSONValue::Type;
+	// The decoder caps at 47 element levels (MAX_NESTING_DEPTH - 1 counting
+	// the root wrapper); an encoder fed a deeper programmatic tree must throw
+	// rather than recurse into a stack overflow. depth counts element frames
+	// (indent does NOT: the #content branch re-enters with indent 0).
+	if ((type == T::OBJECT || type == T::ARRAY) &&
+	    depth >= static_cast<int>(MAX_NESTING_DEPTH) - 1)
+		throw asvJSONError("XML: nesting too deep");
 	std::string pad(indent * 2, ' ');
 
 	switch (type) {
@@ -395,7 +402,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 						} else if (childVal->type == asvJSONValue::BOOL_VAL) {
 							out += "<" + safeChildName + ">" + (childVal->flag ? "true" : "false") + "</" + safeChildName + ">";
 						} else {
-							childVal->toXML(out, childName, 0);
+							childVal->toXML(out, childName, 0, depth + 1);
 							if (!out.empty() && out.back() == '\n') out.pop_back();
 						}
 } else if (item->type == asvJSONValue::OBJECT) {
@@ -409,7 +416,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 						// re-shaping the data.
 						throw asvJSONError("XML: multi-key object in mixed #content is not representable");
 					} else if (item->type == asvJSONValue::ARRAY) {
-						item->toXML(out, "item", 0);
+						item->toXML(out, "item", 0, depth + 1);
 						if (!out.empty() && out.back() == '\n') out.pop_back();
 					} else if (item->type == asvJSONValue::INT || item->type == asvJSONValue::DOUBLE ||
 					           item->type == asvJSONValue::BOOL_VAL || item->type == asvJSONValue::NULL_VAL ||
@@ -483,7 +490,7 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 			for (const auto& [k, v] : *obj) {
 				if (!k.empty() && k[0] == '@') continue;
 				if (k == "#text") continue;
-				v->toXML(out, k, indent + 1);
+				v->toXML(out, k, indent + 1, depth + 1);
 			}
 			out += pad + "</" + xmlSanitizeElementName(name) + ">\n";
 			break;
@@ -505,11 +512,11 @@ inline void asvJSONValue::toXML(std::string& out, const std::string& name, int i
 				if (item->type == asvJSONValue::STRING && xmlNeedsStringType(item->str_data))
 					out += pad + "  <item type=\"string\">" + xmlEscapeContent(item->str_data) + "</item>\n";
 				else if (item->type == asvJSONValue::OBJECT || item->type == asvJSONValue::ARRAY) {
-					item->toXML(out, "item", indent + 1);
+					item->toXML(out, "item", indent + 1, depth + 1);
 				} else if (item->type == asvJSONValue::DATETIME || item->type == asvJSONValue::BINARY ||
 				           item->type == asvJSONValue::OBJECTID || item->type == asvJSONValue::REGEX ||
 				           item->type == asvJSONValue::TIMESTAMP || item->type == asvJSONValue::EXTENSION) {
-					item->toXML(out, "item", indent + 1);
+					item->toXML(out, "item", indent + 1, depth + 1);
 				} else {
 					// CUSTOM_TAG (and any future unhandled type) has no element
 					// text form; "<item></item>" would re-parse as an empty STRING

@@ -93,7 +93,7 @@ namespace asvJSONInternal {
 struct asvJSONValue;
 
 inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSONValue* v);
-inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent);
+inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent, int depth = 0);
 inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out);
 
 // Point 8: check v == nullptr at the start.
@@ -173,8 +173,14 @@ inline void appendSvgAttr(std::string& out, std::string_view name, const asvJSON
 
 // Point 1: only true void elements are self-closing. Container tags removed.
 // Condition changed from `isSelfClosing || !hasContent` to just `!hasContent`.
-inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent) {
+inline void svgSerializeElement(std::string& out, std::string_view tag, const asvJSONValue* v, int indent, int depth) {
 	if (tag.empty()) return;
+	// Same nesting cap as the XML encoder: the decoder (shared xmlParseDocument)
+	// accepts at most 47 element levels; a deeper programmatic tree must be an
+	// error, not a stack overflow.
+	if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1)
+		throw asvJSONError("SVG: nesting too deep");
 
 	// The element name comes from a JSON key, which may hold characters the
 	// XML name grammar forbids ("k[0]", "a b", "&a"). Emitting them verbatim
@@ -259,7 +265,7 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			if (k == "#text") continue; // already emitted above
 
 			// Recurse for child elements
-			svgSerializeElement(out, k, val.get(), indent + 2);
+			svgSerializeElement(out, k, val.get(), indent + 2, depth + 1);
 		}
 
 		// Close tag (indented only when there are element children)
@@ -294,7 +300,9 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 		// element writes its own opening/closing tag at this level.
 		for (const auto& elem : *(v->arr)) {
 			if (!elem) continue;
-			svgSerializeElement(out, safeTag, elem.get(), indent);
+			// Array elements are emitted as SIBLING elements (same tag, same
+			// XML level), so the element-depth does not increase here.
+			svgSerializeElement(out, safeTag, elem.get(), indent, depth);
 		}
 	} else if (v && v->type == asvJSONValue::STRING) {
 		out += std::string((size_t)indent, ' ');
@@ -359,7 +367,7 @@ inline void asvJSONValue_toSVG(const asvJSONValue* v, std::string& out) {
 	if (!v) return;
 	if (v->type == asvJSONValue::OBJECT && v->obj) {
 		for (const auto& [k, val] : *(v->obj)) {
-			svgSerializeElement(out, k, val.get(), 0);
+			svgSerializeElement(out, k, val.get(), 0, 0);
 		}
 	} else {
 		out += "<root>";
