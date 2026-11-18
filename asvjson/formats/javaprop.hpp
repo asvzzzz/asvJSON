@@ -499,8 +499,13 @@ inline bool javapropLooksLike(std::string_view s) {
 }
 
 inline bool asvJSON::fromJavaProp(std::string_view input) {
+  root = nullptr;
   dirty_ = false;
   formatType = FormatType::Unknown;
+  lastError.clear();
+  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
+  constexpr size_t MAX_JAVAPROP_INPUT = 32u * 1024u * 1024u;
+  if (input.size() > MAX_JAVAPROP_INPUT) { lastError = "Java Properties input exceeds 32 MB limit"; return false; }
   try {
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF &&
         (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
