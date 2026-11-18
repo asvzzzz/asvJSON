@@ -2592,6 +2592,13 @@ public:
 	/// @note After calling, the document becomes empty; it can be reused via parse().
 	[[nodiscard]] std::unique_ptr<asvJSONValue> releaseRoot() noexcept { dirty_ = false; return std::move(root); }
 
+	// Install a programmatically built tree as the document root. The header
+	// comments around arrayAdd* have always said "use setRoot()/clear() if
+	// replacement is intended" -- setRoot existed only in the comments
+	// (clear() always existed). setRoot marks the document dirty, like every
+	// other mutation.
+	void setRoot(std::unique_ptr<asvJSONValue> v) { root = std::move(v); dirty_ = true; }
+
 private:
 	static bool isArrayIndex(std::string_view s) {
 		if (s.empty()) return false;

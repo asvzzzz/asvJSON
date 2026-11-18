@@ -30927,6 +30927,29 @@ TEST(testSchemaJsonPointerRefs) {
 	ASSERT(check(R"({"format":"date-time"})", R"("nope")", true));
 }
 
+TEST(testJSONPathDeepDescent) {
+	// A programmatically deep document must not blow the descendant
+	// traversal's stack: jpVisitAll/jpDescChildrenAll/jpDescChildrenName
+	// walk the DOCUMENT tree, and it is not bounded by MAX_NESTING_DEPTH
+	// when built via the raw API (only parsers are).
+	std::unique_ptr<asvJSONValue> v = asvJSONValue::makeObject();
+	v->obj->emplace("x", asvJSONValue::makeInt(1));
+	for (int i = 0; i < 100000; i++) {
+		auto wrap = asvJSONValue::makeArray();
+		wrap->arr->push_back(std::move(v));
+		v = std::move(wrap);
+	}
+	asvJSON doc;
+	doc.setRoot(std::move(v));
+	auto r = doc.query("$..x");
+	ASSERT_EQ(r.size(), size_t(1));
+	if (!r.empty()) ASSERT_EQ(r[0]->num, int64_t(1));
+	// $..* on the same tree: every node except the root is somebody's child
+	// (100000 arrays + the object + the int leaf), no stack overflow.
+	auto r2 = doc.query("$..*");
+	ASSERT_EQ(r2.size(), size_t(100001));
+}
+
 TEST(testJSONPath) {
 	// -- dot notation --
 	{
@@ -38552,6 +38575,7 @@ RUN(testADEBlockScalarKeepChomping);
 RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
+	RUN(testJSONPathDeepDescent);
 	RUN(testJSONPath);
 	RUN(testJSONPathExtras);
 	RUN(testJSONPathValidator);
