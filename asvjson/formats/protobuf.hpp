@@ -498,7 +498,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
             if (wt == 2) {
               ProtoField tmpF = field;
               std::vector<uint8_t> fv;
-              protoEncodeFieldValue(fv, elem.get(), tmpF, depth);
+              protoEncodeFieldValue(fv, elem.get(), tmpF, depth + 1);
               out.insert(out.end(), fv.begin(), fv.end());
             } else {
               protoEncodeScalar(out, elem.get(), field.type);
@@ -513,7 +513,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
         if (wt == 2) {
           ProtoField tmpF = field;
           std::vector<uint8_t> fv;
-          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth);
+          protoEncodeFieldValue(fv, fieldVal.get(), tmpF, depth + 1);
           out.insert(out.end(), fv.begin(), fv.end());
         } else {
           protoEncodeScalar(out, fieldVal.get(), field.type);
@@ -868,16 +868,15 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
     std::sort(fnums.begin(), fnums.end());
     auto rebuilt = std::make_unique<asvJSONValue::ObjectMap>();
     for (int fnum : fnums) {
-      // Guard against DoS: name map with >MAX_OBJECT_SIZE entries would make
-      // the rebuilt object exceed the limit. Rejected early rather than after
-      // a long loop of emplace calls.
-      if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
-        throw asvJSONError("Protobuf: object too large");
       std::string fname = std::to_string(fnum);
       auto nit = less.names.find(fnum);
       if (nit != less.names.end()) fname = nit->second;
       auto it = obj->obj->find(fname);
       if (it != obj->obj->end()) {
+        // Guard against DoS: rebuilding with >MAX_OBJECT_SIZE entries would
+        // exceed the limit. Rejected before each emplace inside the loop.
+        if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
+          throw asvJSONError("Protobuf: object too large");
         rebuilt->emplace(std::move(fname), std::move(it->second));
         continue;
       }
@@ -885,17 +884,26 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
       if (code == "A" || code == "N") {
         auto arr = asvJSONValue::makeArray();
         if (!arr) throw asvJSONError("Protobuf empty array field alloc failed");
+        // Guard against DoS.
+        if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
+          throw asvJSONError("Protobuf: object too large");
         rebuilt->emplace(std::move(fname), std::move(arr));
       } else if (code == "n") {
         auto nv = asvJSONValue::makeNull();
         if (!nv) throw asvJSONError("Protobuf null field alloc failed");
+        // Guard against DoS.
+        if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
+          throw asvJSONError("Protobuf: object too large");
         rebuilt->emplace(std::move(fname), std::move(nv));
       }
     }
     // Defensive: a member the name map does not describe keeps its place after
-    // the mapped fields (the decoder does not produce one today).
+    // the mapped fields (the decoder does not produce one today). Guard against
+    // DoS via an oversized name-map-less object.
     for (auto& kv : *obj->obj) {
       if (rebuilt->find(kv.first) != rebuilt->end()) continue;
+      if (!asvJSONValue::checkObjectSize(rebuilt->size() + 1))
+        throw asvJSONError("Protobuf: object too large");
       rebuilt->emplace(kv.first, std::move(kv.second));
     }
     obj->obj = std::move(rebuilt);
@@ -942,7 +950,8 @@ inline std::unique_ptr<asvJSONValue> protoDecodeWireValue(const uint8_t* data, s
       size_t end = pos + static_cast<size_t>(len);
 
       if (type == "message" || type.empty()) {
-        if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) { pos = end; return nullptr; }
+        // Same >= rule as protoDecodeMessageBody — depth 0..MAX allowed, depth MAX+1 rejected.
+        if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) { pos = end; return nullptr; }
         if (type == "message") {
           auto obj = protoDecodeMessageBody(data, pos, end, schema, depth);
           if (!obj) { pos = end; return nullptr; }
@@ -1091,9 +1100,8 @@ inline std::string protoTextParseStringLit(const std::string& text, size_t& pos)
   char q = text[pos];
   if (q != '"' && q != '\'') return {};
   pos++;
-  // Reserve a reasonable buffer so we do not reallocate on every character.
-  // checkStringLen is enforced after the loop (via makeString), but we keep
-  // this note for anyone adding a second early-return path here.
+  // checkStringLen is enforced after the loop via makeString in callers; a
+  // second early-return path would need its own bound. Reserve to avoid reallocate churn.
   std::string r;
   while (pos < text.size()) {
     char c = text[pos++];
@@ -1205,6 +1213,9 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
   char c = text[pos];
   if (c == '"' || c == '\'') {
     std::string s = protoTextParseStringLit(text, pos);
+    // Guard against an unreasonably long literal: without this a 20MB input
+    // would build a 20MB string and then makeString returns nullptr (silent drop).
+    if (!asvJSONValue::checkStringLen(s.size())) throw asvJSONError("Protobuf text: string too long");
     return asvJSONValue::makeString(s.data(), s.size());
   }
   if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) {
