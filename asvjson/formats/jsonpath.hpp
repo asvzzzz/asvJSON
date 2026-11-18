@@ -521,30 +521,53 @@ inline std::vector<const asvJSONValue*> jpAllChildren(const asvJSONValue* n) {
 
 // The descendant visit set: the input node followed by every descendant,
 // parents before children (RFC 9535 2.5.2.2: D1 is the input value).
+// Iterative DFS with an explicit stack: a programmatically built document can
+// nest far past the parsers' MAX_NESTING_DEPTH, and a recursive traversal of
+// it overflowed the stack. Pre-order is preserved by pushing children in
+// reverse onto the LIFO (first child's subtree completes before the next).
 inline void jpVisitAll(const asvJSONValue* n, std::vector<const asvJSONValue*>& r) {
   if (!n) return;
-  r.push_back(n);
-  auto children = jpAllChildren(n);
-  for (auto c : children) jpVisitAll(c, r);
+  std::vector<const asvJSONValue*> stack;
+  stack.push_back(n);
+  while (!stack.empty()) {
+    const asvJSONValue* cur = stack.back();
+    stack.pop_back();
+    r.push_back(cur);
+    auto children = jpAllChildren(cur);
+    for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+  }
 }
 
 // Descendant child-segment results. The child selector is applied to each
 // visited node, so "..*" collects the children of every visited node (never
 // the nodes themselves) and "..name" collects each visited node's child with
-// that name.
+// that name. Same iterative pre-order as jpVisitAll.
 inline void jpDescChildrenAll(const asvJSONValue* n, std::vector<const asvJSONValue*>& r) {
   if (!n) return;
-  auto children = jpAllChildren(n);
-  for (auto c : children) r.push_back(c);
-  for (auto c : children) jpDescChildrenAll(c, r);
+  std::vector<const asvJSONValue*> stack;
+  stack.push_back(n);
+  while (!stack.empty()) {
+    const asvJSONValue* cur = stack.back();
+    stack.pop_back();
+    auto children = jpAllChildren(cur);
+    for (auto c : children) r.push_back(c);
+    for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+  }
 }
 
 inline void jpDescChildrenName(const asvJSONValue* n, const std::string& name,
                                std::vector<const asvJSONValue*>& r) {
   if (!n) return;
-  const asvJSONValue* child = jpGetProp(n, name);
-  if (child) r.push_back(child);
-  for (auto c : jpAllChildren(n)) jpDescChildrenName(c, name, r);
+  std::vector<const asvJSONValue*> stack;
+  stack.push_back(n);
+  while (!stack.empty()) {
+    const asvJSONValue* cur = stack.back();
+    stack.pop_back();
+    const asvJSONValue* child = jpGetProp(cur, name);
+    if (child) r.push_back(child);
+    auto children = jpAllChildren(cur);
+    for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+  }
 }
 
 // RFC 9535 array slice with the Normalize()/Bounds() algorithm (2.3.4.2.2).
