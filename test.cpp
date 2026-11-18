@@ -16862,6 +16862,27 @@ TEST(testFromJSONLines) {
 // to the last ASCII byte, which threw away COMPLETE multi-byte characters -
 // a line of CJK characters lost all of them and the message showed an empty
 // prefix, so the user could not see which line broke.
+TEST(testJSONLinesNaNFlag) {
+  // allowNaNInfinity must reach the per-line parser: the encoder writes
+  // NaN/Infinity as JSON5-style literals when the flag is set, and the
+  // decoder used to reject its own output (fresh per-line asvJSON had the
+  // flag off). Same document: accepted with the flag, rejected without.
+  asvJSON j;
+  ASSERT(j.parse(std::string_view("[]")));
+  j.allowNaNInfinity = true;
+  j.getRoot()->arr->push_back(asvJSONValue::makeDouble(std::numeric_limits<double>::quiet_NaN()));
+  j.getRoot()->arr->push_back(asvJSONValue::makeDouble(std::numeric_limits<double>::infinity()));
+  std::string s = j.toJSONLines();
+  asvJSON j2;
+  j2.allowNaNInfinity = true;
+  ASSERT(j2.fromJSONLines(std::string_view(s)));
+  ASSERT_EQ(j2.getRoot()->arr->size(), static_cast<size_t>(2));
+  ASSERT(std::isnan(j2.getRoot()->get(static_cast<size_t>(0))->dbl));
+  ASSERT(std::isinf(j2.getRoot()->get(static_cast<size_t>(1))->dbl));
+  asvJSON j3;
+  ASSERT(!j3.fromJSONLines(std::string_view(s)));
+}
+
 TEST(testJSONLinesErrorMessage) {
   // The inner diagnostic is kept (it used to be dropped).
   {
@@ -38376,6 +38397,7 @@ RUN(testGOONSpecialValues);
 
 	RUN(testToJSONLines);
 	RUN(testFromJSONLines);
+	RUN(testJSONLinesNaNFlag);
 	RUN(testJSONLinesErrorMessage);
 	RUN(testJSONLinesUtf8SafeErrorMessage);
 	RUN(testJSONLinesRoundTrip);
