@@ -85,7 +85,7 @@ inline void writeLE64(std::vector<uint8_t>& out, uint64_t v) {
 }
 
 
-inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
+inline void asvJSONValue::toBSON(std::vector<uint8_t>& out, int depth) const {
 	using T = asvJSONValue::Type;
 	switch (type) {
 		case T::DOUBLE: {
@@ -108,6 +108,10 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::OBJECT: {
+			// Depth guard mirrors parseBSON's entry check (depth > MAX throws):
+			// the encoder recursed unbounded and a programmatically deep tree
+			// overflowed the stack. Scalars are never guarded on either side.
+			if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("BSON nesting too deep");
 			out.push_back(0x03);
 			std::vector<uint8_t> sub;
 			sub.reserve(128);
@@ -122,7 +126,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 					std::vector<uint8_t> elem;
 					elem.reserve(64 + k.size());
 					size_t elemStart = elem.size();
-					v->toBSON(elem);
+					v->toBSON(elem, depth + 1);
 					if (elem.size() > elemStart) {
 						elem.insert(elem.begin() + elemStart + 1, k.begin(), k.end());
 						elem.insert(elem.begin() + elemStart + 1 + k.size(), 0);
@@ -141,6 +145,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::ARRAY: {
+			if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("BSON nesting too deep");
 			out.push_back(0x04);
 			std::vector<uint8_t> sub;
 			sub.reserve(128);
@@ -151,7 +156,7 @@ inline void asvJSONValue::toBSON(std::vector<uint8_t>& out) const {
 					std::vector<uint8_t> elem;
 					elem.reserve(64);
 					size_t elemStart = elem.size();
-					(*arr)[i]->toBSON(elem);
+					(*arr)[i]->toBSON(elem, depth + 1);
 					if (elem.size() > elemStart) {
 						char idx[32];
 						auto [ptr, ec] = std::to_chars(idx, idx + sizeof(idx), i);

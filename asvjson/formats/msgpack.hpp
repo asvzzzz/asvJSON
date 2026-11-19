@@ -89,7 +89,7 @@ inline void writeMsgPackExt(std::vector<uint8_t>& out, int8_t extType, const uin
 }
 
 
-inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
+inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out, int depth) const {
 	using T = asvJSONValue::Type;
 	switch (type) {
 		case T::NULL_VAL: out.push_back(0xC0); break;
@@ -157,6 +157,12 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			break;
 		}
 		case T::ARRAY: {
+			// Depth guard mirrors the decoder's container-branch check
+			// (parseMessagePack: depth >= MAX -> throw): a programmatically
+			// built tree is not bounded by MAX_NESTING_DEPTH and the encoder
+			// recursion overflowed the stack. Scalars never increment depth on
+			// either side, so exactly 48 containers encode.
+			if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("MsgPack nesting too deep");
 			if (!arr) { out.push_back(0x90); break; }
 			if (arr->size() <= 0x0F) { out.push_back(static_cast<uint8_t>(0x90 | arr->size())); }
 			else if (arr->size() <= 0xFFFF) { out.push_back(0xDC); out.push_back(static_cast<uint8_t>(arr->size() >> 8)); out.push_back(static_cast<uint8_t>(arr->size())); }
@@ -164,10 +170,11 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				if (arr->size() > static_cast<size_t>(0xFFFFFFFFu)) throw asvJSONError("MsgPack array too large for format");
 				out.push_back(0xDD); out.push_back(static_cast<uint8_t>(arr->size() >> 24)); out.push_back(static_cast<uint8_t>(arr->size() >> 16)); out.push_back(static_cast<uint8_t>(arr->size() >> 8)); out.push_back(static_cast<uint8_t>(arr->size()));
 			}
-			for (const auto& v : *arr) v->toMessagePack(out);
+			for (const auto& v : *arr) v->toMessagePack(out, depth + 1);
 			break;
 		}
 		case T::OBJECT: {
+			if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("MsgPack nesting too deep");
 			if (!obj) { out.push_back(0x80); break; }
 			if (obj->size() <= 0x0F) { out.push_back(static_cast<uint8_t>(0x80 | obj->size())); }
 			else if (obj->size() <= 0xFFFF) { out.push_back(0xDE); out.push_back(static_cast<uint8_t>(obj->size() >> 8)); out.push_back(static_cast<uint8_t>(obj->size())); }
@@ -181,7 +188,7 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 				else if (k.size() <= 0xFFFF) { out.push_back(0xDA); out.push_back(static_cast<uint8_t>(k.size() >> 8)); out.push_back(static_cast<uint8_t>(k.size())); }
 				else { out.push_back(0xDB); out.push_back(static_cast<uint8_t>(k.size() >> 24)); out.push_back(static_cast<uint8_t>(k.size() >> 16)); out.push_back(static_cast<uint8_t>(k.size() >> 8)); out.push_back(static_cast<uint8_t>(k.size())); }
 				msgpackWriteText(out, k);
-				v->toMessagePack(out);
+				v->toMessagePack(out, depth + 1);
 			}
 			break;
 		}
@@ -256,13 +263,16 @@ inline void asvJSONValue::toMessagePack(std::vector<uint8_t>& out) const {
 			// followed by the msgpack-encoded value (an explicit nil when the
 			// annotation has no value). Before this case a CUSTOM_TAG fell into
 			// default: -> 0xC0 and silently degraded to null on decode.
+			// The guard matches msgpackDecodeCustomTag (depth >= MAX rejects
+			// the tag itself; the body is read at depth + 1).
+			if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) throw asvJSONError("MsgPack nesting too deep");
 			std::vector<uint8_t> body;
 			if (str_data.size() <= 31) { body.push_back(static_cast<uint8_t>(0xA0 | str_data.size())); }
 			else if (str_data.size() <= 0xFF) { body.push_back(0xD9); body.push_back(static_cast<uint8_t>(str_data.size())); }
 			else if (str_data.size() <= 0xFFFF) { body.push_back(0xDA); body.push_back(static_cast<uint8_t>(str_data.size() >> 8)); body.push_back(static_cast<uint8_t>(str_data.size())); }
 			else { body.push_back(0xDB); body.push_back(static_cast<uint8_t>(str_data.size() >> 24)); body.push_back(static_cast<uint8_t>(str_data.size() >> 16)); body.push_back(static_cast<uint8_t>(str_data.size() >> 8)); body.push_back(static_cast<uint8_t>(str_data.size())); }
 			msgpackWriteText(body, str_data); // validates UTF-8 for the tag name
-			if (custom_value) custom_value->toMessagePack(body); else body.push_back(0xC0);
+			if (custom_value) custom_value->toMessagePack(body, depth + 1); else body.push_back(0xC0);
 			writeMsgPackExt(out, 4, body.data(), body.size());
 			break;
 		}

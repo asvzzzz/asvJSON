@@ -79,10 +79,10 @@
 //     about 10 microseconds of resolution, not exact ms); TIMESTAMP -> INT64;
 //     OBJECTID/EXTENSION -> BINARY (ext_type / type tag lost on round-trip).
 //
-// Encoder recursion is not depth-limited: a tree built programmatically with
-// many more than MAX_NESTING_DEPTH levels (the parser's own ceiling) can
-// exhaust the stack during toUBJSON(). This mirrors the CBOR, MessagePack and
-// BSON encoders -- the depth limit is enforced on the parsing side only.
+// Encoder recursion is depth-limited (ubjEncode mirrors ubjParseValue's
+// entry check, "UBJSON: nesting too deep"): a tree built programmatically
+// past MAX_NESTING_DEPTH (the parser's own ceiling) would otherwise
+// exhaust the stack during toUBJSON().
 
 #include "../core.hpp"
 
@@ -124,8 +124,14 @@ inline void ubjWriteLen(int64_t n, std::vector<uint8_t>& out) {
   else { out.push_back('L'); ubjWriteBE(out, v, 8); }
 }
 
-inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
+inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out, int depth = 0) {
   using T = asvJSONValue::Type;
+  // Depth guard mirrors ubjParseValue's entry check (depth > MAX throws),
+  // incremented per child on both sides: a programmatically built tree is
+  // not bounded by MAX_NESTING_DEPTH and the encoder recursion overflowed
+  // the stack.
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("UBJSON: nesting too deep");
   switch (v->type) {
     case T::NULL_VAL:
       out.push_back('Z');
@@ -217,7 +223,7 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
       break;
     case T::ARRAY: {
       out.push_back('[');
-      for (const auto& e : *v->arr) ubjEncode(e.get(), out);
+      for (const auto& e : *v->arr) ubjEncode(e.get(), out, depth + 1);
       out.push_back(']');
       break;
     }
@@ -226,7 +232,7 @@ inline void ubjEncode(const asvJSONValue* v, std::vector<uint8_t>& out) {
       for (const auto& [k, val] : *v->obj) {
         ubjWriteLen(static_cast<int64_t>(k.size()), out);
         out.insert(out.end(), k.begin(), k.end());
-        ubjEncode(val.get(), out);
+        ubjEncode(val.get(), out, depth + 1);
       }
       out.push_back('}');
       break;

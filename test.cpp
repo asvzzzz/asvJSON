@@ -3496,9 +3496,12 @@ TEST(testMessagePackSecurityFixes) {
 	// Nesting depth boundary: Option B checks `depth >= MAX` only inside
 	// container branches (fixarray/fixmap/array16/array32/map16/map32).
 	// Scalars do NOT increment depth, so a tree of exactly MAX containers
-	// with a scalar leaf at the deepest level round-trips through both parsers.
-	// 49+ containers are rejected by both. The encoder has NO depth check —
-	// programmatic trees deeper than MAX serialize fine but fail on re-parse.
+	// with a scalar leaf at the deepest level round-trips through both
+	// parsers. 49+ containers are rejected by both. The encoder mirrors the
+	// decoder (same branches, same `depth >= MAX` rule): it throws
+	// "MsgPack nesting too deep" instead of emitting bytes its own decoder
+	// would reject (the old "no depth check" behavior overflowed the stack
+	// on very deep programmatic trees).
 	{
 		// String form: N=MAX opens → MAX containers, leaf "1" at depth MAX.
 		// Both parsers accept exactly MAX containers and reject MAX+1.
@@ -3533,7 +3536,8 @@ TEST(testMessagePackSecurityFixes) {
 		asvJSON j4;
 		ASSERT(j4.fromMessagePack(mp2.data(), mp2.size()));
 	}
-	// MAX+1 containers: both parsers reject.
+	// MAX+1 containers: the ENCODER refuses them (it used to emit bytes its
+	// own decoder then rejected).
 	{
 		asvJSON j5;
 		ASSERT(j5.parse(std::string_view("{\"a\":1}")));
@@ -3544,9 +3548,21 @@ TEST(testMessagePackSecurityFixes) {
 			cur->obj->emplace("a", std::move(inner));
 			cur = cur->obj->begin()->second.get();
 		}
-		auto mp3 = j5.toMessagePack();
+		bool threw = false;
+		try { auto mp3 = j5.toMessagePack(); (void)mp3; }
+		catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	// ...and hand-written bytes with MAX+1 maps are still rejected by the
+	// decoder (NUL-free fixmap 0x81 + fixstr "a" key, innermost value 1).
+	{
+		std::vector<uint8_t> raw;
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1; i++) {
+			raw.push_back(0x81); raw.push_back(0x61); raw.push_back('a');
+		}
+		raw.push_back(0x01);
 		asvJSON j6;
-		ASSERT(!j6.fromMessagePack(mp3.data(), mp3.size()));
+		ASSERT(!j6.fromMessagePack(raw.data(), raw.size()));
 	}
 	// lastError is cleared on successful parse, so a prior error does not linger.
 	{
@@ -18238,6 +18254,42 @@ TEST(testEncoderDepthGuards) {
     auto bad = chain(MAXD + 1);
     mustThrow("TOML pretty", [&] { std::string s2; bad->toTOML(s2, true); });
     mustThrow("TOML compact", [&] { std::string s2; bad->toTOML(s2, false); });
+  }
+  // Binary encoders (MsgPack / UBJSON / BSON) recursed WITHOUT any depth
+  // limit (documented as a limitation): a programmatically deep tree
+  // overflowed the stack (0xC00000FD) inside toX(), and even moderate
+  // depths emitted bytes their own decoder rejects. Boundaries mirror each
+  // decoder: MsgPack container branches check `depth >= MAX` and UBJSON
+  // checks `depth > MAX` per value (children increment on every edge, so
+  // both bottom out at exactly 48 container levels), BSON documents check
+  // `depth > MAX` with the root document at level 0 and only sub-documents
+  // guarded (root + 48 nested documents encode, the 49th nested throws).
+  { // MessagePack: 48 container levels encode, the 49th throws
+    auto ok = chain(MAXD);
+    std::vector<uint8_t> b; ok->toMessagePack(b); ASSERT(!b.empty());
+    auto bad = chain(MAXD + 1);
+    mustThrow("MsgPack", [&] { std::vector<uint8_t> b2; bad->toMessagePack(b2); });
+    auto huge = chain(100000); // the old crash: unbounded recursion
+    mustThrow("MsgPack huge", [&] { std::vector<uint8_t> b3; huge->toMessagePack(b3); });
+  }
+  { // UBJSON: entry guard per value (the scalar leaf trips it one edge
+    // after the 48th container), same effective 48-level boundary
+    auto ok = chain(MAXD);
+    std::vector<uint8_t> b; ok->toUBJSON(b); ASSERT(!b.empty());
+    auto bad = chain(MAXD + 1);
+    mustThrow("UBJSON", [&] { std::vector<uint8_t> b2; bad->toUBJSON(b2); });
+    auto huge = chain(100000);
+    mustThrow("UBJSON huge", [&] { std::vector<uint8_t> b3; huge->toUBJSON(b3); });
+  }
+  { // BSON: root document is nesting level 0, member values start at 1, so
+    // the guard trips one object later than the value-level entry suggests
+    { auto ok = chain(MAXD + 1); asvJSON d; d.setRoot(std::move(ok));
+      auto b = d.toBSON(); ASSERT(!b.empty());
+      asvJSON back; ASSERT(back.fromBSON(b.data(), b.size())); }
+    { auto bad = chain(MAXD + 2);
+      mustThrow("BSON", [&] { asvJSON d; d.setRoot(std::move(bad)); d.toBSON(); }); }
+    { auto huge = chain(100000);
+      mustThrow("BSON huge", [&] { asvJSON d; d.setRoot(std::move(huge)); d.toBSON(); }); }
   }
 }
 
