@@ -353,11 +353,13 @@ private:
   }
 
   CppType inferType(const asvJSONValue* v, const std::string& path,
-                    const std::string& hint, const asvJSONValue* commentSrc = nullptr);
+                    const std::string& hint, const asvJSONValue* commentSrc = nullptr,
+                    int depth = 0);
   CppType inferArray(const asvJSONValue* v, const std::string& path,
-                     const std::string& hint);
+                     const std::string& hint, int depth);
   std::string registerStruct(const asvJSONValue* v, const std::string& path,
-                             const std::string& hint, const asvJSONValue* commentSrc = nullptr);
+                             const std::string& hint, const asvJSONValue* commentSrc = nullptr,
+                             int depth = 0);
   std::string containerOf(const std::string& elem, size_t n, std::string& suffixOut);
 
   void valueLiteral(const asvJSONValue* v, const CppType& t, std::string& out) const;
@@ -415,7 +417,15 @@ inline size_t CppGenerator::findStruct(const std::string& name) const {
 inline std::string CppGenerator::registerStruct(const asvJSONValue* v,
                                                 const std::string& path,
                                                 const std::string& hint,
-                                                const asvJSONValue* commentSrc) {
+                                                const asvJSONValue* commentSrc,
+                                                int depth) {
+  // Depth guard (symmetric with the parsers): a programmatically built tree
+  // deeper than MAX_NESTING_DEPTH used to overflow the stack here (the old
+  // documented limitation). `depth` counts the containers ABOVE this object:
+  // the root is level 1, so 48 levels pass and the 49th throws - matching
+  // core parse()'s limit.
+  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("cpp: nesting too deep");
   // Fast-path: if this value was already registered (e.g. via a prior inferType
   // call that populated objTypeCache_), reuse the same name rather than deriving
   // a second uniqueName() and creating a dangling reference.
@@ -463,7 +473,7 @@ inline std::string CppGenerator::registerStruct(const asvJSONValue* v,
       Field f;
       f.name = cppIdent(k);
       std::string childPath = path.empty() ? std::string(k) : path + "." + std::string(k);
-      CppType ct = inferType(c.get(), childPath, std::string(k));
+      CppType ct = inferType(c.get(), childPath, std::string(k), nullptr, depth + 1);
       f.type = ct.type;
       f.suffix = ct.suffix;
       f.src = c.get();
@@ -488,7 +498,11 @@ inline std::string CppGenerator::registerStruct(const asvJSONValue* v,
 
 inline CppType CppGenerator::inferArray(const asvJSONValue* v,
                                         const std::string& path,
-                                        const std::string& hint) {
+                                        const std::string& hint, int depth) {
+  // Depth guard mirroring registerStruct (see there): the array itself is one
+  // container level, so 48 nested arrays pass and the 49th throws.
+  if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("cpp: nesting too deep");
   CppType t;
   t.kind = CppType::Array;
   const size_t n = v->arr ? v->arr->size() : 0;
@@ -549,7 +563,7 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
       Field f;
       f.name = cppIdent(k);
       std::string childPath = path.empty() ? k : path + "." + k;
-      CppType ct = sample ? inferType(sample, childPath, k)
+      CppType ct = sample ? inferType(sample, childPath, k, nullptr, depth + 1)
                           : CppType{};
       f.type = ct.type;
       f.suffix = ct.suffix;
@@ -573,10 +587,10 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
   }
 
   // Homogeneous element type -> container; mixed -> vector<variant<...>>.
-  CppType first = inferType(v->arr->front().get(), path, hint);
+  CppType first = inferType(v->arr->front().get(), path, hint, nullptr, depth + 1);
   bool same = true;
   for (size_t i = 1; i < n && same; i++) {
-    CppType cur = inferType(v->arr->at(i).get(), path, hint);
+    CppType cur = inferType(v->arr->at(i).get(), path, hint, nullptr, depth + 1);
     if (cur.type != first.type || cur.suffix != first.suffix) same = false;
   }
   if (same) {
@@ -599,7 +613,7 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
   usedVariant_ = true;
   std::vector<CppType> alts;
   for (const auto& c : *v->arr) {
-    CppType cur = inferType(c.get(), path, hint);
+    CppType cur = inferType(c.get(), path, hint, nullptr, depth + 1);
     bool found = false;
     for (const auto& a : alts) if (a.type == cur.type) { found = true; break; }
     if (!found) alts.push_back(cur);
@@ -614,7 +628,8 @@ inline CppType CppGenerator::inferArray(const asvJSONValue* v,
 }
 
 inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string& path,
-                                       const std::string& hint, const asvJSONValue* commentSrc) {
+                                       const std::string& hint, const asvJSONValue* commentSrc,
+                                       int depth) {
   CppType t;
   if (!v) { t.type = effNull(); return t; }
   switch (v->type) {
@@ -630,7 +645,7 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
     case asvJSONValue::TIMESTAMP:
     case asvJSONValue::EXTENSION:
     case asvJSONValue::CUSTOM_TAG: t.type = effString(); return t;
-    case asvJSONValue::ARRAY: return inferArray(v, path, hint);
+    case asvJSONValue::ARRAY: return inferArray(v, path, hint, depth);
     case asvJSONValue::OBJECT: {
       auto cac = objTypeCache_.find(v);
       if (cac != objTypeCache_.end()) return cac->second;
@@ -651,7 +666,7 @@ inline CppType CppGenerator::inferType(const asvJSONValue* v, const std::string&
       }
       busyObjects_.insert(key);
       CppGeneratorBusyGuard guard(busyObjects_, key);
-      std::string name = registerStruct(v, path, hint, commentSrc);
+      std::string name = registerStruct(v, path, hint, commentSrc, depth);
       t.kind = CppType::Struct;
       t.structName = name;
       t.type = name;

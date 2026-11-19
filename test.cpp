@@ -18291,6 +18291,32 @@ TEST(testEncoderDepthGuards) {
     { auto huge = chain(100000);
       mustThrow("BSON huge", [&] { asvJSON d; d.setRoot(std::move(huge)); d.toBSON(); }); }
   }
+  { // C++ generator (toCpp): inferType/registerStruct/inferArray used to
+    // recurse WITHOUT a guard (documented limitation), so a programmatically
+    // deep tree overflowed the stack. Now 48 container levels generate, the
+    // 49th throws - matching core parse(). unwrapRootSingleKey=false keeps
+    // the outermost wrapper counted, so the boundary is exact.
+    CppWriteOptions noUnwrap; noUnwrap.unwrapRootSingleKey = false;
+    auto ok = chain(MAXD);
+    { asvJSON d; d.setRoot(std::move(ok)); ASSERT(!d.toCpp(noUnwrap).empty()); }
+    { auto bad = chain(MAXD + 1);
+      mustThrow("C++ obj chain", [&] { asvJSON d; d.setRoot(std::move(bad)); d.toCpp(noUnwrap); }); }
+    // Array chains go through inferArray (vector<vector<...>>), same cap
+    auto arrChain = [](int levels) -> std::unique_ptr<asvJSONValue> {
+      std::unique_ptr<asvJSONValue> v = asvJSONValue::makeInt(7);
+      for (int i = 0; i < levels; i++) {
+        auto wrap = asvJSONValue::makeArray();
+        wrap->arr->push_back(std::move(v));
+        v = std::move(wrap);
+      }
+      return v;
+    };
+    { auto ok2 = arrChain(MAXD); asvJSON d; d.setRoot(std::move(ok2)); ASSERT(!d.toCpp().empty()); }
+    { auto bad2 = arrChain(MAXD + 1);
+      mustThrow("C++ arr chain", [&] { asvJSON d; d.setRoot(std::move(bad2)); d.toCpp(); }); }
+    { auto huge = chain(100000); // the old crash: unbounded recursion
+      mustThrow("C++ huge", [&] { asvJSON d; d.setRoot(std::move(huge)); d.toCpp(); }); }
+  }
 }
 
 TEST(testYAMLNestedAnchors) {
