@@ -3196,7 +3196,15 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 	}
 	asvJSONValue* cur = root.get();
 	size_t start = 1;
+	int levels = 0; // segment count == container depth being entered/created
 	while (start < ptr.size()) {
+		// Depth guard: every segment enters or CREATES a container level, so
+		// a hostile pointer (applyPatch takes paths straight from parsed
+		// attacker JSON) could build a millions-deep chain that no parser
+		// could ever produce, and the recursive destructor/serializer/clone
+		// would overflow the stack. Cap at MAX_NESTING_DEPTH segments - the
+		// same 48-container ceiling every parser enforces.
+		if (++levels > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return false;
 		size_t slash = ptr.find('/', start);
 		std::string_view seg = (slash == std::string_view::npos) ? ptr.substr(start) : ptr.substr(start, slash - start);
 		bool isLast = (slash == std::string_view::npos);

@@ -45,4 +45,7 @@ if(MSVC)
   foreach(tgt examples test test_minimal convert asvjserver)
     target_compile_options(${tgt} PRIVATE /MT$<$<CONFIG:Debug>:d>)
   endforeach()
+  # test.cpp is a ~38k-line TU; it exceeds the COFF 65k-section object limit
+  # without /bigobj (C1128).
+  target_compile_options(test PRIVATE /bigobj)
 endif()
