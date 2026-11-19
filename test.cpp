@@ -18324,6 +18324,44 @@ TEST(testYAMLNestedAnchors) {
   }
 }
 
+TEST(testADEAnchorExpansionGuard) {
+  // ADE aliases materialize a DEEP COPY of the anchored value (not text
+  // substitution like YAML), but the amplification class is the same: a
+  // doubling chain grows the tree to 2^N nodes from a tiny document, and
+  // the 32 MB input cap bounds neither copies nor their size. The parser
+  // now charges every clone (registration AND alias) to a cumulative
+  // node budget (kMaxAliasNodes = 8M).
+  {
+    std::string y = "l0: &a0 \"01234567890123456789012345678901234567890123456789012345678901234567890123456789\"\n";
+    for (int i = 1; i <= 30; i++)
+      y += "l" + std::to_string(i) + ": &a" + std::to_string(i) + " [*a" + std::to_string(i - 1) + ", *a" + std::to_string(i - 1) + "]\n";
+    asvJSON j;
+    ASSERT(!j.fromADE(std::string_view(y)));
+    ASSERT(j.getLastError().find("node budget") != std::string::npos);
+    ASSERT(j.getRoot() == nullptr);
+  }
+  // Legitimate heavy use stays under the budget: a 10000-element array
+  // aliased 50 times = 500k clone nodes, must parse.
+  {
+    std::string y = "big: &b [";
+    for (int i = 0; i < 10000; i++) { if (i) y += ","; y += std::to_string(i); }
+    y += "]\n";
+    for (int i = 0; i < 50; i++) y += "k" + std::to_string(i) + ": *b\n";
+    asvJSON j;
+    ASSERT(j.fromADE(std::string_view(y)));
+  }
+  // 1000 aliases of the same array = 10M clone nodes, over the budget.
+  {
+    std::string y = "big: &b [";
+    for (int i = 0; i < 10000; i++) { if (i) y += ","; y += std::to_string(i); }
+    y += "]\n";
+    for (int i = 0; i < 1000; i++) y += "k" + std::to_string(i) + ": *b\n";
+    asvJSON j;
+    ASSERT(!j.fromADE(std::string_view(y)));
+    ASSERT(j.getLastError().find("node budget") != std::string::npos);
+  }
+}
+
 TEST(testYAMLAnchorExpansionGuard) {
   // "Billion laughs": a doubling anchor chain (&a2: [*a1,*a1], ...) expands
   // the intermediate JSON exponentially while the 10 MB input cap bounds the
@@ -38587,6 +38625,7 @@ RUN(testTOONReviewFixes);
 	RUN(testSerializeDepthGuard);
 	RUN(testEncoderDepthGuards);
 	RUN(testYAMLNestedAnchors);
+	RUN(testADEAnchorExpansionGuard);
 	RUN(testYAMLAnchorExpansionGuard);
 
 	std::cout << "\n--- TRON Serialization Tests ---\n";
