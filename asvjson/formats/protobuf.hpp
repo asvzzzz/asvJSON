@@ -839,8 +839,15 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
       auto* existing = obj->get(fname);
       if (existing && existing->type == asvJSONValue::ARRAY && existing->arr) {
         if (val->type == asvJSONValue::ARRAY && val->arr) {
+          // Merging two arrays each under MAX_ARRAY_SIZE can still exceed the
+          // cap: check the COMBINED size (protoSetField only sees the single
+          // incoming array).
+          if (!asvJSONValue::checkArraySize(existing->arr->size() + val->arr->size()))
+            throw asvJSONError("Protobuf: array too large");
           for (auto& e : *val->arr) if (e) existing->arr->push_back(std::move(e));
         } else {
+          if (!asvJSONValue::checkArraySize(existing->arr->size() + 1))
+            throw asvJSONError("Protobuf: array too large");
           existing->arr->push_back(std::move(val));
         }
       } else if (val->type == asvJSONValue::ARRAY && val->arr) {
@@ -920,6 +927,12 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
 // (OOM) result: a null element would be dereferenced by every later tree walk.
 inline void protoPushPacked(std::vector<std::unique_ptr<asvJSONValue>>& dst, std::unique_ptr<asvJSONValue> v) {
   if (!v) throw asvJSONError("Protobuf packed field element alloc failed");
+  // Element-count guard: the caller-side byte check cannot bound the COUNT -
+  // a packed varint field spends 1 byte per element, so a 32 MB input would
+  // build a ~32M-element array past MAX_ARRAY_SIZE (every other decoder caps
+  // per-element growth, keep it symmetric).
+  if (!asvJSONValue::checkArraySize(dst.size() + 1))
+    throw asvJSONError("Protobuf packed field too large");
   dst.push_back(std::move(v));
 }
 
@@ -1077,7 +1090,13 @@ inline std::unique_ptr<asvJSONValue> protoDecodeRoot(const uint8_t* data, size_t
         if (len > static_cast<uint64_t>(SIZE_MAX) || static_cast<size_t>(len) > size - pos) break;
         size_t end = pos + static_cast<size_t>(len);
         auto elem = protoDecodeMessageBody(data, pos, end, schema, depth + 1);
-        if (elem && arr && arr->arr) arr->arr->push_back(std::move(elem));
+        // checkArraySize: the wrapper's element count is input-bounded only
+        // (1 byte of header per tiny message => millions of elements).
+        if (elem && arr && arr->arr) {
+          if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+            throw asvJSONError("Protobuf: array too large");
+          arr->arr->push_back(std::move(elem));
+        }
         pos = end;
       }
       return arr;
