@@ -462,6 +462,38 @@ private:
   // number of anchors that may be registered while parsing a document.
   static constexpr size_t kMaxAnchors = 1000000;
 
+  // Cumulative node budget for ALL tree copies an anchor/alias makes during
+  // one parse (the registration clone in registerAnchor AND every alias
+  // clone in parseAlias). Aliases materialize a deep copy from a handful of
+  // source bytes, so the 32 MB input cap bounds neither the number nor the
+  // size of these copies: the doubling chain
+  //   l1: &a1 [*a0,*a0] / l2: &a2 [*a1,*a1] / ...
+  // otherwise grows the tree to 2^30 nodes from a <1 KB document (the
+  // analog of YAML's MAX_YAML_EXPANSION). clonedNodes_ never exceeds the
+  // budget, so the subtraction below cannot underflow.
+  static constexpr size_t kMaxAliasNodes = 8000000;
+  size_t clonedNodes_ = 0;
+  std::unordered_map<std::string, size_t> anchorNodes_;
+
+  // Iterative node count of a subtree (what cloneValue will allocate).
+  static size_t countTreeNodes(const asvJSONValue* v) {
+    size_t n = 0;
+    std::vector<const asvJSONValue*> st;
+    st.push_back(v);
+    while (!st.empty()) {
+      const asvJSONValue* p = st.back();
+      st.pop_back();
+      n++;
+      if (p->custom_value) st.push_back(p->custom_value.get());
+      if (p->type == asvJSONValue::OBJECT && p->obj) {
+        for (const auto& kv : *p->obj) if (kv.second) st.push_back(kv.second.get());
+      } else if (p->type == asvJSONValue::ARRAY && p->arr) {
+        for (const auto& e : *p->arr) if (e) st.push_back(e.get());
+      }
+    }
+    return n;
+  }
+
   // A parsed key plus whether it was quoted. Quoted keys are always literal;
   // unquoted dotted keys are expanded into nested objects. For dot-separated
   // keys with more than one segment, `segs` holds each segment together with
@@ -1214,8 +1246,15 @@ private:
 
   void registerAnchor(const std::string& name, const asvJSONValue* v) {
     if (anchors_.size() >= kMaxAnchors) throw asvJSONError("ADE: too many anchors");
+    // Charge the registration clone to the cumulative node budget BEFORE
+    // allocating it (see kMaxAliasNodes).
+    size_t nodes = countTreeNodes(v);
+    if (nodes > kMaxAliasNodes - clonedNodes_)
+      throw asvJSONError("ADE: anchor/alias expansion exceeds node budget");
+    clonedNodes_ += nodes;
     auto c = cloneValue(v);
     if (!c) throw asvJSONError("ADE: failed to store anchor &" + name);
+    anchorNodes_[name] = nodes;
     anchors_[name] = std::move(c);
   }
 
@@ -1237,6 +1276,17 @@ private:
     // single deep copy of the anchored value (cloneValue, bounded by
     // MAX_CLONE_NODES) and never recurses into further anchor resolution, so
     // there is no cycle to detect and no resolution-depth chain to bound.
+    // Charge the alias clone to the cumulative node budget BEFORE cloning:
+    // each "*name" line costs a few source bytes but materializes a full
+    // deep copy (see kMaxAliasNodes). anchorNodes_ holds the exact subtree
+    // size recorded at registration, so an attacker cannot force repeated
+    // O(subtree) counting passes either.
+    size_t nodes = 0;
+    auto nit = anchorNodes_.find(name);
+    if (nit != anchorNodes_.end()) nodes = nit->second;
+    if (nodes > kMaxAliasNodes - clonedNodes_)
+      throw asvJSONError("ADE: anchor/alias expansion exceeds node budget");
+    clonedNodes_ += nodes;
     auto res = cloneValue(it->second.get());
     if (!res) throw asvJSONError("ADE: failed to resolve alias *" + name);
     return res;
