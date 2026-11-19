@@ -53,6 +53,16 @@
 namespace asvJSONInternal {
 
 inline constexpr size_t MAX_YAML_ANCHORS = 100000;
+// Alias-expansion budget (billion-laughs defense, the analog of GOON's
+// MAX_GOON_OUTPUT): every yamlResolveAlias charges the size of the anchor
+// text it returns to this per-fromYAML-call budget. An anchor chain like
+// `&a1: [*a0,*a0]` doubles the resolved text per level, so a document of
+// a few dozen lines could otherwise expand into gigabytes of intermediate
+// JSON before any parse-side limit fires (the 10 MB input cap bounds the
+// SOURCE, not the expansion). thread_local like the other YAML parse
+// state; reset at the top of every fromYAML call.
+inline constexpr size_t MAX_YAML_EXPANSION = 64ull * 1024ull * 1024ull;
+inline size_t& yamlExpansionBudget() { static thread_local size_t bytes = 0; return bytes; }
 inline constexpr size_t MAX_YAML_DEPTH = 64;
 // Input size limit — symmetric with GOON/TOON/JSON5's MAX_*_INPUT.
 inline constexpr size_t MAX_YAML_INPUT = 10u * 1024u * 1024u;
@@ -1537,6 +1547,14 @@ inline std::string yamlResolveAlias(std::string_view aliasName,
 	if (it == anchors.end()) {
 		throw asvJSONError("YAML: undefined alias '" + name + "'");
 	}
+	// Billion-laughs guard: charge the substituted text to the per-call
+	// expansion budget. Doubling anchor chains (`&a2: [*a1,*a1]`, ...) are
+	// rejected once the total substituted bytes pass MAX_YAML_EXPANSION,
+	// before the intermediate JSON can grow into gigabytes.
+	size_t& budget = yamlExpansionBudget();
+	budget += it->second.size();
+	if (budget > MAX_YAML_EXPANSION)
+		throw asvJSONError("YAML: alias expansion exceeds 64 MB limit");
 	return it->second;
 }
 
@@ -1696,7 +1714,8 @@ inline std::string yamlGatherFlow(const std::vector<std::string>& lines, std::st
 inline std::string yamlFlowJsonAsKey(const std::string& flowText,
     std::unordered_map<std::string, std::string>* anchors,
     std::unordered_set<std::string>* resolving, int depth);
-inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
+    const std::unordered_map<std::string, std::string>* seedAnchors = nullptr);
 
 // Parse a block-style !!set: the header line plus the following "- key" /
 // "? key" item lines. Works at document root or as a mapping/sequence value.
@@ -2156,7 +2175,10 @@ inline std::string yamlToJson(std::string_view input);
 inline std::string yamlParseDoc(std::string_view input, int depth = 0);
 // Parse a document whose lines are already split (used by anchors to avoid
 // re-splitting the collected subtree). Owns its own scoped tag-map snapshot.
-inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth);
+// seedAnchors: for an ANCHORED block child (same document!), the anchors
+// defined so far -- aliases inside the block must resolve against them.
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
+    const std::unordered_map<std::string, std::string>* seedAnchors);
 // A "!!yaml" tag whose content is on following lines (block-scalar header or
 // indented block collection) needs gathering; see yamlGatherYamlEmbed.
 inline bool yamlYamlTagNeedsGather(std::string_view s, std::string& tail);
@@ -2260,6 +2282,23 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 							}
 						}
 						anchors[name] = "\"" + aesc + "\"";
+					} else if (!rv.empty() && (rv[0] == '[' || rv[0] == '{')) {
+						// FLOW anchor value: parse it with the anchors map so
+						// "*alias" INSIDE the anchored value resolves against
+						// the anchors defined so far. The old yamlParseInlineValue
+						// path left aliases as literal "*name" strings, so an
+						// anchor referencing another anchor stored unresolved
+						// text, and every later use of it produced data holding
+						// the literal alias names ("[*a0,*a0]" -> ["*a0","*a0"]).
+						std::string fval(rv);
+						size_t fpos = 0;
+						std::unordered_set<std::string> fres;
+						anchors[name] = yamlParseFlowValue(fval, fpos, &anchors, &fres, depth + 1);
+					} else if (!rv.empty() && rv[0] == '*' && rv.size() > 1 && yamlIsAnchorChar(rv[1])) {
+						// Bare-alias anchor value ("&a1 *a0"): same unresolved-alias
+						// bug as the flow form.
+						std::unordered_set<std::string> ares;
+						anchors[name] = yamlResolveAlias(rv.substr(1), anchors, ares);
 					} else {
 						anchors[name] = yamlParseInlineValue(rv);
 					}
@@ -2298,7 +2337,7 @@ inline bool yamlBuildAnchorMap(std::vector<std::string>& lines,
 							if (static_cast<size_t>(countIndent(cl)) >= minIndent) cl.erase(0, minIndent);
 						}
 					}
-					anchors[name] = yamlParseDocImpl(childLines, depth + 1);
+					anchors[name] = yamlParseDocImpl(childLines, depth + 1, &anchors);
 				} else {
 					anchors[name] = "null";
 				}
@@ -2975,7 +3014,8 @@ inline bool yamlFoldPlainScalar(std::vector<std::string>& lines, size_t& li, int
 	return true;
 }
 
-inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) {
+inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
+    const std::unordered_map<std::string, std::string>* seedAnchors) {
 	// Recursion guard: yamlParseDocImpl recurses via tagged block values,
 	// explicit keys, block sets and anchored blocks (each passing depth+1).
 	if (depth > static_cast<int>(MAX_YAML_DEPTH))
@@ -3028,6 +3068,13 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth) 
 	// map, and block/flow anchors are impossible without the character.
 	std::unordered_map<std::string, std::string> anchors;
 	std::unordered_set<std::string> resolving;
+	// An anchored BLOCK value is part of the SAME document as the anchor
+	// line: seed with the anchors defined so far (document order) so an
+	// alias inside the block resolves against them instead of failing
+	// "undefined alias". Top-level / multi-document calls pass no seed --
+	// those keep genuinely independent namespaces (YAML anchors are scoped
+	// to a document).
+	if (seedAnchors) anchors = *seedAnchors;
 	bool hasAmp = false;
 	for (const auto& ln : lines) {
 		if (ln.find('&') != std::string::npos) { hasAmp = true; break; }
@@ -4266,6 +4313,7 @@ inline bool asvJSON::fromYAML(std::string_view input) {
 	root = nullptr;
 	dirty_ = false;
 	formatType = FormatType::Unknown;
+	yamlExpansionBudget() = 0; // per-call alias-expansion budget
 	if (input.size() > MAX_YAML_INPUT) { lastError = "YAML input exceeds 10 MB limit"; return false; }
 	bool prevNaN = allowNaNInfinity;
 	allowNaNInfinity = true;

@@ -18293,6 +18293,71 @@ TEST(testEncoderDepthGuards) {
   }
 }
 
+TEST(testYAMLNestedAnchors) {
+  // An anchored value that itself contains *alias references used to be
+  // stored UNRESOLVED by the pre-scan (yamlParseInlineValue left "*name"
+  // as literal strings), so a second-level alias emitted literal alias
+  // names as data. And an alias inside an anchored BLOCK child failed
+  // with "undefined alias" because the block was parsed in an isolated
+  // anchor namespace. Both fixed: flow anchor values parse with the
+  // anchors map, block-anchor children seed from it.
+  { // flow anchor referencing an earlier anchor, aliased again
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("l0: &a0 [1]\nl1: &a1 [*a0,*a0]\nl2: [*a1,*a1]\n")));
+    asvJSON e;
+    ASSERT(e.parse(std::string_view("{\"l0\":[1],\"l1\":[[1],[1]],\"l2\":[[[1],[1]],[[1],[1]]]}")));
+    ASSERT(*j.getRoot() == *e.getRoot());
+  }
+  { // anchored BLOCK child referencing an earlier anchor
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("l0: &a0 \"x\"\nl1: &a1\n  - *a0\n  - *a0\nl2: *a1\n")));
+    asvJSON e;
+    ASSERT(e.parse(std::string_view("{\"l0\":\"x\",\"l1\":[\"x\",\"x\"],\"l2\":[\"x\",\"x\"]}")));
+    ASSERT(*j.getRoot() == *e.getRoot());
+  }
+  { // bare-alias anchor value ("&a1 *a0")
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("l0: &a0 [1]\nl1: &a1 *a0\nl2: *a1\n")));
+    asvJSON e;
+    ASSERT(e.parse(std::string_view("{\"l0\":[1],\"l1\":[1],\"l2\":[1]}")));
+    ASSERT(*j.getRoot() == *e.getRoot());
+  }
+}
+
+TEST(testYAMLAnchorExpansionGuard) {
+  // "Billion laughs": a doubling anchor chain (&a2: [*a1,*a1], ...) expands
+  // the intermediate JSON exponentially while the 10 MB input cap bounds the
+  // SOURCE only. yamlResolveAlias charges every substituted anchor to a
+  // 64 MB per-call budget and rejects before the text can grow into GB.
+  {
+    std::string y = "l0: &a0 \"01234567890123456789012345678901234567890123456789012345678901234567890123456789\"\n";
+    for (int i = 1; i <= 30; i++) {
+      y += "l" + std::to_string(i) + ": &a" + std::to_string(i) + " [*a" + std::to_string(i - 1) + ", *a" + std::to_string(i - 1) + "]\n";
+    }
+    asvJSON j;
+    ASSERT(!j.fromYAML(std::string_view(y)));
+    ASSERT(j.getLastError().find("expansion") != std::string::npos);
+    // failed parse must leave a clean contract state
+    ASSERT(j.getRoot() == nullptr);
+  }
+  // Legitimate heavy use stays under the budget: a 1 KB anchor aliased 500
+  // times (500 KB of substitution) must parse.
+  {
+    std::string big(1000, 'x');
+    std::string y = "base: &b \"" + big + "\"\n";
+    for (int i = 0; i < 500; i++) y += "k" + std::to_string(i) + ": *b\n";
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view(y)));
+    ASSERT(j.getRoot() && j.getRoot()->obj && j.getRoot()->obj->size() == 501);
+  }
+  // Per-call budget: the rejected expansion must not leak into a later
+  // successful parse.
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("a: &x [1, 2]\nb: *x\n")));
+  }
+}
+
 TEST(testTRONExtras) {
   // DATETIME preserves tz_offset_min across a TRON round-trip (encoder used to
   // call fmtDateTimeVal with 3 args and the decoder ignored the offset).
@@ -38521,6 +38586,8 @@ RUN(testTOONReviewFixes);
 	RUN(testAuditSweepContracts);
 	RUN(testSerializeDepthGuard);
 	RUN(testEncoderDepthGuards);
+	RUN(testYAMLNestedAnchors);
+	RUN(testYAMLAnchorExpansionGuard);
 
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);
