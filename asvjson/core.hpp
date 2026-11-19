@@ -838,9 +838,9 @@ struct asvJSONValue {
 
 	void serialize(std::string& out, bool allowNaNInfinity = false, int depth = 1) const;
 	void serializePretty(std::string& out, int indent = 0, bool allowNaNInfinity = false) const;
-	void toMessagePack(std::vector<uint8_t>& out) const;
+	void toMessagePack(std::vector<uint8_t>& out, int depth = 0) const;
 	void toCBOR(std::vector<uint8_t>& out, int depth = 0) const;
-	void toBSON(std::vector<uint8_t>& out) const;
+	void toBSON(std::vector<uint8_t>& out, int depth = 0) const;
 	void toUBJSON(std::vector<uint8_t>& out) const;
 	void toXML(std::string& out) const;
 	void toXML(std::string& out, const std::string& name, int indent, int depth = 0) const;
@@ -3574,7 +3574,7 @@ inline std::vector<uint8_t> asvJSON::toBSON() const {
 			std::vector<uint8_t> elem;
 			elem.reserve(64 + k.size());
 			size_t elemStart = elem.size();
-			v->toBSON(elem);
+			v->toBSON(elem, 1); // the root document is BSON nesting level 0
 			if (elem.size() > elemStart) {
 				elem.insert(elem.begin() + elemStart + 1, k.begin(), k.end());
 				elem.insert(elem.begin() + elemStart + 1 + k.size(), 0);
@@ -3586,7 +3586,7 @@ inline std::vector<uint8_t> asvJSON::toBSON() const {
 			std::vector<uint8_t> elem;
 			elem.reserve(64);
 			size_t elemStart = elem.size();
-			(*root->arr)[i]->toBSON(elem);
+			(*root->arr)[i]->toBSON(elem, 1); // the root document is BSON nesting level 0
 			if (elem.size() > elemStart) {
 				char idx[16];
 				int n = snprintf(idx, sizeof(idx), "%zu", i);
