@@ -1433,17 +1433,29 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
     if (text[pos] == '{' || text[pos] == '<') {
       pos++;
       auto elem = asvJSONValue::makeObject();
-      if (elem) { protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
+      if (elem) {
+        if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+          throw asvJSONError("Protobuf text: array too large");
+        protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+      }
       else { protoTextSkipNested(text, pos, "{<", "}>"); }
     } else if (text[pos] == '[') {
       pos++;
       auto elem = asvJSONValue::makeArray();
-      if (elem && elem->arr) { protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem)); }
+      if (elem && elem->arr) {
+        if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+          throw asvJSONError("Protobuf text: array too large");
+        protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+      }
       else { protoTextSkipNested(text, pos, "[", "]"); }
     } else {
       size_t before = pos;
       auto elem = protoTextParseScalar(text, pos);
-      if (elem) arr->arr->push_back(std::move(elem));
+      if (elem) {
+        if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+          throw asvJSONError("Protobuf text: array too large");
+        arr->arr->push_back(std::move(elem));
+      }
       // A scalar that consumed nothing (garbage element like ';') must still
       // advance or the loop below spins forever.
       if (pos == before && pos < text.size()) pos++;

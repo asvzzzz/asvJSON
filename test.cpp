@@ -13431,6 +13431,39 @@ TEST(testProtobufPackedFixed) {
 		ASSERT(j4.fromProtobuf(fit.data(), fit.size(), repSchema));
 		ASSERT_EQ(j4.getRoot()->get("vals")->arr->size(), MAXN);
 	}
+	// Protobuf TEXT parser array DoS: protoTextParseArrayBody pushed every
+	// element without checkArraySize, so "[1,1,...,1]" under the 32 MB input
+	// cap (2 bytes/element) built a 16M-element array - 16x MAX_ARRAY_SIZE.
+	// The same shape via an array-valued field slipped past protoSetField
+	// (it checks the entry count, 1, not the array content).
+	{
+		const size_t MAXN = asvJSONValue::MAX_ARRAY_SIZE;
+		std::string big("[");
+		for (size_t i = 0; i < MAXN + 1; i++) big += "1,";
+		big += "1]";
+		asvJSON j5;
+		ASSERT(!j5.fromProtobufText(big));
+		ASSERT(j5.getLastError().find("array too large") != std::string::npos);
+		std::string fieldBig = "a: [";
+		for (size_t i = 0; i < MAXN + 1; i++) fieldBig += "1,";
+		fieldBig += "1]";
+		asvJSON j6;
+		ASSERT(!j6.fromProtobufText(fieldBig));
+		ASSERT(j6.getLastError().find("array too large") != std::string::npos);
+		// exactly MAX elements still parses (both shapes)
+		std::string fit("[");
+		for (size_t i = 0; i + 1 < MAXN; i++) fit += "1,";
+		fit += "1]";
+		asvJSON j7;
+		ASSERT(j7.fromProtobufText(fit));
+		ASSERT_EQ(j7.getRoot()->arr->size(), MAXN);
+		std::string fieldFit = "a: [";
+		for (size_t i = 0; i + 1 < MAXN; i++) fieldFit += "1,";
+		fieldFit += "1]";
+		asvJSON j8;
+		ASSERT(j8.fromProtobufText(fieldFit));
+		ASSERT_EQ(j8.getRoot()->get("a")->arr->size(), MAXN);
+	}
 }
 
 TEST(testProtobufSchemaLessRoundTrip) {
