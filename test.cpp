@@ -1214,6 +1214,44 @@ TEST(testJSONPointerArrayAppend) {
 	ASSERT_EQ(arr->get(4)->getInt(), 5);
 }
 
+TEST(testSetByPointerDepthGuard) {
+	// A hostile pointer (applyPatch paths come straight from parsed attacker
+	// JSON) used to build an unbounded chain of containers - millions of
+	// levels from a 10 MB path string - which then blew the stack in the
+	// recursive destructor/serializer. setByPointer now caps segments at
+	// MAX_NESTING_DEPTH, the same 48-container ceiling as every parser.
+	{
+		asvJSON j;
+		std::string path;
+		path.reserve(3 * (asvJSONValue::MAX_NESTING_DEPTH + 2));
+		for (int i = 0; i <= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) path += "/a";
+		ASSERT(!j.setByPointer(path, asvJSONValue::makeInt(1)));
+	}
+	// exactly MAX segments still works (value inside the 48th container,
+	// the same shape parse() produces)
+	{
+		asvJSON j;
+		std::string path;
+		for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) path += "/a";
+		ASSERT(j.setByPointer(path, asvJSONValue::makeInt(7)));
+		auto* v = j.getByPointer(path);
+		ASSERT(v != nullptr && v->getInt() == 7);
+	}
+	// applyPatch must reject the deep add (and the document stays alive)
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{\"keep\":1}")));
+		std::string big;
+		big.reserve(200000);
+		for (int i = 0; i < 100000; i++) big += "/a";
+		asvJSON patch;
+		std::string ptxt = std::string("[{\"op\":\"add\",\"path\":\"") + big + "\",\"value\":1}]";
+		ASSERT(patch.parse(ptxt));
+		ASSERT(!doc.applyPatch(patch));
+		ASSERT(doc.getRoot()->hasKey("keep"));
+	}
+}
+
 TEST(testJSONPatchCopyMove) {
 	asvJSON json;
 	json.parse(std::string("{\"a\": 1, \"b\": 2}"));
@@ -38474,6 +38512,7 @@ int main() {
 	std::cout << "\n--- JSON Pointer Escape Tests ---\n";
 	RUN(testJSONPointerEscape);
 	RUN(testJSONPointerArrayAppend);
+	RUN(testSetByPointerDepthGuard);
 	
 	std::cout << "\n--- JSON Patch Extended Tests ---\n";
 	RUN(testJSONPatchCopyMove);
