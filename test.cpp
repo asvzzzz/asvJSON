@@ -13347,6 +13347,52 @@ TEST(testProtobufPackedFixed) {
 		asvJSON json;
 		ASSERT(!json.fromProtobuf(raw, sizeof(raw), schemaJson));
 	}
+	// Element-count DoS. Packed path: the payload byte pre-check already
+	// bounds a single packed field (>= 1 byte per element), so a MAX+1 byte
+	// payload fails with "packed field too large" and a MAX payload fits.
+	// Repeated (non-packed) path: every field appends one scalar to the SAME
+	// array via the merge branch, which had NO element cap - MAX+1 one-byte
+	// fields grew it past MAX_ARRAY_SIZE. It must now reject at the (MAX+1)-th.
+	{
+		const size_t MAXN = asvJSONValue::MAX_ARRAY_SIZE; // 1000000
+		std::string packedSchema = R"({
+			"vals":{"id":1,"type":"int32","repeated":true,"packed":true}
+		})";
+		auto wire = [&](size_t n) {
+			std::vector<uint8_t> b;
+			b.push_back(0x0A); // field 1, wire type 2
+			uint64_t len = n;  // payload length varint (1 byte per element)
+			while (len >= 0x80) { b.push_back((uint8_t)(len & 0x7F) | 0x80); len >>= 7; }
+			b.push_back((uint8_t)len);
+			b.resize(b.size() + n, 0x00); // n one-byte varints, all zero
+			return b;
+		};
+		asvJSON j1;
+		auto over = wire(MAXN + 1);
+		ASSERT(!j1.fromProtobuf(over.data(), over.size(), packedSchema));
+		ASSERT(j1.getLastError().find("packed field too large") != std::string::npos);
+		asvJSON j2;
+		auto fit = wire(MAXN);
+		ASSERT(j2.fromProtobuf(fit.data(), fit.size(), packedSchema));
+		ASSERT_EQ(j2.getRoot()->get("vals")->arr->size(), MAXN);
+	}
+	{
+		const size_t MAXN = asvJSONValue::MAX_ARRAY_SIZE;
+		std::string repSchema = R"({
+			"vals":{"id":1,"type":"int32","repeated":true,"packed":false}
+		})";
+		// n copies of: tag 0x08 (field 1, wire 0) + varint 0x00
+		std::vector<uint8_t> b(2 * (MAXN + 1), 0x00);
+		for (size_t i = 0; i < b.size(); i += 2) b[i] = 0x08;
+		asvJSON j3;
+		ASSERT(!j3.fromProtobuf(b.data(), b.size(), repSchema));
+		ASSERT(j3.getLastError().find("array too large") != std::string::npos);
+		std::vector<uint8_t> fit(2 * MAXN, 0x00);
+		for (size_t i = 0; i < fit.size(); i += 2) fit[i] = 0x08;
+		asvJSON j4;
+		ASSERT(j4.fromProtobuf(fit.data(), fit.size(), repSchema));
+		ASSERT_EQ(j4.getRoot()->get("vals")->arr->size(), MAXN);
+	}
 }
 
 TEST(testProtobufSchemaLessRoundTrip) {
