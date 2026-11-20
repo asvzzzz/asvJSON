@@ -15388,6 +15388,44 @@ TEST(testCsvSingleKeyArrayOfObjects) {
 	}
 }
 
+TEST(testCsvScalarArrayRoot) {
+	// An ARRAY root of non-object values is exported as a single "value"
+	// column, so fromCSV reads it back as an ARRAY of single-key objects. The
+	// values must survive and the formula-injection guard must stay byte-stable
+	// across encode -> decode -> encode (a bare cell that lost its apostrophe
+	// here would re-acquire one and change the output bytes).
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"CSV(["=A1","x,y","q\"q","+S(1)","-z","@c","'=x"])CSV"));
+		std::string csv = j.toCSV();
+		ASSERT_EQ(csv, std::string("value\n'=A1\n\"x,y\"\n\"q\"\"q\"\n'+S(1)\n'-z\n'@c\n\"'=x\"\n"));
+		ASSERT(j2.fromCSV(csv));
+		ASSERT(j2.getRoot()->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(j2.getRoot()->arr->size(), 7U);
+		const char* want[7] = { "=A1", "x,y", "q\"q", "+S(1)", "-z", "@c", "'=x" };
+		for (size_t i = 0; i < 7; i++) {
+			asvJSONValue* row = j2.getRoot()->get(i);
+			ASSERT(row && row->type == asvJSONValue::OBJECT && row->hasKey("value"));
+			ASSERT_EQ(row->get("value")->getString(), std::string(want[i]));
+		}
+		std::string csv2 = j2.toCSV();
+		ASSERT_EQ(csv2, csv);
+		asvJSON j3;
+		ASSERT(j3.fromCSV(csv2));
+		ASSERT_EQ(j3.toCSV(), csv);
+	}
+	// A root array of scalars whose header would collide with a real key name.
+	{
+		asvJSON j, j2;
+		j.parse(std::string_view(R"([1,2,3])"));
+		std::string csv = j.toCSV();
+		ASSERT_EQ(csv, std::string("value\n1\n2\n3\n"));
+		ASSERT(j2.fromCSV(csv));
+		ASSERT_EQ(j2.getRoot()->arr->size(), 3U);
+		ASSERT_EQ(j2.getRoot()->get(1)->get("value")->getInt(), 2);
+	}
+}
+
 TEST(testCsvIntegralDouble) {
 	// A double with an integral value must round-trip as a DOUBLE, not become
 	// an INT through the bare "1"/"100000" literal (to_chars vs %g divergence).
@@ -39077,6 +39115,7 @@ RUN(testCBORFloat16);
 	RUN(testCsvExtras);
 	RUN(testCsvEmptyObjects);
 	RUN(testCsvSingleKeyArrayOfObjects);
+	RUN(testCsvScalarArrayRoot);
 	RUN(testCsvIntegralDouble);
 	RUN(testCsvFlattenCollision);
 	RUN(testCsvHexLiteralIsString);

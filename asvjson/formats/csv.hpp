@@ -27,6 +27,10 @@
 //      an ARRAY of {items: "..."} rows (see testCsvSingleKeyArrayOfObjects);
 //    - a scalar root is a lone headerless data line that fromCSV re-reads as
 //      a header, so it does not round-trip (a scalar export is data-only).
+//    - an ARRAY root of NON-object values is exported as one "value" column,
+//      so it reads back as an ARRAY of single-key objects: ["a","b"] ->
+//      "value\na\nb\n" -> [{"value":"a"},{"value":"b"}]. The values survive,
+//      the wrapper does not (see testCsvScalarArrayRoot).
 //    - an EMPTY OBJECT or ARRAY root produces an empty document (no header, no
 //      rows), so toCSV() returns ""; fromCSV("") rejects it as empty input.
 //      An empty CSV carries no schema, so there is nothing to preserve.
