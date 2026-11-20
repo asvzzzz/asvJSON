@@ -13,10 +13,6 @@
 //   - Comments // /* */ # (already handled by JSON parser)
 // NOTE: unescaped U+000A/U+000D inside strings is accepted (lenient, per json5ToJson)
 // and escaped to \n / \r via escapeControl; spec sec 5.2 forbids them -- use line-continuation
-// Input size limit — symmetric with GOON/TOON's MAX_GOON_INPUT / MAX_TOON_INPUT.
-namespace asvJSONInternal {
-  constexpr size_t MAX_JSON5_INPUT = 10u * 1024u * 1024u;
-} // namespace asvJSONInternal
 // with backslash for actual multi-line strings.
 //
 // Comments (`//`, `/* */`, `#`) round-trip: json5CollectComments walks the
@@ -48,6 +44,11 @@ namespace asvJSONInternal {
 #include "../core.hpp"
 
 namespace asvJSONInternal {
+
+// Input size limit -- symmetric with GOON/TOON's MAX_GOON_INPUT / MAX_TOON_INPUT.
+// (Must live AFTER the include: size_t is not a builtin, and a standalone
+// compile of this header used to fail on strict compilers.)
+constexpr size_t MAX_JSON5_INPUT = 10u * 1024u * 1024u;
 
 inline std::string json5ToJson(std::string_view input) {
   std::string out;
@@ -1087,7 +1088,16 @@ inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, 
 
 inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth, bool pretty) {
   if (!v) { out += "null"; return; }
-  if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
+  // Depth guard counts CONTAINERS and the root container is level 1 (the root
+  // call uses depth 0, children get depth + 1, core parse() checks after
+  // ++parseDepth so ITS root object is level 1 too). Checking `depth` raw let a
+  // programmatically-built 49-container tree serialize fully while parse()
+  // rejects the 49th - toJSON5/fromJSON5 round-trip was broken. Scalars are NOT
+  // checked: core parse() never increments for a scalar, so the leaf of a
+  // 48-container tree must still be emitted (same convention as the fixed TOON
+  // encoder and core serialize()).
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) { out += "null"; return; }
   std::string pad;
   if (pretty) pad = std::string(static_cast<size_t>(depth) * 2, ' ');
   switch (v->type) {

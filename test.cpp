@@ -13528,6 +13528,56 @@ TEST(testToonDepthGuards) {
 	}
 }
 
+TEST(testJSON5DepthRoundTrip) {
+	// Reviewer: json5SerializeVal checked checkNestingDepth(depth) with the root
+	// call at depth 0, so a programmatically-built 49-container tree serialized
+	// FULLY (the depth-48 container passed 48 <= 48) while core parse() rejects
+	// the 49th container - toJSON5 -> fromJSON5 was broken. The guard now
+	// counts containers at level depth+1 (root = level 1, like parse() and
+	// core serialize()) and skips scalars.
+	auto nest = [](int levels, std::unique_ptr<asvJSONValue> leaf) {
+		for (int i = 0; i < levels; i++) {
+			auto o = asvJSONValue::makeObject();
+			o->obj->emplace("a", std::move(leaf));
+			leaf = std::move(o);
+		}
+		return leaf;
+	};
+	// exactly 48 containers (leaf INT sits at depth 48): emitted whole, scalar
+	// included, and re-parses to an identical tree
+	{
+		asvJSON j;
+		j.setRoot(nest(48, asvJSONValue::makeInt(7)));
+		std::string s = j.toJSON5();
+		asvJSON j2;
+		ASSERT(j2.fromJSON5(s));
+		ASSERT_EQ(j2.serialize(), j.serialize());
+	}
+	// 49 containers: the 49th degrades to null, the result parses, and the
+	// re-encode is byte-stable (enc(dec(enc(t))) == enc(t))
+	{
+		asvJSON j;
+		j.setRoot(nest(49, asvJSONValue::makeInt(7)));
+		std::string s = j.toJSON5();
+		asvJSON j2;
+		ASSERT(j2.fromJSON5(s));
+		asvJSON want;
+		want.setRoot(nest(48, asvJSONValue::makeNull()));
+		ASSERT_EQ(j2.serialize(), want.serialize());
+		std::string s2 = j2.toJSON5();
+		ASSERT_EQ(s2, s);
+	}
+	// decoder side: 49 nested arrays reach core parse() and are rejected with
+	// its named depth error (json5ToJson itself is single-pass)
+	{
+		std::string in(49, '[');
+		in += std::string(49, ']');
+		asvJSON j;
+		ASSERT(!j.fromJSON5(in));
+		ASSERT(j.getLastError().find("Maximum nesting depth") != std::string::npos);
+	}
+}
+
 TEST(testProtobufSchemaLessRoundTrip) {
 	// Schema-less wire round-trip must preserve STRING/DOUBLE/message/array types;
 	// the embedded name map now carries per-field type codes so real values stay
@@ -38755,6 +38805,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufStringOverload);
 	RUN(testProtobufPackedFixed);
 	RUN(testToonDepthGuards);
+	RUN(testJSON5DepthRoundTrip);
 	RUN(testProtobufSchemaLessRoundTrip);
 	RUN(testProtobufTextArrayOfObjects);
 	RUN(testProtobufTextArrayRootAndNulls);
