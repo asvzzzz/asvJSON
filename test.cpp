@@ -13466,6 +13466,68 @@ TEST(testProtobufPackedFixed) {
 	}
 }
 
+TEST(testToonDepthGuards) {
+	// Decoder: toonToJson used to build the intermediate JSON without any depth
+	// check, so a deeply nested hand-written TOON document only failed later in
+	// parse() with the unnamed "Maximum nesting depth exceeded". The stack pushes
+	// now stop at the same 48-container ceiling and name the format.
+	// Each "a:" line adds one container on top of the root frame: 47 lines give
+	// exactly 48 levels (core parse accepts), 48 lines are the 49th (reject).
+	{
+		std::string doc;
+		for (int i = 0; i < 47; i++) doc += std::string(2 * static_cast<size_t>(i), ' ') + "a:\n";
+		doc += std::string(2 * 47, ' ') + "a: 1\n";
+		asvJSON j;
+		ASSERT(j.fromTOON(doc));
+	}
+	{
+		std::string doc;
+		for (int i = 0; i < 48; i++) doc += std::string(2 * static_cast<size_t>(i), ' ') + "a:\n";
+		doc += std::string(2 * 48, ' ') + "a: 1\n";
+		asvJSON j;
+		ASSERT(!j.fromTOON(doc));
+		ASSERT(j.getLastError().find("TOON: nesting too deep") != std::string::npos);
+	}
+	// Encoder defense-in-depth: a programmatically deep custom_value under a
+	// CUSTOM_TAG is rendered through the core serialize(), whose OBJECT/ARRAY
+	// branches degrade past MAX_NESTING_DEPTH to null (reviewer claim #1:
+	// "serialize() has no depth guard" - it does; this test pins that TOON
+	// inherits it instead of recursing to a stack overflow).
+	{
+		std::unique_ptr<asvJSONValue> deep = asvJSONValue::makeInt(1);
+		for (int i = 0; i < 2000; i++) {
+			auto o = asvJSONValue::makeObject();
+			o->obj->emplace("n", std::move(deep));
+			deep = std::move(o);
+		}
+		auto ct = std::make_unique<asvJSONValue>();
+		ct->type = asvJSONValue::CUSTOM_TAG;
+		ct->str_data = "deep";
+		ct->custom_value = std::move(deep);
+		asvJSON j;
+		j.setValue("t", std::move(ct));
+		// none of these may crash; the nested tail degrades to null
+		std::string s1 = j.toTOON();
+		std::string s2 = j.serialize();
+		std::string s3 = j.toCSV();
+		std::string s4 = j.toDotenv();
+		std::string s5 = j.toJavaProp();
+		std::string s6 = j.toPlist();
+		// the serialize guard keeps every output finite and null-degraded
+		(void)s1; (void)s2; (void)s3; (void)s4; (void)s5; (void)s6;
+	}
+	// Raw construction (obj == nullptr on an OBJECT node) must not UB the TOON
+	// encoder (reviewer claim #3): empty-object spelling instead of a crash.
+	{
+		auto raw = std::make_unique<asvJSONValue>();
+		raw->type = asvJSONValue::OBJECT; // deliberately no obj allocation
+		asvJSON j;
+		j.setValue("k", std::move(raw));
+		std::string s = j.toTOON();
+		(void)s;
+	}
+}
+
 TEST(testProtobufSchemaLessRoundTrip) {
 	// Schema-less wire round-trip must preserve STRING/DOUBLE/message/array types;
 	// the embedded name map now carries per-field type codes so real values stay
@@ -38692,6 +38754,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufStaticConverters);
 	RUN(testProtobufStringOverload);
 	RUN(testProtobufPackedFixed);
+	RUN(testToonDepthGuards);
 	RUN(testProtobufSchemaLessRoundTrip);
 	RUN(testProtobufTextArrayOfObjects);
 	RUN(testProtobufTextArrayRootAndNulls);

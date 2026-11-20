@@ -283,8 +283,9 @@ inline void toonNestedArrayItem(const asvJSONValue* v, std::string& out, int ind
     if (!e) continue;
     if (e->type == asvJSONValue::OBJECT) {
       out += cpad + "-\n";
-      for (const auto& [k, sub] : *(e->obj))
-        valToToon(sub.get(), out, indent + 2, k, depth + 1);
+      if (e->obj)
+        for (const auto& [k, sub] : *(e->obj))
+          valToToon(sub.get(), out, indent + 2, k, depth + 1);
     } else if (e->type == asvJSONValue::ARRAY) {
       toonNestedArrayItem(e, out, indent + 1, depth + 1);
     } else {
@@ -318,7 +319,10 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
   const bool isRoot = key.empty() && depth == 0;
   std::string pad(static_cast<size_t>(indent) * 2, ' ');
   if (v->type == asvJSONValue::OBJECT) {
-    if (v->obj->empty()) {
+    // Defense in depth: the factories always allocate obj, but a raw-constructed
+    // OBJECT node (type set by hand) would UB-dereference it here. Treat a null
+    // obj as empty - the empty-object spelling is always re-parseable.
+    if (!v->obj || v->obj->empty()) {
       if (!isRoot) out += pad + toonQuoteVal(key) + ": {}\n";
       else out += pad + "{}\n";
       return;
@@ -366,8 +370,9 @@ inline void valToToon(const asvJSONValue* v, std::string& out, int indent, const
       if (!child) continue;
       if (child->type == asvJSONValue::OBJECT) {
         out += cpad + "-\n";
-        for (const auto& [k, sub] : *(child->obj))
-          valToToon(sub.get(), out, indent + 2, k, depth + 1);
+        if (child->obj)
+          for (const auto& [k, sub] : *(child->obj))
+            valToToon(sub.get(), out, indent + 2, k, depth + 1);
       } else if (child->type == asvJSONValue::ARRAY) {
         toonNestedArrayItem(child, out, indent + 1, depth + 1);
       } else {
@@ -749,6 +754,8 @@ inline std::string toonToJson(std::string_view input) {
               if (!stack.empty()) stack.back().first = false;
               if (!keyRaw.empty()) out += '"' + toonDecodeKey(keyRaw) + "\":";
               out += '[';
+              if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+                throw asvJSONError("TOON: nesting too deep");
               stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
               curFrame = &stack.back();   // reindex after push (vector may reallocate)
             }
@@ -872,6 +879,8 @@ inline std::string toonToJson(std::string_view input) {
         } else {
           // non-primitive list-form opener: leave frame open. Its deeper "- value"
           // items are validated against this declared length when the frame closes.
+          if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+            throw asvJSONError("TOON: nesting too deep");
           stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
           curFrame = &stack.back();   // reindex after push (vector may reallocate)
           stack.back().declLen = arrLen;
@@ -887,6 +896,8 @@ inline std::string toonToJson(std::string_view input) {
       curFrame->first = false;
       if (curFrame->type == 'A') curFrame->itemCount++;   // one object element of the enclosing array
       out += '{';
+      if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+        throw asvJSONError("TOON: nesting too deep");
       stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
       curFrame = &stack.back();   // reindex after push (vector may reallocate)
       continue;
@@ -916,10 +927,14 @@ inline std::string toonToJson(std::string_view input) {
 
       if (valPart.empty()) {
         out += '"' + keyStr + "\":{";
+        if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+          throw asvJSONError("TOON: nesting too deep");
         stack.push_back({'O', true, indent, true, false, 0, 0, {}, -1});
         curFrame = &stack.back();   // reindex after push (vector may reallocate)
       } else if (valPart == "[]") {
         out += '"' + keyStr + "\":[";
+        if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+          throw asvJSONError("TOON: nesting too deep");
         stack.push_back({'A', true, indent, true, false, 0, 0, {}, -1});
         curFrame = &stack.back();   // reindex after push (vector may reallocate)
       } else if (valPart == "{}") {
