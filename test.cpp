@@ -33822,6 +33822,155 @@ TEST(testJsonStreamStrict) {
 	}
 }
 
+// SAX number-literal parity: an integer that overflows int64 AND double must be
+// handled the same way by JsonSaxParser and JsonStreamParser (previously the
+// stream parser rejected ERANGE while the stateless one emitted +/-inf when
+// allowNaNInfinity was set, so the same document parsed one way by each parser).
+// Also pins: the partial-BOM finish() message, and the container caps inside
+// JsonSaxToDom (a hand-driven handler cannot grow containers past the caps).
+TEST(testJsonSaxNumberParity) {
+	std::string huge(400, '9');
+	std::string doc = "[" + huge + "]";
+
+	struct Collector : JsonSaxHandler {
+		std::vector<double> doubles;
+		std::vector<int64_t> ints;
+		std::string err;
+		size_t endArrays = 0;
+		void onIntegerValue(int64_t v) override { ints.push_back(v); }
+		void onDoubleValue(double v) override { doubles.push_back(v); }
+		void onEndArray() override { endArrays++; }
+		void onError(std::string_view m) override { err = std::string(m); }
+	};
+
+	// allowNaNInfinity = true: BOTH parsers must emit +inf and complete.
+	{
+		Collector c1;
+		JsonSaxParser p1;
+		p1.allowNaNInfinity = true;
+		ASSERT(p1.parse(doc, c1));
+		ASSERT_EQ(c1.doubles.size(), 1u);
+		ASSERT(std::isinf(c1.doubles[0]) && c1.doubles[0] > 0);
+		ASSERT_EQ(c1.endArrays, 1u);
+		ASSERT_EQ(c1.err, std::string(""));
+
+		Collector c2;
+		JsonStreamParser p2(c2);
+		p2.allowNaNInfinity = true;
+		ASSERT(p2.feed(doc));
+		ASSERT(p2.finish());
+		ASSERT_EQ(c2.doubles.size(), 1u);
+		ASSERT(std::isinf(c2.doubles[0]) && c2.doubles[0] > 0);
+		ASSERT_EQ(c2.endArrays, 1u);
+		ASSERT_EQ(c2.err, std::string(""));
+	}
+
+	// allowNaNInfinity = false: BOTH parsers must reject with the same message.
+	{
+		Collector c1;
+		JsonSaxParser p1;
+		ASSERT(!p1.parse(doc, c1));
+		ASSERT_EQ(c1.err, std::string("NaN or Infinity not allowed"));
+		ASSERT_EQ(c1.doubles.size(), 0u);
+
+		Collector c2;
+		JsonStreamParser p2(c2);
+		// The number completes at ']', so the rejection lands in feed().
+		ASSERT(!p2.feed(doc));
+		ASSERT_EQ(p2.getLastError(), std::string("NaN or Infinity not allowed"));
+		ASSERT_EQ(c2.doubles.size(), 0u);
+	}
+
+	// A 20-digit integer overflows int64 but is FINITE as double: not a
+	// divergence case, both parsers emit the same finite double.
+	{
+		std::string doc2 = "[12345678901234567890]";
+		Collector c1, c2;
+		JsonSaxParser p1;
+		ASSERT(p1.parse(doc2, c1));
+		JsonStreamParser p2(c2);
+		ASSERT(p2.feed(doc2));
+		ASSERT(p2.finish());
+		ASSERT_EQ(c1.doubles.size(), 1u);
+		ASSERT_EQ(c2.doubles.size(), 1u);
+		ASSERT(!std::isinf(c1.doubles[0]) && !std::isinf(c2.doubles[0]));
+		ASSERT_EQ(c1.doubles[0], c2.doubles[0]);
+	}
+
+	// The DOM parser keeps the same literal as an exact raw-number STRING
+	// (documented SAX/DOM divergence, pinned so a future change is visible).
+	{
+		asvJSON j;
+		ASSERT(j.parse(doc));
+		const asvJSONValue* v = j.getRoot()->get(0);
+		ASSERT(v && v->type == asvJSONValue::STRING);
+		ASSERT_EQ(v->str_data, huge);
+	}
+
+	// finish() after a partial BOM: the input was not empty, so "Incomplete input".
+	{
+		Collector c;
+		JsonStreamParser p(c);
+		ASSERT(p.feed(std::string_view("\xEF\xBB", 2)));
+		ASSERT(!p.finish());
+		ASSERT_EQ(p.getLastError(), std::string("Incomplete input"));
+	}
+	// A whitespace-only stream is still "Empty input".
+	{
+		Collector c;
+		JsonStreamParser p(c);
+		ASSERT(p.feed("   "));
+		ASSERT(!p.finish());
+		ASSERT_EQ(p.getLastError(), std::string("Empty input"));
+	}
+	// A complete BOM followed by a value still parses.
+	{
+		Collector c;
+		JsonStreamParser p(c);
+		ASSERT(p.feed(std::string_view("\xEF\xBB\xBF", 3)));
+		ASSERT(p.feed("[1]"));
+		ASSERT(p.finish());
+		ASSERT_EQ(c.ints.size(), 1u);
+	}
+
+	// JsonSaxToDom enforces the array cap even for a hand-driven event stream
+	// (getError() stays empty until a fatal error is recorded).
+	{
+		JsonSaxToDom dom;
+		dom.onStartArray();
+		for (size_t i = 0; i <= asvJSONValue::MAX_ARRAY_SIZE + 10 && dom.getError().empty(); i++) {
+			dom.onIntegerValue(1);
+		}
+		ASSERT_EQ(dom.getError(), std::string("Array too large"));
+		ASSERT(dom.getResult() == nullptr);
+	}
+	// ... and the object cap.
+	{
+		JsonSaxToDom dom;
+		dom.onStartObject();
+		for (size_t i = 0; i <= asvJSONValue::MAX_OBJECT_SIZE + 10 && dom.getError().empty(); i++) {
+			dom.onKey("k" + std::to_string(i));
+			dom.onIntegerValue(1);
+		}
+		ASSERT_EQ(dom.getError(), std::string("Object too large"));
+		ASSERT(dom.getResult() == nullptr);
+	}
+	// Re-assigning the same key does not grow the map, so it never trips the cap.
+	{
+		JsonSaxToDom dom;
+		dom.onStartObject();
+		for (int i = 0; i < 5000; i++) {
+			dom.onKey("same");
+			dom.onIntegerValue(i);
+		}
+		dom.onEndObject();
+		ASSERT(dom.getError().empty());
+		auto root = dom.getResult();
+		ASSERT(root && root->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(root->obj->size(), 1u);
+	}
+}
+
 TEST(testSaxToDom) {
 	// -- basic object --
 	{
@@ -39092,6 +39241,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testSaxStreamAuditFixes);
 	RUN(testJsonSaxStrict);
 	RUN(testJsonStreamStrict);
+	RUN(testJsonSaxNumberParity);
 	RUN(testSaxToDom);
 
 	std::cout << "\n--- JSON Schema Validation Tests ---\n";

@@ -6,6 +6,12 @@
 //   - SAX-to-DOM conversion adapter (JsonSaxToDom)
 //   - Comments (//, /* */, #), NaN/Infinity, same options as DOM parser
 //   - Resource limits: MAX_NESTING_DEPTH, MAX_STRING_LEN, MAX_ARRAY_SIZE, MAX_OBJECT_SIZE
+// Number note: an integer literal that does not fit int64 is emitted through
+// onDoubleValue (SAX has no raw-number event, unlike the DOM parser, which keeps
+// such a literal as a STRING with raw_number). If the magnitude also overflows
+// double (a 400-digit integer, or 1e999), the value is +/-inf and is accepted
+// only when allowNaNInfinity is set; otherwise it is rejected. Both parsers
+// (JsonSaxParser and JsonStreamParser) behave identically here.
 
 #include "../core.hpp"
 #include <string>
@@ -603,9 +609,13 @@ public:
       // bytes never all arrived ('N', 'I', '-', '-I', a lone '/' awaiting its
       // comment partner). At EOF that token can never complete -- report
       // "Incomplete input"; saying "Empty input" would claim the caller sent
-      // nothing at all. needMore_ false here means only blanks/comments were
+      // nothing at all. Same for bomPending_ WITH a non-empty buffer: some BOM
+      // prefix bytes arrived (feed("\xEF\xBB")) but the sequence never
+      // completed, so the input was not empty either. (bomPending_ is true from
+      // construction, so the buffer check is what keeps a never-fed parser "Empty".)
+      // needMore_ false here means only blanks/comments were
       // seen (or feed() was never called), which really is empty.
-      if (needMore_) { setError("Incomplete input"); return false; }
+      if (needMore_ || (bomPending_ && !buffer_.empty())) { setError("Incomplete input"); return false; }
       setError("Empty input"); return false;
     }
 
@@ -1084,6 +1094,10 @@ private:
         if (pos_ + 1 >= buffer_.size()) {
           // Backslash at end of buffer -- capture up to and including it; the
           // escaped target arrives in a later chunk and is consumed via strEscape_.
+          if (tokenBuffer_.size() + (pos_ - tokenStart_ + 1) > asvJSONValue::MAX_STRING_LEN) {
+            setError("String too long");
+            return false;
+          }
           tokenBuffer_.append(buffer_, tokenStart_, pos_ - tokenStart_ + 1);
           pos_++;
           tokenStart_ = pos_;
@@ -1098,14 +1112,17 @@ private:
         pos_++;
       }
     }
-    // End of buffer without finding closing quote -- save partial data
-    tokenBuffer_.append(buffer_, tokenStart_, buffer_.size() - tokenStart_);
-    tokenStart_ = buffer_.size();
-    pos_ = buffer_.size();
-    if (tokenBuffer_.size() > asvJSONValue::MAX_STRING_LEN) {
+    // End of buffer without finding closing quote -- save partial data.
+    // Bound BEFORE the append (the same order processNumber uses), so a 100 MB
+    // chunk cannot grow tokenBuffer_ past the 10 MB string cap first and get
+    // rejected afterwards.
+    if (tokenBuffer_.size() + (buffer_.size() - tokenStart_) > asvJSONValue::MAX_STRING_LEN) {
       setError("String too long");
       return false;
     }
+    tokenBuffer_.append(buffer_, tokenStart_, buffer_.size() - tokenStart_);
+    tokenStart_ = buffer_.size();
+    pos_ = buffer_.size();
     return true; // need more data
   }
 
@@ -1231,11 +1248,19 @@ private:
         // int64 overflow: same documented divergence as the stateless parser --
         // the DOM parser keeps the literal as a raw_number string, SAX emits it
         // as a double (a JSON number either way, with type conversion).
+        // No errno==ERANGE short-circuit here: a literal too big for double too
+        // (a 400-digit integer) sets ERANGE and yields +/-inf, which the
+        // allowNaNInfinity gate below accepts -- exactly what the stateless
+        // parser and this parser's own DOUBLE path do for 1e999. Rejecting it
+        // only on the integer path made the two SAX parsers disagree on the
+        // same document. ERANGE on an integer literal can only mean overflow
+        // (there is no fraction or exponent to underflow), so the isinf gate
+        // covers it.
         tokenBuffer_.clear();
         errno = 0;
         char* end = nullptr;
         double d = std::strtod(numStr.c_str(), &end);
-        if (errno == ERANGE || end != numStr.c_str() + numStr.size()) {
+        if (end != numStr.c_str() + numStr.size()) {
           setError("Invalid number: out of range");
           return false;
         }
@@ -1480,10 +1505,26 @@ private:
   bool addToCurrent(std::unique_ptr<asvJSONValue> val) {
     asvJSONValue* parent = stack_.back();
     if (parent->type == asvJSONValue::OBJECT && parent->obj) {
+      // The bundled parsers cap container sizes themselves (cntObject_ / f.count),
+      // but JsonSaxToDom is usable with a hand-driven handler too, so the
+      // library's object cap is enforced here as well -- only for a NEW key,
+      // because re-assigning an existing one does not grow the map (same rule
+      // the DOM parser follows).
+      if (parent->obj->find(currentKey_) == parent->obj->end() &&
+          !asvJSONValue::checkObjectSize(parent->obj->size() + 1)) {
+        errorMsg_ = "Object too large";
+        fatal_ = true;
+        return false;
+      }
       (*parent->obj)[currentKey_] = std::move(val);
       return true;
     }
     if (parent->type == asvJSONValue::ARRAY && parent->arr) {
+      if (!asvJSONValue::checkArraySize(parent->arr->size() + 1)) {
+        errorMsg_ = "Array too large";
+        fatal_ = true;
+        return false;
+      }
       parent->arr->push_back(std::move(val));
       return true;
     }
