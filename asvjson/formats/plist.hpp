@@ -20,9 +20,13 @@
 // DATETIME, <data> -> BINARY, <dict> (alternating <key>/value) -> OBJECT and
 // <array> -> ARRAY. XML comments and the optional XML declaration/DOCTYPE are
 // accepted on parse and dropped on output. Tag attributes are accepted and
-// ignored (the standard <plist version="1.0"> and stray attributes alike), and a
+// ignored (the standard <plist version="1.0"> and stray attributes alike);
+// the attribute run is scanned quote-aware, so a '>' inside an attribute
+// value (legal in XML 1.0) does not end the tag. A
 // <![CDATA[...]]> section inside a text element is read as its raw content
-// (entities inside the section stay literal).
+// (entities inside the section stay literal). The reader is deliberately
+// lenient about markup inside text content: a nested tag such as
+// <string>a<string>b</string> keeps its literal text instead of failing.
 //
 // plist has no null type: null values are written as an empty <string/> and
 // read back as an empty string (a documented lossy round-trip). An empty
@@ -46,7 +50,11 @@
 // <date> keeps the value's stored timezone offset when one is present. Apple's
 // plist spec wants UTC with a trailing Z, so documents destined for Apple
 // tooling should use offset-less datetimes; the offset form parses back, so
-// plist round-trips are lossless. NaN/Infinity write as <real>nan</real> /
+// plist round-trips are lossless. A DATETIME whose timestamp gmtimeSafe cannot
+// convert renders as the literal text "null"; that is NOT a valid <date>, so it
+// is written as <string>null</string> and re-reads as STRING (the INI/TOML/CSV
+// convention) instead of producing a document fromPlist rejects outright.
+// NaN/Infinity write as <real>nan</real> /
 // <real>inf</real> and parse back through strtod -- a non-standard extension
 // Apple readers will not understand, mirroring the JSON layer's
 // allowNaNInfinity convention.
@@ -55,7 +63,11 @@
 // parseDict/parseArray (same depth) -> parseValue(depth + 1). That matches
 // MAX_NESTING_DEPTH exactly, so every tree the encoders accept can be parsed
 // back (the old two-steps-per-level accounting halved the effective limit and
-// rejected a legal 40-deep document that toPlist() had just written).
+// rejected a legal 40-deep document that toPlist() had just written). On the
+// encoder side the level counter is threaded separately from the output indent:
+// a CUSTOM_TAG has no element of its own (its payload rides at the caller's
+// indent) but still counts as one level, so a chain of nested custom_value
+// nodes is bounded too (an unbounded recursion overflowed the stack).
 
 #include "../core.hpp"
 
@@ -175,8 +187,14 @@ inline bool plistLooksLike(std::string_view s) {
 }
 
 // Write a single value element (indent already applied except for the dict
-// <key> lines, which are emitted by the OBJECT case directly).
-inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
+// <key> lines, which are emitted by the OBJECT case directly). `depth` counts
+// nesting LEVELS, which is not always the same as `indent`: a CUSTOM_TAG has no
+// element of its own, so its payload is written at the caller's indent, yet the
+// tag still occupies one level (core serialize()/appendJsonToken and the
+// MessagePack/CBOR encoders count it the same way). Keeping the two separate is
+// what bounds the recursion - sharing one counter let a chain of nested
+// custom_value nodes recurse without limit and overflow the stack.
+inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent, int depth) {
   using T = asvJSONValue::Type;
   const std::string pad(static_cast<size_t>(indent * 2), ' ');
   switch (v->type) {
@@ -221,7 +239,13 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
     case T::DATETIME: {
       std::string s;
       fmtDateTimeVal(v->timestamp, v->datetime_ms, s, v->tz_offset_min);
-      out += pad + "<date>" + xmlEscapeContent(s) + "</date>\n";
+      // A timestamp gmtimeSafe cannot convert renders as the literal text
+      // "null". Emitted as <date>null</date> the document could not be read
+      // back at all ("plist: invalid <date>"), so write it as a <string>: the
+      // text survives and re-reads as STRING - the same convention INI/TOML/
+      // CSV/dotenv use for this degenerate case.
+      if (s == "null") out += pad + "<string>null</string>\n";
+      else out += pad + "<date>" + xmlEscapeContent(s) + "</date>\n";
       break;
     }
     case T::BINARY:
@@ -247,30 +271,43 @@ inline void plistWriteVal(const asvJSONValue* v, std::string& out, int indent) {
       break;
     }
     case T::CUSTOM_TAG:
-      if (v->custom_value) plistWriteVal(v->custom_value.get(), out, indent);
+      // plist has no tag element: the payload is written in place (same indent),
+      // but the tag still consumes a nesting level. Without this check the
+      // recursion followed custom_value forever - a 2000-deep chain overflowed
+      // the stack in toPlist() (same class as the toCpp()/JSON5 encoder guards).
+      if (!asvJSONValue::checkNestingDepth(depth + 1)) {
+        out += pad + "<string/>\n"; // degrade to null at limit
+        break;
+      }
+      if (v->custom_value) plistWriteVal(v->custom_value.get(), out, indent, depth + 1);
       else out += pad + "<string/>\n";
       break;
     case T::ARRAY: {
-      // Core parse() uses ++parseDepth before check (1-based), encoder indent is
-      // 0-based. child indent = indent + 1, so check indent + 1 to match.
-      if (!asvJSONValue::checkNestingDepth(indent + 1)) {
+      // Core parse() uses ++parseDepth before check (1-based), the encoder level
+      // counter is 0-based and increments per container, so the child check is
+      // depth + 1. For dict/array depth and indent advance together, so the
+      // emitted-container limit (48) is unchanged by threading depth.
+      if (!asvJSONValue::checkNestingDepth(depth + 1)) {
         out += pad + "<string/>\n"; // degrade to null at limit
         break;
       }
       out += pad + "<array>\n";
-      for (const auto& item : *v->arr) plistWriteVal(item.get(), out, indent + 1);
+      // `obj`/`arr` are guaranteed non-null by the factories; the guard is
+      // defense in depth for a hand-built node (same convention as the TOON
+      // and S-expression encoders) and renders it as the empty container.
+      if (v->arr) for (const auto& item : *v->arr) plistWriteVal(item.get(), out, indent + 1, depth + 1);
       out += pad + "</array>\n";
       break;
     }
     case T::OBJECT: {
-      if (!asvJSONValue::checkNestingDepth(indent + 1)) {
+      if (!asvJSONValue::checkNestingDepth(depth + 1)) {
         out += pad + "<string/>\n"; // degrade to null at limit
         break;
       }
       out += pad + "<dict>\n";
-      for (const auto& [k, val] : *v->obj) {
+      if (v->obj) for (const auto& [k, val] : *v->obj) {
         out += pad + "  <key>" + xmlEscapeContent(k) + "</key>\n";
-        plistWriteVal(val.get(), out, indent + 1);
+        plistWriteVal(val.get(), out, indent + 1, depth + 1);
       }
       out += pad + "</dict>\n";
       break;
@@ -284,7 +321,7 @@ inline void asvJSONValue::toPlist(std::string& out) const {
   out += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
   out += "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
   out += "<plist version=\"1.0\">\n";
-  plistWriteVal(this, out, 0);
+  plistWriteVal(this, out, 0, 0);
   out += "</plist>\n";
 }
 
@@ -324,7 +361,12 @@ struct PlistReader {
   }
 
   // At '<': read the tag name and optional attributes, return {name,
-  // selfClosing}; pos is advanced past '>' (or '/>').
+  // selfClosing}; pos is advanced past '>' (or '/>'). The attribute run is
+  // scanned QUOTE-AWARE: '>' is legal inside an XML attribute VALUE
+  // (XML 1.0 s2.3 - only '<' and '&' must be escaped there), so
+  // <plist version="1.0" note="a>b"> must not end the tag at the '>' inside
+  // the quotes (the old plain find('>') left the tail "b\">" as content and
+  // the parse died with "expected '<'").
   std::pair<std::string, bool> openTag() {
     if (atEnd() || s[pos] != '<') fail("expected '<'");
     size_t p = pos + 1;
@@ -332,8 +374,16 @@ struct PlistReader {
     if (p == pos + 1) fail("empty tag name");
     std::string name(s.data() + pos + 1, p - pos - 1);
     size_t q = p;
-    while (q < s.size() && s[q] != '>') q++;
-    if (q >= s.size()) fail("unterminated tag <" + name + ">");
+    char quote = 0;
+    while (q < s.size()) {
+      char c = s[q];
+      if (quote) { if (c == quote) quote = 0; }
+      else if (c == '"' || c == '\'') quote = c;
+      else if (c == '>') break;
+      q++;
+    }
+    if (q >= s.size()) fail(quote ? "unterminated attribute quote in tag <" + name + ">"
+                                  : "unterminated tag <" + name + ">");
     bool selfClose = false;
     size_t check = q;
     while (check > p && wsChar(s[check - 1])) check--;

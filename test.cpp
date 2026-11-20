@@ -26581,6 +26581,155 @@ TEST(testPlistReviewFixes) {
   }
 }
 
+TEST(testPlistSecurityFixes) {
+  // 1. A DATETIME gmtimeSafe cannot convert renders as the literal text
+  //    "null", which is NOT a valid <date> -- the encoder used to emit
+  //    <date>null</date> and fromPlist then rejected the WHOLE document
+  //    ("plist: invalid <date>"). It now writes <string>null</string>: the
+  //    document stays readable and the value degrades to STRING, the same
+  //    convention INI/TOML/CSV use for this degenerate case.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("bad", asvJSONValue::makeDateTime(0x1FFFFFFFFFFFFFFFLL, 7, 0));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<date>null</date>") == std::string::npos);
+    ASSERT(out.find("<string>null</string>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    auto* v = k.getRoot()->get("bad");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(v->str_data, std::string("null"));
+  }
+  //    A readable DATETIME still rides <date> and keeps ms + tz offset.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{}")));
+    j.getRoot()->obj->emplace("ok", asvJSONValue::makeDateTime(0, 123, 300));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<date>1970-01-01T05:00:00.123+05:00</date>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    auto* v = k.getRoot()->get("ok");
+    ASSERT(v && v->type == asvJSONValue::DATETIME);
+    ASSERT_EQ(v->datetime_ms, 123);
+    ASSERT_EQ(v->tz_offset_min, 300);
+  }
+  // 2. CUSTOM_TAG depth guard. A CUSTOM_TAG emits no element of its own (the
+  //    payload rides at the caller's indent), so the old encoder shared its
+  //    counter with the indent and never checked the tag at all: a chain of
+  //    nested custom_value nodes recursed without limit and overflowed the
+  //    stack in toPlist() (exit code 0xC00000FD). A 2000-deep chain must
+  //    encode (degrading past MAX_NESTING_DEPTH), not crash.
+  auto customChain = [](int n) {
+    auto v = asvJSONValue::makeString("leaf");
+    for (int i = 0; i < n; i++) {
+      auto c = std::make_unique<asvJSONValue>();
+      c->type = asvJSONValue::CUSTOM_TAG;
+      c->str_data = "t";
+      c->custom_value = std::move(v);
+      v = std::move(c);
+    }
+    return v;
+  };
+  {
+    asvJSON j;
+    j.setRoot(customChain(2000));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<string>leaf</string>") == std::string::npos); // payload past the cap is gone
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    ASSERT(k.getRoot()->type == asvJSONValue::STRING);
+    ASSERT(k.getRoot()->str_data.empty()); // degraded to the null sentinel
+  }
+  //    Boundary: a 48-deep chain is fully emitted and stays readable (the tag
+  //    counts as one level, matching core appendJsonToken's depth + 1 for
+  //    CUSTOM_TAG); the 49th level degrades to the empty-<string> sentinel.
+  {
+    asvJSON j;
+    j.setRoot(customChain(48));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<string>leaf</string>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    ASSERT(k.getRoot()->type == asvJSONValue::STRING);
+    ASSERT_EQ(k.getRoot()->str_data, std::string("leaf"));
+  }
+  {
+    asvJSON j;
+    j.setRoot(customChain(49));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<string>leaf</string>") == std::string::npos);
+    ASSERT(out.find("<string/>") != std::string::npos);
+  }
+  //    Containers still round-trip at exactly MAX levels and degrade at MAX+1
+  //    (the guard moved from `indent` to a threaded `depth` counter - for
+  //    dict/array the two stay in lockstep, so the boundary must not move).
+  auto wrap = [](int n) {
+    auto v = asvJSONValue::makeString("leaf");
+    for (int i = 0; i < n; i++) {
+      auto o = asvJSONValue::makeObject();
+      o->obj->emplace("a", std::move(v));
+      v = std::move(o);
+    }
+    return v;
+  };
+  {
+    asvJSON j;
+    j.setRoot(wrap(48));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<string>leaf</string>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromPlist(out));
+    asvJSONValue* p = k.getRoot();
+    for (int i = 0; i < 48; i++) { p = p->get("a"); ASSERT(p != nullptr); }
+    ASSERT(p->type == asvJSONValue::STRING);
+    ASSERT_EQ(p->str_data, std::string("leaf"));
+  }
+  {
+    asvJSON j;
+    j.setRoot(wrap(49));
+    std::string out = j.toPlist();
+    ASSERT(out.find("<string>leaf</string>") == std::string::npos);
+  }
+  // 3. Contract reset on a failed parse (root/lastError/dirty_ must not keep
+  //    stale state from the previous document).
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":1}")));
+    ASSERT(!j.fromPlist(std::string("<plist><dict><key>a</key></dict></plist>")));
+    ASSERT(j.getRoot() == nullptr);
+    ASSERT(!j.getLastError().empty());
+    ASSERT(j.fromPlist(std::string("<plist><integer>7</integer></plist>")));
+    ASSERT(j.getLastError().empty());
+    ASSERT_EQ(j.getRoot()->getInt(), 7);
+  }
+  // 4. '>' is legal inside an XML attribute VALUE (XML 1.0 s2.3). The tag
+  //    scanner used to stop at the FIRST '>' it saw, so a document with
+  //    note="a>b" was rejected outright ("expected '<'") even though the XML
+  //    parser accepts this form. Attributes stay accepted-and-ignored.
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist><dict a=\"x>y\"><key>k</key>"
+                                   "<integer>1</integer></dict></plist>")));
+    ASSERT_EQ(j.getRoot()->get("k")->getInt(), 1);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromPlist(std::string("<plist version=\"1.0\" x='a>b &lt;c'>"
+                                   "<string>s</string></plist>")));
+    ASSERT_EQ(j.getRoot()->str_data, std::string("s"));
+  }
+  //    An attribute quote that is never closed must still be an error, not a
+  //    silently truncated tag.
+  {
+    asvJSON j;
+    ASSERT(!j.fromPlist(std::string("<plist><dict a=\"unclosed><key>k</key>"
+                                    "<integer>1</integer></dict></plist>")));
+    ASSERT(j.getLastError().find("unterminated attribute quote") != std::string::npos);
+  }
+}
+
 TEST(testFromBencode) {
   {
     asvJSON j;
@@ -39270,6 +39419,7 @@ RUN(testCppReviewFixes);
 RUN(testPlistAuditRegressions);
 	RUN(testPlistFromAny);
 	RUN(testPlistReviewFixes);
+	RUN(testPlistSecurityFixes);
 
 	std::cout << "\n--- Bencode Serialization Tests ---\n";
 	RUN(testFromBencode);
