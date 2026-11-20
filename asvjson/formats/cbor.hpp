@@ -40,10 +40,13 @@
 //     every other serializer in the library emits it as-is. Use BINARY (major
 //     type 2, deliberately unchecked) for arbitrary byte payloads.
 //
-// NaN / Infinity are encoded natively via float16 (0xFA), float32 (0xF9), and
-// float64 (0xFB) - no allowNaNInfinity flag is needed or used; the encoder
+// NaN / Infinity are encoded natively - the encoder writes the raw bit pattern
+// as float32 (0xFA) for an is_float32 value and float64 (0xFB) otherwise (it has
+// no float16 form), and the decoder accepts all three IEEE forms including
+// float16 (0xF9). No allowNaNInfinity flag is needed or used: the encoder
 // always emits them, and the decoder always accepts them. This matches CBOR's
-// native capability (RFC 8949 sec 3.4.3).
+// native capability (RFC 8949 sec 3.4.3). Half floats decode to DOUBLE, so a
+// decode -> encode cycle widens 0xF9 to 0xFB (value-preserving).
 //
 // Container sizes (ARRAY/OBJECT) are enforced on encode against MAX_ARRAY_SIZE
 // / MAX_OBJECT_SIZE; an oversized programmatic tree is rejected at its own

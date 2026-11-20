@@ -4296,17 +4296,92 @@ TEST(testCBORIndefiniteMap) {
 }
 
 TEST(testCBORFloat16) {
-	// Build CBOR with half-precision float: 0xF9 0x3C 0x00 = 1.0
-	std::vector<uint8_t> data;
-	data.push_back(0xF9);
-	data.push_back(0x3C);
-	data.push_back(0x00);
-
-	asvJSON json;
-	ASSERT(json.fromCBOR(data.data(), data.size()));
-	auto* v = json.getRoot();
-	ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
-	ASSERT_EQ(v->dbl, 1.0);
+	// Half-precision (0xF9) decode: every binary16 class, not just 1.0.
+	// The subnormal scale (mant * 2^-24), the first normal (2^-14), the
+	// largest normal (65504) and the exponent-all-ones form (0x7C00 is
+	// INFINITY here, while 0x7C00 in float32 is an ordinary 1.175e-38) are
+	// the classic off-by-one traps of a hand-written binary16 decoder.
+	struct { uint8_t hi, lo; double want; } cases[] = {
+		{ 0x3C, 0x00, 1.0 },
+		{ 0x3E, 0x00, 1.5 },
+		{ 0xC0, 0x00, -2.0 },
+		{ 0x54, 0x00, 64.0 },
+		{ 0x00, 0x01, 0.0 },                        // smallest subnormal = 2^-24 (checked below)
+		{ 0x03, 0xFF, 0.0 },                        // largest subnormal  = 1023 * 2^-24
+		{ 0x04, 0x00, 0.0 },                        // smallest normal    = 2^-14
+		{ 0x7B, 0xFF, 65504.0 },                    // largest normal
+		{ 0x00, 0x00, 0.0 },
+	};
+	// The subnormal/first-normal rows are written with ldexp so the expected
+	// value is the exact dyadic number, not a rounded decimal literal.
+	const double wantSub1 = std::ldexp(1.0, -24);
+	const double wantSubMax = std::ldexp(1023.0, -24);
+	const double wantNorm1 = std::ldexp(1.0, -14);
+	for (auto& c : cases) {
+		double want = c.want;
+		if (c.hi == 0x00 && c.lo == 0x01) want = wantSub1;
+		else if (c.hi == 0x03 && c.lo == 0xFF) want = wantSubMax;
+		else if (c.hi == 0x04 && c.lo == 0x00) want = wantNorm1;
+		uint8_t data[] = { 0xF9, c.hi, c.lo };
+		asvJSON json;
+		ASSERT_MSG(json.fromCBOR(data, sizeof(data)), json.getLastError().c_str());
+		auto* v = json.getRoot();
+		ASSERT(v != nullptr && v->type == asvJSONValue::DOUBLE);
+		ASSERT_MSG(v->dbl == want, "half decode value mismatch");
+	}
+	// -0 keeps its sign bit (== 0.0 cannot see it).
+	{
+		uint8_t data[] = { 0xF9, 0x80, 0x00 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(data, sizeof(data)));
+		ASSERT(std::signbit(json.getRoot()->dbl));
+	}
+	// Infinity / NaN (exponent all ones) are accepted with no allowNaNInfinity
+	// gate - CBOR has them natively. -Infinity keeps its sign.
+	{
+		uint8_t pinf[] = { 0xF9, 0x7C, 0x00 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(pinf, sizeof(pinf)));
+		ASSERT(std::isinf(json.getRoot()->dbl) && json.getRoot()->dbl > 0);
+	}
+	{
+		uint8_t ninf[] = { 0xF9, 0xFC, 0x00 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(ninf, sizeof(ninf)));
+		ASSERT(std::isinf(json.getRoot()->dbl) && json.getRoot()->dbl < 0);
+	}
+	{
+		uint8_t nan[] = { 0xF9, 0x7E, 0x00 };
+		asvJSON json;
+		ASSERT(json.fromCBOR(nan, sizeof(nan)));
+		ASSERT(std::isnan(json.getRoot()->dbl));
+	}
+	// The encoder has no float16 form: a decoded half re-emits as float64
+	// (0xFB) with the same value, and a float32 keeps is_float32 so the
+	// re-encode is byte-identical.
+	{
+		uint8_t data[] = { 0xF9, 0x7B, 0xFF };
+		asvJSON json;
+		ASSERT(json.fromCBOR(data, sizeof(data)));
+		std::vector<uint8_t> out;
+		json.getRoot()->toCBOR(out);
+		ASSERT(out.size() == 9 && out[0] == 0xFB);
+		ASSERT(!json.getRoot()->is_float32);
+		asvJSON back;
+		ASSERT(back.fromCBOR(out.data(), out.size()));
+		ASSERT(back.getRoot()->dbl == 65504.0);
+	}
+	{
+		uint8_t data[] = { 0xFA, 0x00, 0x40, 0x00, 0x00 }; // float32 subnormal 2^-127
+		asvJSON json;
+		ASSERT(json.fromCBOR(data, sizeof(data)));
+		ASSERT(json.getRoot()->is_float32);
+		ASSERT(json.getRoot()->dbl == std::ldexp(1.0, -127));
+		std::vector<uint8_t> out;
+		json.getRoot()->toCBOR(out);
+		ASSERT(out.size() == 5 && out[0] == 0xFA);
+		for (size_t i = 0; i < sizeof(data); i++) ASSERT(out[i] == data[i]);
+	}
 }
 
 TEST(testCBORUInt64Overflow) {
