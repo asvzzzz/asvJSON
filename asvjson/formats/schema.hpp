@@ -181,17 +181,33 @@ private:
   // an absent instance is equivalent to JSON null - so {"type":"object"} fails
   // on an empty document, while true-schema or {} succeeds.
   // Hard cap on the validateNode recursion depth (per validation, continuing
-  // across anyOf/oneOf/not/if/contains forks). Parsed inputs sit far below it:
-  // data nests at most MAX_NESTING_DEPTH = 48 levels, and even a recursive
-  // schema consumes only ~3 frames per data level. A pathological PRODUCT of
-  // deeply nested schema keywords x deeply nested data (a 48x48 allOf/items
-  // chain) would need ~7000 frames and overflow the default 1 MB stack all
-  // by itself -- such combinations are REPORTED through failInternal
-  // (shapeFailed_, so fork keywords abort on it) instead of crashing. Only a
-  // programmatically built (raw-API) schema or instance can nest deeper than
-  // the parsers allow, and there the unbounded recursion overflowed the stack.
-  static constexpr int MAX_VALIDATION_DEPTH = 512;
+  // across anyOf/oneOf/not/if/contains forks). Parsed inputs sit near the bottom
+  // of it: data nests at most MAX_NESTING_DEPTH = 48 levels, and a recursive
+  // schema consumes ~1-3 keyword levels per data level (a `properties` descent
+  // is one, an `allOf`+`items` pair is two), so a 48x3 product wants ~144.
+  // The cap is a STACK budget, not a semantic one, and the frame size varies by
+  // keyword shape and by optimisation level - measured on MSVC x64 with the
+  // default 1 MB main-thread stack, counting nested validateNode levels:
+  //   properties / additionalProperties:  crash at ~250 (/Od), ~900 (/O2)
+  //   allOf / anyOf / not / items:        crash at ~350 (/Od), ~600 (/O2)
+  // The old 512 sat ABOVE the unoptimized thresholds, so the guard never fired
+  // in time and a deep programmatic (raw-API) schema or instance crashed the
+  // process (0xC00000FD) instead of failing validation. 160 reports the case
+  // with ~90 levels of margin in the worst measured shape and still admits the
+  // 48x3 product of parser-built inputs. Only programmatically built trees can
+  // nest deeper than the parsers allow; hitting the cap fails validation
+  // through failInternal (shapeFailed_, so fork keywords abort on it).
+  static constexpr int MAX_VALIDATION_DEPTH = 160;
   int nodeDepth_ = 0;
+
+  // valuesEqual()/identityHash() walk two trees in lockstep and recurse per
+  // container level. Parsed trees are capped at MAX_NESTING_DEPTH, but a
+  // programmatically built instance (or `enum`/`const` entry) is not, and the
+  // unbounded recursion overflowed the stack (~20000 levels crashed in both
+  // /Od and /O2). Deeper than this the two operands compare NOT equal, which
+  // is the conservative answer: a `const`/`enum` member check reports "not in
+  // list" and a uniqueness check stays silent, never a crash.
+  static constexpr int MAX_VALUE_COMPARE_DEPTH = 128;
 
   bool validateImpl(const asvJSONValue* value, const asvJSONValue* schema) {
     if (!schema) return true;
@@ -400,8 +416,13 @@ private:
     return failed ? nullptr : cur;
   }
 
-  static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b) {
+  // Exact value equality (draft-07 `const`/`enum`/`uniqueItems` semantics).
+  // `depth` bounds the lockstep walk: past MAX_VALUE_COMPARE_DEPTH the answer
+  // is "not equal" (see the constant). Callers from the parser side never get
+  // there - both operands nest at most MAX_NESTING_DEPTH deep.
+  static bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth = 0) {
     if (!a || !b) return a == b;
+    if (depth > MAX_VALUE_COMPARE_DEPTH) return false;
     if (a->type != b->type) {
       if ((a->type == asvJSONValue::INT || a->type == asvJSONValue::DOUBLE) &&
           (b->type == asvJSONValue::INT || b->type == asvJSONValue::DOUBLE)) {
@@ -435,13 +456,13 @@ private:
       case asvJSONValue::CUSTOM_TAG:
         if (a->str_data != b->str_data) return false;
         if (static_cast<bool>(a->custom_value) != static_cast<bool>(b->custom_value)) return false;
-        if (a->custom_value) return valuesEqual(a->custom_value.get(), b->custom_value.get());
+        if (a->custom_value) return valuesEqual(a->custom_value.get(), b->custom_value.get(), depth + 1);
         return true;
       case asvJSONValue::ARRAY: {
         if (!a->arr || !b->arr) return a->arr == b->arr;
         if (a->arr->size() != b->arr->size()) return false;
         for (size_t i = 0; i < a->arr->size(); i++)
-          if (!valuesEqual((*a->arr)[i].get(), (*b->arr)[i].get())) return false;
+          if (!valuesEqual((*a->arr)[i].get(), (*b->arr)[i].get(), depth + 1)) return false;
         return true;
       }
       case asvJSONValue::OBJECT: {
@@ -450,12 +471,126 @@ private:
         for (auto& kv : *a->obj) {
           auto it = b->obj->find(kv.first);
           if (it == b->obj->end()) return false;
-          if (!valuesEqual(kv.second.get(), it->second.get())) return false;
+          if (!valuesEqual(kv.second.get(), it->second.get(), depth + 1)) return false;
         }
         return true;
       }
       default: return false;
     }
+  }
+
+  // Bucket key for the two uniqueness checks (`enum` entries, `uniqueItems`
+  // items). It is NOT an equality test -- valuesEqual() stays the exact
+  // relation -- only a way to stop comparing every pair: an O(n^2) scan over
+  // valuesEqual is a CPU-DoS vector on an attacker-supplied schema (50k enum
+  // entries measured 30 s of pure shape checking, 200k measured 494 s).
+  // The one property that matters: values valuesEqual() calls equal MUST hash
+  // the same, so a bucket can never hide a duplicate. Numbers are therefore
+  // canonicalised (INT 1 and DOUBLE 1.0 share one key, which is exactly the
+  // documented "same enum entry" rule), object members are folded
+  // commutatively because the object compare is order-insensitive, array
+  // elements positionally. A collision costs one extra exact compare, never a
+  // wrong verdict. Recursion is capped like valuesEqual(); a capped subtree
+  // hashes to a fixed marker, which only merges buckets.
+  static uint64_t identityHash(const asvJSONValue* v, int depth) {
+    if (!v) return 0;
+    if (depth > MAX_VALUE_COMPARE_DEPTH) return 0xC0FFEE1ull;
+    uint64_t h = 1469598103934665603ull; // FNV-1a, 64-bit
+    auto mix = [&h](uint64_t x) {
+      for (int i = 0; i < 8; i++) { h ^= (x >> (i * 8)) & 0xFFull; h *= 1099511628211ull; }
+    };
+    auto fnv = [](const auto& s) { // std::string or std::vector<uint8_t>
+      uint64_t x = 1469598103934665603ull;
+      for (unsigned char c : s) { x ^= c; x *= 1099511628211ull; }
+      return x;
+    };
+    if (v->type == asvJSONValue::INT || v->type == asvJSONValue::DOUBLE) {
+      // One marker for both spellings, then the canonical value: an exactly
+      // integral DOUBLE must hash like the INT holding the same number.
+      mix(0x4E554Dull); // "NUM"
+      if (v->type == asvJSONValue::INT) { mix(static_cast<uint64_t>(v->num)); return h; }
+      double d = v->dbl;
+      if (d != d) mix(0x4E614Eull); // NaN: unordered, never equal to anything
+      else if (d == 0.0) mix(0);    // folds +0.0 and -0.0
+      else if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+        int64_t i = static_cast<int64_t>(d);
+        if (static_cast<double>(i) == d) { mix(static_cast<uint64_t>(i)); return h; }
+        uint64_t bits = 0; // in range but not exactly integral
+        std::memcpy(&bits, &d, sizeof(bits));
+        mix(bits);
+      } else {
+        uint64_t bits = 0; // outside int64: exact bit pattern
+        std::memcpy(&bits, &d, sizeof(bits));
+        mix(bits);
+      }
+      return h;
+    }
+    mix(static_cast<uint64_t>(v->type));
+    switch (v->type) {
+      case asvJSONValue::NULL_VAL: break;
+      case asvJSONValue::BOOL_VAL: mix(v->flag ? 1ull : 0ull); break;
+      case asvJSONValue::STRING:
+      case asvJSONValue::OBJECTID:
+      case asvJSONValue::REGEX: mix(fnv(v->str_data)); break;
+      case asvJSONValue::TIMESTAMP: mix(static_cast<uint64_t>(v->num)); break;
+      case asvJSONValue::DATETIME:
+        mix(static_cast<uint64_t>(static_cast<int64_t>(v->timestamp)));
+        mix(static_cast<uint64_t>(v->datetime_ms));
+        mix(static_cast<uint64_t>(v->tz_offset_min));
+        break;
+      case asvJSONValue::BINARY: mix(fnv(v->bin_data)); break;
+      case asvJSONValue::EXTENSION:
+        mix(static_cast<uint64_t>(static_cast<int64_t>(v->ext_type)));
+        mix(fnv(v->bin_data));
+        break;
+      case asvJSONValue::CUSTOM_TAG:
+        mix(fnv(v->str_data));
+        mix(identityHash(v->custom_value.get(), depth + 1));
+        break;
+      case asvJSONValue::ARRAY: {
+        if (!v->arr) break;
+        mix(v->arr->size());
+        for (const auto& e : *v->arr) mix(identityHash(e.get(), depth + 1)); // positional
+        break;
+      }
+      case asvJSONValue::OBJECT: {
+        if (!v->obj) break;
+        mix(v->obj->size());
+        for (const auto& kv : *v->obj) {
+          // Commutative fold: valuesEqual() matches members by name, so the
+          // key order of the map must not change the key.
+          uint64_t k = fnv(kv.first);
+          uint64_t s = identityHash(kv.second.get(), depth + 1);
+          s ^= s >> 33; s *= 0xff51afd7ed558ccdull; s ^= s >> 29;
+          h += k + s;
+        }
+        break;
+      }
+      default: break;
+    }
+    return h;
+  }
+
+  // Shared driver for the two uniqueness checks (`enum` entries, `uniqueItems`
+  // items). Buckets by identityHash and confirms inside the bucket with
+  // valuesEqual, so the verdict is exactly the pairwise O(n^2) scan's, at
+  // ~O(n) when the values are distinct. Reports the first duplicate pair.
+  static bool findDuplicatePair(const std::vector<std::unique_ptr<asvJSONValue>>& v,
+                                size_t& firstIdx, size_t& secondIdx) {
+    static constexpr size_t kNil = static_cast<size_t>(-1);
+    const size_t n = v.size();
+    std::unordered_map<uint64_t, size_t> head; // bucket -> last index in it
+    head.reserve(n);
+    std::vector<size_t> chain(n, kNil);        // threads the rest of a bucket
+    for (size_t i = 0; i < n; i++) {
+      uint64_t key = identityHash(v[i].get(), 0);
+      auto bucket = head.find(key);
+      for (size_t k = bucket == head.end() ? kNil : bucket->second; k != kNil; k = chain[k])
+        if (valuesEqual(v[k].get(), v[i].get())) { firstIdx = k; secondIdx = i; return true; }
+      if (bucket == head.end()) head.emplace(key, i);
+      else { chain[i] = bucket->second; bucket->second = i; }
+    }
+    return false;
   }
 
   static std::string valueTypeName(const asvJSONValue* v) {
@@ -700,12 +835,19 @@ private:
           setError("Invalid schema: 'type' should have at least one element");
           return false;
         }
-        for (size_t i = 0; i < t->arr->size(); i++)
-          for (size_t j = i + 1; j < t->arr->size(); j++)
-            if ((*t->arr)[i]->str_data == (*t->arr)[j]->str_data) {
-              setError("Invalid schema: 'type' entries must be unique");
-              return false;
-            }
+        // O(n) hash dedup (the same shape `required` uses below): the pairwise
+        // scan was quadratic in an attacker-supplied array, and every entry
+        // clears the known-name check, so {"type":["string", ... x 200k]} was
+        // minutes of pure shape checking.
+        std::unordered_set<std::string> seen;
+        seen.reserve(t->arr->size());
+        bool dupType = false;
+        for (const auto& e : *t->arr)
+          if (!seen.insert(e->str_data).second) { dupType = true; break; }
+        if (dupType) {
+          setError("Invalid schema: 'type' entries must be unique");
+          return false;
+        }
       }
     }
     if (auto e = schemaGet(schema, "enum")) {
@@ -728,12 +870,14 @@ private:
       // are redundant with equal values (1 and 1.0 compare equal via
       // valuesEqual, the same equality the membership check uses) and hide a
       // copy-paste slip; a schema that repeats itself is rejected.
-      for (size_t i = 0; i < e->arr->size(); i++)
-        for (size_t j = i + 1; j < e->arr->size(); j++)
-          if (valuesEqual((*e->arr)[i].get(), (*e->arr)[j].get())) {
-            setError("Invalid schema: 'enum' entries must be unique");
-            return false;
-          }
+      // Bucketed rather than pairwise: the O(n^2) scan over valuesEqual was a
+      // CPU-DoS on a schema the parser accepts (50k entries measured 30 s,
+      // 200k measured 494 s of shape checking alone).
+      size_t dupA = 0, dupB = 0;
+      if (findDuplicatePair(*e->arr, dupA, dupB)) {
+        setError("Invalid schema: 'enum' entries must be unique");
+        return false;
+      }
     }
     if (auto r = schemaGet(schema, "required")) {
       if (r->type != asvJSONValue::ARRAY || !r->arr) {
@@ -1351,8 +1495,8 @@ private:
     if (schemaHas(schema, "uniqueItems")) {
       auto node = schemaGet(schema, "uniqueItems");
       if (node && node->type == asvJSONValue::BOOL_VAL && node->flag) {
-        // Fast path: arrays of scalars use a hash set; containers fall back to
-        // the O(n^2) deep-compare below.
+        // Fast path: arrays of scalars use a hash set of canonical text keys;
+        // anything else goes through the bucketed deep compare below.
         bool allScalars = true;
         for (size_t i = 0; i < count; i++) {
           auto t = (*items)[i]->type;
@@ -1398,13 +1542,13 @@ private:
             first.emplace(std::move(token), i);
           }
         } else {
-          for (size_t i = 0; i < count; i++) {
-            for (size_t j = i + 1; j < count; j++) {
-              if (valuesEqual((*items)[i].get(), (*items)[j].get())) {
-                setError("Array items at indices " + std::to_string(i) + " and " + std::to_string(j) + " are not unique");
-                return false;
-              }
-            }
+          // Container items: bucketed like the `enum` check. The pairwise scan
+          // was quadratic in an instance the attacker controls -- 50k nested
+          // arrays under a plain `{"uniqueItems":true}`.
+          size_t dupA = 0, dupB = 0;
+          if (findDuplicatePair(*items, dupA, dupB)) {
+            setError("Array items at indices " + std::to_string(dupA) + " and " + std::to_string(dupB) + " are not unique");
+            return false;
           }
         }
       }

@@ -31733,6 +31733,164 @@ TEST(testSchemaDepthGuard) {
 	}
 }
 
+TEST(testSchemaStackBudgetAndLinearUniqueness) {
+	// Audit wave (schema.hpp, probe-proven): (a) MAX_VALIDATION_DEPTH sat ABOVE
+	// the depth where the recursion actually dies, so a deep programmatic
+	// schema/instance crashed the process instead of failing validation;
+	// (b) valuesEqual() recursed without a bound; (c) the `enum`/`type`/
+	// `uniqueItems` uniqueness checks were a quadratic scan over valuesEqual,
+	// minutes of CPU on inputs every parser accepts.
+	{ // 1) properties chain: the cheapest-per-level shape, and the one that died
+	  // first (~250 nested validateNode levels unoptimized, ~900 with /O2).
+	  // The cap is 160, so both builds report it.
+	  auto propChain = [](int depth) {
+		std::unique_ptr<asvJSONValue> sch = asvJSONValue::makeObject();
+		std::unique_ptr<asvJSONValue> inst = asvJSONValue::makeObject();
+		asvJSONValue* scur = sch.get();
+		asvJSONValue* icur = inst.get();
+		for (int i = 0; i < depth; i++) {
+		  auto props = asvJSONValue::makeObject();
+		  auto inner = asvJSONValue::makeObject();
+		  asvJSONValue* ip = inner.get();
+		  props->obj->emplace("p", std::move(inner));
+		  scur->obj->emplace("properties", std::move(props));
+		  scur = ip;
+		  auto in2 = asvJSONValue::makeObject();
+		  asvJSONValue* ip2 = in2.get();
+		  icur->obj->emplace("p", std::move(in2));
+		  icur = ip2;
+		}
+		std::pair<std::unique_ptr<asvJSONValue>, std::unique_ptr<asvJSONValue>> r;
+		r.first = std::move(sch);
+		r.second = std::move(inst);
+		return r;
+	  };
+	  { // inside the budget: the cap must not turn the validator useless
+		auto pr = propChain(150);
+		SchemaValidator v; std::string err;
+		ASSERT(v.validate(pr.second.get(), pr.first.get(), err));
+	  }
+	  { // past it: a reported schema-internal error, never 0xC00000FD
+		auto pr = propChain(400);
+		SchemaValidator v; std::string err;
+		ASSERT(!v.validate(pr.second.get(), pr.first.get(), err));
+		ASSERT(err.find("nesting too deep") != std::string::npos);
+	  }
+	}
+	{ // 2) parser-reachable worst case that must KEEP working: an `items`
+	  // chain 47 levels deep (parse()'s limit) over a 47-deep array. Each data
+	  // level consumes one schema level, so the descent is ~47 frames.
+	  asvJSON schema, inst;
+	  std::string s, in;
+	  for (int i = 0; i < 47; i++) s += "{\"items\":";
+	  s += "{\"type\":\"integer\"}";
+	  for (int i = 0; i < 47; i++) s += "}";
+	  for (int i = 0; i < 47; i++) in += "[";
+	  in += "1";
+	  for (int i = 0; i < 47; i++) in += "]";
+	  ASSERT(schema.parse(std::string_view(s)));
+	  ASSERT(inst.parse(std::string_view(in)));
+	  std::string derr;
+	  ASSERT(inst.validate(schema, derr));
+	}
+	{ // 2b) the worst parser-reachable product: a recursive $ref schema costs
+	  // ~3 frames per data level, so 47 levels of array wants ~141 - the margin
+	  // the cap was sized for. Past 160 it must be reported, and only a
+	  // programmatically deep instance can get there (pinned by
+	  // testSchemaDepthGuard case 2).
+	  asvJSON schema, inst;
+	  ASSERT(schema.parse(std::string_view(R"({"items":{"$ref":"#"}})")));
+	  std::string in;
+	  for (int i = 0; i < 47; i++) in += "[";
+	  in += "1";
+	  for (int i = 0; i < 47; i++) in += "]";
+	  ASSERT(inst.parse(std::string_view(in)));
+	  std::string derr2;
+	  ASSERT(inst.validate(schema, derr2));
+	}
+	{ // 3) valuesEqual walked two trees in lockstep with no bound: 20k-deep
+	  // programmatic trees crashed `enum` membership and `const` compare.
+	  auto deep = []() {
+		std::unique_ptr<asvJSONValue> v = asvJSONValue::makeObject();
+		v->obj->emplace("a", asvJSONValue::makeInt(7));
+		for (int i = 0; i < 100000; i++) {
+		  auto w = asvJSONValue::makeObject();
+		  w->obj->emplace("a", std::move(v));
+		  v = std::move(w);
+		}
+		return v;
+	  };
+	  {
+		std::unique_ptr<asvJSONValue> sch = asvJSONValue::makeObject();
+		auto arr = asvJSONValue::makeArray();
+		arr->arr->push_back(deep());
+		arr->arr->push_back(deep());
+		sch->obj->emplace("enum", std::move(arr));
+		std::unique_ptr<asvJSONValue> val = deep();
+		SchemaValidator v; std::string err;
+		ASSERT(!v.validate(val.get(), sch.get(), err)); // capped compare -> "not equal"
+		ASSERT(err.find("not in enum") != std::string::npos);
+	  }
+	  {
+		std::unique_ptr<asvJSONValue> sch = asvJSONValue::makeObject();
+		sch->obj->emplace("const", deep());
+		std::unique_ptr<asvJSONValue> val = deep();
+		SchemaValidator v; std::string err;
+		ASSERT(!v.validate(val.get(), sch.get(), err));
+		ASSERT(err.find("does not match const") != std::string::npos);
+	  }
+	}
+	{ // 4) the enum-uniqueness shape check is now bucketed, and the semantics
+	  // are unchanged: 1 vs 1.0 stay the same entry, 1 vs true do not.
+	  asvJSON sch;
+	  std::string err;
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[1,1.0]})")));
+	  asvJSON v1; ASSERT(v1.parse(std::string_view("1")));
+	  ASSERT(!v1.validate(sch, err));
+	  ASSERT(err.find("'enum' entries must be unique") != std::string::npos);
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[1,true,"1"]})")));
+	  ASSERT(v1.validate(sch, err));
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[{"a":1},{"a":1}]})")));
+	  ASSERT(!v1.validate(sch, err));
+	  ASSERT(err.find("'enum' entries must be unique") != std::string::npos);
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[{"a":1},{"a":2}]})")));
+	  asvJSON v2; ASSERT(v2.parse(std::string_view(R"({"a":2})")));
+	  ASSERT(v2.validate(sch, err));
+	  // 1 vs 10 vs 100 must NOT collide in the numeric bucket either (0 and
+	  // -0.0 DO collide, and correctly so: valuesEqual calls them equal)
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[1,10,100,1.5,-1,0,2.5]})")));
+	  ASSERT(v1.validate(sch, err));
+	  ASSERT(sch.parse(std::string_view(R"({"enum":[0,-0.0]})")));
+	  ASSERT(!v1.validate(sch, err));
+	  ASSERT(err.find("'enum' entries must be unique") != std::string::npos);
+	}
+	{ // 5) linear scale: 50k distinct enum entries used to cost ~30 s of shape
+	  // checking (200k ~8 min). Now milliseconds, and still accepted.
+	  std::string s = R"({"enum":[)";
+	  for (int i = 0; i < 50000; i++) { s += std::to_string(i); s += ','; }
+	  s += "999999999999999999999999]}"; // + a raw_number string entry
+	  asvJSON sch, v1;
+	  ASSERT(sch.parse(std::string_view(s)));
+	  ASSERT(v1.parse(std::string_view("42")));
+	  std::string err;
+	  ASSERT(v1.validate(sch, err));
+	}
+	{ // 6) uniqueItems over CONTAINERS keeps the same diagnostics and indices
+	  asvJSON sch, inst;
+	  ASSERT(sch.parse(std::string_view(R"({"uniqueItems":true})")));
+	  ASSERT(inst.parse(std::string_view(R"([1,2,[3,4],{"a":1},[3,4]])")));
+	  std::string err;
+	  ASSERT(!inst.validate(sch, err));
+	  ASSERT(err.find("items at indices 2 and 4 are not unique") != std::string::npos);
+	  ASSERT(inst.parse(std::string_view(R"([[1],{"a":[1]},[2],{"a":[2]}])")));
+	  ASSERT(inst.validate(sch, err));
+	  // and the `type` array uniqueness survived the same rewrite
+	  ASSERT(sch.parse(std::string_view(R"({"type":["string","string"]})")));
+	  ASSERT(!inst.validate(sch, err));
+	  ASSERT(err.find("'type' entries must be unique") != std::string::npos);
+	}
+}
+
 TEST(testDeepTreeEqualityAndDiff) {
 	// operator== used to recurse: two equal 100k-deep programmatically built
 	// trees overflowed the comparison stack (a crash inside a noexcept
@@ -39576,6 +39734,7 @@ RUN(testSchemaJsonPointerRefs);
 
 	std::cout << "\n--- JSONPath (RFC 9535) Tests ---\n";
 	RUN(testSchemaDepthGuard);
+	RUN(testSchemaStackBudgetAndLinearUniqueness);
 	RUN(testDeepTreeEqualityAndDiff);
 	RUN(testJSONPathDeepDescent);
 	RUN(testJSONPath);
