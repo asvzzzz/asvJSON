@@ -362,7 +362,16 @@ inline std::vector<std::string> parseTomlKeyPath(std::string_view& s) {
     std::string key = parseTomlKey(s);
     if (!quotedStart && key.empty())
       throw asvJSONError("invalid key: unexpected character");
-    if (quotedStart || !key.empty()) keys.push_back(std::move(key));
+    if (quotedStart || !key.empty()) {
+      // Bound the segment count before anything else: every segment becomes a
+      // tree level (two, passing through an array of tables), and a
+      // 20k-segment header also makes the canonical-path bookkeeping in
+      // fromTOML quadratic (one measured 20001-segment header parsed for
+      // 6.6 s; a 32 MB input could carry millions of segments).
+      if (keys.size() >= static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("TOML: nesting too deep");
+      keys.push_back(std::move(key));
+    }
     s = trimSV(s);
     if (!s.empty() && s[0] == '.') {
       s.remove_prefix(1);
@@ -1327,8 +1336,46 @@ inline void asvJSONValue::toTOML(std::string& out, bool pretty) const {
 
 // --- Decoder ---
 // Helper: navigate/create path in a tree, return the final object at the path
+// Container depth of the node a header/dotted path resolves to (root object =
+// level 1; passing through an array of tables counts the array AND its last
+// element; a scalar counts as one level, and the next segment would fail on it
+// anyway). Returns the deepest level reached when the path does not fully
+// exist yet, so callers can guard the node they are about to create.
+inline int tomlPathDepth(asvJSONValue* root, const std::vector<std::string>& path) {
+  asvJSONValue* cur = root;
+  int levels = 1;
+  for (const auto& seg : path) {
+    if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) return levels;
+    auto it = cur->obj->find(seg);
+    if (it == cur->obj->end()) return levels;
+    cur = it->second.get();
+    if (cur->type == asvJSONValue::ARRAY) {
+      levels += 1;
+      if (cur->arr && !cur->arr->empty() && cur->arr->back()->type == asvJSONValue::OBJECT) {
+        cur = cur->arr->back().get();
+        levels += 1;
+      }
+    } else {
+      levels += 1;
+    }
+  }
+  return levels;
+}
+
 inline asvJSONValue* tomlNavigate(asvJSONValue* cur, const std::vector<std::string>& path,
-                                  bool create = true) {
+                                  bool create = true, int baseLevels = 1) {
+  // Guard the chain this navigation CREATES: an uncapped dotted key or header
+  // path (`[a.b.c...]`) built a 250-level object chain no parser could produce
+  // (serialize null-degrades it, the document stops surviving its own
+  // round-trip) and an `[[a]]/[[a.b]]/...` header chain adds TWO levels per
+  // segment (array + element), 30 headers reaching depth 61. Same guard class
+  // as setByPointer's segment cap (f167068) and applyPatch's chain cap
+  // (2e598a1); `baseLevels` lets callers that start below the root pass the
+  // real depth of the start node (an element of an array of tables).
+  // Every emplace is also bounded by MAX_OBJECT_SIZE (the INI guard analog):
+  // one `k = 1` line per key grew the root object to 1.2M entries (> 1M)
+  // under the 32 MB input cap.
+  int levels = baseLevels;
   for (const auto& seg : path) {
     if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) {
       if (!create) return nullptr;
@@ -1337,19 +1384,32 @@ inline asvJSONValue* tomlNavigate(asvJSONValue* cur, const std::vector<std::stri
     auto it = cur->obj->find(seg);
     if (it == cur->obj->end()) {
       if (!create) return nullptr;
+      if (levels + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("TOML: nesting too deep");
+      if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1))
+        throw asvJSONError("TOML: object too large");
       auto newObj = asvJSONValue::makeObject();
       if (!newObj) throw asvJSONError("TOML: out of memory");
       auto* raw = newObj.get();
       cur->obj->emplace(seg, std::move(newObj));
       cur = raw;
+      levels += 1;
     } else {
       cur = it->second.get();
       // A header or dotted key may legally pass through an array of tables;
       // it binds to the most recently defined element (TOML: any reference to
       // an array of tables points to its last element).
-      if (cur->type == asvJSONValue::ARRAY && cur->arr && !cur->arr->empty() &&
-          cur->arr->back()->type == asvJSONValue::OBJECT)
-        cur = cur->arr->back().get();
+      if (cur->type == asvJSONValue::ARRAY) {
+        levels += 1;
+        if (cur->arr && !cur->arr->empty() && cur->arr->back()->type == asvJSONValue::OBJECT) {
+          cur = cur->arr->back().get();
+          levels += 1;
+        }
+      } else {
+        levels += 1;
+      }
+      if (levels > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("TOML: nesting too deep");
     }
   }
   return cur;
@@ -1361,6 +1421,8 @@ inline void tomlObjSet(asvJSONValue* obj, const std::string& key, std::unique_pt
     throw asvJSONError("duplicate key: " + key);
   auto it = obj->obj->find(key);
   if (it != obj->obj->end()) throw asvJSONError("duplicate key: " + key);
+  if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+    throw asvJSONError("TOML: object too large");
   obj->obj->emplace(key, std::move(val));
 }
 
@@ -1538,6 +1600,8 @@ inline bool asvJSON::fromTOML(std::string_view input) {
               throw asvJSONError("cannot append to statically defined array '" + fullPath + "'");
             asvJSONValue* arrVal;
             if (it == parent->obj->end()) {
+              if (!asvJSONValue::checkObjectSize(parent->obj->size() + 1))
+                throw asvJSONError("TOML: object too large");
               auto newArr = asvJSONValue::makeArray();
               if (!newArr) throw asvJSONError("TOML: out of memory");
               arrVal = newArr.get();
@@ -1545,6 +1609,15 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             } else {
               arrVal = it->second.get();
             }
+            // Each [[header]] appends one element two container levels under
+            // the parent (array + element). An uncapped chain of 32 MB of
+            // `[[t]]` lines built 1.1M array elements (> MAX_ARRAY_SIZE), and
+            // a nested `[[a]]/[[a.b]]/...` chain reached depth 61.
+            if (tomlPathDepth(root.get(), parentPath) + 2 >
+                static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+              throw asvJSONError("TOML: nesting too deep");
+            if (!asvJSONValue::checkArraySize(arrVal->arr->size() + 1))
+              throw asvJSONError("TOML: array too large");
             auto newElem = asvJSONValue::makeObject();
             if (!newElem) throw asvJSONError("TOML: out of memory");
             arrVal->arr->push_back(std::move(newElem));
@@ -1557,6 +1630,11 @@ inline bool asvJSON::fromTOML(std::string_view input) {
             if (it != parent->obj->end() && it->second->type != asvJSONValue::OBJECT)
               throw asvJSONError("cannot redefine key '" + last + "' as table");
             if (it == parent->obj->end()) {
+              if (tomlPathDepth(root.get(), parentPath) + 1 >
+                  static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+                throw asvJSONError("TOML: nesting too deep");
+              if (!asvJSONValue::checkObjectSize(parent->obj->size() + 1))
+                throw asvJSONError("TOML: object too large");
               auto newObj = asvJSONValue::makeObject();
               if (!newObj) throw asvJSONError("TOML: out of memory");
               parent->obj->emplace(last, std::move(newObj));
@@ -1770,16 +1848,31 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         // Set key=value on the element (handle dotted keys)
         if (keys.size() == 1) {
           auto val = tomlParseJsonValue(jsonVal);
-          if (val) tomlObjSet(elem, keys[0], std::move(val));
+          if (val) {
+            // The attached value's own container chain counts toward the
+            // depth budget too (applyPatch's value-chain cap, 2e598a1): an
+            // individually-legal value placed at a legal parent can still
+            // wrap the document past what the parsers accept and the
+            // serializers reproduce.
+            if (tomlPathDepth(root.get(), tablePath) +
+                    valueContainerDepth(val.get(), static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) >
+                static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+              throw asvJSONError("TOML: nesting too deep");
+            tomlObjSet(elem, keys[0], std::move(val));
+          }
         } else {
           std::string lastKey = keys.back();
           std::vector<std::string> nestedPath(keys.begin(), keys.end() - 1);
-          asvJSONValue* target = tomlNavigate(elem, nestedPath, true);
+          asvJSONValue* target = tomlNavigate(elem, nestedPath, true, tomlPathDepth(root.get(), tablePath));
           if (target) {
             auto val = tomlParseJsonValue(jsonVal);
             if (val) {
               std::vector<std::string> p = tablePath;
               p.insert(p.end(), keys.begin(), keys.end());
+              if (tomlPathDepth(root.get(), p) +
+                      valueContainerDepth(val.get(), static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) >
+                  static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+                throw asvJSONError("TOML: nesting too deep");
               markDottedSupers(p);
               tomlObjSet(target, lastKey, std::move(val));
             }
@@ -1809,6 +1902,10 @@ inline bool asvJSON::fromTOML(std::string_view input) {
         if (parent) {
           auto val = tomlParseJsonValue(jsonVal);
           if (val) {
+            if (tomlPathDepth(root.get(), fullPath) +
+                    valueContainerDepth(val.get(), static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) >
+                static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+              throw asvJSONError("TOML: nesting too deep");
             if (keys.size() > 1) {
               std::vector<std::string> p = fullPath;
               p.push_back(lastKey);

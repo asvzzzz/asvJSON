@@ -17302,6 +17302,109 @@ b = 1)")));
   }
 }
 
+TEST(testTomlGrowthGuards) {
+  // Wave 45: the TOML decoder grew containers without limit. A 32 MB document
+  // built a 1.2M-key root object (> MAX_OBJECT_SIZE) and a 1.1M-element
+  // `[[t]]` array (> MAX_ARRAY_SIZE); dotted keys and headers (`[a.b...]`)
+  // built 250-level object chains no parser can produce (serialize null-
+  // degrades them, the document stops surviving its own round-trip), and an
+  // `[[a]]`/`[[a.b]]` chain adds TWO levels per segment (30 headers reached
+  // depth 61). A 20001-segment header also burned 6.6 s in the quadratic
+  // canonical-path bookkeeping. Guards: MAX_NESTING_DEPTH counts REAL
+  // container levels (array + its element = 2), parseTomlKeyPath caps the
+  // segment count, and every emplace/push_back checks MAX_OBJECT_SIZE /
+  // MAX_ARRAY_SIZE (the INI guard analog).
+  auto dotted = [](int n) {
+    std::string s;
+    for (int i = 0; i < n; i++) { if (i) s += '.'; s += "k" + std::to_string(i); }
+    return s;
+  };
+  auto arrchain = [](int n) {
+    std::string doc, p;
+    for (int i = 0; i < n; i++) { p += (i ? ".x" : "a"); p += std::to_string(i); doc += "[[" + p + "]]\n"; }
+    return doc;
+  };
+  // Dotted key boundary: 48 containers is the core parser's cap, and a
+  // scalar leaf at level 49 under 48 containers stays legal.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(dotted(47) + " = 1\n"));
+    ASSERT(j.fromTOML(dotted(48) + " = 1\n"));
+    ASSERT(!j.fromTOML(dotted(48) + " = [1]\n"));
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  // Header boundary: 47 segments = 48 containers, the 48th segment is level 49.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML("[" + dotted(47) + "]\n"));
+    ASSERT(!j.fromTOML("[" + dotted(48) + "]\n"));
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  // Inline-table dotted keys keep the same segment cap (the deep form is
+  // rejected through the intermediate JSON anyway, named early here).
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML("r = {" + dotted(47) + " = 1}\n"));
+    ASSERT(!j.fromTOML("r = {" + dotted(48) + " = 1}\n"));
+  }
+  // The attached value's container chain counts toward the budget too
+  // (applyPatch's value-chain cap, 2e598a1).
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML("[" + dotted(46) + "]\nq = [1]\n"));    // table at 47 + array = 48
+    ASSERT(!j.fromTOML("[" + dotted(46) + "]\nq = [[1]]\n")); // +2 = 49
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  // Array-of-tables chain: two container levels per segment.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(arrchain(23)));                          // depth 47
+    ASSERT(!j.fromTOML(arrchain(24)));                         // depth 49
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  {
+    std::string deep = arrchain(23);
+    asvJSON j;
+    ASSERT(j.fromTOML(deep + "q = [1]\n"));                    // element 47 + array = 48
+    ASSERT(!j.fromTOML(deep + "q = [[1]]\n"));                 // 49
+    ASSERT(!j.fromTOML(deep + dotted(2) + " = [1]\n"));        // dotted key under the element
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  // The quadratic CPU bomb is now rejected at segment 49, O(1) per header.
+  {
+    asvJSON j;
+    ASSERT(!j.fromTOML("[" + dotted(20001) + "]\n"));
+    ASSERT_EQ(j.getLastError(), std::string("TOML: nesting too deep"));
+  }
+  // MAX_ARRAY_SIZE: 1,000,001 `[[t]]` headers were accepted before the fix.
+  {
+    std::string doc;
+    doc.reserve(7ull * 1000001ull);
+    for (int i = 0; i <= 1000000; i++) doc += "[[t]]\n";
+    asvJSON j;
+    ASSERT(!j.fromTOML(doc));
+    ASSERT_EQ(j.getLastError(), std::string("TOML: array too large"));
+  }
+  // MAX_OBJECT_SIZE: 1,000,001 distinct root keys were accepted before the fix.
+  {
+    std::string doc;
+    doc.reserve(12ull * 1000001ull);
+    for (int i = 0; i <= 1000000; i++) { doc += "k"; doc += std::to_string(i); doc += "=1\n"; }
+    asvJSON j;
+    ASSERT(!j.fromTOML(doc));
+    ASSERT_EQ(j.getLastError(), std::string("TOML: object too large"));
+  }
+  // Legit rich documents still round-trip exactly.
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML("[a.b]\nc = 1\n[[t]]\nx = 1\n[[t]]\ny = 2\n[t.z]\nw = 3\n"));
+    std::string out = j.toTOML();
+    asvJSON k;
+    ASSERT(k.fromTOML(out));
+    ASSERT(*j.getRoot() == *k.getRoot());
+  }
+}
+
 TEST(testToJSONLines) {
   // Array of objects -> one JSON line per element
   {
@@ -39828,6 +39931,7 @@ RUN(testGOONSpecialValues);
 	RUN(testTomlSpecialTypes);
 	RUN(testFromTOML);
 	RUN(testTomlReviewFixes);
+	RUN(testTomlGrowthGuards);
 
 	std::cout << "\n--- JSON Lines Serialization Tests ---\n";
 	// ByteSize Tests
