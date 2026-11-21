@@ -2460,8 +2460,15 @@ inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
         throw asvJSONError("ADE: CUSTOM_TAG name must not contain '>'");
       if (verbatim) os << "!<" << v->str_data << "> ";
       else os << '!' << v->str_data << ' ';
-      if (v->custom_value) adeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
-      else os << "null";
+      // A CUSTOM_TAG carries a value of its own, so it nests like a container:
+      // a chain of custom_value nodes recursed through here without limit and
+      // overflowed the stack (the container guards at the OBJECT/ARRAY branches
+      // never fire on a tag-only chain). Same diagnostic as those branches.
+      if (v->custom_value) {
+        if (!asvJSONValue::checkNestingDepth(indent + 1))
+          throw asvJSONError("ADE: nesting too deep");
+        adeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
+      } else os << "null";
       break;
     }
     case T::TIMESTAMP: {

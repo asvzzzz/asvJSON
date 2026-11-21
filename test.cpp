@@ -18544,6 +18544,90 @@ TEST(testSerializeDepthGuard) {
   ASSERT_EQ(opens, static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH));
 }
 
+TEST(testCustomTagDepthGuard) {
+  // A CUSTOM_TAG owns a value, so it recurses exactly like a container. A chain
+  // of custom_value nodes built through the raw API is not bounded by any parser
+  // cap, and serialize() had no guard for it: the recursion ran to the end of the
+  // stack (0xC00000FD) instead of degrading, and every format whose tag text
+  // comes from serialize() crashed with it (JSON, JSON5, TOML, INI, CSV, TOON,
+  // JSON Lines, plus YAML/ADE through their own tree walk).
+  auto custom = [](int n) -> std::unique_ptr<asvJSONValue> {
+    std::unique_ptr<asvJSONValue> v = asvJSONValue::makeInt(7);
+    for (int i = 0; i < n; i++) {
+      auto c = std::make_unique<asvJSONValue>();
+      c->type = asvJSONValue::CUSTOM_TAG;
+      c->str_data = "t";
+      c->custom_value = std::move(v);
+      v = std::move(c);
+    }
+    return v;
+  };
+  auto countTag = [](const std::string& s) {
+    size_t n = 0, p = 0;
+    while ((p = s.find("$customTag", p)) != std::string::npos) { n++; p += 10; }
+    return n;
+  };
+  const size_t TAGS = static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH) + 1;
+
+  { // the crash itself: a 5000-deep chain must degrade to null, not die
+    auto v = custom(5000);
+    std::string s;
+    v->serialize(s);
+    ASSERT(countTag(s) <= TAGS);
+    ASSERT(s.find("null") != std::string::npos);
+  }
+  { // boundary: MAX+1 tag levels render verbatim, the next one degrades. The +1
+    // matters - a parser puts the value of the deepest legal container at level
+    // MAX+1, so a tag that deep is data, not an over-depth tree.
+    auto ok = custom(static_cast<int>(TAGS));
+    std::string s;
+    ok->serialize(s);
+    ASSERT_EQ(countTag(s), TAGS);
+    ASSERT(s.find("null") == std::string::npos);
+    auto bad = custom(static_cast<int>(TAGS) + 1);
+    std::string s2;
+    bad->serialize(s2);
+    ASSERT_EQ(countTag(s2), TAGS);
+    ASSERT(s2.find("null") != std::string::npos);
+  }
+  { // the tag as the value behind MAX container levels must survive intact
+    std::unique_ptr<asvJSONValue> v = custom(1);
+    for (int i = 0; i < static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH); i++) {
+      auto a = asvJSONValue::makeArray();
+      a->arr->push_back(std::move(v));
+      v = std::move(a);
+    }
+    std::string s;
+    v->serialize(s);
+    ASSERT_EQ(countTag(s), static_cast<size_t>(1));
+  }
+  { // the encoders that walk the tag through their own recursion must throw or
+    // degrade - never overflow the stack
+    auto deepChain = [] {
+      std::unique_ptr<asvJSONValue> t = asvJSONValue::makeInt(1);
+      for (int i = 0; i < 2000; i++) {
+        auto x = std::make_unique<asvJSONValue>();
+        x->type = asvJSONValue::CUSTOM_TAG;
+        x->str_data = "t";
+        x->custom_value = std::move(t);
+        t = std::move(x);
+      }
+      return t;
+    };
+    bool threw = false;
+    try { std::string s; auto v = deepChain(); v->toYAML(s); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+    threw = false;
+    try { asvJSON j; j.setRoot(deepChain()); j.toADE(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+    // TOON/JSON5/CSV take the tag text from serialize(), so they degrade
+    threw = false;
+    try { asvJSON j; j.setRoot(deepChain()); ASSERT(j.toTOON().size() > 0); }
+    catch (const asvJSONError&) { threw = true; }
+    ASSERT(!threw);
+  }
+}
+
 TEST(testEncoderDepthGuards) {
   // Same class as the serialize() guard: programmatically built trees nest past
   // what any parser accepts, and the per-format recursive encoders must throw
@@ -39293,6 +39377,7 @@ RUN(testTOONReviewFixes);
 	RUN(testTOONSecurityFixes);
 	RUN(testAuditSweepContracts);
 	RUN(testSerializeDepthGuard);
+	RUN(testCustomTagDepthGuard);
 	RUN(testEncoderDepthGuards);
 	RUN(testYAMLNestedAnchors);
 	RUN(testADEAnchorExpansionGuard);

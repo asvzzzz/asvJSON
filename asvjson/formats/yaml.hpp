@@ -194,8 +194,10 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 	using T = asvJSONValue::Type;
 	// Trees built programmatically can nest deeper than any parser accepts
 	// (MAX_NESTING_DEPTH containers); the mutual encoder recursion must stop
-	// with an error instead of overflowing the stack.
-	if ((v->type == T::OBJECT || v->type == T::ARRAY) &&
+	// with an error instead of overflowing the stack. CUSTOM_TAG counts as a
+	// level too: it carries a value of its own, so a chain of custom_value
+	// nodes recursed through here without limit (stack overflow).
+	if ((v->type == T::OBJECT || v->type == T::ARRAY || v->type == T::CUSTOM_TAG) &&
 	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
 		throw asvJSONError("YAML: nesting too deep");
 	switch (v->type) {
@@ -472,7 +474,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			// "key: !name <value>"; the value stays inline (force-flow) so the
 			// tagged form returns to a single line.
 			std::string childOut;
-			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true)) {
+			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true, depth + 1)) {
 				std::string nm(v->str_data);
 				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
 				out += prefix() + "!" + nm + " " + childOut + yamlTrail(v, wc) + "\n";
@@ -552,7 +554,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 
 	if (v->type == T::OBJECT && v->yaml_set) {
 		std::string inner;
-		yamlTryFlowVal(v, inner, o, true);
+		yamlTryFlowVal(v, inner, o, true, depth);
 		std::string trial = prefix();
 		if (!fitsLine(trial, inner)) {
 			// Too long for one line: emit the set in block form instead of
@@ -567,7 +569,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 	if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner, o, forceFlow) && fitsLine(trial, inner)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow, depth) && fitsLine(trial, inner)) {
 			if (isRoot) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {
@@ -581,7 +583,7 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
 		std::string trial = prefix();
 		std::string inner;
-		if (yamlTryFlowVal(v, inner, o, forceFlow) && fitsLine(trial, inner)) {
+		if (yamlTryFlowVal(v, inner, o, forceFlow, depth) && fitsLine(trial, inner)) {
 			if (isRoot) out += inner + "\n";
 			else out += trial + inner + "\n";
 		} else {

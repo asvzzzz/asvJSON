@@ -1004,7 +1004,20 @@ inline void asvJSONValue::serialize(std::string& out, bool allowNaNInfinity, int
 		case REGEX:
 		case TIMESTAMP:
 		case EXTENSION:
+			appendJsonToken(out, this, allowNaNInfinity, depth);
+			break;
 		case CUSTOM_TAG:
+			// A CUSTOM_TAG carries a value of its own, so unlike the scalars above
+			// it recurses: a programmatically built chain of custom_value nodes ran
+			// through here without limit and overflowed the stack. Every format that
+			// embeds serialize()'s text for a CUSTOM_TAG (JSON, JSON5, YAML, TOML,
+			// INI, CSV, TOON, ADE, JSON Lines) crashed together with it. The tag is
+			// bounded ONE level past the container cap, not at it: a parser puts the
+			// value of the deepest legal container at level MAX+1 (the INT leaf of a
+			// 48-level array chain sits there - pinned by testSerializeDepthGuard),
+			// so a tag at that level must still render. Its payload is written at
+			// depth + 1, where the OBJECT/ARRAY/CUSTOM_TAG guards degrade it.
+			if (depth > static_cast<int>(MAX_NESTING_DEPTH) + 1) { out += "null"; break; }
 			appendJsonToken(out, this, allowNaNInfinity, depth);
 			break;
 		case OBJECT: {
@@ -2834,6 +2847,13 @@ inline void appendJsonToken(std::string& out, const asvJSONValue* v, bool allowN
 			break;
 		}
 		case asvJSONValue::CUSTOM_TAG: {
+			// Depth guard for callers that reach appendJsonToken directly (the
+			// format encoders that emit JSON tokens themselves). Same rule as the
+			// CUSTOM_TAG case in asvJSONValue::serialize: the tag recurses into its
+			// payload, so an unbounded chain of them must degrade, not recurse
+			// forever; the +1 keeps a tag that is the value of the deepest legal
+			// container (level MAX+1) intact.
+			if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 1) { out += "null"; break; }
 			out += "{\"$customTag\":{\"name\":\"";
 			appendJsonEscaped(out, v->str_data);
 			out += "\",\"value\":";
