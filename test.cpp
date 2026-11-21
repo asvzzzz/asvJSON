@@ -13716,6 +13716,68 @@ TEST(testProtobufSchemaLessRoundTrip) {
 		auto* e = j2.getRoot()->get("empty");
 		ASSERT(e != nullptr && e->type == asvJSONValue::OBJECT);
 	}
+	// Reserved-range field numbering: the schema-less encoder numbered members
+	// 1..N and wrote the name map at the reserved field 19000, so a member at
+	// index 18999 collided with it. The decoder treats field 19000 as the name
+	// map and skips it, so EVERY round-trip silently dropped one member
+	// (20000 -> 19999 -> 19998 ...) and enc(dec(enc(t))) != enc(t). protoLessFieldNum
+	// now skips 19000-19999.
+	{
+		const size_t N = 20000;  // > 19000 members: index 18999 used to be field 19000
+		asvJSON j;
+		j.parse(std::string("{}"));
+		for (size_t i = 0; i < N; i++)
+			j.getRoot()->obj->emplace("k" + std::to_string(i), asvJSONValue::makeInt((int64_t)(i + 1)));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->obj != nullptr);
+		ASSERT_EQ(j2.getRoot()->obj->size(), N);
+		// the member that used to land on field 19000, and its neighbours
+		auto* before = j2.getRoot()->get("k18998");
+		auto* at = j2.getRoot()->get("k18999");
+		auto* after = j2.getRoot()->get("k19000");
+		ASSERT(before != nullptr && before->num == 18999);
+		ASSERT(at != nullptr && at->num == 19000);
+		ASSERT(after != nullptr && after->num == 19001);
+		// byte stability: a second encode must produce the very same buffer
+		auto buf2 = j2.toProtobuf();
+		ASSERT_EQ(buf.size(), buf2.size());
+		ASSERT(buf == buf2);
+	}
+	// Same shape with STRING values (wire type 2, the name map's own wire type).
+	{
+		const size_t N = 19500;
+		asvJSON j;
+		j.parse(std::string("{}"));
+		for (size_t i = 0; i < N; i++)
+			j.getRoot()->obj->emplace("s" + std::to_string(i), asvJSONValue::makeString("v" + std::to_string(i)));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		ASSERT(j2.getRoot() != nullptr && j2.getRoot()->obj != nullptr);
+		ASSERT_EQ(j2.getRoot()->obj->size(), N);
+		auto* at = j2.getRoot()->get("s18999");
+		ASSERT(at != nullptr && at->type == asvJSONValue::STRING && at->str_data == "v18999");
+	}
+	// A sub-message with > 19000 members (the numbering is per message).
+	{
+		const size_t N = 19001;
+		asvJSON j;
+		j.parse(std::string("{}"));
+		auto inner = asvJSONValue::makeObject();
+		for (size_t i = 0; i < N; i++)
+			inner->obj->emplace("n" + std::to_string(i), asvJSONValue::makeInt((int64_t)i));
+		j.getRoot()->obj->emplace("inner", std::move(inner));
+		auto buf = j.toProtobuf();
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto* in = j2.getRoot()->get("inner");
+		ASSERT(in != nullptr && in->obj != nullptr);
+		ASSERT_EQ(in->obj->size(), N);
+		auto* at = in->get("n18999");
+		ASSERT(at != nullptr && at->num == 18999);
+	}
 }
 
 TEST(testProtobufTextArrayOfObjects) {

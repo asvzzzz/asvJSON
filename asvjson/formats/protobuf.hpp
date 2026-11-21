@@ -78,7 +78,12 @@
 //   19001 + repeated field 1) so the elements survive a schema-less round-trip
 //   intact; non-object array elements cannot be represented in the wrapper and
 //   are skipped. Fields in the reserved range 19000-19999 (the schema-less name
-//   map and the array-root marker) must not be used for user data.
+//   map and the array-root marker) must not be used for user data. The schema-less
+//   encoder therefore SKIPS that range when numbering members (protoLessFieldNum:
+//   members 1..18999, then 20000+), so an object with >= 19000 members no longer
+//   collides with the name map at field 19000 (each round-trip used to drop one
+//   member). The mapping is monotone, so ascending field number still equals the
+//   original member order.
 // - BINARY/EXTENSION values are serialized as quoted strings by the text
 //   format, so a toProtobufText()/fromProtobufText() round-trip turns them into
 //   STRING (the raw type is lost). The schema-less WIRE format keeps them apart:
@@ -134,6 +139,22 @@ inline constexpr int protoArrayRootFieldNum = 19001;
 
 // Largest legal protobuf field number (2^29-1 per the spec).
 inline constexpr uint64_t protoMaxFieldNum = (1ULL << 29) - 1;
+
+// Schema-less field numbering: sequential 1..N in member order, but the
+// reserved range 19000-19999 is SKIPPED. An object with >= 19000 members used
+// to encode a REAL field at number 19000, and the schema-less decoder (rightly)
+// treats field 19000 as the embedded name map and drops it, so every round-trip
+// silently lost one member (20000 -> 19999 -> 19998 members). 19001 (the
+// array-root marker) sat on the same path. The mapping stays strictly monotone,
+// so "ascending field number == original member order", which the no-wire-bytes
+// recovery relies on, is preserved. Max member count (MAX_OBJECT_SIZE) keeps
+// the top number far below protoMaxFieldNum.
+inline int protoLessFieldNum(size_t memberIndex) {
+  constexpr size_t reservedSpan = 1000;  // 19000..19999
+  if (memberIndex + 1 < static_cast<size_t>(protoNameMapFieldNum))
+    return static_cast<int>(memberIndex + 1);
+  return static_cast<int>(memberIndex + 1 + reservedSpan);
+}
 
 // Sentinel for "this field carries no extension type byte". Chosen outside the
 // int8_t range of asvJSONValue::ext_type so that EXTENSION(0) -- a perfectly
@@ -542,7 +563,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
       std::string nm = "{";
       for (size_t i = 0; i < fields.size(); i++) {
         if (i > 0) nm += ",";
-        nm += "\"" + std::to_string(i + 1) + "\":{\"n\":\"";
+        nm += "\"" + std::to_string(protoLessFieldNum(i)) + "\":{\"n\":\"";
         for (char c : fields[i].key) {
           if (c == '"') nm += "\\\"";
           else if (c == '\\') nm += "\\\\";
@@ -575,7 +596,7 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
     }
     for (size_t fi = 0; fi < fields.size(); fi++) {
       const auto& [key, fieldVal] = fields[fi];
-      int fnum = static_cast<int>(fi + 1);
+      int fnum = protoLessFieldNum(fi);
       switch (fieldVal->type) {
       case asvJSONValue::INT:
         protoWriteTag(out, fnum, 0);
