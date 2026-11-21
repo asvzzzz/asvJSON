@@ -1379,6 +1379,9 @@ private:
 // JsonSaxToDom -- builds a DOM tree from SAX events
 // ============================================================================
 // Use with either JsonSaxParser or JsonStreamParser to build an asvJSONValue tree.
+// When driven by hand, the adapter enforces the library caps itself: object /
+// array sizes (MAX_OBJECT_SIZE / MAX_ARRAY_SIZE) and nesting depth
+// (MAX_NESTING_DEPTH, the same container limit both parsers apply).
 
 class JsonSaxToDom : public JsonSaxHandler {
 public:
@@ -1477,6 +1480,16 @@ private:
 
   void pushContainer(std::unique_ptr<asvJSONValue> node) {
     if (!node) return;
+    // Both shipped parsers reject past MAX_NESTING_DEPTH, and the adapter is
+    // also usable with a hand-driven handler -- so it enforces the same cap.
+    // A deeper tree is one no parser could produce: it cannot round-trip
+    // through the library (serializers degrade it, cloneValue refuses it),
+    // and an unbounded event stream lets the caller grow it without limit.
+    if (stack_.size() + 1 > asvJSONValue::MAX_NESTING_DEPTH) {
+      fatal_ = true;
+      errorMsg_ = "SAX-to-DOM nesting too deep";
+      return; // the freshly made node is destroyed here
+    }
     asvJSONValue* raw = node.get();
     if (stack_.empty()) {
       root_ = std::move(node);

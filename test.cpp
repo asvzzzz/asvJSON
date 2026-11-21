@@ -34473,6 +34473,25 @@ TEST(testJsonSaxNumberParity) {
 		ASSERT(root && root->type == asvJSONValue::OBJECT);
 		ASSERT_EQ(root->obj->size(), 1u);
 	}
+
+	// Nesting depth cap on the hand-driven stream: exactly MAX_NESTING_DEPTH
+	// containers build (what parse() accepts), the MAX+1-th is fatal.
+	{
+		JsonSaxToDom dom;
+		for (size_t i = 0; i < static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH); i++) dom.onStartArray();
+		for (size_t i = 0; i < static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH); i++) dom.onEndArray();
+		ASSERT(dom.getError().empty());
+		auto root = dom.getResult();
+		ASSERT(root && root->type == asvJSONValue::ARRAY);
+	}
+	{
+		JsonSaxToDom dom;
+		for (size_t i = 0; i < static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH) + 1 && dom.getError().empty(); i++) {
+			dom.onStartObject();
+		}
+		ASSERT_EQ(dom.getError(), std::string("SAX-to-DOM nesting too deep"));
+		ASSERT(dom.getResult() == nullptr);
+	}
 }
 
 TEST(testSaxToDom) {
