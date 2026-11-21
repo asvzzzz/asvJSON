@@ -1252,6 +1252,89 @@ TEST(testSetByPointerDepthGuard) {
 	}
 }
 
+TEST(testApplyPatchDepthBomb) {
+	// The setByPointer segment cap above counts PATH segments only, not the
+	// container chain of the attached value. A chain of individually-legal
+	// applyPatch ops (move /x into a fresh 48-segment path, repeated) used to
+	// wrap the document into a new 48-level chain once per op: the composed
+	// tree no parser can build, serialize() silently truncated it to null
+	// (the document stopped surviving its own round-trip), and the first op
+	// rejected by the clone depth guard deleted the source without writing
+	// the destination, wiping the document. setByPointer now caps
+	// segments + value chain at MAX_NESTING_DEPTH, move/copy check the
+	// placement BEFORE touching the document.
+	const int MAXD = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
+	std::string deepPath;
+	for (int i = 0; i < MAXD; i++) deepPath += "/x";
+	// a rejected move must not destroy the source
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{\"a\":[1,2]}")));
+		asvJSON patch;
+		ASSERT(patch.parse(std::string("[{\"op\":\"move\",\"from\":\"/a\",\"path\":\"") + deepPath + "\"}]"));
+		ASSERT(!doc.applyPatch(patch));
+		ASSERT(doc.getRoot()->hasKey("a"));
+		std::string txt = doc.serialize(false);
+		asvJSON back;
+		ASSERT(back.parse(txt));
+		ASSERT(*back.getRoot() == *doc.getRoot());
+	}
+	// the move bomb: every op legal on its own, the composition is not; the
+	// document stays alive and losslessly round-trippable
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{\"keep\":1}")));
+		std::string ptxt = "[";
+		for (int i = 0; i < 6; i++) {
+			if (i) ptxt += ",";
+			ptxt += std::string("{\"op\":\"move\",\"from\":\"") + (i ? "/x" : "/keep") + "\",\"path\":\"" + deepPath + "\"}";
+		}
+		ptxt += "]";
+		asvJSON patch;
+		ASSERT(patch.parse(ptxt));
+		ASSERT(!doc.applyPatch(patch));
+		std::string txt = doc.serialize(false);
+		asvJSON back;
+		ASSERT(back.parse(txt));
+		ASSERT(*back.getRoot() == *doc.getRoot());
+	}
+	// an add whose parsed value would overflow the ceiling is rejected
+	{
+		asvJSON doc;
+		ASSERT(doc.parse(std::string_view("{\"keep\":1}")));
+		std::string val;
+		for (int i = 0; i < MAXD - 2; i++) val += "[";
+		val += "1";
+		for (int i = 0; i < MAXD - 2; i++) val += "]";
+		asvJSON patch;
+		ASSERT(patch.parse(std::string("[{\"op\":\"add\",\"path\":\"") + deepPath + "\",\"value\":" + val + "}]"));
+		ASSERT(!doc.applyPatch(patch));
+		std::string txt = doc.serialize(false);
+		asvJSON back;
+		ASSERT(back.parse(txt));
+		ASSERT(*back.getRoot() == *doc.getRoot());
+	}
+	// boundaries: segments + chain == MAX passes, MAX + 1 is rejected
+	{
+		asvJSON j;
+		std::string path;
+		for (int i = 0; i < MAXD - 1; i++) path += "/a";
+		auto arr = asvJSONValue::makeArray();
+		ASSERT(arr != nullptr);
+		arr->arr->push_back(asvJSONValue::makeInt(1));
+		ASSERT(j.setByPointer(path, std::move(arr)));
+	}
+	{
+		asvJSON j;
+		std::string path;
+		for (int i = 0; i < MAXD; i++) path += "/a";
+		auto arr = asvJSONValue::makeArray();
+		ASSERT(arr != nullptr);
+		arr->arr->push_back(asvJSONValue::makeInt(1));
+		ASSERT(!j.setByPointer(path, std::move(arr)));
+	}
+}
+
 TEST(testJSONPatchCopyMove) {
 	asvJSON json;
 	json.parse(std::string("{\"a\": 1, \"b\": 2}"));
@@ -39491,6 +39574,7 @@ int main() {
 	RUN(testJSONPointerEscape);
 	RUN(testJSONPointerArrayAppend);
 	RUN(testSetByPointerDepthGuard);
+	RUN(testApplyPatchDepthBomb);
 	
 	std::cout << "\n--- JSON Patch Extended Tests ---\n";
 	RUN(testJSONPatchCopyMove);

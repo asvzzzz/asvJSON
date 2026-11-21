@@ -3272,9 +3272,36 @@ inline const asvJSONValue* asvJSON::getByPointer(std::string_view ptr) const {
 	return const_cast<asvJSON*>(this)->getByPointer(ptr);
 }
 
+// Container-chain depth of a value: scalars add 0 levels, OBJECT/ARRAY/CUSTOM_TAG
+// add one level plus the deepest child. Recursion is bounded by `limit` frames
+// (the helper returns limit+1 as soon as the cap is crossed), so it is safe to
+// call even on an unbounded composed tree.
+inline int valueContainerDepth(const asvJSONValue* v, int limit) {
+	if (!v) return 0;
+	if (v->type != asvJSONValue::OBJECT && v->type != asvJSONValue::ARRAY && v->type != asvJSONValue::CUSTOM_TAG) return 0;
+	if (limit <= 0) return limit + 1;
+	int m = 0;
+	if (v->type == asvJSONValue::OBJECT) {
+		if (v->obj) for (const auto& kv : *v->obj) {
+			int d = valueContainerDepth(kv.second.get(), limit - 1);
+			if (d > m) m = d;
+			if (m >= limit) return limit + 1;
+		}
+	} else if (v->type == asvJSONValue::ARRAY) {
+		if (v->arr) for (const auto& e : *v->arr) {
+			int d = valueContainerDepth(e.get(), limit - 1);
+			if (d > m) m = d;
+			if (m >= limit) return limit + 1;
+		}
+	} else {
+		m = valueContainerDepth(v->custom_value.get(), limit - 1);
+	}
+	return m + 1;
+}
+
 inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value) {
 	if (!value) return false; // a null node would be dereferenced by every later tree walk
-	if (ptr.empty() || ptr == "/") { root = std::move(value); dirty_ = true; return true; }
+	if (ptr.empty() || ptr == "/") { root = std::move(value); dirty_ = true; return true; } // root replacement keeps the documented raw-API behavior: a programmatically deep tree is safe here (iterative destructor, guarded walkers), and applyPatch can never route an over-deep value through this branch because its cloneValue caps at MAX_NESTING_DEPTH (null value -> early false)
 	if (ptr[0] != '/') return false;
 	if (!root) {
 		size_t nextSlash = ptr.find('/', 1);
@@ -3300,6 +3327,14 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 		size_t slash = ptr.find('/', start);
 		std::string_view seg = (slash == std::string_view::npos) ? ptr.substr(start) : ptr.substr(start, slash - start);
 		bool isLast = (slash == std::string_view::npos);
+		// The value's own container chain extends BELOW the segment level, so
+		// the composed tree (segments + chain) must also fit the parser
+		// ceiling: a scalar at MAX segments is the pinned-legal shape, an
+		// array there would be container no. MAX+1 no parser can produce.
+		if (isLast) {
+			int cap = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - static_cast<int>(levels);
+			if (valueContainerDepth(value.get(), cap) > cap) return false;
+		}
 		if (cur->type == asvJSONValue::OBJECT && cur->obj) {
 			std::string key = decodeJSONPointerKey(seg);
 			if (isLast) {
@@ -3565,6 +3600,22 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			if (fromIt == elem->obj->end() || fromIt->second->type != asvJSONValue::STRING) return false;
 			auto* fromVal = getByPointer(fromIt->second->str_data);
 			if (!fromVal) return false;
+			// Placement guard BEFORE any mutation: destination segments plus the
+			// source's container chain must fit the parser ceiling. setByPointer
+			// rejects an over-deep placement too, but for "move" that rejection
+			// runs AFTER removeByPointer has already deleted the source, and a
+			// patch of individually-legal moves could wrap the chain into a fresh
+			// 48-level path again and again - every op within the segment cap,
+			// the composed tree unbounded (silent null-truncation on serialize).
+			size_t segs = 0;
+			for (size_t s = 1; s < path.size(); ) {
+				segs++;
+				size_t sl = path.find('/', s);
+				if (sl == std::string_view::npos) break;
+				s = sl + 1;
+			}
+			int cap = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - static_cast<int>(segs);
+			if (cap < 0 || valueContainerDepth(fromVal, cap) > cap) return false;
 			if (op == "move") {
 				auto fromClone = cloneValue(fromVal);
 				if (!removeByPointer(fromIt->second->str_data)) return false;
