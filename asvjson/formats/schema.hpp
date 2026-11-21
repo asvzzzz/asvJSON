@@ -22,6 +22,13 @@
 // validate() never throws: an escaping std::exception (std::bad_alloc from the
 // caches, std::regex_error from a pattern whose *match* runs out of stack) is
 // converted into a false return with a "Schema validation failed: ..." message.
+// A pathological `pattern`/`patternProperties` regex over attacker-controlled
+// text is CPU-expensive (std::regex backtracks): MSVC enforces a pre-set match
+// complexity limit and regex_search throws std::regex_error(error_complexity)
+// after roughly 1-2 s, which the fence turns into a false return, so validate()
+// neither hangs nor crashes there. libstdc++/libc++ have no such cap, so the
+// wall-clock bound is toolchain-specific: treat the SCHEMA (its patterns) as
+// trusted input even though instances may be hostile.
 // A malformed subschema is likewise reported rather than swallowed, including
 // inside anyOf/oneOf/not/if/contains -- those keywords abort on the first broken
 // branch instead of counting it as a branch the instance failed to match. A
