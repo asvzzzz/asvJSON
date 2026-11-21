@@ -109,7 +109,11 @@ namespace asvJSONInternal {
 // Insertion-ordered associative map for object children (default backing store).
 // Keys are indexed by string_view into stable heap nodes; iteration follows insertion
 // order. Update-in-place (operator[], insert_or_assign, it->second = ...) never moves
-// an entry's position.
+// an entry's position. Erase is O(1) amortized: the order_ entry is hole-punched and
+// the key index gets a tombstone, so slot positions stay valid and no per-erase index
+// rebuild is needed (a bulk compaction runs only once the holes rival the live count).
+// Bulk removal from a public API (applyPatch/removeByPointer) therefore stays linear,
+// not O(N^2) hash rebuilds.
 template <typename Value>
 class ObjectMapT {
 public:
@@ -129,7 +133,9 @@ private:
 
 	// Flat open-addressing key index. Only one allocation per inserted key (the
 	// order_ Node); the table itself grows geometrically (a handful of reallocs
-	// per map). Tombstone deletion + rebuild-on-erase keeps the algorithm simple.
+	// per map). Tombstone deletion + lazy order_ compaction keep erase O(1)
+	// amortized: slot `pos` values stay valid because erased order_ entries
+	// become holes instead of shifting the vector.
 	// Objects with <= kSmallObjectMax entries stay in linear-scan mode (no
 	// table allocation), which eliminates table allocs for tiny maps common in
 	// YAML/TOML metadata.
@@ -159,6 +165,8 @@ private:
 	std::vector<std::unique_ptr<Node>> order_;
 	std::vector<Slot> slots_;
 	std::size_t used_ = 0; // non-empty slots (live + tombstones)
+	std::size_t live_ = 0; // live entries == order_ entries that are not holes
+	std::size_t firstLive_ = 0; // smallest live index in order_ (== order_.size() when empty)
 
 	static std::size_t nextPow2(std::size_t n) noexcept {
 		if (n < kInitCap) n = kInitCap;
@@ -179,19 +187,22 @@ public:
 		using reference = value_type&;
 
 		iterator() = default;
-		explicit iterator(VecIt it) : it_(it) {}
+		iterator(VecIt it, VecIt endIt) : it_(it), end_(endIt) { skipHoles(); }
 
 		reference operator*() const { return (**it_).kv; }
 		pointer operator->() const { return &(**it_).kv; }
-		iterator& operator++() { ++it_; return *this; }
-		iterator operator++(int) { iterator t(*this); ++it_; return t; }
+		iterator& operator++() { ++it_; skipHoles(); return *this; }
+		iterator operator++(int) { iterator t(*this); ++(*this); return t; }
 		bool operator==(const iterator& o) const { return it_ == o.it_; }
 		bool operator!=(const iterator& o) const { return it_ != o.it_; }
 
 		friend class ObjectMapT;
 		friend class const_iterator;
 	private:
+		// Invariant: unless it_ == end_, the entry is live (never a hole).
+		void skipHoles() { while (it_ != end_ && !*it_) ++it_; }
 		VecIt it_;
+		VecIt end_;
 	};
 
 	class const_iterator {
@@ -204,19 +215,22 @@ public:
 		using reference = const value_type&;
 
 		const_iterator() = default;
-		explicit const_iterator(VecIt it) : it_(it) {}
-		const_iterator(const iterator& it) : it_(it.it_) {}
+		const_iterator(VecIt it, VecIt endIt) : it_(it), end_(endIt) { skipHoles(); }
+		const_iterator(const iterator& it) : it_(it.it_), end_(it.end_) {}
 
 		reference operator*() const { return (**it_).kv; }
 		pointer operator->() const { return &(**it_).kv; }
-		const_iterator& operator++() { ++it_; return *this; }
-		const_iterator operator++(int) { const_iterator t(*this); ++it_; return t; }
+		const_iterator& operator++() { ++it_; skipHoles(); return *this; }
+		const_iterator operator++(int) { const_iterator t(*this); ++(*this); return t; }
 		bool operator==(const const_iterator& o) const { return it_ == o.it_; }
 		bool operator!=(const const_iterator& o) const { return it_ != o.it_; }
 
 		friend class ObjectMapT;
 	private:
+		// Invariant: unless it_ == end_, the entry is live (never a hole).
+		void skipHoles() { while (it_ != end_ && !*it_) ++it_; }
 		VecIt it_;
+		VecIt end_;
 	};
 
 	ObjectMapT() = default;
@@ -225,15 +239,15 @@ public:
 	ObjectMapT(const ObjectMapT&) = delete;
 	ObjectMapT& operator=(const ObjectMapT&) = delete;
 
-	iterator begin() noexcept { return iterator(order_.begin()); }
-	iterator end() noexcept { return iterator(order_.end()); }
-	const_iterator begin() const noexcept { return const_iterator(order_.begin()); }
-	const_iterator end() const noexcept { return const_iterator(order_.end()); }
+	iterator begin() noexcept { return iterator(order_.begin() + static_cast<std::ptrdiff_t>(firstLive_), order_.end()); }
+	iterator end() noexcept { return iterator(order_.end(), order_.end()); }
+	const_iterator begin() const noexcept { return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(firstLive_), order_.end()); }
+	const_iterator end() const noexcept { return const_iterator(order_.end(), order_.end()); }
 
-	size_type size() const noexcept { return order_.size(); }
-	bool empty() const noexcept { return order_.empty(); }
+	size_type size() const noexcept { return live_; }
+	bool empty() const noexcept { return live_ == 0; }
 	void reserve(size_type n) { order_.reserve(n); }
-	void clear() { order_.clear(); slots_.clear(); used_ = 0; }
+	void clear() { order_.clear(); slots_.clear(); used_ = 0; live_ = 0; firstLive_ = 0; }
 
 	iterator find(const std::string& k) { return findImpl(std::string_view(k)); }
 	iterator find(std::string_view k) { return findImpl(k); }
@@ -273,14 +287,32 @@ public:
 	size_type count(const char* k) const { return findPosOf(k) == npos ? 0 : 1; }
 
 	iterator erase(iterator pos) {
-		std::ptrdiff_t p = pos.it_ - order_.begin();
-		eraseAt(static_cast<std::size_t>(p));
-		return iterator(order_.begin() + p);
+		const std::size_t p = static_cast<std::size_t>(pos.it_ - order_.begin());
+		// Next live element BEFORE mutating (the ++ walks an existing hole run;
+		// each hole run is walked at most once per erased node, so amortized O(1)).
+		iterator nxt = pos;
+		++nxt;
+		const bool hadNext = (nxt.it_ != order_.end());
+		const std::size_t nextOld = hadNext ? static_cast<std::size_t>(nxt.it_ - order_.begin()) : npos;
+		const bool compact = needCompactAfterErase();
+		std::size_t rank = npos; // live entries before p == new index of nextOld after compaction
+		if (compact && hadNext) {
+			rank = 0;
+			for (std::size_t i = 0; i < p; i++) if (order_[i]) rank++;
+		}
+		eraseAt(p, compact);
+		if (!hadNext) return end();
+		if (compact) {
+			iterator it = begin();
+			for (std::size_t i = 0; i < rank; i++) ++it;
+			return it;
+		}
+		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(nextOld), order_.end());
 	}
 	size_type erase(const std::string& k) {
 		auto p = findPosOf(k);
 		if (p == npos) return 0;
-		eraseAt(p);
+		eraseAt(p, needCompactAfterErase());
 		return 1;
 	}
 
@@ -305,7 +337,7 @@ private:
 			}
 		}
 		for (std::size_t i = 0; i < order_.size(); i++) {
-			if (order_[i]->kv.first == k) return i;
+			if (order_[i] && order_[i]->kv.first == k) return i;
 		}
 		return npos;
 	}
@@ -349,6 +381,7 @@ private:
 		slots_.assign(cap, Slot{kEmptyHash, 0, 0, nullptr});
 		std::size_t n = 0;
 		for (std::size_t i = 0; i < order_.size(); i++) {
+			if (!order_[i]) continue; // hole (erased entry awaiting compaction)
 			const std::string& kk = order_[i]->kv.first;
 			const std::uint64_t h = hashOf(std::string_view(kk));
 			std::size_t j = static_cast<std::size_t>(h) & (cap - 1);
@@ -363,12 +396,12 @@ private:
 	iterator findImpl(std::string_view k) {
 		auto p = findPosOf(k);
 		if (p == npos) return end();
-		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(p));
+		return iterator(order_.begin() + static_cast<std::ptrdiff_t>(p), order_.end());
 	}
 	const_iterator findImpl(std::string_view k) const {
 		auto p = findPosOf(k);
 		if (p == npos) return end();
-		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(p));
+		return const_iterator(order_.begin() + static_cast<std::ptrdiff_t>(p), order_.end());
 	}
 
 	template <typename K>
@@ -380,6 +413,8 @@ private:
 		auto node = std::make_unique<Node>(std::forward<K>(k), std::move(v));
 		const std::size_t pos = order_.size();
 		order_.push_back(std::move(node));
+		if (live_ == 0) firstLive_ = pos;
+		live_++;
 		if (slots_.empty()) return; // still small-object mode: no table yet
 		growIfNeeded(); // may rehash; slot target recomputed below
 		const std::size_t slot = insertSlotFor(h);
@@ -397,12 +432,49 @@ private:
 		return order_.back()->kv.second;
 	}
 
-	void eraseAt(std::size_t pos) {
-		order_.erase(order_.begin() + static_cast<std::ptrdiff_t>(pos));
+	// Compaction fires when the holes would rival the live entries, keeping
+	// order_.size() <= 2*live_ + O(1); the cost is charged across the erases
+	// that created the holes, so erase stays O(1) amortized.
+	bool needCompactAfterErase() const noexcept {
+		return order_.size() - 1 >= 2 * (live_ - 1) + kSmallObjectMax;
+	}
+
+	void compactHoles() {
+		std::vector<std::unique_ptr<Node>> live;
+		live.reserve(live_);
+		for (auto& n : order_) if (n) live.push_back(std::move(n));
+		order_ = std::move(live);
+		firstLive_ = 0;
 		if (!slots_.empty()) rebuildIndex();
-		// NOTE: rebuildIndex() is O(n), so erasing N keys one by one is O(N^2).
-		// This is an intentional trade-off for the small-object path; bulk
-		// erase should be done via a dedicated method if performance matters.
+	}
+
+	void eraseAt(std::size_t pos, bool compact) {
+		// Tombstone the key slot (O(1) probe) and hole-punch order_ instead of
+		// shifting the vector: every slot's `pos` stays valid, so no per-erase
+		// index rebuild. rebuildIndex() here would make N single erases O(N^2)
+		// - an attacker-supplied RFC 6902 patch with N "remove" ops against a
+		// wide object is exactly that pattern (applyPatch -> removeByPointer).
+		if (!slots_.empty()) {
+			const std::string& kk = order_[pos]->kv.first;
+			const std::uint64_t h = hashOf(std::string_view(kk));
+			const std::size_t mask = slots_.size() - 1;
+			std::size_t i = static_cast<std::size_t>(h) & mask;
+			for (;;) {
+				const Slot& e = slots_[i];
+				if (e.hash == kEmptyHash) break; // slot must exist; leave it to compact()
+				if (e.hash == h && e.pos == static_cast<std::uint32_t>(pos)) {
+					slots_[i] = Slot{kTombHash, 0, 0, nullptr};
+					break;
+				}
+				i = (i + 1) & mask;
+			}
+		}
+		order_[pos].reset();
+		live_--;
+		if (firstLive_ == pos) {
+			while (firstLive_ < order_.size() && !order_[firstLive_]) firstLive_++;
+		}
+		if (compact) compactHoles();
 	}
 };
 

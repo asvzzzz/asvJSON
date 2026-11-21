@@ -36770,6 +36770,105 @@ TEST(testKeyOrder) {
 	}
 }
 
+TEST(testObjectMapBulkErase) {
+	// ObjectMapT::erase is O(1) amortized (hole-punch + tombstone + lazy
+	// compaction). The old implementation rebuilt the whole key index per
+	// erase: an attacker-sized RFC 6902 patch of N "remove" ops against a
+	// wide object was O(N^2) (measured: 16k removes over 32k keys = 10.4s;
+	// now ~6ms). The wall test below pins the linearity; the rest pins the
+	// semantics the rewrite must not change.
+	// 1) Bulk applyPatch removals stay linear (CPU-time bound, generous:
+	//    old code ~9s CPU here, new code ~10ms; bound 2s).
+	{
+		const int N = 30000;
+		std::string doc = "{";
+		std::string patch = "[";
+		for (int i = 0; i < N; i++) {
+			doc += "\"k" + std::to_string(i) + "\":" + std::to_string(i);
+			if (i + 1 < N) doc += ",";
+		}
+		doc += "}";
+		for (int i = 0; i < N / 2; i++) {
+			patch += "{\"op\":\"remove\",\"path\":\"/k" + std::to_string(i) + "\"}";
+			if (i + 1 < N / 2) patch += ",";
+		}
+		patch += "]";
+		asvJSON j, p;
+		ASSERT(j.parse(doc));
+		ASSERT(p.parse(patch));
+		std::clock_t t0 = std::clock();
+		ASSERT(j.applyPatch(p));
+		double cpuMs = 1000.0 * (std::clock() - t0) / CLOCKS_PER_SEC;
+		ASSERT(cpuMs < 2000.0);
+		// survivors keep insertion order: k(N/2) ... k(N-1)
+		auto* root = j.getRoot();
+		ASSERT(root && root->type == asvJSONValue::OBJECT);
+		ASSERT(root->obj->size() == (size_t)(N / 2));
+		int expect = N / 2, cnt = 0;
+		for (const auto& kv : *root->obj) {
+			ASSERT(kv.first == "k" + std::to_string(expect++));
+			cnt++;
+		}
+		ASSERT(cnt == N / 2 && expect == N);
+		// erased keys miss across tombstone runs, survivors hit
+		ASSERT(root->obj->find("k0") == root->obj->end());
+		ASSERT(root->obj->find("k14998") == root->obj->end());
+		ASSERT(root->obj->find("k29998") != root->obj->end());
+		ASSERT(root->obj->count("k15000") == 1);
+		// hole-heavy tree serializes and re-parses intact
+		std::string jt = j.serialize();
+		asvJSON j2;
+		ASSERT(j2.parse(jt));
+		ASSERT(*j2.getRoot() == *j.getRoot());
+	}
+	// 2) erase(iterator) full sweep, then re-insert starts a fresh order
+	{
+		asvJSON j;
+		std::string doc = "{";
+		for (int i = 0; i < 300; i++) { doc += "\"k" + std::to_string(i) + "\":" + std::to_string(i); if (i + 1 < 300) doc += ","; }
+		doc += "}";
+		ASSERT(j.parse(doc));
+		auto& m = *j.getRoot()->obj;
+		size_t erased = 0;
+		for (auto it = m.begin(); it != m.end(); ) { it = m.erase(it); erased++; }
+		ASSERT(erased == 300 && m.empty() && m.size() == 0);
+		ASSERT(m.begin() == m.end());
+		for (int i = 9; i >= 0; i--) m.insert_or_assign(std::string("z") + std::to_string(i), asvJSONValue::makeInt(i));
+		int idx = 9;
+		for (const auto& kv : m) ASSERT(kv.first == "z" + std::to_string(idx--));
+		ASSERT(idx == -1 && m.count("z5") == 1);
+	}
+	// 3) small-object path (< kSmallObjectMax): erase by key, re-insert appends
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}"));
+		auto& m = *j.getRoot()->obj;
+		ASSERT(m.erase("b") == 1 && m.erase("d") == 1 && m.erase("zzz") == 0);
+		ASSERT(m.size() == 3 && m.count("b") == 0 && m.count("d") == 0);
+		std::string order;
+		for (const auto& kv : m) order += kv.first;
+		ASSERT(order == "ace");
+		m.insert_or_assign(std::string("b"), asvJSONValue::makeInt(2));
+		order.clear();
+		for (const auto& kv : m) order += kv.first;
+		ASSERT(order == "aceb"); // re-inserted key goes to the tail (std semantics)
+	}
+	// 4) churn across the small-object and table-growth boundaries:
+	//    lookups must stay correct over an alternating insert/erase pattern
+	{
+		asvJSON j;
+		ASSERT(j.parse("{}"));
+		auto& m = *j.getRoot()->obj;
+		for (int round = 0; round < 50; round++) {
+			for (int i = 0; i < 30; i++) m.insert_or_assign(std::string("r") + std::to_string(i), asvJSONValue::makeInt(i));
+			for (int i = 0; i < 30; i += 2) ASSERT(m.erase("r" + std::to_string(i)) == 1);
+			ASSERT(m.size() == 15);
+		}
+		for (int i = 1; i < 30; i += 2) ASSERT(m.count("r" + std::to_string(i)) == 1);
+		for (int i = 0; i < 30; i += 2) ASSERT(m.count("r" + std::to_string(i)) == 0);
+	}
+}
+
 TEST(testGetIndexOverload) {
 	// Root array: get(index) returns elements; the explicit size_t overload
 	// wins for integer literals, so get(0) is no longer converted to a null
@@ -39798,6 +39897,7 @@ RUN(testYamlAuditReview);
 
 	std::cout << "\n--- Key Order Tests ---\n";
 	RUN(testKeyOrder);
+	RUN(testObjectMapBulkErase);
 	RUN(testGetIndexOverload);
 
 	std::cout << "\n--- Re-audit Regression Tests ---\n";
