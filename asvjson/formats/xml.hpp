@@ -904,6 +904,13 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 					if (!cdata.empty()) {
 						// CDATA is character data per the spec -- flagged so the
 						// text is never re-interpreted as a number/bool/null.
+						// The segment buffer is what the grouping loop below
+						// turns into array items / object members, so it is
+						// bounded by MAX_ARRAY_SIZE here: the container caps
+						// fire AFTER the children were already built, and a
+						// 12 MB document of 2M segments peaked at ~200 MB.
+						if (!asvJSONValue::checkArraySize(segments.size() + 1))
+							throw asvJSONError("XML: too many child nodes");
 						segments.push_back({false, true, std::move(cdata), "", nullptr});
 					}
 					pos = end + 3; continue;
@@ -929,7 +936,14 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 			}
 			std::string childName;
 			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap, collapseSameNamed);
-			if (childVal) segments.push_back({true, false, "", std::move(childName), std::move(childVal)});
+			if (childVal) {
+				// Transient child buffer is bounded: every segment becomes an
+				// array item or an object member later, and the container caps
+				// in the grouping loop fire only AFTER the node was built.
+				if (!asvJSONValue::checkArraySize(segments.size() + 1))
+					throw asvJSONError("XML: too many child nodes");
+				segments.push_back({true, false, "", std::move(childName), std::move(childVal)});
+			}
 		} else {
 			size_t start = pos;
 			while (pos < s.size() && s[pos] != '<') pos++;
@@ -938,7 +952,11 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 			for (auto c : text) {
 				if (c != ' ' && c != '\t' && c != '\n' && c != '\r') { onlySpace = false; break; }
 			}
-			if (!onlySpace) segments.push_back({false, false, std::move(text), "", nullptr});
+			if (!onlySpace) {
+				if (!asvJSONValue::checkArraySize(segments.size() + 1))
+					throw asvJSONError("XML: too many child nodes");
+				segments.push_back({false, false, std::move(text), "", nullptr});
+			}
 		}
 	}
 }

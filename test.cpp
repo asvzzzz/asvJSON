@@ -39159,12 +39159,11 @@ TEST(testXMLGrowthGuards) {
 	// document of distinct <kN/> built a 1,050,000-member OBJECT - both past
 	// the 1M caps every other decoder enforces (the segments buffer also held
 	// all the child nodes before grouping, so peak memory tracked the input).
-	// Guards: MAX_ARRAY_SIZE on every arr->arr->push_back site (asv:arr
-	// marker, mixed #content, count-collapse grouping, text-only #content),
-	// MAX_OBJECT_SIZE on every obj->obj->emplace site (attribute maps, #text/
-	// #content insertion, same-named-child grouping, repeated root merge) and
-	// on the transient attrs map itself (a 12 MB tag of `a0="" a1="" ...`
-	// would otherwise mint ~1.7M members before any object existed).
+	// Guards: the transient segments buffer is capped at MAX_ARRAY_SIZE on
+	// every push (child element, text run, CDATA) with "XML: too many child
+	// nodes", and every arr->arr->push_back / obj->obj->emplace in the
+	// grouping loop re-checks its own container cap (defense in depth). The
+	// transient attrs map is capped by MAX_OBJECT_SIZE as well.
 	const size_t M = asvJSONValue::MAX_ARRAY_SIZE;
 	auto arrDoc = [](size_t n) {
 		std::string xml = "<r>";
@@ -39191,7 +39190,7 @@ TEST(testXMLGrowthGuards) {
 	{
 		asvJSON j;
 		ASSERT(!j.fromXML(arrDoc(M + 1)));
-		ASSERT(j.getLastError().find("array too large") != std::string::npos);
+		ASSERT(j.getLastError().find("too many child nodes") != std::string::npos);
 	}
 	{
 		asvJSON j;
@@ -39205,7 +39204,7 @@ TEST(testXMLGrowthGuards) {
 	{
 		asvJSON j;
 		ASSERT(!j.fromXML(objDoc(M + 1)));
-		ASSERT(j.getLastError().find("object too large") != std::string::npos);
+		ASSERT(j.getLastError().find("too many child nodes") != std::string::npos);
 	}
 	// The transient attribute map is capped too.
 	{
@@ -39329,6 +39328,91 @@ TEST(testDecodedKeyLengthCaps) {
 		expectThrow("toADE", [&] { j.toADE(); }, "key too long");
 		expectThrow("toProtobufText", [&] { j.toProtobufText(); }, "key too long");
 		expectThrow("toCpp", [&] { j.toCpp(); }, "identifier too long");
+	}
+}
+
+TEST(testADEEncoderDepthGuard) {
+	// Wave 51: toADE() crashed the process (0xC00000FD) on a programmatically
+	// deep tree. Two causes: (a) adeHasComments recursed through the whole
+	// subtree with no limit - and it runs once per writer level, so the crash
+	// happened inside the FIRST call, before any guard; (b) the multiline
+	// (comment-bearing) writer forms passed the child the PARENT's indent as
+	// its nesting level, so the checkNestingDepth guard never advanced and the
+	// comment path encoded trees past MAX_NESTING_DEPTH (not parse()-
+	// representable). Fix: adeHasComments is iterative, and the guard rides a
+	// dedicated depth parameter separate from the visual indent (plus a
+	// recursion fuse in adeWriteValue as a backstop).
+	auto chain = [](int levels, bool withComments) {
+		auto root = asvJSONValue::makeObject();
+		asvJSONValue* cur = root.get();
+		std::vector<asvJSONValue*> nodes;
+		for (int i = 0; i < levels; i++) {
+			auto child = asvJSONValue::makeObject();
+			cur->obj->emplace("a", std::move(child));
+			cur = cur->obj->find("a")->second.get();
+			nodes.push_back(cur);
+		}
+		cur->obj->emplace("leaf", asvJSONValue::makeInt(1));
+		if (withComments) {
+			int i = 0;
+			for (auto* n : nodes) {
+				n->comments.reset(new Comments());
+				n->comments->trailing.push_back(Comment{"c" + std::to_string(i++), false});
+			}
+		}
+		return root;
+	};
+	// 48 containers (root + 47 nested) round-trips; the 49th is an error.
+	{
+		asvJSON j;
+		j.setRoot(chain(47, false));
+		std::string a = j.toADE();
+		ASSERT(!a.empty());
+		asvJSON k;
+		ASSERT(k.fromADE(a));
+	}
+	{
+		asvJSON j;
+		j.setRoot(chain(48, false));
+		bool threw = false;
+		try { j.toADE(); } catch (const asvJSONError& e) {
+			threw = true;
+			ASSERT(std::string(e.what()).find("maximum nesting depth") != std::string::npos);
+		}
+		ASSERT(threw);
+	}
+	// The comment-bearing (multiline) path: same limit, and no crash at
+	// absurd depth.
+	{
+		asvJSON j;
+		j.setRoot(chain(47, true));
+		std::string a = j.toADE();
+		ASSERT(!a.empty());
+		asvJSON k;
+		ASSERT(k.fromADE(a));
+	}
+	{
+		asvJSON j;
+		j.setRoot(chain(48, true));
+		bool threw = false;
+		try { j.toADE(); } catch (const asvJSONError&) { threw = true; }
+		ASSERT(threw);
+	}
+	for (int depth : {2000, 200000}) {
+		{
+			asvJSON j;
+			j.setRoot(chain(depth, false));
+			bool threw = false;
+			try { j.toADE(); } catch (const asvJSONError&) { threw = true; }
+			ASSERT(threw);
+		}
+		{
+			asvJSON j;
+			j.setRoot(chain(depth, true));
+			bool threw = false;
+			try { j.toADE(); } catch (const asvJSONError&) { threw = true; }
+			ASSERT(threw);
+		}
 	}
 }
 
@@ -40653,6 +40737,7 @@ RUN(testYamlAuditReview);
 	RUN(testXMLGrowthGuards);
 	RUN(testTronClassPropsGuard);
 	RUN(testDecodedKeyLengthCaps);
+	RUN(testADEEncoderDepthGuard);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 

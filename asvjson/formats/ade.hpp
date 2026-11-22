@@ -2178,20 +2178,34 @@ inline void adeWriteFoldedScalar(std::ostream& os, std::string_view s) {
 }
 
 // Forward declaration
-inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict);
+inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict,
+                          int depth = -1);
 
 // True when a node carries comments (or any descendant does): such nodes
 // need multi-line output so the comments can be preserved verbatim.
 inline bool adeHasComments(const asvJSONValue* v) {
+  // Iterative on purpose. This scan used to recurse through the whole subtree,
+  // once per writer level, so a programmatically deep tree (raw API, 25k+
+  // levels) overflowed the 1 MB stack inside the FIRST call (0xC00000FD, no
+  // error reported) - the crash was here, not in the indent-guarded writers.
   if (!v) return false;
-  if (v->comments &&
-      (!v->comments->leading.empty() || !v->comments->trailing.empty() ||
-       !v->comments->closing.empty() || !v->comments->footing.empty()))
-    return true;
-  if (v->type == asvJSONValue::OBJECT && v->obj) {
-    for (const auto& [k, c] : *v->obj) if (adeHasComments(c.get())) return true;
-  } else if (v->type == asvJSONValue::ARRAY && v->arr) {
-    for (const auto& c : *v->arr) if (adeHasComments(c.get())) return true;
+  std::vector<const asvJSONValue*> stack;
+  stack.push_back(v);
+  while (!stack.empty()) {
+    const asvJSONValue* n = stack.back();
+    stack.pop_back();
+    if (!n) continue;
+    if (n->comments &&
+        (!n->comments->leading.empty() || !n->comments->trailing.empty() ||
+         !n->comments->closing.empty() || !n->comments->footing.empty()))
+      return true;
+    if (n->type == asvJSONValue::OBJECT && n->obj) {
+      for (const auto& [k, c] : *n->obj)
+        if (c) stack.push_back(c.get());
+    } else if (n->type == asvJSONValue::ARRAY && n->arr) {
+      for (const auto& c : *n->arr)
+        if (c) stack.push_back(c.get());
+    }
   }
   return false;
 }
@@ -2248,7 +2262,7 @@ inline bool adeWriteTrailing(std::ostream& os, const asvJSONValue* v) {
 
 // Multi-line inline object ("key: { ... }") that preserves comments on
 // fields, closing comments before '}', and the object's own trailing.
-inline void adeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+inline void adeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict, int depth) {
   os << "{\n";
   for (const auto& [k, sub] : *v->obj) {
     if (sub->comments) adeWriteCommentLines(os, sub->comments->leading, indent);
@@ -2256,7 +2270,12 @@ inline void adeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int
     adeWriteKey(os, k, strict);
     os << ": ";
     std::ostringstream vbuf;
-    adeWriteValue(vbuf, sub.get(), indent, true, strict);
+    // The VISUAL indent of a multiline block does not nest (that is the point
+    // of the form), so the nesting guard must ride its own counter: passing
+    // `indent` as the level made the guard never advance for comment-bearing
+    // trees, which both mis-stated the encoder limit and (with the recursive
+    // adeHasComments) crashed the process on deep raw-API trees.
+    adeWriteValue(vbuf, sub.get(), indent, true, strict, depth + 1);
     os << vbuf.str();
     os << ',';
     bool nl = adeWriteTrailing(os, sub.get());
@@ -2271,14 +2290,14 @@ inline void adeWriteMultilineObject(std::ostream& os, const asvJSONValue* v, int
 
 // Multi-line array ("[\n ... \n]") that preserves comments on elements
 // and closing comments before ']'.
-inline void adeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+inline void adeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int indent, bool strict, int depth) {
   os << "[\n";
   for (size_t i = 0; i < v->arr->size(); i++) {
     const auto& el = v->arr->at(i);
     if (el->comments) adeWriteCommentLines(os, el->comments->leading, indent);
     adeWriteIndent(os, indent);
     std::ostringstream vbuf;
-    adeWriteValue(vbuf, el.get(), indent, true, strict);
+    adeWriteValue(vbuf, el.get(), indent, true, strict, depth + 1);
     os << vbuf.str();
     os << ',';
     bool nl = adeWriteTrailing(os, el.get());
@@ -2291,11 +2310,11 @@ inline void adeWriteMultilineArray(std::ostream& os, const asvJSONValue* v, int 
   os << ']';
 }
 
-inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict) {
+inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, bool strict, int depth) {
   // align with the decoder: checkNestingDepth uses depth starting at 1 for the
-  // first container (matching parse() semantics). The serializer's indent starts
-  // at 0 for root, so add 1 to compare against the same limit.
-  if (!asvJSONValue::checkNestingDepth(indent + 1))
+  // first container (matching parse() semantics). `depth` is the container
+  // level, `indent` only the visual column, so the two are checked apart.
+  if (!asvJSONValue::checkNestingDepth(depth + 1))
     throw asvJSONError("ADE: maximum nesting depth exceeded");
   if (indent == 0) {
     bool first = true;
@@ -2304,10 +2323,10 @@ inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, 
       first = false;
       adeWriteKey(os, k, strict);
       os << ": ";
-      adeWriteValue(os, sub.get(), 1, true, strict);
+      adeWriteValue(os, sub.get(), 1, true, strict, depth + 1);
     }
   } else if (adeHasComments(v)) {
-    adeWriteMultilineObject(os, v, indent, strict);
+    adeWriteMultilineObject(os, v, indent, strict, depth);
   } else {
     os << '{';
     bool first = true;
@@ -2316,24 +2335,24 @@ inline void adeWriteObject(std::ostream& os, const asvJSONValue* v, int indent, 
       first = false;
       adeWriteKey(os, k, strict);
       os << ": ";
-      adeWriteValue(os, sub.get(), indent + 1, false, strict);
+      adeWriteValue(os, sub.get(), indent + 1, false, strict, depth + 1);
     }
     os << '}';
   }
 }
 
-inline void adeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, bool multiline, bool strict) {
-  if (!asvJSONValue::checkNestingDepth(indent + 1))
+inline void adeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, bool multiline, bool strict, int depth) {
+  if (!asvJSONValue::checkNestingDepth(depth + 1))
     throw asvJSONError("ADE: maximum nesting depth exceeded");
   if (!v->arr || v->arr->empty()) { os << "[]"; return; }
   bool allObjs = true;
   for (const auto& e : *v->arr) if (e->type != asvJSONValue::OBJECT) { allObjs = false; break; }
   if ((allObjs && multiline) || adeHasComments(v)) {
-    if (adeHasComments(v)) { adeWriteMultilineArray(os, v, indent, strict); return; }
+    if (adeHasComments(v)) { adeWriteMultilineArray(os, v, indent, strict, depth); return; }
     os << "[\n";
     for (size_t i = 0; i < v->arr->size(); i++) {
       adeWriteIndent(os, indent);
-      adeWriteObject(os, v->arr->at(i).get(), indent + 1, strict);
+      adeWriteObject(os, v->arr->at(i).get(), indent + 1, strict, depth + 1);
       if (i + 1 < v->arr->size()) os << ',';
       os << '\n';
     }
@@ -2343,22 +2362,45 @@ inline void adeWriteArray(std::ostream& os, const asvJSONValue* v, int indent, b
     os << '[';
     for (size_t i = 0; i < v->arr->size(); i++) {
       if (i) os << ", ";
-      adeWriteValue(os, v->arr->at(i).get(), indent + 1, false, strict);
+      adeWriteValue(os, v->arr->at(i).get(), indent + 1, false, strict, depth + 1);
     }
     os << ']';
   }
 }
 
-inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict) {
+inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, bool lineContext, bool strict,
+                          int depth) {
   using T = asvJSONValue::Type;
+  // `indent` is only the visual column (the multiline forms do not nest it),
+  // so the nesting guard rides `depth`. depth < 0 means "same as indent", the
+  // behaviour every call site had before the two were separated.
+  if (depth < 0) depth = indent;
+  // Hard recursion fuse. The container guards (adeWriteObject/adeWriteArray)
+  // count the VISUAL indent, and the multiline helpers used to hand children
+  // the parent's indent, so a programmatically deep tree (raw API: 25k+
+  // levels) recursed until the 1 MB stack died (0xC00000FD) instead of
+  // reporting an error. This counter is per-call-frame and independent of
+  // indent bookkeeping, so no path can escape it. Legal trees nest at most
+  // MAX_NESTING_DEPTH values deep, hence the margin.
+  struct AdeDepthGuard {
+    int& n;
+    explicit AdeDepthGuard(int& c) : n(c) {
+      ++n;
+      if (n > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) + 4)
+        throw asvJSONError("ADE: maximum nesting depth exceeded");
+    }
+    ~AdeDepthGuard() { --n; }
+  };
+  static thread_local int adeEncDepth = 0;
+  AdeDepthGuard adeDepthGuard(adeEncDepth);
   if (!v) { os << "null"; return; }
   switch (v->type) {
     case T::OBJECT:
-      if (v->obj) adeWriteObject(os, v, indent, strict);
+      if (v->obj) adeWriteObject(os, v, indent, strict, depth);
       else os << "{}";
       break;
     case T::ARRAY:
-      adeWriteArray(os, v, indent, lineContext, strict);
+      adeWriteArray(os, v, indent, lineContext, strict, depth);
       break;
     case T::STRING: {
       if (v->raw_number) {
@@ -2479,7 +2521,7 @@ inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
       if (v->custom_value) {
         if (!asvJSONValue::checkNestingDepth(indent + 1))
           throw asvJSONError("ADE: nesting too deep");
-        adeWriteValue(os, v->custom_value.get(), indent + 1, true, strict);
+        adeWriteValue(os, v->custom_value.get(), indent + 1, true, strict, depth + 1);
       } else os << "null";
       break;
     }
@@ -2516,7 +2558,7 @@ inline void serializeADE(std::ostream& os, const asvJSONValue& val, int indent, 
       adeWriteKey(os, k, strict);
       os << ": ";
       std::ostringstream vbuf;
-      adeWriteValue(vbuf, sub.get(), 1, true, strict);
+      adeWriteValue(vbuf, sub.get(), 1, true, strict, 1);
       std::string vs = vbuf.str();
       os << vs;
       // Ask the writer whether the stream now ends on a fresh line, rather than
@@ -2545,7 +2587,7 @@ inline void serializeADE(std::ostream& os, const asvJSONValue& val, int indent, 
     }
   } else {
     if (val.comments) adeWriteCommentLines(os, val.comments->leading, 0);
-    adeWriteValue(os, &val, indent, false, strict);
+    adeWriteValue(os, &val, indent, false, strict, indent);
     os << '\n';
     if (val.comments && !val.comments->footing.empty())
       adeWriteCommentLines(os, val.comments->footing, 0);
