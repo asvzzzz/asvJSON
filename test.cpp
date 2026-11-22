@@ -14113,6 +14113,90 @@ TEST(testProtobufTextDepthGuardStringAware) {
 	}
 }
 
+// Wave 48 battery: fromX must never build a tree with more than
+// MAX_NESTING_DEPTH containers (parse()/serialize() cannot represent it), and
+// format-specific guards must not reject documents at the legal limit.
+//  - ADE: the top-level collection used to enter parseArray(1) - one free
+//    container level, so 49-deep [[[...]]] parsed while the ADE encoder
+//    rejected the same tree.
+//  - RON: parseValue's slot guard used `depth >= MAX`, rejecting the scalar
+//    leaf of a legal 48-container chain (core parse accepts it).
+//  - Protobuf text: the depth skip fired INSIDE the child body, after the
+//    parent had already created the container - a 49-node tree whose contents
+//    were silently dropped. The skip now happens at the creation site.
+TEST(testFormatDepthParity) {
+  auto maxDepth = [](auto&& self, const asvJSONValue* v, int d) -> int {
+    if (!v) return d;
+    if (v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY ||
+        v->type == asvJSONValue::CUSTOM_TAG) d++;
+    int m = d;
+    if (v->type == asvJSONValue::OBJECT && v->obj)
+      for (const auto& kv : *v->obj) { int x = self(self, kv.second.get(), d); if (x > m) m = x; }
+    else if (v->type == asvJSONValue::ARRAY && v->arr)
+      for (const auto& e : *v->arr) { int x = self(self, e.get(), d); if (x > m) m = x; }
+    else if (v->type == asvJSONValue::CUSTOM_TAG) { int x = self(self, v->custom_value.get(), d); if (x > m) m = x; }
+    return m;
+  };
+  auto nest = [](const std::string& open, const std::string& close, int n) {
+    std::string s;
+    for (int i = 0; i < n; i++) s += open;
+    s += "1";
+    for (int i = 0; i < n; i++) s += close;
+    return s;
+  };
+  const int MAXN = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH);
+
+  // 1. ADE top-level collection: 48 containers legal, 49 rejected.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE(nest("[", "]", 48), false));
+    ASSERT(maxDepth(maxDepth, j.getRoot(), 0) <= MAXN);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromADE(nest("[", "]", 49), false));
+    ASSERT(j.getLastError().find("nesting too deep") != std::string::npos);
+  }
+  // 2. RON: 48 containers + scalar leaf legal (was rejected by the >= slot
+  //    guard), the 49th container rejected.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(nest("[", "]", 48)));
+    ASSERT(maxDepth(maxDepth, j.getRoot(), 0) <= MAXN);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromRON(nest("[", "]", 49)));
+    ASSERT(j.getLastError() == "RON: nesting too deep");
+  }
+  // 3. Protobuf text: over-deep blocks are skipped WITHOUT creating the
+  //    over-cap container; the tree stays parse()-representable and the
+  //    sibling keys survive (skip semantics pinned by
+  //    testProtobufTextDepthGuardStringAware stay intact).
+  for (int n : {MAXN, MAXN + 1, MAXN + 8}) {
+    std::string t;
+    for (int i = 0; i < n; i++) t += "k: {";
+    t += "v: 1";
+    for (int i = 0; i < n; i++) t += "}";
+    t += " after: 9";
+    asvJSON j;
+    ASSERT(j.fromProtobufText(t));
+    ASSERT(maxDepth(maxDepth, j.getRoot(), 0) <= MAXN);
+    auto* aft = j.getRoot()->get("after");
+    ASSERT(aft != nullptr && aft->getInt() == 9);
+    // the tree must survive its own JSON round-trip (no null-degradation)
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));
+    ASSERT(k.serialize() == ser);
+  }
+  { // array-form creation cap
+    asvJSON j;
+    ASSERT(j.fromProtobufText("a: " + nest("[", "]", MAXN + 5)));
+    ASSERT(maxDepth(maxDepth, j.getRoot(), 0) <= MAXN);
+  }
+}
+
 TEST(testProtobufExtras) {
 	// Numeric field-name keys (text format: field numbers are valid keys) must
 	// round-trip; previously the parser rejected keys starting with a digit.
@@ -40015,6 +40099,7 @@ RUN(testCBORFloat16);
 	RUN(testProtobufTextArrayRootAndNulls);
 	RUN(testProtobufSchemaRequiresFieldId);
 	RUN(testProtobufTextDepthGuardStringAware);
+	RUN(testFormatDepthParity);
 	RUN(testProtobufExtras);
 	RUN(testProtobufAuditFixes);
 	RUN(testProtobufAuditFixesRound2);

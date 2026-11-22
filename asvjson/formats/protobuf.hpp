@@ -1453,22 +1453,34 @@ inline void protoTextParseArrayBody(const std::string& text, size_t& pos, asvJSO
     if (pos >= text.size() || text[pos] == ']') { if (pos < text.size()) pos++; break; }
     if (text[pos] == '{' || text[pos] == '<') {
       pos++;
-      auto elem = asvJSONValue::makeObject();
-      if (elem) {
-        if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
-          throw asvJSONError("Protobuf text: array too large");
-        protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+      // Cap at the CREATION site: a child container at depth+1 > MAX must not
+      // be built at all (the entry guard below fires only after the parent
+      // already made the node, leaving a 49-container tree that serialize()
+      // null-degrades). Skip the body and drop the element instead.
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+        protoTextSkipNested(text, pos, "{<", "}>");
+      } else {
+        auto elem = asvJSONValue::makeObject();
+        if (elem) {
+          if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+            throw asvJSONError("Protobuf text: array too large");
+          protoTextParseBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+        }
+        else { protoTextSkipNested(text, pos, "{<", "}>"); }
       }
-      else { protoTextSkipNested(text, pos, "{<", "}>"); }
     } else if (text[pos] == '[') {
       pos++;
-      auto elem = asvJSONValue::makeArray();
-      if (elem && elem->arr) {
-        if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
-          throw asvJSONError("Protobuf text: array too large");
-        protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+        protoTextSkipNested(text, pos, "[", "]");
+      } else {
+        auto elem = asvJSONValue::makeArray();
+        if (elem && elem->arr) {
+          if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+            throw asvJSONError("Protobuf text: array too large");
+          protoTextParseArrayBody(text, pos, elem.get(), depth + 1); arr->arr->push_back(std::move(elem));
+        }
+        else { protoTextSkipNested(text, pos, "[", "]"); }
       }
-      else { protoTextSkipNested(text, pos, "[", "]"); }
     } else {
       size_t before = pos;
       auto elem = protoTextParseScalar(text, pos);
@@ -1524,6 +1536,14 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
 
     if (text[pos] == '{' || text[pos] == '<') {
       pos++;
+      // Creation-site cap (see protoTextParseArrayBody): never attach a
+      // container past MAX depth - the tree must stay parse()-representable.
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+        protoTextSkipNested(text, pos, "{<", "}>");
+        protoTextSkipWS(text, pos);
+        if (pos < text.size() && (text[pos] == ';' || text[pos] == ',')) pos++;
+        continue;
+      }
       auto obj = asvJSONValue::makeObject();
       if (!obj) { protoTextSkipNested(text, pos, "{<", "}>"); continue; }
       protoTextParseBody(text, pos, obj.get(), depth + 1);
@@ -1532,6 +1552,12 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
       if (pos < text.size() && (text[pos] == ';' || text[pos] == ',')) pos++;
     } else if (text[pos] == '[') {
       pos++;
+      if (depth + 1 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) {
+        protoTextSkipNested(text, pos, "[", "]");
+        protoTextSkipWS(text, pos);
+        if (pos < text.size() && (text[pos] == ';' || text[pos] == ',')) pos++;
+        continue;
+      }
       auto arr = asvJSONValue::makeArray();
       if (arr && arr->arr) {
         protoTextParseArrayBody(text, pos, arr.get(), depth + 1);

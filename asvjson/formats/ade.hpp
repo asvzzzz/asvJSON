@@ -1781,7 +1781,13 @@ std::unique_ptr<asvJSONValue> ADEParser::parseDocument() {
       char c = peek();
       if (c == '[' || c == '{') {
         if (any) throw asvJSONError("ADE: unexpected top-level collection at line " + std::to_string(lineNum_));
-        auto coll = (c == '[') ? parseArray(1) : parseObject(1);
+        // The root collection is the FIRST container (like the root object of
+        // a key/value document), so it must enter at depth 2 like every other
+        // first container (parseValue(1) -> parseArray(2), check(1)). With
+        // parseArray(1) the whole document got one free container level:
+        // 49-deep `[[[...]]]` parsed but the ADE encoder (and core parse())
+        // reject it.
+        auto coll = (c == '[') ? parseArray(2) : parseObject(2);
         skipWsAndComments();
         if (!eof()) throw asvJSONError("ADE: trailing content after top-level collection");
         return coll;

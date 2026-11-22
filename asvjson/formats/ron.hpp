@@ -741,7 +741,13 @@ struct RonParser {
   }
 
   std::string parseValue(int depth, const std::string& path, bool commit) {
-    if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    // Recursion fuse for runaway value chains. Containers are capped by
+    // parseParen/parseSeq/parseMap's own `depth >= MAX` entry guard (that
+    // rejects the 49th container), so this check must stay one slot looser:
+    // a SCALAR at level 48 (the leaf of a legal 48-container chain) is data,
+    // not an over-depth tree - core parse() accepts it, and `>=` here used to
+    // reject documents every other decoder round-trips (49th `[` vs `1`).
+    if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
       throw asvJSONError("RON: nesting too deep");
     skipWs();
     if (commit) commitLead(path);
