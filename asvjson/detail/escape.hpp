@@ -20,6 +20,12 @@ inline bool xmlCharAllowed(unsigned char c) {
 	return c >= 0x20 || c == '\t' || c == '\n' || c == '\r';
 }
 
+// Key/name length limit for the XML-family encoders. This header is included
+// from core.hpp BEFORE struct asvJSONValue, so asvJSONValue::MAX_STRING_LEN is
+// not yet visible here; core.hpp static_asserts that the two constants stay
+// equal.
+inline constexpr size_t XML_MAX_NAME_LEN = 10u * 1024u * 1024u;
+
 inline std::string xmlInvalidCharMessage(unsigned char c) {
 	static const char* HEX = "0123456789ABCDEF";
 	std::string msg = "XML: control character U+00";
@@ -65,6 +71,13 @@ inline void xmlEscapeTextInto(std::string& out, std::string_view s) {
 }
 
 inline std::string xmlSanitizeElementName(std::string_view key) {
+	// The name is written as an element (or attribute) name and comes back as
+	// an object key; fromXML/fromSVG reject a name past MAX_STRING_LEN, so the
+	// encoder must reject the same key (an unencodable key is an error, never
+	// non-round-trippable output). This constant mirrors asvJSONValue::
+	// MAX_STRING_LEN -- core.hpp static_asserts the two stay equal.
+	if (key.size() > XML_MAX_NAME_LEN)
+		throw asvJSONError("XML: name too long");
 	std::string name;
 	name.reserve(key.size());
 	for (unsigned char c : key) {

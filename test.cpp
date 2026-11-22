@@ -39307,6 +39307,29 @@ TEST(testDecodedKeyLengthCaps) {
 		asvJSON k; ASSERT(!k.fromTRON("class C: " + big + "\nC(1)\n"));
 		ASSERT(k.getLastError().find("key too long") != std::string::npos);
 	}
+	// Encoder symmetry: an unencodable key must be an error, never a document
+	// its own decoder rejects (the INI convention). Each format throws from
+	// the key-emit site.
+	auto expectThrow = [](const char* who, std::function<void()> f, const char* needle) {
+		std::string msg;
+		bool threw = false;
+		try { f(); } catch (const asvJSONError& e) { threw = true; msg = e.what(); }
+		(void)who;
+		ASSERT(threw);
+		ASSERT(msg.find(needle) != std::string::npos);
+	};
+	{
+		asvJSON j; ASSERT(j.parse("{}"));
+		j.getRoot()->obj->emplace(big, asvJSONValue::makeInt(1));
+		expectThrow("toCSV", [&] { j.toCSV(); }, "header too long");
+		expectThrow("toTOML", [&] { j.toTOML(); }, "key too long");
+		expectThrow("toXML", [&] { j.toXML(); }, "name too long");
+		expectThrow("toSVG", [&] { j.toSVG(); }, "name too long");
+		expectThrow("toTRON", [&] { j.toTRON(); }, "key too long");
+		expectThrow("toADE", [&] { j.toADE(); }, "key too long");
+		expectThrow("toProtobufText", [&] { j.toProtobufText(); }, "key too long");
+		expectThrow("toCpp", [&] { j.toCpp(); }, "identifier too long");
+	}
 }
 
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for

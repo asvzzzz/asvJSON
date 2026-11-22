@@ -1617,6 +1617,11 @@ inline void protoTextSerializeMsg(const asvJSONValue* val, std::string& out, int
   out += "{\n";
   for (const auto& [k, fv] : *val->obj) {
     if (!fv || fv->type == asvJSONValue::NULL_VAL) continue;
+    // The name (bare or bracketed) comes back as an object key, and
+    // fromProtobufText rejects one past MAX_STRING_LEN, so the encoder must
+    // not emit it (the INI encoder convention).
+    if (!asvJSONValue::checkStringLen(k.size()))
+      throw asvJSONError("Protobuf text: key too long");
     // Serialize the value into a scratch buffer first: a type the text format
     // cannot represent writes nothing, and emitting the key anyway would leave
     // a bare "k: " line with no value behind. The return value is the signal

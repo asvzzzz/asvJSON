@@ -495,6 +495,12 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 					self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis, depth + 1);
 			} else {
 				std::string key = prefix;
+				// The header cell IS this key, and the decoder rejects a cell
+				// past MAX_STRING_LEN, so refuse to emit one (the INI encoder
+				// convention: an unencodable key is an error, never broken
+				// output).
+				if (!asvJSONValue::checkStringLen(key.size()))
+					throw asvJSONError("CSV: column header too long");
 				if (keySeen.insert(key).second) keys.push_back(std::move(key));
 			}
 		};
@@ -549,6 +555,8 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 						self(self, val.get(), prefix.empty() ? k : prefix + "." + k, vis, depth + 1);
 				} else {
 					std::string key = prefix;
+					if (!asvJSONValue::checkStringLen(key.size()))
+						throw asvJSONError("CSV: column header too long");
 					// Two different paths flattening onto one column would
 					// silently drop one value; reject instead of losing data.
 					if (!flatSeen.insert(key).second)

@@ -100,6 +100,10 @@ inline bool cppIdentChar(unsigned char c) {
 
 // Sanitize arbitrary text into a valid C++ identifier (case preserved).
 inline std::string cppIdent(std::string_view raw, const char* fallback = "field") {
+  // The identifier is generated from an object key, and fromCpp rejects an
+  // identifier past MAX_STRING_LEN, so the generator must not emit one.
+  if (!asvJSONValue::checkStringLen(raw.size()))
+    throw asvJSONError("cpp: identifier too long");
   std::string out;
   out.reserve(raw.size() + 1);
   for (char ch : raw) {
@@ -114,6 +118,10 @@ inline std::string cppIdent(std::string_view raw, const char* fallback = "field"
 
 // Turn a key into a PascalCase type name.
 inline std::string cppPascal(std::string_view raw, const char* fallback = "Type") {
+  // Type names come from object keys and must survive a fromCpp() re-read,
+  // which rejects an identifier past MAX_STRING_LEN.
+  if (!asvJSONValue::checkStringLen(raw.size()))
+    throw asvJSONError("cpp: identifier too long");
   std::string out;
   bool up = true;
   for (char ch : raw) {

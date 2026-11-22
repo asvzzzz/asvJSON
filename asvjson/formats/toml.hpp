@@ -161,6 +161,12 @@ inline void consumeUnicodeEscape(std::string_view& s, int hexDigits, std::string
 
 // Quote a TOML key if not a valid bare key
 inline std::string tomlQuoteKey(const std::string& key) {
+  // Every key lands in the document (bare or quoted key, or a [table] header
+  // segment), and fromTOML now rejects a segment past MAX_STRING_LEN, so the
+  // encoder must refuse it too - an unencodable key is an error, never
+  // non-round-trippable output (the INI encoder convention).
+  if (!asvJSONValue::checkStringLen(key.size()))
+    throw asvJSONError("TOML: key too long");
   if (key.empty()) return "\"\"";
   bool bare = true;
   for (char c : key) {

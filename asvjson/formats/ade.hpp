@@ -2048,6 +2048,10 @@ inline void adeEscPipe(std::ostream& os, std::string_view s) {
 }
 
 inline void adeWriteKey(std::ostream& os, const std::string& k, bool strict) {
+  // fromADE rejects a key segment past MAX_STRING_LEN, so the encoder must
+  // not emit one (the INI encoder convention).
+  if (!asvJSONValue::checkStringLen(k.size()))
+    throw asvJSONError("ADE: key too long");
   // Strict mode requires all keys to be quoted (Section 3).
   if (!strict && adeKeySafe(k)) os << k;
   else adeWriteQuoted(os, k);

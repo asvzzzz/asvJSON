@@ -292,6 +292,13 @@ inline void tronSerializeVal(const asvJSONValue* v,
     }
     case asvJSONValue::OBJECT: {
       if (v->obj->empty()) { out += "{}"; break; }
+      // Every member key is emitted either in the inline object form or as a
+      // class property, and fromTRON() rejects a key past MAX_STRING_LEN, so
+      // refuse to emit one (the INI encoder convention). Checked once per
+      // object so the class-instantiation path is covered too.
+      for (const auto& [k, _] : *v->obj)
+        if (!asvJSONValue::checkStringLen(k.size()))
+          throw asvJSONError("TRON: key too long");
       if (v->yaml_set) {
         // YAML !!set marker form: {"$set":["a","b"]}; the member keys become
         // the array strings in insertion order. fromTRON() recognizes this

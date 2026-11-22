@@ -539,6 +539,10 @@ inline void emitCommentLines(std::string& out, const std::vector<Comment>& list,
 struct asvJSONValue {
 	static constexpr size_t MAX_NESTING_DEPTH = 48;
 	static constexpr size_t MAX_STRING_LEN = 10 * 1024 * 1024;
+	// The XML-family encoder (detail/escape.hpp, included before this struct)
+	// caps element/attribute names with its own constant; keep them in step.
+	static_assert(MAX_STRING_LEN == asvJSONInternal::XML_MAX_NAME_LEN,
+	              "XML_MAX_NAME_LEN must mirror MAX_STRING_LEN");
 	static constexpr size_t MAX_ARRAY_SIZE = 1000000;
 	static constexpr size_t MAX_OBJECT_SIZE = 1000000;
 	static constexpr size_t MAX_CLONE_NODES = 100000000; // guard against memory exhaustion on huge trees
