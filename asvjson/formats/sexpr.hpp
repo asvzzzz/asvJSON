@@ -466,7 +466,15 @@ inline std::string sexprTokensToJson(const std::vector<SexprToken>& tokens, size
 
 inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth = 0) {
   if (!v) { out += "nil"; return; }
-  if (!asvJSONValue::checkNestingDepth(depth)) { out += "nil"; return; }
+  // Container cap. The old top-of-function `checkNestingDepth(depth)` let the
+  // encoder emit MAX+1 containers (root at depth 0), one more than fromSexpr()
+  // accepts, so toSexpr() of a deep raw-API tree produced a document its own
+  // decoder rejected. The check now covers CONTAINERS only and sits at
+  // depth + 1, so emitted containers == accepted containers (MAX). Scalars
+  // still render at any depth: the leaf of a legal MAX-container tree is one
+  // level below the deepest container (the JSON5/TOON convention).
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) { out += "nil"; return; }
   switch (v->type) {
     case asvJSONValue::NULL_VAL: out += "nil"; break;
     case asvJSONValue::BOOL_VAL: out += v->flag ? "#t" : "#f"; break;

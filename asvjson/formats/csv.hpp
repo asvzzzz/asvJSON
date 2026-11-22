@@ -487,8 +487,22 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 		std::unordered_set<const asvJSONValue*> visited;
 		auto collect = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
 						   std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
-			if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
+			if (!v) return;
 			if (vis.count(v)) return;
+			// Past the flattening cap the subtree becomes ONE column holding its
+			// JSON text instead of vanishing: dropping it produced a header-less
+			// (sometimes completely empty) document, and fromCSV("") rejects
+			// empty input - so toCSV() of a deep raw-API tree emitted something
+			// its own decoder refused. The path prefix at the cut point is the
+			// column name; it is never empty here because the cut can only
+			// happen below the root.
+			if (depth > (int)asvJSONValue::MAX_NESTING_DEPTH) {
+				std::string key = prefix;
+				if (!asvJSONValue::checkStringLen(key.size()))
+					throw asvJSONError("CSV: column header too long");
+				if (keySeen.insert(key).second) keys.push_back(std::move(key));
+				return;
+			}
 			vis.insert(v);
 			if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 				for (const auto& [k, val] : *v->obj)
@@ -512,8 +526,19 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			std::unordered_set<const asvJSONValue*> fillVisited;
 			auto fill = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
 							std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
-				if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
+				if (!v) return;
 				if (vis.count(v)) return;
+				// Mirror of `collect`: a subtree past the cap becomes one JSON
+				// text cell instead of disappearing, so the column the header
+				// promised always has a value behind it.
+				if (depth > (int)asvJSONValue::MAX_NESTING_DEPTH) {
+					std::string key = prefix;
+					// Two different paths flattening onto one column would
+					// silently drop one value; reject instead of losing data.
+					if (!flat.emplace(key, csvCell(v)).second)
+						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
+					return;
+				}
 				vis.insert(v);
 				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)
@@ -547,8 +572,21 @@ inline void asvJSONValue::toCSV(std::string& out) const {
 			std::unordered_set<const asvJSONValue*> flattenVisited;
 			auto flatten = [&](auto&& self, const asvJSONValue* v, const std::string& prefix,
 							   std::unordered_set<const asvJSONValue*>& vis, int depth) -> void {
-				if (!v || depth > (int)asvJSONValue::MAX_NESTING_DEPTH) return;
+				if (!v) return;
 				if (vis.count(v)) return;
+				// Past the cap the subtree is one JSON text cell, not nothing
+				// (see the array-path collect/fill pair).
+				if (depth > (int)asvJSONValue::MAX_NESTING_DEPTH) {
+					std::string key = prefix;
+					if (!asvJSONValue::checkStringLen(key.size()))
+						throw asvJSONError("CSV: column header too long");
+					// Two different paths flattening onto one column would
+					// silently drop one value; reject instead of losing data.
+					if (!flatSeen.insert(key).second)
+						throw asvJSONError("CSV: flattened key collision on \"" + key + "\"");
+					flat.emplace_back(std::move(key), csvCell(v));
+					return;
+				}
 				vis.insert(v);
 				if (v->type == T::OBJECT && v->obj && !v->obj->empty()) {
 					for (const auto& [k, val] : *v->obj)

@@ -1270,7 +1270,13 @@ inline bool ronNeedsLeadBreak(const asvJSONValue* v, bool pretty) {
 // following line are not consumed. Block comments end with `*/` and are safe.
 inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, bool pretty) {
   if (!v) { out += "None"; return; }
-  if (!asvJSONValue::checkNestingDepth(depth)) { out += "None"; return; }
+  // Container cap at depth + 1, containers only (the JSON5/TOON convention):
+  // the old guard emitted MAX+1 containers while the RON parser accepts MAX,
+  // so toRON() of a deep raw-API tree produced a document fromRON() rejected.
+  // Scalars must still render at any depth - the leaf of a legal MAX-container
+  // tree sits one level below the deepest container.
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) { out += "None"; return; }
   switch (v->type) {
     case asvJSONValue::NULL_VAL: out += "None"; break;
     case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); break;
@@ -1336,6 +1342,19 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
         }
         bool namedGroup = childObjectOk ||
                           (child->type == asvJSONValue::ARRAY && child->arr && !child->arr->empty());
+        // The named-group path emits the child's fields/elements DIRECTLY (via
+        // ronSerializeObjFields / the element loop, at the parent's `depth`), so
+        // the depth cap at the top of ronSerializeVal never sees that level: a
+        // chain of single-key objects (the common `a(a:a(...))` shape) encoded
+        // MAX+1 real containers and fromRON()'s own JSON pass rejected the
+        // document. Compare the child's ACTUAL container depth against the
+        // remaining budget instead; if it does not fit, fall through to the
+        // plain struct/map form, where the child goes through ronSerializeVal
+        // and degrades to `None` at the boundary.
+        if (namedGroup &&
+            (depth + 1 + asvJSONInternal::valueContainerDepth(child, static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))) >
+                static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+          namedGroup = false;
         if (namedGroup && ronIsValidTypeName(nit->first)) {
           bool childEmpty = (child->type == asvJSONValue::OBJECT) && child->obj->empty();
           // This branch DOES emit the group node's own leading comments: the

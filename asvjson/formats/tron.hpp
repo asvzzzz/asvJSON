@@ -186,7 +186,12 @@ inline void tronSerializeVal(const asvJSONValue* v,
     const std::unordered_map<std::string, std::vector<std::string>>& classKeys,
     std::string& out, bool allowNaNInfinity = false, int depth = 0) {
   if (!v) { out += "null"; return; }
-  if (!asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
+  // Container cap at depth + 1, containers only: toTRON() used to emit
+  // MAX+1 containers (root at depth 0) while fromTRON() accepts MAX, so a
+  // deep raw-API tree encoded to a document its own decoder rejected.
+  // Scalars render at any depth (JSON5/TOON convention).
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) { out += "null"; return; }
   if (v->type >= asvJSONValue::DATETIME && v->type <= asvJSONValue::EXTENSION) {
     // Special types serialized as TRON values
     switch (v->type) {

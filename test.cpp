@@ -14899,7 +14899,9 @@ TEST(testProtobufSecurityFixes) {
 		asvJSON j;
 		ASSERT(!j.fromProtobuf(big.data(), big.size()));
 	}
-	// 4. Depth guard: encoder must not crash on deep trees.
+	// 4. Depth guard: the wire encoder must neither crash nor emit a lossy
+	// document - a tree past MAX_NESTING_DEPTH is an error (silent truncation
+	// broke enc(dec(enc(t))) == enc(t): the surviving members re-number).
 	{
 		asvJSON j;
 		j.parse(std::string("{}"));
@@ -14911,8 +14913,32 @@ TEST(testProtobufSecurityFixes) {
 			cur->obj->emplace("n", std::move(next));
 			cur = cur->obj->begin()->second.get();
 		}
+		bool threw = false;
+		try { auto buf = j.toProtobuf(); (void)buf; }
+		catch (const asvJSONError& e) {
+			threw = true;
+			ASSERT(std::string(e.what()).find("nesting too deep") != std::string::npos);
+		}
+		ASSERT(threw);
+	}
+	// 4b. Exactly MAX container levels still encode and round-trip.
+	{
+		asvJSON j;
+		j.parse(std::string("{}"));
+		asvJSONValue* cur = j.getRoot();
+		for (size_t i = 1; i < asvJSONValue::MAX_NESTING_DEPTH; i++) {
+			auto next = asvJSONValue::makeObject();
+			if (!cur->obj || !next->obj) break;
+			cur->obj->clear();
+			cur->obj->emplace("n", std::move(next));
+			cur = cur->obj->begin()->second.get();
+		}
+		cur->obj->emplace("leaf", asvJSONValue::makeInt(7));
 		auto buf = j.toProtobuf();
-		(void)buf;
+		asvJSON j2;
+		ASSERT(j2.fromProtobuf(buf.data(), buf.size()));
+		auto buf2 = j2.toProtobuf();
+		ASSERT_EQ(buf.size(), buf2.size());
 	}
 	// 5. Text string length guard: MAX_STRING_LEN + 1 rejected.
 	{
@@ -18413,22 +18439,24 @@ TEST(testSexprReviewFixes) {
     ASSERT(b.fromSexpr(std::string_view(s)));
     ASSERT_EQ(b.serialize(), a.serialize());
   }
-  // A 49-container document: toSexpr still succeeds (it writes depth 48 and
-  // degrades past it), but reparse dies in parse()'s universal container cap
-  // -- the decoder's own gate no longer fires first (it used to report
-  // "S-Expression nesting too deep" here).
+  // A 49-container document: toSexpr() caps its own output at MAX containers
+  // (wave 53 - it used to emit one level more than fromSexpr() accepts, so the
+  // document did not survive its own format). The tail degrades to nil and the
+  // document re-parses cleanly.
   for (bool leaf : {true, false}) {
     asvJSON a;
     ASSERT(a.parse(std::string_view("[]")));
     fill(a.getRoot(), 49, leaf);
     std::string s = a.toSexpr();
     ASSERT(!s.empty());
+    ASSERT(s.find("nil") != std::string::npos);
     asvJSON b;
-    ASSERT(!b.fromSexpr(std::string_view(s)));
-    ASSERT(b.getLastError().find("Maximum nesting depth") != std::string::npos);
+    ASSERT(b.fromSexpr(std::string_view(s)));
+    std::string c = b.toSexpr();
+    ASSERT_EQ(c, s);   // enc(dec(enc(t))) == enc(t)
   }
   // Past MAX the encoder degrades to nil instead of recursing unbounded: a
-  // 50-container chain comes back truncated with a nil inside.
+  // 50-container chain comes back truncated, still parseable and stable.
   {
     asvJSON a;
     ASSERT(a.parse(std::string_view("[]")));
@@ -18436,7 +18464,8 @@ TEST(testSexprReviewFixes) {
     std::string s = a.toSexpr();
     ASSERT(s.find("nil") != std::string::npos);
     asvJSON b;
-    ASSERT(!b.fromSexpr(std::string_view(s)));
+    ASSERT(b.fromSexpr(std::string_view(s)));
+    ASSERT_EQ(b.toSexpr(), s);
   }
   // emitLiteral must not swallow the closing quote on a truncated \u escape.
   // Pre-fix: "\u12" copied '1','2','"' into the literal, consuming the quote
@@ -19523,9 +19552,11 @@ TEST(testTRONAudit) {
       std::string s = j.toTRON();
       ASSERT(s.find("null") != std::string::npos);
       asvJSON j2;
-      // The truncated document is still rejected by the strict decoder's own
-      // depth guard (the encoder emits up to MAX_NESTING_DEPTH levels).
-      ASSERT(!j2.fromTRON(std::string_view(s)));
+      // Wave 53: the encoder caps its own containers at MAX_NESTING_DEPTH, so
+      // the degraded document parses (it used to be one level deeper than the
+      // decoder accepted) and the re-encode is byte-identical.
+      ASSERT(j2.fromTRON(std::string_view(s)));
+      ASSERT_EQ(j2.toTRON(), s);
     }
   }
   // 5. -NaN round-trips with allowNaNInfinity (the tokenizer now accepts the
@@ -39348,6 +39379,81 @@ TEST(testDecodedKeyLengthCaps) {
 	}
 }
 
+TEST(testEncoderDepthParity) {
+	// Wave 53: an encoder must never emit a document its own decoder rejects.
+	// RON/GOON/TRON/sexpr all capped their recursion at checkNestingDepth(depth)
+	// with root depth 0, i.e. MAX+1 containers, while their parsers accept MAX;
+	// RON additionally recursed through the named-group form without counting
+	// the level at all. Now every one of them caps emitted CONTAINERS at MAX
+	// (scalars still render at any depth) and degrades the overflow to the
+	// format's null token.
+	auto objChain = [](int levels) {
+		auto root = asvJSONValue::makeObject();
+		asvJSONValue* cur = root.get();
+		for (int i = 0; i < levels; i++) {
+			auto child = asvJSONValue::makeObject();
+			cur->obj->emplace("a", std::move(child));
+			cur = cur->obj->find("a")->second.get();
+		}
+		cur->obj->emplace("leaf", asvJSONValue::makeInt(1));
+		return root;
+	};
+	auto arrChain = [](int levels) {
+		auto root = asvJSONValue::makeArray();
+		asvJSONValue* cur = root.get();
+		for (int i = 0; i < levels; i++) {
+			auto child = asvJSONValue::makeArray();
+			cur->arr->push_back(std::move(child));
+			cur = cur->arr->back().get();
+		}
+		cur->arr->push_back(asvJSONValue::makeInt(1));
+		return root;
+	};
+	struct F { const char* n; std::string (*enc)(asvJSON&); bool (*dec)(asvJSON&, const std::string&); };
+	F fs[] = {
+		{"ron", [](asvJSON& j) { return j.toRON(); }, [](asvJSON& j, const std::string& s) { return j.fromRON(s); }},
+		{"goon", [](asvJSON& j) { return j.toGOON(); }, [](asvJSON& j, const std::string& s) { return j.fromGOON(s); }},
+		{"tron", [](asvJSON& j) { return j.toTRON(); }, [](asvJSON& j, const std::string& s) { return j.fromTRON(s); }},
+		{"sexpr", [](asvJSON& j) { return j.toSexpr(); }, [](asvJSON& j, const std::string& s) { return j.fromSexpr(s); }},
+		{"json5", [](asvJSON& j) { return j.toJSON5(); }, [](asvJSON& j, const std::string& s) { return j.fromJSON5(s); }},
+	};
+	for (auto& f : fs) {
+		// A tree AT the limit (48 containers) must round-trip with no loss at
+		// all - the cap may only bite one level deeper.
+		for (int kind = 0; kind < 2; kind++) {
+			asvJSON j;
+			j.setRoot(kind == 0 ? objChain(47) : arrChain(47));
+			std::string orig = j.serialize();
+			std::string a = f.enc(j);
+			asvJSON j2;
+			ASSERT_MSG(f.dec(j2, a), std::string(f.n) + " legal-depth decode: " + j2.getLastError());
+			ASSERT_MSG(j2.serialize() == orig, std::string(f.n) + " legal-depth kind=" +
+			                 std::to_string(kind) + " lost data");
+		}
+		for (int levels : {47, 48, 49, 60, 5000}) {
+			for (int kind = 0; kind < 2; kind++) {
+				asvJSON j;
+				j.setRoot(kind == 0 ? objChain(levels) : arrChain(levels));
+				std::string a = f.enc(j);
+				ASSERT_MSG(!a.empty(), std::string(f.n) + " empty encode");
+				asvJSON j2;
+				bool ok = f.dec(j2, a);
+				ASSERT_MSG(ok, std::string(f.n) + " levels=" + std::to_string(levels) +
+				                " kind=" + std::to_string(kind) + " decode: " + j2.getLastError());
+				// The degrade form of a past-cap tree may normalize (the first
+				// encode keeps a shape the truncated tree no longer has), so the
+				// fixed point is checked on the second round: enc of a parsed
+				// document must be parseable and reproduce itself.
+				std::string b = f.enc(j2);
+				asvJSON j3;
+				ASSERT_MSG(f.dec(j3, b), std::string(f.n) + " second decode: " + j3.getLastError());
+				std::string c = f.enc(j3);
+				ASSERT_EQ(c, b);
+			}
+		}
+	}
+}
+
 TEST(testXmlNamespaceScopeChain) {
 	// Wave 52: namespace bindings were copied into EVERY element
 	// (`std::unordered_map scopedNs = nsMap`), which is quadratic: 20k xmlns
@@ -40848,6 +40954,7 @@ RUN(testYamlAuditReview);
 	RUN(testADEEncoderDepthGuard);
 	RUN(testCppTemplateTypeDepthGuard);
 	RUN(testXmlNamespaceScopeChain);
+	RUN(testEncoderDepthParity);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 

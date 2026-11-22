@@ -63,6 +63,12 @@
 // - A schema field marked "repeated" whose JSON value is not an ARRAY is
 //   encoded as a single element and decodes as a one-element array, which
 //   round-trips in both directions.
+// - A tree deeper than MAX_NESTING_DEPTH (only reachable through the raw API)
+//   makes toProtobuf() THROW "Protobuf: nesting too deep". It used to stop
+//   encoding at the boundary and silently drop the tail, which broke the
+//   self-consistency invariant: toProtobuf -> fromProtobuf -> toProtobuf gave
+//   different bytes (a 60-level chain: 1435 -> 1405), because the truncated
+//   tree has fewer members and the schema-less field numbering shifts.
 // - An EMPTY repeated array has no wire representation at all (protobuf3
 //   semantics: an empty repeated field is indistinguishable from an absent
 //   one), so with a JSON-driven SCHEMA the key is dropped: {"rep":[]} comes
@@ -487,9 +493,15 @@ inline void protoEncodeFieldValue(std::vector<uint8_t>& out, const asvJSONValue*
 inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* val, const ProtoSchema* schema, int depth = 1) {
   if (!val || val->type != asvJSONValue::OBJECT || !val->obj) return;
   // Depth guard: prevent stack overflow on programmatically-built trees deeper
-  // than MAX_NESTING_DEPTH. Core parse() allows exactly MAX containers (1..MAX),
-  // so we stop encoding at the boundary.
-  if (!asvJSONValue::checkNestingDepth(depth)) return;
+  // than MAX_NESTING_DEPTH. Core parse() allows exactly MAX containers (1..MAX).
+  // Silently DROPPING the tail (the old `return`) produced a document that did
+  // not survive its own format: toProtobuf -> fromProtobuf -> toProtobuf gave
+  // different bytes (1435 -> 1405 on a 60-level chain), because the truncated
+  // tree carries fewer members and therefore re-numbers the schema-less fields.
+  // Throwing matches every other binary encoder (MsgPack/CBOR/BSON/UBJSON/
+  // Bencode all report the over-depth tree instead of emitting a lossy one).
+  if (!asvJSONValue::checkNestingDepth(depth))
+    throw asvJSONError("Protobuf: nesting too deep");
   if (schema) {
     for (const auto& [key, fieldVal] : *val->obj) {
       if (!fieldVal) continue;

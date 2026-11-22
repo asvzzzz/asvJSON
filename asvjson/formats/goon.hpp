@@ -109,7 +109,14 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 // `[...]` cells, which the decoder passes through to the JSON parser verbatim
 // (so GOON literals like T/F/_/~ and __OID__ prefixes would be invalid there).
 inline void goonJsonText(const asvJSONValue* v, std::string& out, int depth = 0) {
-  if (!v || !asvJSONValue::checkNestingDepth(depth)) { out += "null"; return; }
+  if (!v) { out += "null"; return; }
+  // Container cap at depth + 1, containers only: this inline JSON cell is
+  // parsed by the core parser, whose container cap counts EVERY level the
+  // GOON document already emitted, so an inline cell that nests MAX levels
+  // under a root array overshoots the limit and the document fromGOON() then
+  // rejects it. Scalars still render at any depth.
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) { out += "null"; return; }
   switch (v->type) {
     case asvJSONValue::NULL_VAL: out += "null"; return;
     case asvJSONValue::BOOL_VAL: out += (v->flag ? "true" : "false"); return;
@@ -704,10 +711,23 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       // The decoder passes `[...]` through to the JSON parser verbatim, so the
       // elements must be valid JSON text (GOON literals like T/_/~ and the
       // __OID__ prefixes are invalid there and would corrupt the value).
+      // The cell's OWN bracket is written here, not by goonJsonText, so this
+      // level must be counted here too: the item sits at level depth + 2, and
+      // past the cap the item degrades to GOON null (`- _`) instead of
+      // emitting a cell the core parser would reject (wave 53: a chain of
+      // nested arrays encoded one container too deep and fromGOON() failed
+      // with "Maximum nesting depth exceeded").
+      if (!asvJSONValue::checkNestingDepth(depth + 2)) {
+        out += pad + itemIndent + "- _\n";
+        continue;
+      }
       out += pad + itemIndent + "- [";
       for (size_t j = 0; j < child->size(); j++) {
         if (j > 0) out += ',';
-        goonJsonText(child->get(j), out, depth + 1);
+        // goonJsonText caps at `depth + 1`, i.e. it treats its `depth` argument
+        // as "the level this node's PARENT occupies". The cell's own bracket is
+        // the item at level depth + 2, so its elements start one level deeper.
+        goonJsonText(child->get(j), out, depth + 2);
       }
       out += "]\n";
     } else {
@@ -729,9 +749,23 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
 
 inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent, const std::string& key, int depth, const std::unordered_map<std::string, int>* dict = nullptr, const GoonWriteOptions& opts = {}) {
   if (!v) return;
-  if (!asvJSONValue::checkNestingDepth(depth)) return;
   int iw = opts.indentWidth >= 1 ? opts.indentWidth : 1;
   std::string pad(static_cast<size_t>(indent) * static_cast<size_t>(iw), ' ');
+  // Container cap at depth + 1, containers only (the JSON5/TOON convention).
+  // The old guard (`checkNestingDepth(depth)`) let the encoder emit MAX+1
+  // containers while fromGOON() accepts MAX, so a deep raw-API tree produced
+  // a document its own decoder rejected; and returning without writing
+  // anything dropped the whole key line. A past-cap container now degrades to
+  // the GOON null literal, so the key survives and the document parses.
+  if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
+      !asvJSONValue::checkNestingDepth(depth + 1)) {
+    if (!key.empty()) {
+      out += pad;
+      goonWriteKey(key, out, opts);
+      out += ": _\n";
+    } else out += pad + "_\n";
+    return;
+  }
   std::string lit = goonLiteral(v);
   if (!lit.empty()) {
     if (!key.empty() || depth > 0) {
