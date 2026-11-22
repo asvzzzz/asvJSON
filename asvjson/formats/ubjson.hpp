@@ -630,14 +630,14 @@ inline bool asvJSON::fromUBJSON(const void* data, size_t size) {
     }
     formatType = FormatType::UBJSON;
     return true;
-  } catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+  } catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
   catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
     // bool + lastError, like the other from* parsers (see fromMessagePack).
     // Not theoretical here: ubjReadRawString allocates std::string and the
     // container loops push into std::vector -- only the value factories use
     // new(std::nothrow).
-    lastError = e.what(); root = nullptr; return false;
+    lastError = e.what(); root = nullptr; dirty_ = false; return false;
   }
 }
 

@@ -448,14 +448,14 @@ inline bool asvJSON::fromAny(std::string_view input) {
     return false;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error must not escape: the three std::string probe
     // copies (BSON/MessagePack/CBOR detection) and the lastError assignments
     // allocate, and fromAny's contract is false + lastError like every from*.
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

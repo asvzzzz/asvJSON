@@ -660,7 +660,7 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
@@ -669,7 +669,7 @@ inline bool asvJSON::fromJavaProp(std::string_view input) {
     // list, `key += javapropUnescape(...)`, rawVal.assign/erase, Comments is
     // new'd and obj->obj->emplace grows the map -- only factories new(nothrow).
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

@@ -336,7 +336,7 @@ inline bool asvJSON::fromBencode(std::string_view input) {
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
@@ -345,7 +345,7 @@ inline bool asvJSON::fromBencode(std::string_view input) {
     // std::string with throwing constructors and the container loops push
     // into vector/map -- only the value factories use new(std::nothrow).
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

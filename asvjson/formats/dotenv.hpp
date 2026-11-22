@@ -581,7 +581,7 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
@@ -590,7 +590,7 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
     // / pending.push_back are throwing operations, unlike the value factories,
     // which use new(std::nothrow) and so never throw.
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

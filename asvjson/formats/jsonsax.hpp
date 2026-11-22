@@ -1508,6 +1508,7 @@ private:
   }
 
   bool addValue(std::unique_ptr<asvJSONValue> val) {
+    if (!val) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return false; }
     if (stack_.empty()) {
       root_ = std::move(val);
       return true;
@@ -1516,6 +1517,7 @@ private:
   }
 
   bool addToCurrent(std::unique_ptr<asvJSONValue> val) {
+    if (!val) { fatal_ = true; errorMsg_ = "SAX-to-DOM allocation failed"; return false; }
     asvJSONValue* parent = stack_.back();
     if (parent->type == asvJSONValue::OBJECT && parent->obj) {
       // The bundled parsers cap container sizes themselves (cntObject_ / f.count),

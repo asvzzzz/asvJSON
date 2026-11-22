@@ -3776,11 +3776,11 @@ inline bool asvJSON::fromCpp(std::string_view input, const CppReadOptions& opts)
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

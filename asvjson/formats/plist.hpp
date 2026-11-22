@@ -671,13 +671,13 @@ inline bool asvJSON::fromPlist(std::string_view input) {
     return true;
   } catch (const asvJSONError& e) {
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
     // bool + lastError, like the other from* parsers (see fromMessagePack).
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }

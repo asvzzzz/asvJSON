@@ -1787,13 +1787,13 @@ public:
 			return root != nullptr;
 		} catch (const asvJSONError& e) {
 			lastError = e.what();
-			root = nullptr;
+			root = nullptr; dirty_ = false;
 			return false;
 		} catch (const std::exception& e) {
 			// bad_alloc / length_error from jsonBuf.assign or the parser's own
 			// string growth must not escape a public bool + lastError API.
 			lastError = e.what();
-			root = nullptr;
+			root = nullptr; dirty_ = false;
 			return false;
 		}
 	}
@@ -3338,6 +3338,9 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 		if (cur->type == asvJSONValue::OBJECT && cur->obj) {
 			std::string key = decodeJSONPointerKey(seg);
 			if (isLast) {
+				auto it2 = mapFind(*cur->obj, key);
+				if (it2 == cur->obj->end() && !asvJSONValue::checkObjectSize(cur->obj->size() + 1))
+					return false;
 				cur->obj->insert_or_assign(std::move(key), std::move(value));
 				dirty_ = true;
 				return true;
@@ -3353,12 +3356,14 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 				if (isArrayIndex(nextSeg) || nextSeg == "-") {
 					auto nextArr = asvJSONValue::makeArray();
 					if (!nextArr) return false;
+					if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1)) return false;
 					auto* nextPtr = nextArr.get();
 					cur->obj->emplace(std::move(key), std::move(nextArr));
 					cur = nextPtr;
 				} else {
 					auto nextObj = asvJSONValue::makeObject();
 					if (!nextObj) return false;
+					if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1)) return false;
 					auto* nextPtr = nextObj.get();
 					cur->obj->emplace(std::move(key), std::move(nextObj));
 					cur = nextPtr;
@@ -3367,6 +3372,7 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (seg == "-") {
 				if (!isLast) return false;
+				if (!asvJSONValue::checkArraySize(cur->arr->size() + 1)) return false;
 				cur->arr->push_back(std::move(value));
 				dirty_ = true;
 				return true;
@@ -3667,9 +3673,9 @@ inline bool asvJSON::fromMessagePack(const void* data, size_t size) {
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
 		formatType = FormatType::MessagePack;
 		return true;
-	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the custom-tag decode uses std::make_unique, matching the other from* parsers.
-	    lastError = e.what(); root = nullptr; return false;
+	    lastError = e.what(); root = nullptr; dirty_ = false; return false;
 	}
 }
 
@@ -3692,9 +3698,9 @@ inline bool asvJSON::fromCBOR(const void* data, size_t size) {
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
 		formatType = FormatType::CBOR;
 		return true;
-	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers (see fromCpp).
-	    lastError = e.what(); root = nullptr; return false;
+	    lastError = e.what(); root = nullptr; dirty_ = false; return false;
 	}
 }
 
@@ -3893,9 +3899,9 @@ inline bool asvJSON::fromBSON(const void* data, size_t size) {
 		if (!root || pos != size) { root = nullptr; throw asvJSONError(pos != size ? "Trailing bytes" : "Parse failed"); }
 		formatType = FormatType::BSON;
 		return true;
-	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; return false; }
+	} catch (const asvJSONError& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 	  catch (const std::exception& e) { // bad_alloc / length_error etc. must not escape: the public contract is bool + lastError, like the other from* parsers.
-	    lastError = e.what(); root = nullptr; return false;
+	    lastError = e.what(); root = nullptr; dirty_ = false; return false;
 	}
 }
 

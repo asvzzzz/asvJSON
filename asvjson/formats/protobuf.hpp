@@ -314,13 +314,12 @@ inline void protoSetField(asvJSONValue* obj, const std::string& key, std::unique
       it->second->arr->push_back(std::move(val));
     } else {
       auto arr = asvJSONValue::makeArray();
-      if (arr && arr->arr) {
-        if (!asvJSONValue::checkArraySize(2))
-          throw asvJSONError("Protobuf: array too large");
-        arr->arr->push_back(std::move(it->second));
-        arr->arr->push_back(std::move(val));
-        it->second = std::move(arr);
-      }
+      if (!arr || !arr->arr) throw asvJSONError("Protobuf: out of memory");
+      if (!asvJSONValue::checkArraySize(2))
+        throw asvJSONError("Protobuf: array too large");
+      arr->arr->push_back(std::move(it->second));
+      arr->arr->push_back(std::move(val));
+      it->second = std::move(arr);
     }
   } else {
     // Guard against DoS: fieldnum: 0, wt: 0 repeated creates siblings.
@@ -875,8 +874,9 @@ inline std::unique_ptr<asvJSONValue> protoDecodeMessageBody(const uint8_t* data,
         protoSetField(obj.get(), fname, std::move(val));
       } else {
         auto arr = asvJSONValue::makeArray();
-        if (arr && arr->arr) arr->arr->push_back(std::move(val));
-        if (arr) protoSetField(obj.get(), fname, std::move(arr));
+        if (!arr || !arr->arr) throw asvJSONError("Protobuf: out of memory");
+        arr->arr->push_back(std::move(val));
+        protoSetField(obj.get(), fname, std::move(arr));
       }
     } else {
       protoSetField(obj.get(), fname, std::move(val));
@@ -1741,7 +1741,7 @@ inline bool asvJSON::fromProtobuf(const void* data, size_t size, const std::stri
     root = protoDecodeRoot(static_cast<const uint8_t*>(data), size, schema.get());
     if (root) formatType = FormatType::Protobuf;
     return root != nullptr;
-  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
+  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 }
 
 inline std::string asvJSON::toProtobufText() const {
@@ -1853,7 +1853,7 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
     if (root) { formatType = FormatType::ProtobufText; return true; }
     lastError = "protobuf text: no value";
     return false;
-  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
+  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 }
 
 inline std::vector<uint8_t> asvJSON::protobufFromString(const std::string& jsonStr) {
@@ -1905,7 +1905,7 @@ inline bool asvJSON::fromProtobuf(const std::string& data, const std::string& sc
     }
     // Fall back to raw binary
     return fromProtobuf(static_cast<const void*>(data.data()), data.size(), schemaJson);
-  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; return false; }
+  } catch (const std::exception& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }
 }
 
 } // namespace asvJSONInternal

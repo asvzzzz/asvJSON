@@ -1824,7 +1824,7 @@ inline bool asvJSON::fromGOON(std::string_view input) {
   } catch (const asvJSONError& e) {
     allowNaNInfinity = prevNaN;
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   } catch (const std::exception& e) {
     // bad_alloc / length_error etc. must not escape: the public contract is
@@ -1833,7 +1833,7 @@ inline bool asvJSON::fromGOON(std::string_view input) {
     // would silently change later parses (same lesson as fromJSON5).
     allowNaNInfinity = prevNaN;
     lastError = e.what();
-    root = nullptr;
+    root = nullptr; dirty_ = false;
     return false;
   }
 }
