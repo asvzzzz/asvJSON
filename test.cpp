@@ -11,6 +11,7 @@ using namespace asvJSONInternal;
 #include <random>
 #include <limits>
 #include <cmath>
+#include <chrono>
 #include <crtdbg.h>
 
 int passed = 0;
@@ -39331,6 +39332,60 @@ TEST(testDecodedKeyLengthCaps) {
 	}
 }
 
+TEST(testXmlNamespaceScopeChain) {
+	// Wave 52: namespace bindings were copied into EVERY element
+	// (`std::unordered_map scopedNs = nsMap`), which is quadratic: 20k xmlns
+	// declarations on the root x 20k child elements (a 409 KB document) burned
+	// 57 s of CPU. The bindings now form a scope chain (XmlNsScope), so an
+	// element that declares nothing pays nothing and a lookup is O(depth x
+	// decls-per-element). Semantics pinned below are byte-identical to the
+	// old implementation.
+	const std::string XSI = "http://www.w3.org/2001/XMLSchema-instance";
+	{	// declaration on the root applies to descendants
+		asvJSON j;
+		ASSERT(j.fromXML("<r xmlns:xsi=\"" + XSI + "\"><a xsi:nil=\"true\"/></r>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"r\":{\"@xmlns:xsi\":\"") + XSI + "\",\"a\":null}}");
+	}
+	{	// a prefix declared inside one element stays out of its siblings
+		asvJSON j;
+		ASSERT(j.fromXML("<r><a xmlns:x=\"urn:x\"><b x:id=\"1\"/></a><c x:id=\"2\"/></r>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"r\":{\"a\":{\"@xmlns:x\":\"urn:x\",\"b\":{\"@x:id\":\"1\"}},\"c\":{\"@x:id\":\"2\"}}}"));
+	}
+	{	// a foreign xsi URI is not a nil marker
+		asvJSON j;
+		ASSERT(j.fromXML("<r xmlns:xsi=\"urn:other\"><a xsi:nil=\"true\"/></r>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"r\":{\"@xmlns:xsi\":\"urn:other\",\"a\":{\"@xsi:nil\":\"true\"}}}"));
+	}
+	{	// the bare (undeclared) xsi:nil shorthand still works
+		asvJSON j;
+		ASSERT(j.fromXML("<r><a xsi:nil=\"true\"/></r>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"r\":{\"a\":null}}"));
+	}
+	{	// chain precedence: the innermost declaration wins, and a sibling of
+		// the inner element keeps the OUTER binding (so its xsi:nil is not a
+		// nil marker)
+		asvJSON j;
+		ASSERT(j.fromXML("<r xmlns:xsi=\"urn:other\"><a xmlns:xsi=\"" + XSI + "\"><b xsi:nil=\"true\"/></a><c xsi:nil=\"true\"/></r>"));
+		std::string s = j.serialize();
+		ASSERT(s.find("\"b\":null") != std::string::npos);
+		ASSERT(s.find("\"c\":{\"@xsi:nil\":\"true\"}") != std::string::npos);
+	}
+	// Performance guard: the old copy-per-element map took ~57 s here.
+	{
+		std::string doc = "<r";
+		for (int i = 0; i < 20000; i++) doc += " xmlns:a" + std::to_string(i) + "=\"v\"";
+		doc += ">";
+		for (int i = 0; i < 20000; i++) doc += "<c/>";
+		doc += "</r>";
+		auto t0 = std::chrono::steady_clock::now();
+		asvJSON j;
+		bool ok = j.fromXML(doc);
+		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+		ASSERT(ok);
+		ASSERT_MSG(ms < 5000, "xmlns scope chain took " + std::to_string(ms) + " ms");
+	}
+}
+
 TEST(testCppTemplateTypeDepthGuard) {
 	// Wave 52: cppRdParseTypeV recursed through template arguments with no
 	// limit, so 2000 nested std::vector<...> (a 30 KB document) overflowed the
@@ -40776,6 +40831,7 @@ RUN(testYamlAuditReview);
 	RUN(testDecodedKeyLengthCaps);
 	RUN(testADEEncoderDepthGuard);
 	RUN(testCppTemplateTypeDepthGuard);
+	RUN(testXmlNamespaceScopeChain);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 

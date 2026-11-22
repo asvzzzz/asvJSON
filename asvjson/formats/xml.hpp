@@ -865,6 +865,27 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 	}
 }
 
+// Namespace bindings form a scope CHAIN, one link per element that declares
+// xmlns prefixes. The old code copied the whole inherited map into every
+// element, which is quadratic: a 409 KB document (20k xmlns declarations on
+// the root x 20k child elements) burned 57 s of CPU in the copies alone.
+// The chain keeps lookup at O(depth x decls-per-element) and costs nothing
+// when an element declares no namespaces.
+struct XmlNsScope {
+	const XmlNsScope* parent = nullptr;
+	std::vector<std::pair<std::string, std::string>> decls;  // prefix -> URI
+	const std::string* find(std::string_view prefix) const {
+		for (const XmlNsScope* f = this; f; f = f->parent) {
+			for (const auto& d : f->decls)
+				if (d.first.size() == prefix.size() &&
+				    std::equal(prefix.begin(), prefix.end(), d.first.begin()))
+					return &d.second;
+		}
+		return nullptr;
+	}
+	bool has(std::string_view prefix) const { return find(prefix) != nullptr; }
+};
+
 // Forward declaration
 // collapseSameNamed toggles XML's "element whose only children share a name
 // collapses to a bare array" rule. XML needs it ({"bin":[a,b]} is encoded as
@@ -872,7 +893,7 @@ inline void xmlSkipNilBody(std::string_view s, size_t& pos, const std::string& e
 // repeated elements after the JSON key ({"defs":{"clipPath":[a,b]}} ->
 // <defs><clipPath/>x2</defs>), so the key is recoverable only when the
 // children stay grouped under it.
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed);
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, const XmlNsScope& nsScope, bool collapseSameNamed);
 
 // Segment for interleaved mixed content tracking
 struct XmlSegment {
@@ -886,7 +907,7 @@ struct XmlSegment {
 // Parse a single element's children into segments (preserving interleaved order)
 inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 	std::vector<XmlSegment>& segments, int depth,
-	std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed)
+	const XmlNsScope& nsScope, bool collapseSameNamed)
 {
 	while (pos < s.size()) {
 		if (s[pos] == '<') {
@@ -935,7 +956,7 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 				pos = end + 2; continue;
 			}
 			std::string childName;
-			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsMap, collapseSameNamed);
+			auto childVal = xmlParseElement(s, pos, childName, depth + 1, nsScope, collapseSameNamed);
 			if (childVal) {
 				// Transient child buffer is bounded: every segment becomes an
 				// array item or an object member later, and the container caps
@@ -962,17 +983,18 @@ inline void xmlParseChildrenSegments(std::string_view s, size_t& pos,
 }
 
 // Parse a complete XML element: <name attrs...>content</name> or <name attrs.../>
-inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, std::unordered_map<std::string, std::string>& nsMap, bool collapseSameNamed) {
+inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t& pos, std::string& elemName, int depth, const XmlNsScope& inheritedNs, bool collapseSameNamed) {
 	// The document parser wraps the result in a root object, so the element
 	// depth budget is two less than parse()'s limit (one for the element itself,
 	// one for the wrapper). depth >= MAX_NESTING_DEPTH - 1 allows exactly
 	// MAX_NESTING_DEPTH container levels total (N elements + wrapper = 48).
 	if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - 1) throw asvJSONError("XML nesting too deep");
-	// Namespace declarations are element-scoped: copy the inherited bindings,
-	// accumulate this element's own xmlns declarations into the copy, and hand
-	// the copy to children. Deeper elements never leak a binding back out, so
-	// a prefix declared inside one sibling is invisible to the next.
-	std::unordered_map<std::string, std::string> scopedNs = nsMap;
+	// Namespace declarations are element-scoped: this element links a new scope
+	// onto the inherited chain (empty unless it declares prefixes) and hands
+	// that link to its children. Deeper elements never leak a binding back out,
+	// so a prefix declared inside one sibling is invisible to the next.
+	XmlNsScope nsScope;
+	nsScope.parent = &inheritedNs;
 	if (pos >= s.size() || s[pos] != '<') throw asvJSONError("expected '<'");
 	pos++; // skip '<'
 
@@ -1011,10 +1033,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	}
 
 	// Accumulate any xmlns declarations made on THIS element into the scoped
-	// map (the copy is discarded when the element returns, so bindings stay
+	// chain link (it is discarded when the element returns, so bindings stay
 	// within this element's subtree).
 	for (const auto& [k, v] : attrs) {
-		if (k.size() > 6 && k.substr(0, 6) == "xmlns:") scopedNs[std::string(k.substr(6))] = v;
+		if (k.size() > 6 && k.substr(0, 6) == "xmlns:") nsScope.decls.emplace_back(k.substr(6), v);
 	}
 
 	// xsi:nil detection: check any prefix:*nil attribute whose prefix
@@ -1027,9 +1049,9 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (k.size() < 5 || k.substr(k.size() - 4) != ":nil") continue;
 			std::string prefix(k.data(), k.size() - 4);
 			// Accept if prefix maps to XSI URI, or if literal "xsi" without xmlns decl
-			auto it = scopedNs.find(prefix);
-			bool match = (it != scopedNs.end() && it->second == xsiUri);
-			if (!match && prefix == "xsi" && !scopedNs.count("xsi")) match = true;
+			const std::string* bound = nsScope.find(prefix);
+			bool match = (bound != nullptr && *bound == xsiUri);
+			if (!match && prefix == "xsi" && !nsScope.has("xsi")) match = true;
 			if (!match) continue;
 			if (v == "true" || v == "1") {
 				if (pos < s.size() && s[pos] == '/') {
@@ -1081,7 +1103,7 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 
 	// Parse children and text content
 	std::vector<XmlSegment> segments;
-	xmlParseChildrenSegments(s, pos, segments, depth + 1, scopedNs, collapseSameNamed);
+	xmlParseChildrenSegments(s, pos, segments, depth + 1, nsScope, collapseSameNamed);
 
 	// Closing tag
 	xmlSkipSpaces(s, pos);
@@ -1480,12 +1502,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseDocument(std::string_view input, bo
 	// last-wins so the final element for a name is the surviving value.
 	auto obj = asvJSONValue::makeObject();
 	if (!obj) throw asvJSONError("out of memory");
-	std::unordered_map<std::string, std::string> nsMap;
+	XmlNsScope rootNs;
 	int count = 0;
 	while (pos < input.size()) {
 		if (!skipProlog()) break;
 		std::string name;
-		auto val = xmlParseElement(input, pos, name, 0, nsMap, collapseSameNamed);
+		auto val = xmlParseElement(input, pos, name, 0, rootNs, collapseSameNamed);
 		if (!val) break;
 		// Repeated roots merge last-wins: only a NEW name grows the map.
 		if (obj->obj->find(name) == obj->obj->end() &&
