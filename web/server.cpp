@@ -364,7 +364,18 @@ public:
       }
       char ipStr[64];
       std::snprintf(ipStr, sizeof(ipStr), "%s", inet_ntoa(client.sin_addr));
-      handleClient(clientSock, ipStr);
+      // Defense in depth: the library API is bool + lastError and handleAPI
+      // fences its encoders, but std::string growth here (16 MB bodies) can
+      // still throw bad_alloc/length_error. An escaping exception would
+      // propagate out of run() and terminate the whole server - one hostile
+      // connection killing every later one. Keep the accept loop alive.
+      try {
+        handleClient(clientSock, ipStr);
+      } catch (const std::exception& e) {
+        std::cerr << "client handler error: " << e.what() << "\n";
+      } catch (...) {
+        std::cerr << "client handler error (unknown)\n";
+      }
       SOCK_CLOSE(clientSock);
     }
   }
