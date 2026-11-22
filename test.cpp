@@ -39224,6 +39224,34 @@ TEST(testXMLGrowthGuards) {
 	}
 }
 
+TEST(testTronClassPropsGuard) {
+	// Wave 50: a TRON class definition had no cap on its property count and
+	// the parent-props merge used std::find, O(n^2) in the property count. A
+	// 1.5 MB document (`class C: p0,p1,...,p199999`) burned 53 s of CPU, and a
+	// class of millions of properties instantiated into an object with millions
+	// of members, past MAX_OBJECT_SIZE. Fix: the property list is capped by
+	// checkObjectSize (every property becomes one object member), and the
+	// dedup merge uses a hash set.
+	const size_t M = asvJSONValue::MAX_OBJECT_SIZE;
+	{
+		std::string doc = "class C: ";
+		for (size_t i = 0; i < M + 1; i++) {
+			if (i) doc += ",";
+			doc += "p" + std::to_string(i);
+		}
+		doc += "\n";
+		asvJSON j;
+		ASSERT(!j.fromTRON(doc));
+		ASSERT(j.getLastError().find("class too large") != std::string::npos);
+	}
+	// Dedup semantics are unchanged: child overrides parent, order preserved.
+	{
+		asvJSON j;
+		ASSERT(j.fromTRON("class A: a,b\nclass B(A): b,c\nB(1,2,3)\n"));
+		ASSERT_EQ(j.serialize(), std::string("{\"a\":1,\"b\":2,\"c\":3}"));
+	}
+}
+
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
@@ -40543,6 +40571,7 @@ RUN(testYamlAuditReview);
 	RUN(testBomStrippedByDecoders);
 	RUN(testXMLControlCharRejected);
 	RUN(testXMLGrowthGuards);
+	RUN(testTronClassPropsGuard);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 

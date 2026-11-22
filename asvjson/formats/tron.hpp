@@ -914,6 +914,12 @@ inline bool asvJSON::fromTRON(std::string_view input) {
       // that is really a class instantiation is never treated as a property.
       std::vector<std::string> props;
       while (state.propAhead()) {
+        // Every property becomes a member of the instantiated object, so the
+        // property list is bounded by MAX_OBJECT_SIZE. Without the cap an 8M-
+        // property class definition (well under MAX_TRON_INPUT) built an 8M-
+        // member object no other decoder can produce.
+        if (!asvJSONValue::checkObjectSize(props.size() + 1))
+          throw asvJSONError("TRON: class too large");
         if (state.peek().type == TronTokType::STRING) {
           props.push_back(tronUnescape(state.advance().text));
         } else {
@@ -926,11 +932,17 @@ inline bool asvJSON::fromTRON(std::string_view input) {
       }
       if (props.empty())
         throw asvJSONError("class requires at least one property");
-      // Merge parent props (child overrides parent)
+      // Merge parent props (child overrides parent). The dedup uses a hash set:
+      // the old std::find scan was O(n^2) in the property count, and 200k props
+      // (a 1.5 MB document) burned 53 s of CPU -- a trivially reachable DoS.
       std::vector<std::string> allProps = std::move(parentProps);
-      for (const auto& p : props) {
-        if (std::find(allProps.begin(), allProps.end(), p) == allProps.end())
-          allProps.push_back(p);
+      std::unordered_set<std::string> propSeen(allProps.begin(), allProps.end());
+      for (auto& p : props) {
+        if (propSeen.insert(p).second) {
+          if (!asvJSONValue::checkObjectSize(allProps.size() + 1))
+            throw asvJSONError("TRON: class too large");
+          allProps.push_back(std::move(p));
+        }
       }
       state.classes[name] = {std::move(allProps)};
     }
