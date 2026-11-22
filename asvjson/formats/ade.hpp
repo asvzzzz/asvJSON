@@ -471,7 +471,22 @@ private:
   // otherwise grows the tree to 2^30 nodes from a <1 KB document (the
   // analog of YAML's MAX_YAML_EXPANSION). clonedNodes_ never exceeds the
   // budget, so the subtraction below cannot underflow.
+  //
+  // The ceiling alone was not enough: 8M nodes is ~900 MB of live tree, so a
+  // 1.2 KB document could still exhaust memory before the guard fired. The
+  // budget now scales with the source (16 nodes per input byte) between a
+  // floor and the ceiling, mirroring how YAML bounds expansion by bytes:
+  // tiny documents cannot buy a huge tree, and a real 32 MB document still
+  // gets the full ceiling.
   static constexpr size_t kMaxAliasNodes = 8000000;
+  static constexpr size_t kMinAliasNodes = 500000;
+  static constexpr size_t kAliasNodesPerByte = 16;
+  size_t aliasBudget() const {
+    size_t b = text_.size() * kAliasNodesPerByte;
+    if (b < kMinAliasNodes) b = kMinAliasNodes;
+    if (b > kMaxAliasNodes) b = kMaxAliasNodes;
+    return b;
+  }
   size_t clonedNodes_ = 0;
   std::unordered_map<std::string, size_t> anchorNodes_;
 
@@ -1251,7 +1266,8 @@ private:
     // Charge the registration clone to the cumulative node budget BEFORE
     // allocating it (see kMaxAliasNodes).
     size_t nodes = countTreeNodes(v);
-    if (nodes > kMaxAliasNodes - clonedNodes_)
+    const size_t budget = aliasBudget();
+    if (nodes > budget - clonedNodes_)
       throw asvJSONError("ADE: anchor/alias expansion exceeds node budget");
     clonedNodes_ += nodes;
     auto c = cloneValue(v);
@@ -1286,7 +1302,8 @@ private:
     size_t nodes = 0;
     auto nit = anchorNodes_.find(name);
     if (nit != anchorNodes_.end()) nodes = nit->second;
-    if (nodes > kMaxAliasNodes - clonedNodes_)
+    const size_t budget = aliasBudget();
+    if (nodes > budget - clonedNodes_)
       throw asvJSONError("ADE: anchor/alias expansion exceeds node budget");
     clonedNodes_ += nodes;
     auto res = cloneValue(it->second.get());
