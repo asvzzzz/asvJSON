@@ -1890,7 +1890,14 @@ inline long long cppRdIntToks(const std::vector<const Tok*>& v, size_t b, size_t
 }
 
 // Forward declaration for template recursion.
-inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_t e) {
+inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_t e, int depth = 0) {
+  // The template-argument walk builds a TypeRef chain one link deep per
+  // nesting level, and both this parser and the materializer follow it
+  // recursively. Without a cap, 2000 nested std::vector<> (a 30 KB document)
+  // overflowed the stack (0xC00000FD) inside fromCpp. Same limit as the
+  // generator/materializer guards (see "cpp: nesting too deep").
+  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("cpp: nesting too deep");
   TypeRef ty;
   size_t i = b;
   while (i < e && v[i]->kind == Tok::Ident && cppRdIsQual(v[i]->text)) i++;
@@ -1913,29 +1920,29 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
     if (close == e) { ty.kind = TypeRef::Unknown; ty.name = "std::" + tn; return ty; }
     if (tn == "vector" || tn == "list" || tn == "deque" || tn == "set" || tn == "unordered_set") {
       ty.kind = TypeRef::Array;
-      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1));
     } else if (tn == "array") {
       ty.kind = TypeRef::Array;
-      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1));
       if (groups.size() >= 2) {
         long long c = cppRdIntToks(v, groups[1].first, groups[1].second);
         if (c >= 0) { ty.arrayLen = static_cast<size_t>(c); ty.hasLen = true; }
       }
     } else if (tn == "variant") {
       ty.kind = TypeRef::Variant;
-      for (auto& g : groups) ty.alts.push_back(std::make_shared<TypeRef>(cppRdParseTypeV(v, g.first, g.second)));
+      for (auto& g : groups) ty.alts.push_back(std::make_shared<TypeRef>(cppRdParseTypeV(v, g.first, g.second, depth + 1)));
     } else if (tn == "optional") {
       ty.kind = TypeRef::Optional;
-      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1));
     } else if (tn == "unique_ptr" || tn == "shared_ptr") {
       // Pointer wrappers melt to their pointee so recursive structs (which
       // toCpp() emits as std::unique_ptr<T>) round-trip as values.
-      if (!groups.empty()) ty = cppRdParseTypeV(v, groups[0].first, groups[0].second);
+      if (!groups.empty()) ty = cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1);
       else { ty.kind = TypeRef::Unknown; ty.name = "std::" + tn; }
     } else if (tn == "map" || tn == "unordered_map") {
       ty.kind = TypeRef::Map;
-      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
-      if (groups.size() >= 2) ty.value = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[1].first, groups[1].second));
+      if (!groups.empty()) ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1));
+      if (groups.size() >= 2) ty.value = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[1].first, groups[1].second, depth + 1));
     } else if (tn == "pair") {
       // A pair is a fixed 2-element aggregate, not a homogeneous sequence, and
       // keeping only T1 as the element type dropped the second member of
@@ -1952,10 +1959,10 @@ inline TypeRef cppRdParseTypeV(const std::vector<const Tok*>& v, size_t b, size_
         pv.kind = TypeRef::Variant;
         for (size_t gi = 0; gi < 2; gi++)
           pv.alts.push_back(std::make_shared<TypeRef>(
-            cppRdParseTypeV(v, groups[gi].first, groups[gi].second)));
+            cppRdParseTypeV(v, groups[gi].first, groups[gi].second, depth + 1)));
         ty.elem = std::make_shared<TypeRef>(pv);
       } else if (!groups.empty()) {
-        ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second));
+        ty.elem = std::make_shared<TypeRef>(cppRdParseTypeV(v, groups[0].first, groups[0].second, depth + 1));
       }
     } else {
       ty.kind = TypeRef::Unknown;

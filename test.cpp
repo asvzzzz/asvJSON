@@ -39331,6 +39331,43 @@ TEST(testDecodedKeyLengthCaps) {
 	}
 }
 
+TEST(testCppTemplateTypeDepthGuard) {
+	// Wave 52: cppRdParseTypeV recursed through template arguments with no
+	// limit, so 2000 nested std::vector<...> (a 30 KB document) overflowed the
+	// stack inside fromCpp (0xC00000FD, process death - no error channel could
+	// report it). The parse side now shares the generator's MAX_NESTING_DEPTH
+	// cap.
+	auto doc = [](int n) {
+		std::string t = "int";
+		for (int i = 0; i < n; i++) t = "std::vector<" + t + ">";
+		return "struct S { " + t + " x; };";
+	};
+	// 48 levels parse; the 49th is a clean error.
+	{
+		asvJSON j;
+		ASSERT(j.fromCpp(doc(48)));
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromCpp(doc(49)));
+		ASSERT(j.getLastError().find("nesting too deep") != std::string::npos);
+	}
+	// Absurd depths must not crash.
+	for (int n : {2000, 50000}) {
+	  asvJSON j;
+	  ASSERT(!j.fromCpp(doc(n)));
+	  ASSERT(j.getLastError().find("nesting too deep") != std::string::npos);
+	}
+	// Nested variant/optional alternatives are fine at any breadth.
+	{
+	  std::string t = "std::variant<int";
+	  for (int i = 0; i < 5000; i++) t += ", std::optional<int>";
+	  t += ">";
+	  asvJSON j;
+	  ASSERT(j.fromCpp("struct S { " + t + " x; };"));
+	}
+}
+
 TEST(testADEEncoderDepthGuard) {
 	// Wave 51: toADE() crashed the process (0xC00000FD) on a programmatically
 	// deep tree. Two causes: (a) adeHasComments recursed through the whole
@@ -40738,6 +40775,7 @@ RUN(testYamlAuditReview);
 	RUN(testTronClassPropsGuard);
 	RUN(testDecodedKeyLengthCaps);
 	RUN(testADEEncoderDepthGuard);
+	RUN(testCppTemplateTypeDepthGuard);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 
