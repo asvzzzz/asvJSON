@@ -710,7 +710,11 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 		auto xarr = asvJSONValue::makeArray();
 		if (!xarr) throw asvJSONError("XML: out of memory");
 		xobj->obj->emplace("#content", std::move(xarr));
-		for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+		for (const auto& [k, v] : attrs) {
+			if (!asvJSONValue::checkObjectSize(xobj->obj->size() + 1))
+				throw asvJSONError("XML: object too large");
+			xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+		}
 		return xobj;
 	}
 	auto tit = attrs.find("type");
@@ -741,7 +745,11 @@ inline std::unique_ptr<asvJSONValue> xmlEmptyElement(const std::unordered_map<st
 	if (attrs.empty()) return xmlMakeString("", 0);
 	auto obj = asvJSONValue::makeObject();
 	if (!obj) throw asvJSONError("XML: out of memory");
-	for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+	for (const auto& [k, v] : attrs) {
+		if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+			throw asvJSONError("XML: object too large");
+		obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+	}
 	return obj;
 }
 
@@ -963,6 +971,12 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (pos < s.size() && (s[pos] == '"' || s[pos] == '\'')) {
 				// Duplicate attributes are forbidden by the XML spec; the
 				// first value would otherwise be silently overwritten.
+				// Every attribute becomes an object member, so the map is
+				// bounded by MAX_OBJECT_SIZE like every other decoder's
+				// object growth (a 12 MB tag of `a0="" a1="" ...` would
+				// otherwise mint ~1.7M members).
+				if (attrs.size() >= asvJSONValue::MAX_OBJECT_SIZE)
+					throw asvJSONError("XML: object too large");
 				if (!attrs.emplace(attrName, xmlParseAttrValue(s, pos)).second)
 					throw asvJSONError("XML: duplicate attribute \"" + attrName + "\"");
 			}
@@ -1112,6 +1126,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		for (auto& seg : segments)
 			if (seg.isElement) {
 				if (!seg.childVal) throw asvJSONError("XML: out of memory");
+				if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+					throw asvJSONError("XML: array too large");
 				arr->arr->push_back(std::move(seg.childVal));
 			}
 		return arr;
@@ -1127,10 +1143,17 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			auto xarr = asvJSONValue::makeArray();
 			if (!xarr) throw asvJSONError("XML: out of memory");
 			for (size_t i = 0; i < segments.size(); i++)
-				if (!segments[i].isElement && !segments[i].text.empty())
+				if (!segments[i].isElement && !segments[i].text.empty()) {
+					if (!asvJSONValue::checkArraySize(xarr->arr->size() + 1))
+						throw asvJSONError("XML: array too large");
 					xarr->arr->push_back(xmlMakeString(segments[i].text.data(), segments[i].text.size()));
+				}
 			xobj->obj->emplace("#content", std::move(xarr));
-			for (const auto& [k, v] : attrs) xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+			for (const auto& [k, v] : attrs) {
+				if (!asvJSONValue::checkObjectSize(xobj->obj->size() + 1))
+					throw asvJSONError("XML: object too large");
+				xobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+			}
 			return xobj;
 		}
 		if (attrs.empty()) {
@@ -1152,7 +1175,14 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				if (attrs.size() == 1) return xmlMakeString(combinedText.data(), combinedText.size());
 				auto sobj = asvJSONValue::makeObject();
 				if (!sobj) throw asvJSONError("XML: out of memory");
-				for (const auto& [k, v] : attrs) if (k != "type") sobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+				for (const auto& [k, v] : attrs) {
+					if (k == "type") continue;
+					if (!asvJSONValue::checkObjectSize(sobj->obj->size() + 1))
+						throw asvJSONError("XML: object too large");
+					sobj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+				}
+				if (!asvJSONValue::checkObjectSize(sobj->obj->size() + 1))
+					throw asvJSONError("XML: object too large");
 				sobj->obj->emplace("#text", xmlMakeString(combinedText.data(), combinedText.size()));
 				return sobj;
 			}
@@ -1218,8 +1248,16 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 		// Has attributes - object with #text + @attr
 		auto obj = asvJSONValue::makeObject();
 		if (!obj) throw asvJSONError("XML: out of memory");
-		for (const auto& [k, v] : attrs) obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
-		if (!combinedText.empty()) obj->obj->emplace("#text", xmlNonNull(xmlDetectValue(combinedText)));
+		for (const auto& [k, v] : attrs) {
+			if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+				throw asvJSONError("XML: object too large");
+			obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
+		}
+		if (!combinedText.empty()) {
+			if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+				throw asvJSONError("XML: object too large");
+			obj->obj->emplace("#text", xmlNonNull(xmlDetectValue(combinedText)));
+		}
 		return obj;
 	}
 
@@ -1251,6 +1289,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 	// @type arrives as the reserved asv:ut attribute and maps back to @type.
 	for (const auto& [k, v] : attrs) {
 		if (pinTextString && k == "type") continue;
+		if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+			throw asvJSONError("XML: object too large");
 		obj->obj->emplace(xmlAttrToKey(k), xmlMakeString(v.data(), v.size()));
 	}
 
@@ -1272,6 +1312,8 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				auto wrapper = asvJSONValue::makeObject();
 				if (!wrapper) throw asvJSONError("XML: out of memory");
 				wrapper->obj->emplace(seg.childName, std::move(seg.childVal));
+				if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+					throw asvJSONError("XML: array too large");
 				arr->arr->push_back(std::move(wrapper));
 			} else {
 				// Text in mixed content is character data, like CDATA: always
@@ -1282,19 +1324,27 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				// that the encoder had to wrap as <item>10</item>, re-parsing as
 				// {"item":10} -- a one-way reshape that broke external
 				// mixed-content round-trips. Always-string closes that gap.
+				if (!asvJSONValue::checkArraySize(arr->arr->size() + 1))
+					throw asvJSONError("XML: array too large");
 				arr->arr->push_back(xmlMakeString(seg.text.data(), seg.text.size()));
 			}
 		}
+		if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+			throw asvJSONError("XML: object too large");
 		obj->obj->emplace("#content", std::move(arr));
 	} else {
 		// Non-interleaved: all text first (if any), then all elements
 		// Add text content as #text (CDATA content stays raw STRING)
 		if (!combinedText.empty()) {
+			if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+				throw asvJSONError("XML: object too large");
 			if (hasCdata || pinTextString) obj->obj->emplace("#text", xmlMakeString(combinedText.data(), combinedText.size()));
 			else obj->obj->emplace("#text", xmlNonNull(xmlDetectValue(combinedText)));
 		} else if (pinTextString) {
 			// type="string" with no text run at all still denotes an empty
 			// STRING: this is what toXML emits for {#text:"", child:1}.
+			if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+				throw asvJSONError("XML: object too large");
 			obj->obj->emplace("#text", xmlMakeString("", 0));
 		}
 
@@ -1310,15 +1360,21 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 			if (nameCounts[seg.childName] > 1) {
 				auto it = obj->obj->find(seg.childName);
 				if (it == obj->obj->end()) {
+					if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+						throw asvJSONError("XML: object too large");
 					auto arr = asvJSONValue::makeArray();
 					if (!arr) throw asvJSONError("XML: out of memory");
 					obj->obj->emplace(seg.childName, std::move(arr));
 					it = obj->obj->find(seg.childName);
 				}
 				if (!seg.childVal) throw asvJSONError("XML: out of memory");
+				if (!asvJSONValue::checkArraySize(it->second->arr->size() + 1))
+					throw asvJSONError("XML: array too large");
 				it->second->arr->push_back(std::move(seg.childVal));
 			} else {
 				if (!seg.childVal) throw asvJSONError("XML: out of memory");
+				if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+					throw asvJSONError("XML: object too large");
 				obj->obj->emplace(seg.childName, std::move(seg.childVal));
 			}
 		}
@@ -1408,6 +1464,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseDocument(std::string_view input, bo
 		std::string name;
 		auto val = xmlParseElement(input, pos, name, 0, nsMap, collapseSameNamed);
 		if (!val) break;
+		// Repeated roots merge last-wins: only a NEW name grows the map.
+		if (obj->obj->find(name) == obj->obj->end() &&
+		    !asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+			throw asvJSONError("XML: object too large");
 		obj->obj->insert_or_assign(std::move(name), std::move(val));
 		count++;
 	}

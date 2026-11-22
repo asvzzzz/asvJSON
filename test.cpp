@@ -39152,6 +39152,78 @@ TEST(testXMLControlCharRejected) {
 	}
 }
 
+TEST(testXMLGrowthGuards) {
+	// Wave 50: the XML decoder was the ONLY decoder with no container-growth
+	// caps at all (no checkObjectSize/checkArraySize anywhere). A 4.8 MB
+	// document of repeated <i/> built a 1,200,000-element ARRAY and a 10.4 MB
+	// document of distinct <kN/> built a 1,050,000-member OBJECT - both past
+	// the 1M caps every other decoder enforces (the segments buffer also held
+	// all the child nodes before grouping, so peak memory tracked the input).
+	// Guards: MAX_ARRAY_SIZE on every arr->arr->push_back site (asv:arr
+	// marker, mixed #content, count-collapse grouping, text-only #content),
+	// MAX_OBJECT_SIZE on every obj->obj->emplace site (attribute maps, #text/
+	// #content insertion, same-named-child grouping, repeated root merge) and
+	// on the transient attrs map itself (a 12 MB tag of `a0="" a1="" ...`
+	// would otherwise mint ~1.7M members before any object existed).
+	const size_t M = asvJSONValue::MAX_ARRAY_SIZE;
+	auto arrDoc = [](size_t n) {
+		std::string xml = "<r>";
+		for (size_t i = 0; i < n; i++) xml += "<i/>";
+		xml += "</r>";
+		return xml;
+	};
+	auto objDoc = [](size_t n) {
+		std::string xml = "<r>";
+		for (size_t i = 0; i < n; i++) xml += "<k" + std::to_string(i) + "/>";
+		xml += "</r>";
+		return xml;
+	};
+	// Exactly MAX elements is legal; MAX+1 is rejected.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML(arrDoc(M)));
+		auto* r = j.getRoot();
+		ASSERT(r && r->type == asvJSONValue::OBJECT);
+		auto it = r->obj->find("r");
+		ASSERT(it != r->obj->end() && it->second && it->second->type == asvJSONValue::ARRAY);
+		ASSERT_EQ(it->second->arr->size(), M);
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromXML(arrDoc(M + 1)));
+		ASSERT(j.getLastError().find("array too large") != std::string::npos);
+	}
+	{
+		asvJSON j;
+		ASSERT(j.fromXML(objDoc(M)));
+		auto* r = j.getRoot();
+		ASSERT(r && r->type == asvJSONValue::OBJECT);
+		auto it = r->obj->find("r");
+		ASSERT(it != r->obj->end() && it->second && it->second->type == asvJSONValue::OBJECT);
+		ASSERT_EQ(it->second->obj->size(), M);
+	}
+	{
+		asvJSON j;
+		ASSERT(!j.fromXML(objDoc(M + 1)));
+		ASSERT(j.getLastError().find("object too large") != std::string::npos);
+	}
+	// The transient attribute map is capped too.
+	{
+		std::string xml = "<x";
+		for (size_t i = 0; i < M + 1; i++) xml += " a" + std::to_string(i) + "=\"\"";
+		xml += "/>";
+		asvJSON j;
+		ASSERT(!j.fromXML(xml));
+		ASSERT(j.getLastError().find("object too large") != std::string::npos);
+	}
+	// Ordinary documents still round-trip unchanged.
+	{
+		asvJSON j;
+		ASSERT(j.fromXML("<a k=\"1\"><b>2</b><b>3</b></a>"));
+		ASSERT_EQ(j.serialize(), std::string("{\"a\":{\"@k\":\"1\",\"b\":[2,3]}}"));
+	}
+}
+
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
@@ -40470,6 +40542,7 @@ RUN(testYamlAuditReview);
 	RUN(testJSONPathQuotedNameShorthand);
 	RUN(testBomStrippedByDecoders);
 	RUN(testXMLControlCharRejected);
+	RUN(testXMLGrowthGuards);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 
