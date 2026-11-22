@@ -25904,6 +25904,60 @@ TEST(testDotenvAuditFixes) {
   }
 }
 
+TEST(testDotenvGrowthGuards) {
+  // The 32 MB input budget fits millions of 4-byte `a=1\n` lines, so the
+  // decoder needs the same checkObjectSize cap every other direct-tree from*
+  // applies (CSV/INI/JavaProp/protobuf). Before the fix a 1.5M-key document
+  // parsed into a root object 50% past MAX_OBJECT_SIZE.
+  {
+    std::string s;
+    s.reserve(12000000);
+    for (size_t i = 0; i < 1000000; i++) { s += "k"; s += std::to_string(i); s += "=1\n"; }
+    asvJSON j;
+    ASSERT(j.fromDotenv(s));
+    ASSERT(j.getRoot() != nullptr && j.getRoot()->obj != nullptr);
+    ASSERT_EQ(j.getRoot()->obj->size(), size_t(1000000));
+  }
+  {
+    std::string s;
+    for (size_t i = 0; i < 1000001; i++) { s += "k"; s += std::to_string(i); s += "=1\n"; }
+    asvJSON j;
+    ASSERT(!j.fromDotenv(s));
+    ASSERT_EQ(j.getLastError(), std::string("dotenv: object too large"));
+    ASSERT(j.getRoot() == nullptr); // no stale tree on the rejected parse
+  }
+  // The UTF-8 BOM is stripped BEFORE the MAX_DOTENV_INPUT cap, so a BOM plus
+  // exactly-32 MB of content is not rejected on a 3-byte technicality.
+  {
+    std::string body;
+    body.reserve(32u * 1024u * 1024u);
+    while (body.size() < 32u * 1024u * 1024u) body += "A=1\n";
+    body.resize(32u * 1024u * 1024u);
+    std::string s = std::string("\xEF\xBB\xBF") + body;
+    asvJSON j;
+    ASSERT(j.fromDotenv(s)); // key limit is NOT tripped: body reuses one key
+    // One byte more of content crosses the cap.
+    s += 'x';
+    asvJSON k;
+    ASSERT(!k.fromDotenv(s));
+    ASSERT_EQ(k.getLastError(), std::string("Dotenv input exceeds 32 MB limit"));
+  }
+  // A non-OBJECT root has no dotenv spelling: toDotenv() throws (documented
+  // in the header), it never emits a bare value.
+  {
+    asvJSON a;
+    a.arrayAddInt(1);
+    bool threw = false;
+    try { a.toDotenv(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+    asvJSON s;
+    s.setRoot(asvJSONValue::makeInt(5));
+    threw = false;
+    try { s.toDotenv(); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+}
+
 TEST(testFromJavaProp) {
   // '=', ':' and whitespace separators, leading whitespace, type inference
   {

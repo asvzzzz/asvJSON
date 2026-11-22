@@ -68,6 +68,10 @@
 //   has no final line to sit on. toDotenv() writes the root's leading and footing
 //   comments and silently drops these two. Per-key leading/trailing and the root
 //   footing are all preserved.
+// - toDotenv() REQUIRES an OBJECT root: a scalar or array root throws
+//   `dotenv: root must be an object` (a flat KEY=VALUE list has no place for a
+//   bare value). Nested objects/arrays under a key degrade to JSON text, but the
+//   root itself has no such spelling.
 
 #include "../core.hpp"
 
@@ -416,14 +420,18 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
   dirty_ = false;
   formatType = FormatType::Unknown;
   lastError.clear();
-  // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT.
-  constexpr size_t MAX_DOTENV_INPUT = 32u * 1024u * 1024u;
-  if (input.size() > MAX_DOTENV_INPUT) { lastError = "Dotenv input exceeds 32 MB limit"; return false; }
   try {
-    // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser).
+    // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON parser) BEFORE
+    // the size cap, so BOM + exactly-32 MB content is not rejected on a
+    // 3-byte technicality.
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF &&
         (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
-      input = input.substr(3);
+      input.remove_prefix(3);
+
+    // Input size limit — symmetric with GOON/TOON/JSON5/YAML's MAX_*_INPUT,
+    // now enforced on the BOM-stripped view.
+    constexpr size_t MAX_DOTENV_INPUT = 32u * 1024u * 1024u;
+    if (input.size() > MAX_DOTENV_INPUT) { lastError = "Dotenv input exceeds 32 MB limit"; return false; }
 
     if (input.empty()) throw asvJSONError("empty input");
 
@@ -551,8 +559,16 @@ inline bool asvJSON::fromDotenv(std::string_view input) {
       }
 
       auto it = obj->obj->find(key);
-      if (it == obj->obj->end()) obj->obj->emplace(key, std::move(val));
-      else it->second = std::move(val);
+      if (it == obj->obj->end()) {
+        // The 32 MB input budget fits ~8M unique 4-byte lines (`a=1\n`), so
+        // the map needs the same growth cap the other direct-tree decoders
+        // (CSV/INI/JavaProp/protobuf) apply before every emplace.
+        if (!asvJSONValue::checkObjectSize(obj->obj->size() + 1))
+          throw asvJSONError("dotenv: object too large");
+        obj->obj->emplace(key, std::move(val));
+      } else {
+        it->second = std::move(val);
+      }
     }
 
     if (!pending.empty()) {
