@@ -288,8 +288,16 @@ inline bool asvJSON::fromCSV(std::string_view input) {
 		// A quoted header is an explicit text literal appended verbatim; only an
 		// unquoted header gets the formula-injection guard stripped (a header
 		// like "'@x" that toCSV quoted on purpose must not lose its apostrophe).
-		for (auto& [h, hq] : rawHeaders)
+		for (auto& [h, hq] : rawHeaders) {
+			// Every header becomes an object key, so it is bounded by
+			// MAX_STRING_LEN (the INI/Dotenv key-length precedent). The input
+			// cap alone would let a 32 MB file mint an 11 MB key that the core
+			// JSON parser later rejects ("Object key too long"), so the value
+			// could never round-trip through another format.
+			if (!asvJSONValue::checkStringLen(h.size()))
+				throw asvJSONError("CSV: column header too long");
 			headers.push_back(hq ? std::move(h) : csvStripInjection(h));
+		}
 
 		// Duplicate column headers make the layout ambiguous; reject the input
 		// instead of silently keeping one column's data and dropping the other's.

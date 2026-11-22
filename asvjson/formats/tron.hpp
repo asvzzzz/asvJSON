@@ -549,6 +549,10 @@ struct TronParseState {
         throw asvJSONError("TRON object too large");
       if (peek().type != TronTokType::STRING) throw asvJSONError("TRON: expected string key");
       std::string key = tronUnescape(advance().text);
+      // Keys become object members; bound them by MAX_STRING_LEN like the
+      // core JSON parser does ("Object key too long").
+      if (!asvJSONValue::checkStringLen(key.size()))
+        throw asvJSONError("TRON: key too long");
       if (!match(TronTokType::COLON)) throw asvJSONError("TRON: expected ':'");
       skipNewlines();
       asvJSONValue* val = parseValue(depth + 1);
@@ -921,8 +925,11 @@ inline bool asvJSON::fromTRON(std::string_view input) {
         if (!asvJSONValue::checkObjectSize(props.size() + 1))
           throw asvJSONError("TRON: class too large");
         if (state.peek().type == TronTokType::STRING) {
-          props.push_back(tronUnescape(state.advance().text));
+          std::string pn = tronUnescape(state.advance().text);
+          if (!asvJSONValue::checkStringLen(pn.size())) throw asvJSONError("TRON: key too long");
+          props.push_back(std::move(pn));
         } else {
+          if (!asvJSONValue::checkStringLen(state.peek().text.size())) throw asvJSONError("TRON: key too long");
           props.push_back(state.advance().text);
         }
         if (state.peek().type == TronTokType::COMMA) { state.advance(); state.skipNewlines(); }

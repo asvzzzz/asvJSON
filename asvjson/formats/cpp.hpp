@@ -1475,6 +1475,10 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
       size_t s = i;
       while (i < n && cppRdIdentChar(in[i])) i++;
       std::string ident(in.data() + s, i - s);
+      // A declaration name becomes an object key, so it is bounded by
+      // MAX_STRING_LEN like every other decoded key.
+      if (!asvJSONValue::checkStringLen(ident.size()))
+        throw asvJSONError("cpp: identifier too long");
       // Raw string literal: R"delimiter(... )delimiter" (C++11). The form is
       // R"d chars )d" - the opening paren comes AFTER the quote, so the
       // delimiter is read first and the body ends at ')' + delimiter + '"'.

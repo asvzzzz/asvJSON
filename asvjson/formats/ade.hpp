@@ -690,6 +690,8 @@ private:
         seg = { std::string(text_.data() + start, pos_ - start), false };
       }
       segs.push_back(std::move(seg));
+      if (!segs.empty() && !asvJSONValue::checkStringLen(segs.back().first.size()))
+        throw asvJSONError("ADE: key too long");
       if (!eof() && peek() == '.') { pos_++; continue; }
       break;
     }

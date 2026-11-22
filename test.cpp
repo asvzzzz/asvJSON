@@ -39252,6 +39252,63 @@ TEST(testTronClassPropsGuard) {
 	}
 }
 
+TEST(testDecodedKeyLengthCaps) {
+	// Wave 50: the direct-tree text decoders (CSV header cells, TOML key
+	// segments, TRON object keys and class property names, XML element and
+	// attribute names, ADE key segments, protobuf-text field names, C++
+	// declaration names) accepted keys past MAX_STRING_LEN (10 MB) - the input
+	// size cap alone bounds them. INI/Dotenv/JavaProp/plist/BSON check decoded
+	// keys, and the core JSON parser rejects "Object key too long", so such a
+	// value can never round-trip through any other format. Each decoder now
+	// enforces checkStringLen at the key site; exactly MAX_STRING_LEN stays
+	// legal.
+	const size_t L = asvJSONValue::MAX_STRING_LEN;
+	std::string big(L + 1, 'k');
+	std::string legal(L, 'k');
+	{ // CSV header cell
+		asvJSON j; ASSERT(j.fromCSV(legal + "\n1\n"));
+		asvJSON k; ASSERT(!k.fromCSV(big + "\n1\n"));
+		ASSERT(k.getLastError().find("header too long") != std::string::npos);
+	}
+	{ // TOML bare and quoted key segments
+		asvJSON j; ASSERT(j.fromTOML(legal + " = 1\n"));
+		asvJSON k; ASSERT(!k.fromTOML(big + " = 1\n"));
+		ASSERT(k.getLastError().find("key too long") != std::string::npos);
+		asvJSON q; ASSERT(!q.fromTOML("\"" + big + "\" = 1\n"));
+	}
+	{ // TRON object key
+		asvJSON j; ASSERT(j.fromTRON("{\"a\": 1}"));
+		asvJSON k; ASSERT(!k.fromTRON("{\"" + big + "\": 1}"));
+		ASSERT(k.getLastError().find("key too long") != std::string::npos);
+	}
+	{ // XML element name and attribute name
+		asvJSON j; ASSERT(j.fromXML("<r><" + legal + "/></r>"));
+		asvJSON k; ASSERT(!k.fromXML("<r><" + big + "/></r>"));
+		ASSERT(k.getLastError().find("name too long") != std::string::npos);
+		asvJSON a; ASSERT(!a.fromXML("<r " + big + "=\"1\"/>"));
+	}
+	{ // ADE key segment
+		asvJSON j; ASSERT(j.fromADE(legal + ": 1\n"));
+		asvJSON k; ASSERT(!k.fromADE(big + ": 1\n"));
+		ASSERT(k.getLastError().find("key too long") != std::string::npos);
+	}
+	{ // protobuf text field name
+		asvJSON j; ASSERT(j.fromProtobufText(legal + ": 1\n"));
+		asvJSON k; ASSERT(!k.fromProtobufText(big + ": 1\n"));
+		ASSERT(k.getLastError().find("key too long") != std::string::npos);
+	}
+	{ // C++ declaration name
+		asvJSON j; ASSERT(j.fromCpp("struct S { int f; };"));
+		asvJSON k; ASSERT(!k.fromCpp("struct S { int " + big + "; };"));
+		ASSERT(k.getLastError().find("identifier too long") != std::string::npos);
+	}
+	// TRON class property name
+	{
+		asvJSON k; ASSERT(!k.fromTRON("class C: " + big + "\nC(1)\n"));
+		ASSERT(k.getLastError().find("key too long") != std::string::npos);
+	}
+}
+
 // Review fix: GOON goonNeedsQuotes does NOT special-case ISO-8601 strings for
 // type-preservation reasons. The core JSON parser auto-detects the shape and
 // re-parses as DATETIME on read, so quoting the string in GOON would not change
@@ -40572,6 +40629,7 @@ RUN(testYamlAuditReview);
 	RUN(testXMLControlCharRejected);
 	RUN(testXMLGrowthGuards);
 	RUN(testTronClassPropsGuard);
+	RUN(testDecodedKeyLengthCaps);
 	RUN(testEncoderSelfConsistency);
 	RUN(testEncoderDecoderMatrix);
 

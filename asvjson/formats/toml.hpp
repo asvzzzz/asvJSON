@@ -370,6 +370,11 @@ inline std::vector<std::string> parseTomlKeyPath(std::string_view& s) {
       // 6.6 s; a 32 MB input could carry millions of segments).
       if (keys.size() >= static_cast<size_t>(asvJSONValue::MAX_NESTING_DEPTH))
         throw asvJSONError("TOML: nesting too deep");
+      // Every segment becomes an object key, so each is bounded by
+      // MAX_STRING_LEN (the INI key-length precedent): a 30 MB bare key would
+      // otherwise build a tree the core parser can never reproduce.
+      if (!asvJSONValue::checkStringLen(key.size()))
+        throw asvJSONError("TOML: key too long");
       keys.push_back(std::move(key));
     }
     s = trimSV(s);

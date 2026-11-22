@@ -1529,6 +1529,11 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
       fname = protoTextParseIdent(text, pos);
     } else break;
 
+    // The field name becomes an object key: bound it by MAX_STRING_LEN like
+    // the core parser does (protoSetField caps the member COUNT only).
+    if (!asvJSONValue::checkStringLen(fname.size()))
+      throw asvJSONError("Protobuf text: key too long");
+
     protoTextSkipWS(text, pos);
     bool hasColon = (pos < text.size() && text[pos] == ':');
     if (hasColon) { pos++; protoTextSkipWS(text, pos); }

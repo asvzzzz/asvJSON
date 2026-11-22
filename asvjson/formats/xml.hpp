@@ -568,6 +568,11 @@ inline std::string xmlParseName(std::string_view s, size_t& pos) {
 			name += static_cast<char>(s[pos++]);
 		else break;
 	}
+	// An element or attribute name becomes an object key, so it is bounded by
+	// MAX_STRING_LEN like every other decoded key (the core JSON parser rejects
+	// an "Object key too long", so an oversized one could never round-trip).
+	if (!asvJSONValue::checkStringLen(name.size()))
+		throw asvJSONError("XML: name too long");
 	return name;
 }
 
