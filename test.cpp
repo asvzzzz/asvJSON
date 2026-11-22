@@ -24971,6 +24971,36 @@ TEST(testINIDepthAndKeyGuards) {
     ASSERT(!k.fromINI("[" + dots(46) + "]\nz = []\nz = []\n"));  // merged element at 49
     ASSERT(k.getLastError() == "INI: nesting too deep");
   }
+  // 4b. Conversion branch (existing value is NOT an array) wraps the EXISTING
+  // value in the new array too - its chain must fit the same cap. Note the
+  // merge case z = [] + z = 1 stays LEGAL (z is already an array, the scalar
+  // merges into it at level 48, nothing moves) - pinned deliberately.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[" + dots(46) + "]\nz = []\nz = 1\n"));  // z=[1] at 48 - legal
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));
+    ASSERT(k.serialize() == ser);
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[" + dots(46) + "]\nz = {}\nz = 1\n"));  // {} moves to level 49
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[" + dots(46) + "]\nz = 1\nz = {}\n"));  // incoming {} past cap
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[" + dots(45) + "]\nz = {}\nz = 1\n"));  // one level shallower - legal
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));
+    ASSERT(k.serialize() == ser);
+  }
   // 5. Oversized path segments: decoder must reject like the encoder does
   {
     std::string seg(11u * 1024u * 1024u, 'k');

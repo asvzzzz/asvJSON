@@ -681,6 +681,14 @@ inline void iniSetValue(asvJSONValue* target, const std::string& key, std::uniqu
       // A null EXISTING node means an earlier insert already broke the
       // invariant (defensive: unreachable now that values are checked).
       if (!it->second) throw asvJSONError("INI: out of memory");
+      // Conversion wraps the EXISTING value in the new array too: it moves
+      // one level deeper exactly like the incoming value, so its container
+      // chain needs the same cap (z = {} then z = 1 at the boundary would
+      // otherwise push the object to level MAX+1 and serialize() null-degrades
+      // it). The merge-into-ARRAY branch needs no such check: the array is
+      // already at parentDepth+1 and every element was capped on its push.
+      if (valueContainerDepth(it->second.get(), cap) > cap)
+        throw asvJSONError("INI: nesting too deep");
       auto arr = asvJSONValue::makeArray();
       if (!arr || !arr->arr) throw asvJSONError("INI: out of memory");
       if (!asvJSONValue::checkArraySize(2))
