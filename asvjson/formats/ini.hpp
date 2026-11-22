@@ -370,6 +370,12 @@ inline asvJSONValue* iniNavigate(asvJSONValue* root, const std::vector<std::stri
     throw asvJSONError("INI: nesting too deep");
   asvJSONValue* cur = root;
   for (const auto& seg : pathParts) {
+    // Bound every path segment's length (MAX_STRING_LEN). The encoder
+    // (iniEscapeFlatKey/iniEscapeSectionKey) rejects oversized keys, so without
+    // this the decoder accepted an 11 MB section segment that toINI then
+    // refused - broken round-trip and a MAX_STRING_LEN contract violation.
+    if (!asvJSONValue::checkStringLen(seg.size()))
+      throw asvJSONError("INI: key too long");
     if (!cur || cur->type != asvJSONValue::OBJECT || !cur->obj) {
       if (!create) return nullptr;
       throw asvJSONError("cannot navigate through non-object");
@@ -639,12 +645,24 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
 // Insert a value into an object by key. Repeated keys convert to arrays: the
 // primitive-array encoder emits duplicates of the same key (one per element),
 // so the decoder must merge them back into an array instead of overriding.
-inline void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val) {
+// parentDepth is the container level of `target` (root object is level 1), so
+// a container leaf can be placed without exceeding MAX_NESTING_DEPTH - the
+// iniNavigate guard counts path segments only and misses a container value
+// under a parent already at MAX (serialize() then null-degrades it and the
+// document stops surviving its own round-trip). Same shape as the applyPatch
+// (2e598a1) and TOML decoder (f5c9968) placement guards in core.hpp.
+inline void iniSetValue(asvJSONValue* target, const std::string& key, std::unique_ptr<asvJSONValue> val, int parentDepth) {
   if (!target || target->type != asvJSONValue::OBJECT || !target->obj) return;
   // A null value must never enter the tree: every serializer dereferences
   // members/elements without a null check.
   if (!val) throw asvJSONError("INI: out of memory");
   auto it = target->obj->find(key);
+  // A merged/converted entry lands one level deeper (inside the array), so
+  // its chain budget is one smaller.
+  int cap = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) -
+            parentDepth - (it == target->obj->end() ? 0 : 1);
+  if (cap < 0 || valueContainerDepth(val.get(), cap) > cap)
+    throw asvJSONError("INI: nesting too deep");
   if (it == target->obj->end()) {
     // Guard against DoS: a sequence of unique keys key1, key2, ... creates
     // siblings under target. checkObjectSize prevents the map from growing
@@ -1696,6 +1714,13 @@ inline bool asvJSON::fromINI(std::string_view input) {
           }
           if (!parent || parent->type != asvJSONValue::OBJECT)
             throw asvJSONError("cannot navigate through non-object");
+          // The new array sits at pathDepth+1 and its element object at
+          // pathDepth+2. Without this guard [[a1.a2...a46.a47]] builds a
+          // 49-container tree no parse() can reproduce (serialize() null-
+          // degrades the element's contents). Root is level 1 here, matching
+          // parse()'s limit of MAX containers.
+          if (pathDepth + 2 > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+            throw asvJSONError("INI: nesting too deep");
           auto it = parent->obj->find(arrKey);
           if (it == parent->obj->end()) {
             // Guard against DoS: [[a.b1]], [[a.b2]], ... creates siblings under a.
@@ -1848,10 +1873,13 @@ inline bool asvJSON::fromINI(std::string_view input) {
                     : (inSection && !sectionPath.empty() ? 1 + static_cast<int>(sectionPath.size()) : 1);
           asvJSONValue* parent = iniNavigate(target, keyPath, true, targetDepth);
           if (parent) {
-            iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted));
+            iniSetValue(parent, leafKey, iniParseVal(valueStr, quoted),
+                        targetDepth + static_cast<int>(keyPath.size()));
           }
         } else {
-          iniSetValue(target, iniUnescapeSectionKey(key), iniParseVal(valueStr, quoted));
+          int targetDepth = currentArrayElement ? currentArrayElementDepth
+                    : (inSection && !sectionPath.empty() ? 1 + static_cast<int>(sectionPath.size()) : 1);
+          iniSetValue(target, iniUnescapeSectionKey(key), iniParseVal(valueStr, quoted), targetDepth);
         }
       }
     }

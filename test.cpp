@@ -24898,6 +24898,106 @@ TEST(testINIReviewFixes) {
   }
 }
 
+// Wave 47 (INI review): fromINI must not build 49-container trees that
+// serialize()/parse() cannot reproduce. The iniNavigate guard counted path
+// segments only and missed a container leaf landing under a parent already at
+// MAX depth, and the [[...]] array-section branch had no depth guard at all
+// ([[a1.a2...a46.a47]] built element objects at level 49; serialize() then
+// null-degrades their contents - the document stops surviving its own
+// round-trip). Guards: leaf-chain cap in iniSetValue via valueContainerDepth
+// (the applyPatch precedent 2e598a1), pathDepth + 2 cap in the [[...]] branch,
+// and checkStringLen for every iniNavigate path segment (the encoder rejects
+// oversized keys via iniEscapeFlatKey/iniEscapeSectionKey, so the decoder must
+// agree - an 11 MB section key used to parse and then throw on toINI).
+TEST(testINIDepthAndKeyGuards) {
+  auto dots = [](int n) {
+    std::string s;
+    for (int i = 1; i <= n; i++) { if (i > 1) s += "."; s += "a" + std::to_string(i); }
+    return s;
+  };
+  // 1. [[...]] array-section chain: array at pathDepth+1, element at +2.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[[" + dots(46) + "]]\nx = 1\n"));  // element at 48, scalar at 49 - legal
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));  // the tree must survive its own JSON round-trip
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[[" + dots(47) + "]]\nx = 1\n"));  // element would sit at 49
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[[" + dots(46) + "]]\nx = []\n"));  // container leaf inside element at 48
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  // 2. Plain section + container leaf
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[" + dots(46) + "]\nz = []\n"));  // z array at 48
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[" + dots(47) + "]\nz = []\n"));  // z array at 49
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[" + dots(47) + "]\nz = 1\n"));  // scalar value at 49 - legal
+  }
+  // 3. Array-of-tables + dotted key: element at 3, 45 segments + container leaf = 49
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[[items]]\n" + dots(44) + ".z = []\n"));
+    std::string ser = j.serialize();
+    asvJSON k;
+    ASSERT(k.parse(ser));
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.fromINI("[[items]]\n" + dots(45) + ".z = []\n"));
+    ASSERT(j.getLastError() == "INI: nesting too deep");
+  }
+  // 4. Duplicate-key merge lands one level deeper (inside the existing array)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("[" + dots(46) + "]\nz = []\n"));
+    asvJSON k;
+    ASSERT(!k.fromINI("[" + dots(46) + "]\nz = []\nz = []\n"));  // merged element at 49
+    ASSERT(k.getLastError() == "INI: nesting too deep");
+  }
+  // 5. Oversized path segments: decoder must reject like the encoder does
+  {
+    std::string seg(11u * 1024u * 1024u, 'k');
+    asvJSON j;
+    ASSERT(!j.fromINI("[" + seg + "]\nk = 1\n"));
+    ASSERT(j.getLastError() == "INI: key too long");
+  }
+  {
+    std::string seg(11u * 1024u * 1024u, 'm');
+    asvJSON j;
+    ASSERT(!j.fromINI("[" + seg + ".tail]\nk = 1\n"));
+    ASSERT(j.getLastError() == "INI: key too long");
+  }
+  {
+    std::string seg(11u * 1024u * 1024u, 'n');
+    asvJSON j;
+    ASSERT(!j.fromINI("[[" + seg + "]]\nk = 1\n"));
+    ASSERT(j.getLastError() == "INI: key too long");
+  }
+  {
+    std::string seg(11u * 1024u * 1024u, 'd');
+    asvJSON j;
+    ASSERT(!j.fromINI("x." + seg + " = 1\n"));  // dotted key segment (pre-existing check)
+    ASSERT(j.getLastError().find("key too long") != std::string::npos);
+  }
+}
+
 TEST(testINISpecialValues) {
   // Special value types degrade to TEXT in INI the way they do in CSV/dotenv/
   // Java Properties. DATETIME is the only one with a native INI form: its bare
@@ -40061,6 +40161,7 @@ RUN(testCppReviewFixes);
 	RUN(testINIMultilineTrailingComment);
 	RUN(testINIDottedKeyRoundTrip);
 	RUN(testINIReviewFixes);
+	RUN(testINIDepthAndKeyGuards);
 	RUN(testINISpecialValues);
 	RUN(testINIRepeatedArrayComments);
 
