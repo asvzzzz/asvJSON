@@ -130,7 +130,7 @@ inline std::unique_ptr<asvJSONValue> dotenvParseVal(const std::string& s, bool q
       return asvJSONValue::makeInt(static_cast<int64_t>(ll));
     }
     errno = 0;
-    double d = std::strtod(s.c_str(), &end);
+    double d = asvStrtod(s.c_str(), &end);
     if (end && *end == 0 && end == s.c_str() + s.size()) {
       if (errno == ERANGE) return asvJSONValue::makeStringView(std::string_view(s));
       return asvJSONValue::makeDouble(d);

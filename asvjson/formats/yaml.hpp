@@ -830,7 +830,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		char* end = nullptr;
 		long long iv = std::strtoll(tmp.c_str(), &end, 10);
 		if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
-		double dv = std::strtod(tmp.c_str(), &end);
+		double dv = asvStrtod(tmp.c_str(), &end);
 		if (end == tmp.c_str() + tmp.size()) {
 			if (!std::isfinite(dv)) return yamlQuoteJsonScalar(s);
 			return fmtDbl(dv);
@@ -853,7 +853,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 		if (s.size() > 0) {
 			char* end = nullptr;
 			std::string tmp(s);
-			std::strtod(tmp.c_str(), &end);
+			asvStrtod(tmp.c_str(), &end);
 			validNumber = (end == tmp.c_str() + tmp.size());
 		}
 	#endif
@@ -884,7 +884,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				char* end = nullptr;
 				long long iv = std::strtoll(tmp.c_str(), &end, 10);
 				if (end == tmp.c_str() + tmp.size()) return std::to_string(iv);
-				double dv = std::strtod(tmp.c_str(), &end);
+				double dv = asvStrtod(tmp.c_str(), &end);
 				if (end == tmp.c_str() + tmp.size()) {
 					std::string norm;
 					fmtDoubleVal(dv, norm);
@@ -901,7 +901,7 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				std::string tmp(s);
 				cstr = tmp.c_str();
 				char* end = nullptr;
-				probe = std::strtod(cstr, &end);
+				probe = asvStrtod(cstr, &end);
 				if (end == cstr + tmp.size() && !std::isfinite(probe)) return yamlQuoteJsonScalar(s);
 			}
 			return std::string(s);
@@ -1337,7 +1337,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			std::string valStr(val);
 			char* e = nullptr;
 			errno = 0;
-			double d = std::strtod(valStr.c_str(), &e);
+			double d = asvStrtod(valStr.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == valStr.c_str() + valStr.size() && valStr.size() > 0) {
 			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
@@ -1358,7 +1358,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 			catch (const std::runtime_error&) { throw asvJSONError("YAML: invalid escape in string"); }
 			char* e = nullptr;
 			errno = 0;
-			double d = std::strtod(inner.c_str(), &e);
+			double d = asvStrtod(inner.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == inner.c_str() + inner.size()) {
 			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
@@ -1377,7 +1377,7 @@ inline std::string yamlParseTaggedValue(std::string_view s) {
 		if (!parsed.empty() && (parsed[0] == '-' || (parsed[0] >= '0' && parsed[0] <= '9'))) {
 			char* e = nullptr;
 			errno = 0;
-			double d = std::strtod(parsed.c_str(), &e);
+			double d = asvStrtod(parsed.c_str(), &e);
 			if (errno == ERANGE) throw asvJSONError("YAML: !!float overflow");
 			if (e == parsed.c_str() + parsed.size()) {
 			#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))

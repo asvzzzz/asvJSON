@@ -226,7 +226,7 @@ inline std::unique_ptr<asvJSONValue> csvDetectType(std::string_view s) {
 #else
 			std::string tmp(s);
 			char* end; errno = 0;
-			d = std::strtod(tmp.c_str(), &end);
+			d = asvStrtod(tmp.c_str(), &end);
 			// strtod signals ERANGE for overflow (-> +/-HUGE_VAL) and for
 			// underflow (0 when the value is gone entirely, or a subnormal
 			// when it merely got smaller). Overflow and total underflow must

@@ -629,7 +629,7 @@ inline std::unique_ptr<asvJSONValue> iniParseVal(const std::string& s, bool quot
     }
     // Try double
     errno = 0;
-    double d = std::strtod(s.c_str(), &end);
+    double d = asvStrtod(s.c_str(), &end);
     if (end && *end == 0 && end == s.c_str() + s.size()) {
       if (errno == ERANGE) {
         // Out-of-range double (e.g. "1e999"): preserve the literal as text

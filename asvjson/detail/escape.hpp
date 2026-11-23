@@ -4,8 +4,44 @@
 #include <string_view>
 #include <charconv>
 #include <cstdlib>
+#include <clocale>
+#if defined(_WIN32)
+#include <locale.h>
+#endif
 
 namespace asvJSONInternal {
+
+// ---------- locale-independent strtod ----------
+// Every grammar in this library spells decimals with a DOT (JSON's, and the
+// "bare value" type-inference of INI/dotenv/CSV/Java Properties/ADE/TOML/
+// YAML/... which all mirror it). std::strtod respects LC_NUMERIC: under a
+// comma-decimal locale (de_DE, ru_RU, fr_FR, ...) strtod("1.5") stops at the
+// dot, so the SAME document typed "1.5" as DOUBLE in the C locale degraded to
+// STRING elsewhere - locale-dependent tree drift (probe sw69, wave 72: 39
+// drifts on INI/ADE/dotenv/... whose inference calls strtod directly instead
+// of the locale-safe from_chars fast path).
+// The fix is a drop-in strtod bound to the classic ("C") locale: identical
+// grammar (inf/nan/hex-float spellings included), no global setlocale (which
+// would race with the library's per-thread parse guarantees), no behavior
+// change while the process is already in the C locale.
+inline double asvStrtod(const char* s, char** end) {
+#if defined(_WIN32)
+	// UCRT: _create_locale once; _strtod_l is thread-safe for READONLY locale
+	// handles (the CRT docs allow concurrent use of an _locale_t).
+	static const _locale_t classic = _create_locale(LC_ALL, "C");
+	if (classic) return _strtod_l(s, end, classic);
+	return std::strtod(s, end);
+#elif defined(__GLIBC__) || defined(__APPLE__) || defined(__BIONIC__)
+	static const locale_t classic = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+	if (classic) return strtod_l(s, end, classic);
+	return std::strtod(s, end);
+#else
+	// No per-call locale API: fall back to plain strtod. (Toolchains where
+	// from_chars(double) exists keep taking the locale-safe path above it -
+	// this only covers the fallback branches.)
+	return std::strtod(s, end);
+#endif
+}
 
 // ---------- XML helpers ----------
 // XML 1.0's Char production is #x9 | #xA | #xD | [#x20-#xD7FF] | ... : every
@@ -113,7 +149,7 @@ inline bool yamlLooksNumeric(std::string_view s) {
 	if (t.size() > 0) {
 		std::string tmp(t);
 		char* end = nullptr;
-		std::strtod(tmp.c_str(), &end);
+		asvStrtod(tmp.c_str(), &end);
 		if (end == tmp.c_str() + tmp.size()) return true;
 	}
 	return false;

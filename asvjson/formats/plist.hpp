@@ -509,7 +509,7 @@ inline std::unique_ptr<asvJSONValue> PlistReader::parseValue(int depth) {
     std::string tmp(v);
     errno = 0;
     char* end = nullptr;
-    double d = std::strtod(tmp.c_str(), &end);
+    double d = asvStrtod(tmp.c_str(), &end);
     if (errno == ERANGE || end == tmp.c_str() || *end != '\0') fail("invalid <real>");
     return asvJSONValue::makeDouble(d);
   }

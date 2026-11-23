@@ -349,7 +349,7 @@ private:
         std::string numStr(buf, numLen);
         errno = 0;
         char* end = nullptr;
-        d = std::strtod(numStr.c_str(), &end);
+        d = asvStrtod(numStr.c_str(), &end);
         if (end != numStr.c_str() + numStr.size()) throw std::runtime_error("Invalid number");
         if (allowNaNInfinity && std::isinf(d)) bad = false;
         else throw std::runtime_error("Invalid number: out of range");
@@ -359,7 +359,7 @@ private:
       std::string numStr(buf, numLen);
       char* endptr;
       errno = 0;
-      d = std::strtod(numStr.c_str(), &endptr);
+      d = asvStrtod(numStr.c_str(), &endptr);
       if (errno == ERANGE) {
         if (allowNaNInfinity && std::isinf(d)) { bad = false; }
         else throw std::runtime_error("Invalid number: out of range");
@@ -385,7 +385,7 @@ private:
         std::string numStr(buf, numLen);
         errno = 0;
         char* end = nullptr;
-        double d = std::strtod(numStr.c_str(), &end);
+        double d = asvStrtod(numStr.c_str(), &end);
         if (end != numStr.c_str() + numLen) throw std::runtime_error("Invalid number");
         if ((std::isnan(d) || std::isinf(d)) && !allowNaNInfinity)
           throw std::runtime_error("NaN or Infinity not allowed");
@@ -1208,7 +1208,7 @@ private:
         // fall back to strtod, verifying it consumed everything.
         errno = 0;
         char* end = nullptr;
-        d = std::strtod(numStr.c_str(), &end);
+        d = asvStrtod(numStr.c_str(), &end);
         if (errno == ERANGE) { setError("Invalid number: out of range"); return false; }
         if (end != numStr.c_str() + numStr.size()) { setError("Invalid number"); return false; }
       } else if (ec == std::errc::result_out_of_range) {
@@ -1221,7 +1221,7 @@ private:
         // honored exactly as they honor it and underflow stays rejected.
         errno = 0;
         char* end = nullptr;
-        d = std::strtod(numStr.c_str(), &end);
+        d = asvStrtod(numStr.c_str(), &end);
         if (end != numStr.c_str() + numStr.size()) { setError("Invalid number"); return false; }
         if (!(allowNaNInfinity && std::isinf(d))) { setError("Invalid number: out of range"); return false; }
       } else {
@@ -1230,7 +1230,7 @@ private:
       }
     #else
       errno = 0;
-      d = std::strtod(numStr.c_str(), nullptr);
+      d = asvStrtod(numStr.c_str(), nullptr);
       if (errno == ERANGE) {
         if (!(allowNaNInfinity && std::isinf(d))) { setError("Invalid number: out of range"); return false; }
       }
@@ -1259,7 +1259,7 @@ private:
         tokenBuffer_.clear();
         errno = 0;
         char* end = nullptr;
-        double d = std::strtod(numStr.c_str(), &end);
+        double d = asvStrtod(numStr.c_str(), &end);
         if (end != numStr.c_str() + numStr.size()) {
           setError("Invalid number: out of range");
           return false;

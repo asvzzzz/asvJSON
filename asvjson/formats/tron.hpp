@@ -847,7 +847,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
 #else
         char* end;
         errno = 0;
-        d = std::strtod(n.c_str(), &end);
+        d = asvStrtod(n.c_str(), &end);
         if (errno == ERANGE || end != n.c_str() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
 #endif
         auto v = asvJSONValue::makeDouble(d);

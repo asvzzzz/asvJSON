@@ -1217,7 +1217,7 @@ inline std::string parseTomlValue(std::string_view s, int depth = 0, bool strict
   {
     char* endp = nullptr;
     if (isFloatNum) {
-      double dv = std::strtod(clean.c_str(), &endp);
+      double dv = asvStrtod(clean.c_str(), &endp);
       if (errno == ERANGE || std::isinf(dv))
         throw asvJSONError("number out of range");
     } else {

@@ -21608,6 +21608,56 @@ TEST(testGetNestedEscapeForms) {
   #undef LEAF
 }
 
+TEST(testLocaleIndependentNumbers) {
+  // Wave 72: number type-inference must be locale-independent. In a
+  // comma-decimal LC_NUMERIC locale a naive strtod reads "1.5" as 1 (+ junk)
+  // and the INI/ADE/dotenv/... decoders degrade the SAME document to STRING
+  // (probe sw69 found 39 such tree drifts before the asvStrtod fix). The
+  // conversion now goes through a classic-locale strtod wrapper. When no
+  // comma locale is installed in the environment the core assertions are
+  // skipped, but the C-locale baseline always runs.
+  const char* candidates[] = { "German_Germany.1252", "de_DE.UTF-8", "de_DE", "French_France.1252", "fr_FR.UTF-8", "Russian_Russia.1251" };
+  const char* active = nullptr;
+  for (const char* loc : candidates) {
+    if (setlocale(LC_NUMERIC, loc)) { active = loc; break; }
+  }
+  auto check = [&](const char* what, const std::string& in, bool (*parseFn)(asvJSON&, const std::string&), const char* key, bool expectDouble) {
+    asvJSON j;
+    ASSERT_MSG(parseFn(j, in), what);
+    asvJSONValue* v = j.getNested(key);
+    std::string reason = std::string(what) + ": " + key + " type=" + (v ? std::string(asvJSONValue::typeToString(v->type)) : "missing");
+    ASSERT_MSG(v != nullptr, reason.c_str());
+    if (expectDouble) {
+      ASSERT_MSG(v->type == asvJSONValue::DOUBLE, reason.c_str());
+      ASSERT_EQ(v->getDouble(), 1.5);
+    }
+  };
+  check("C/ini", "a = 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromINI(s); }, "a", true);
+  check("C/ade", "a: 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromADE(s); }, "a", true);
+  check("C/dotenv", "A=1.5\n", [](asvJSON& j, const std::string& s){ return j.fromDotenv(s); }, "A", true);
+  check("C/javaprop", "a=1.5\n", [](asvJSON& j, const std::string& s){ return j.fromJavaProp(s); }, "a", true);
+  // encoder side: '.' decimals in the output regardless of the locale
+  {
+    asvJSON j; j.parse("{\"d\":1.5}");
+    std::string s = j.serialize(false);
+    ASSERT_EQ(s, std::string("{\"d\":1.5}"));
+  }
+  if (active) {
+    std::printf("  [locale test active under %s]\n", active);
+    check("loc/ini", "a = 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromINI(s); }, "a", true);
+    check("loc/ade", "a: 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromADE(s); }, "a", true);
+    check("loc/dotenv", "A=1.5\n", [](asvJSON& j, const std::string& s){ return j.fromDotenv(s); }, "A", true);
+    check("loc/javaprop", "a=1.5\n", [](asvJSON& j, const std::string& s){ return j.fromJavaProp(s); }, "a", true);
+    check("loc/toml", "a = 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromTOML(s); }, "a", true);
+    check("loc/plist", "<dict><key>a</key><real>1.5</real></dict>", [](asvJSON& j, const std::string& s){ return j.fromPlist(s); }, "a", true);
+    check("loc/yaml", "a: 1.5\n", [](asvJSON& j, const std::string& s){ return j.fromYAML(s); }, "a", true);
+    { asvJSON j; j.parse("{\"d\":1.5}"); std::string s = j.serialize(false); ASSERT_EQ(s, std::string("{\"d\":1.5}")); }
+    setlocale(LC_NUMERIC, "C");
+  } else {
+    std::printf("  [locale test: no comma locale available, core checks only]\n");
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41801,6 +41851,7 @@ RUN(testSchemaVsCoreNumericEquality);
 RUN(testViewOverloadAgreementNul);
 RUN(testDirtyFlagAndKnobHygiene);
 RUN(testGetNestedEscapeForms);
+RUN(testLocaleIndependentNumbers);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);

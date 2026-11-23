@@ -386,7 +386,7 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
   if (isFloat) {
     char* end = nullptr;
     errno = 0;
-    double d = std::strtod(t.c_str(), &end);
+    double d = asvStrtod(t.c_str(), &end);
     if (!end || *end != 0 || errno == ERANGE || !std::isfinite(d)) return nullptr;
     // Mirror the JSON parser: a literal with more significant digits than a
     // double can hold exactly is stored as a raw_number STRING so the value

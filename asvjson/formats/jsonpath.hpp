@@ -253,7 +253,7 @@ inline bool jpParseNumber(const std::string& s, double& out) {
   if (i != s.size()) return false;
   errno = 0;
   char* endp = nullptr;
-  double v = std::strtod(s.c_str(), &endp);
+  double v = asvStrtod(s.c_str(), &endp);
   if (endp != s.c_str() + s.size()) return false;
   if (std::isinf(v) || std::isnan(v)) return false;
   out = v;

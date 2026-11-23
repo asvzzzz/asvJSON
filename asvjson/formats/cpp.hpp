@@ -1594,6 +1594,24 @@ inline std::unique_ptr<asvJSONValue> cppRdNonNull(std::unique_ptr<asvJSONValue> 
   return v;
 }
 
+// std::stod respects LC_NUMERIC (a comma locale reads "1.5" as 1 + junk and
+// throws on a bare "5.5"-style locale mismatch the other way). The C++ number
+// grammar always spells decimals with a dot, so the conversion goes through
+// the classic-locale strtod wrapper with the same exception contract as
+// std::stod (invalid_argument when nothing parses, out_of_range on overflow;
+// underflow yields 0/±HUGE-free tiny values and does NOT throw).
+inline double cppRdStod(const std::string& s) {
+  const char* p = s.c_str();
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p == '\0') throw std::invalid_argument("cppRdStod");
+  char* end = nullptr;
+  errno = 0;
+  double d = asvStrtod(p, &end);
+  if (end == p) throw std::invalid_argument("cppRdStod");
+  if (errno == ERANGE && !std::isfinite(d)) throw std::out_of_range("cppRdStod");
+  return d;
+}
+
 inline std::unique_ptr<asvJSONValue> cppRdString(std::string s) {
   if (!asvJSONValue::checkStringLen(s.size()))
     throw asvJSONError("cpp: string too long");
@@ -1744,7 +1762,7 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
     for (char c : sb) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (flt) {
       try {
-        double a = std::stod(sa), b = std::stod(sb);
+        double a = cppRdStod(sa), b = cppRdStod(sb);
         return cppRdNonNull(asvJSONValue::makeDouble(neg ? -a : a - b));
       } catch (const asvJSONError&) { throw; } catch (...) { return nullptr; }
     }
@@ -1765,7 +1783,7 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
     for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (neg) s.insert(s.begin(), '-');
     if (flt) {
-      try { return cppRdNonNull(asvJSONValue::makeDouble(std::stod(s))); }
+      try { return cppRdNonNull(asvJSONValue::makeDouble(cppRdStod(s))); }
       catch (const asvJSONError&) { throw; }
       catch (...) { return cppRdString(cppRdStripNumSuffix(tk->text)); }
     }
@@ -3404,7 +3422,7 @@ struct Reader {
     bool flt = asDouble;
     for (char c : s) if (c == '.' || c == 'e' || c == 'E') flt = true;
     if (flt) {
-      try { return cppRdNonNull(asvJSONValue::makeDouble(std::stod(s))); }
+      try { return cppRdNonNull(asvJSONValue::makeDouble(cppRdStod(s))); }
       catch (const asvJSONError&) { throw; }
       catch (...) { return cppRdString(cppRdStripNumSuffix(raw)); }
     }

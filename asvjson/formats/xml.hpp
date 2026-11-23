@@ -642,7 +642,7 @@ inline std::unique_ptr<asvJSONValue> xmlDetectValue(std::string_view s) {
 			// environments should setlocale(LC_ALL, "C") before parsing.
 			std::string tmp(s);
 			char* end; errno = 0;
-			d = std::strtod(tmp.c_str(), &end);
+			d = asvStrtod(tmp.c_str(), &end);
 			if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return asvJSONValue::makeDouble(d);
 #endif
 		}
@@ -690,7 +690,7 @@ inline bool xmlNeedsStringType(std::string_view s) {
 			// misclassify "3.14". Callers should setlocale(LC_ALL, "C").
 			std::string tmp(s);
 			char* end; errno = 0;
-			double dv = std::strtod(tmp.c_str(), &end);
+			double dv = asvStrtod(tmp.c_str(), &end);
 			(void)dv; // only the error code matters here, the value is not read
 			if (errno != ERANGE && end == tmp.c_str() + tmp.size()) return true; // DOUBLE
 #endif

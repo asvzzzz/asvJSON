@@ -1386,7 +1386,7 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
         (pos + 1 >= text.size() ||
          (!std::isalnum(static_cast<unsigned char>(text[pos + 1])) && text[pos + 1] != '_'))) {
       pos++;
-      return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
+      return asvJSONValue::makeDouble(asvStrtod(num.c_str(), nullptr));
     }
     // Trailing junk -- alphanumeric or another dot ("123abc", "1e5x", "1.2.3") --
     // is kept as part of the literal so it round-trips losslessly as a raw number
@@ -1426,7 +1426,7 @@ inline std::unique_ptr<asvJSONValue> protoTextParseScalar(const std::string& tex
       if (v) v->raw_number = true;
       return v;
     }
-    if (hasDot || hasExp) return asvJSONValue::makeDouble(std::strtod(num.c_str(), nullptr));
+    if (hasDot || hasExp) return asvJSONValue::makeDouble(asvStrtod(num.c_str(), nullptr));
     long long l;
     auto [ip, iec] = std::from_chars(num.c_str(), num.c_str() + num.size(), l);
     if (iec == std::errc() && ip == num.c_str() + num.size()) return asvJSONValue::makeInt(l);

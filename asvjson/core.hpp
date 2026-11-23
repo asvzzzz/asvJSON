@@ -1695,7 +1695,7 @@ private:
 			std::string numStr(buf, numLen);
 			char* endptr;
 			errno = 0;
-			d = std::strtod(numStr.c_str(), &endptr);
+			d = asvStrtod(numStr.c_str(), &endptr);
 			if (errno == ERANGE) {
 				// Overflow (e.g. 1e999): strtod sets d to +/-HUGE_VAL. Honor allowNaNInfinity.
 				// Underflow (e.g. 1e-999) leaves d finite/0 -> still rejected, as before.
@@ -2827,7 +2827,7 @@ inline void fmtDoubleVal(double d, std::string& out) {
 	if (n > 0) {
 		errno = 0;
 		char* end = nullptr;
-		double back = std::strtod(buf, &end);
+		double back = asvStrtod(buf, &end);
 		if (end == buf + n && !(errno == ERANGE && back == 0.0) && back == d) {
 			out.append(buf, static_cast<size_t>(n));
 			return;

@@ -151,7 +151,7 @@ inline std::unique_ptr<asvJSONValue> javapropParseVal(const std::string& s) {
     {
       errno = 0;
       char* end2 = nullptr;
-      double d = std::strtod(s.c_str(), &end2);
+      double d = asvStrtod(s.c_str(), &end2);
       if (end2 && *end2 == 0 && end2 == s.c_str() + s.size()) {
         if (errno == ERANGE) {
           auto v = asvJSONValue::makeStringView(std::string_view(s));
