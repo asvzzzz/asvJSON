@@ -39618,6 +39618,41 @@ TEST(testXmlNamespaceScopeChain) {
 	}
 }
 
+TEST(testCppInitializerPeelLinear) {
+  // Wave 55: cppRdScalarLiteral peeled balanced outer parentheses and leading
+  // unary signs with v.erase(v.begin()), re-scanning the whole window for the
+  // matching ')' on every pair: an initializer of N nested parens cost O(N^2)
+  // (60k levels = 11.1 s; MAX_CPP_INPUT (32 MB) allows far more). The close
+  // positions are now computed in one pass and the peel only moves index
+  // bounds - the same 60k levels cost 40 ms.
+  auto timeIt = [](const std::string& doc) {
+    auto t0 = std::chrono::steady_clock::now();
+    asvJSON j;
+    bool ok = j.fromCpp(std::string_view(doc));
+    auto t1 = std::chrono::steady_clock::now();
+    ASSERT_MSG(ok, j.getLastError());
+    ASSERT_EQ(j.serialize(), std::string("{\"S\":{\"a\":1}}"));
+    return std::chrono::duration<double, std::milli>(t1 - t0).count();
+  };
+  const int N = 60000;
+  double parens = timeIt("struct S { int a = " + std::string(N, '(') + "1" + std::string(N, ')') + "; };");
+  double signs = timeIt("struct S { int a = " + std::string(N, '-') + "1; };");
+  ASSERT_MSG(parens < 2000.0, "quadratic paren peel: " + std::to_string((int)parens) + " ms");
+  ASSERT_MSG(signs < 2000.0, "quadratic sign peel: " + std::to_string((int)signs) + " ms");
+
+  // Semantics are unchanged by the rewrite (the same forms were diffed against
+  // the old implementation byte for byte).
+  asvJSON j;
+  ASSERT(j.fromCpp(std::string_view("struct S { int a = ((5)); };")));
+  ASSERT_EQ(j.getRoot()->get("S")->get("a")->getInt(), int64_t(5));
+  asvJSON k;
+  ASSERT(k.fromCpp(std::string_view("struct S { int a = ---5; };")));
+  ASSERT_EQ(k.getRoot()->get("S")->get("a")->getInt(), int64_t(-5));
+  asvJSON m;
+  ASSERT(m.fromCpp(std::string_view("struct S { int a = ((((1)))); };")));
+  ASSERT_EQ(m.getRoot()->get("S")->get("a")->getInt(), int64_t(1));
+}
+
 TEST(testCppTemplateTypeDepthGuard) {
 	// Wave 52: cppRdParseTypeV recursed through template arguments with no
 	// limit, so 2000 nested std::vector<...> (a 30 KB document) overflowed the
@@ -41065,7 +41100,8 @@ RUN(testYamlAuditReview);
 	RUN(testTronClassPropsGuard);
 	RUN(testDecodedKeyLengthCaps);
 	RUN(testADEEncoderDepthGuard);
-	RUN(testCppTemplateTypeDepthGuard);
+	RUN(testCppInitializerPeelLinear);
+RUN(testCppTemplateTypeDepthGuard);
 	RUN(testXmlNamespaceScopeChain);
 	RUN(testEncoderDepthParity);
 	RUN(testEncoderSelfConsistency);

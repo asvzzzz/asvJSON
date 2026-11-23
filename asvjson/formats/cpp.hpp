@@ -1664,25 +1664,37 @@ inline std::unique_ptr<asvJSONValue> cppRdScalarLiteral(const std::vector<Tok>& 
   std::vector<const Tok*> v;
   v.reserve(processed.size());
   for (const Tok& tk : processed) if (tk.kind != Tok::Comment) v.push_back(&tk);
-  while (v.size() >= 2 && v.front()->kind == Tok::Punct && v.front()->text == "(" &&
-         v.back()->kind == Tok::Punct && v.back()->text == ")") {
-    int d = 0;
-    size_t match = v.size();
+  // Balanced outer parentheses are peeled one pair at a time, and a leading run
+  // of unary signs is peeled token by token. Both used to MUTATE the vector
+  // (`v.erase(v.begin())`), and the paren loop also re-scanned the whole window
+  // for the matching ')' on every pair. An initializer like `((((...(1)...))))`
+  // therefore cost O(n^2): measured 60k nesting levels = 11.1 s, 300k levels
+  // (a 600 KB file, MAX_CPP_INPUT allows far more) = minutes. The close
+  // position of every '(' is now computed in ONE pass, the peel walks index
+  // bounds, and the surviving range is cut out of the vector a single time.
+  std::vector<size_t> closeOf(v.size(), SIZE_MAX);
+  {
+    std::vector<size_t> opens;
     for (size_t k = 0; k < v.size(); k++) {
       if (v[k]->kind != Tok::Punct) continue;
-      if (v[k]->text == "(") d++;
-      else if (v[k]->text == ")") { d--; if (d == 0) { match = k; break; } }
+      if (v[k]->text == "(") opens.push_back(k);
+      else if (v[k]->text == ")" && !opens.empty()) { closeOf[opens.back()] = k; opens.pop_back(); }
     }
-    if (match != v.size() - 1) break;
-    v.erase(v.begin());
-    v.pop_back();
+  }
+  size_t lo = 0, hi = v.size();
+  while (hi - lo >= 2 && v[lo]->kind == Tok::Punct && v[lo]->text == "(" &&
+         v[hi - 1]->kind == Tok::Punct && v[hi - 1]->text == ")" &&
+         closeOf[lo] == hi - 1) {
+    lo++; hi--;
   }
   bool neg = false;
-  while (!v.empty() && v.front()->kind == Tok::Punct &&
-         (v.front()->text == "-" || v.front()->text == "+")) {
-    if (v.front()->text == "-") neg = !neg;
-    v.erase(v.begin());
+  while (hi > lo && v[lo]->kind == Tok::Punct &&
+         (v[lo]->text == "-" || v[lo]->text == "+")) {
+    if (v[lo]->text == "-") neg = !neg;
+    lo++;
   }
+  if (hi < v.size()) v.resize(hi);
+  if (lo > 0) v.erase(v.begin(), v.begin() + (std::ptrdiff_t)lo);
   // A functional cast or constructor call: `std::string("hello")`, `char('a')`,
   // `int(5)`, `static_cast<int>(7)`. The paren-strip loop above only fires when
   // the initializer *starts* with '(', so these fell through to the caller's
