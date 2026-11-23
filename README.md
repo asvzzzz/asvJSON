@@ -474,6 +474,8 @@ Convenience methods combining dot-path lookup with type extraction.
 | `bool applyPatch(const asvJSON& patch)` | JSON Patch (RFC 6902) - array of operations. |
 | `asvJSON applyMergePatch(const asvJSON& patch) const` | JSON Merge Patch (RFC 7396) - returns new document. |
 
+> **`applyPatch()` follows RFC 6902:** "add" at an array index >= the size APPENDS at the end (no null padding - never a million-element gap), and at an existing index it INSERTS, shifting the tail right; "replace" requires the target member/index to exist (`-` is an add-only token). A trailing empty token (`/x/`) names the member `""` of `x` for get/set/remove alike. One deliberate deviation from the RFC: the pointers `""` and `"/"` BOTH address the whole document (root get/set/remove/replace/clear), the library-wide convention shared by `getByPointer`/`setByPointer`/`removeByPointer`. The raw `setByPointer()` additionally differs on array leaves: it overwrites an existing index and pads a gap with `null`s - use `applyPatch()` for spec-conformant edits.
+
 #### Binary Format Conversion
 
 | Method | Description |

@@ -36919,14 +36919,63 @@ TEST(testSetByPointerArrayGapSerialize) {
 	ASSERT(j.getRoot() && k.getRoot() && *j.getRoot() == *k.getRoot());
 }
 
-TEST(testApplyPatchArrayExpandPadsNulls) {
-	// RFC 6902: adding past the end of an array pads intermediate slots with null.
+TEST(testApplyPatchRFCArrayOps) {
+	// RFC 6902 4.1: an "add" array index >= the size means APPEND at the end
+	// (there is no null padding - the old behavior turned a 40-byte patch into
+	// a MAX_ARRAY_SIZE wall of null nodes, and the raw-API padding of
+	// testSetByPointerArrayExpand is a setByPointer convention only).
 	asvJSON j;
 	ASSERT(j.parse(R"([1,2])"));
 	asvJSON patch;
 	ASSERT(patch.parse(R"([{"op":"add","path":"/4","value":9}])"));
 	ASSERT(j.applyPatch(patch));
-	ASSERT(j.serialize() == R"([1,2,null,null,9])");
+	ASSERT(j.serialize() == R"([1,2,9])");
+	// No amplification: a huge index is just an append.
+	ASSERT(j.parse(R"([1,2])"));
+	ASSERT(patch.parse(R"([{"op":"add","path":"/999999","value":9}])"));
+	ASSERT(j.applyPatch(patch));
+	ASSERT_EQ(j.getRoot()->size(), size_t(3));
+	// "add" at an EXISTING index inserts and shifts the tail right.
+	ASSERT(j.parse(R"([1,2])"));
+	ASSERT(patch.parse(R"([{"op":"add","path":"/0","value":9}])"));
+	ASSERT(j.applyPatch(patch));
+	ASSERT(j.serialize() == R"([9,1,2])");
+	// RFC 6902 4.3: "replace" requires the target to exist - array index and
+	// object member alike (the old set shared with "add" silently created them).
+	ASSERT(j.parse(R"([1,2])"));
+	ASSERT(patch.parse(R"([{"op":"replace","path":"/5","value":9}])"));
+	ASSERT(!j.applyPatch(patch));
+	ASSERT(j.serialize() == R"([1,2])");
+	ASSERT(j.parse(R"({"a":1})"));
+	ASSERT(patch.parse(R"([{"op":"replace","path":"/missing","value":9}])"));
+	ASSERT(!j.applyPatch(patch));
+	ASSERT(j.serialize() == R"({"a":1})");
+	// "-" is an add-only target token.
+	ASSERT(j.parse(R"([1,2])"));
+	ASSERT(patch.parse(R"([{"op":"replace","path":"/-","value":9}])"));
+	ASSERT(!j.applyPatch(patch));
+	// RFC 6901 empty final token: "/x/" names member "" of x. getByPointer
+	// always read it; the writers must agree. remove used to return TRUE
+	// having removed NOTHING (applyPatch reported success on a no-op).
+	j.parse(R"({"x":{"":7,"k":1}})");
+	ASSERT(j.getByPointer("/x/"));                       // reader sees member ""
+	patch.parse(R"([{"op":"remove","path":"/x/"}])");
+	ASSERT(j.applyPatch(patch));                        // now it really removes
+	ASSERT(j.serialize() == R"({"x":{"k":1}})");
+	j.parse(R"({"arr":[1,2]})");
+	patch.parse(R"([{"op":"remove","path":"/arr/"}])");
+	ASSERT(!j.applyPatch(patch));                       // arrays have no "" index
+	// setByPointer can create/overwrite the empty-name member too.
+	j.parse(R"({"x":{"":7}})");
+	ASSERT(j.setByPointer("/x/", asvJSONValue::makeInt(8)));
+	ASSERT_EQ(j.getByPointer("/x/")->getInt(), int64_t(8));
+	ASSERT(j.setByPointer("/newobj/", asvJSONValue::makeInt(1)));
+	ASSERT(j.parse(R"({"x":{}})"));
+	ASSERT(!j.setByPointer("/x/", nullptr));            // null value rejected by contract
+	// Raw-API padding stays intact (the public setByPointer contract).
+	j.parse(R"({"arr":[1]})");
+	ASSERT(j.setByPointer("/arr/5", asvJSONValue::makeInt(2)));
+	ASSERT_EQ(j.getArray("arr")->size(), size_t(6));
 }
 
 TEST(testDiffAppliesAsPatch) {
@@ -41172,7 +41221,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testDiff);
 	RUN(testDiffAppliesAsPatch);
 	RUN(testSetByPointerArrayGapSerialize);
-	RUN(testApplyPatchArrayExpandPadsNulls);
+	RUN(testApplyPatchRFCArrayOps);
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
 	RUN(testPrettyPrint);

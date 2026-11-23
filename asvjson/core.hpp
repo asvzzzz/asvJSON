@@ -2696,6 +2696,14 @@ private:
 		return true;
 	}
 
+	// RFC-aware writer behind applyPatch(). mode 0 = raw setByPointer behavior
+	// (out-of-range array index pads the gap with nulls, replace creates a
+	// missing member); mode 1 = RFC 6902 "add" semantics: an array index past
+	// the end APPENDS (no padding - a 40-byte patch used to mint a
+	// MAX_ARRAY_SIZE wall of null nodes); mode 2 = RFC 6902 "replace": the
+	// target MUST exist (a missing member/index is an error, not an insert).
+	bool setByPointerRFC(std::string_view ptr, std::unique_ptr<asvJSONValue> value, int mode);
+
 public:
 	// JSON Pointer
 	asvJSONValue* getByPointer(std::string_view ptr);
@@ -3304,6 +3312,10 @@ inline int valueContainerDepth(const asvJSONValue* v, int limit) {
 }
 
 inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONValue> value) {
+	return setByPointerRFC(ptr, std::move(value), 0);
+}
+
+inline bool asvJSON::setByPointerRFC(std::string_view ptr, std::unique_ptr<asvJSONValue> value, int mode) {
 	if (!value) return false; // a null node would be dereferenced by every later tree walk
 	if (ptr.empty() || ptr == "/") { root = std::move(value); dirty_ = true; return true; } // root replacement keeps the documented raw-API behavior: a programmatically deep tree is safe here (iterative destructor, guarded walkers), and applyPatch can never route an over-deep value through this branch because its cloneValue caps at MAX_NESTING_DEPTH (null value -> early false)
 	if (ptr[0] != '/') return false;
@@ -3343,8 +3355,11 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			std::string key = decodeJSONPointerKey(seg);
 			if (isLast) {
 				auto it2 = mapFind(*cur->obj, key);
-				if (it2 == cur->obj->end() && !asvJSONValue::checkObjectSize(cur->obj->size() + 1))
-					return false;
+				if (it2 == cur->obj->end()) {
+					// RFC 6902 "replace": the target location MUST exist.
+					if (mode == 2) return false;
+					if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1)) return false;
+				}
 				cur->obj->insert_or_assign(std::move(key), std::move(value));
 				dirty_ = true;
 				return true;
@@ -3375,7 +3390,9 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			}
 		} else if (cur->type == asvJSONValue::ARRAY && cur->arr) {
 			if (seg == "-") {
-				if (!isLast) return false;
+				// "-" names the (nonexistent) element after the last one: legal for
+				// "add", invalid for RFC 6902 "replace".
+				if (!isLast || mode == 2) return false;
 				if (!asvJSONValue::checkArraySize(cur->arr->size() + 1)) return false;
 				cur->arr->push_back(std::move(value));
 				dirty_ = true;
@@ -3386,7 +3403,28 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			auto [p, ec] = std::from_chars(seg.data(), seg.data() + seg.size(), idx);
 			if (ec != std::errc()) return false;
 			if (isLast) {
+				// RFC 6902: "add" at an index past the end APPENDS (4.1), and
+				// "replace" requires the target to exist (4.3). Only the raw API
+				// pads the gap with nulls (pinned by testSetByPointerArrayExpand) -
+				// under applyPatch that padding was the amplification vector: a
+				// 40-byte patch grew an array to a MAX_ARRAY_SIZE wall of nulls.
+				if (mode == 1 && idx > cur->arr->size()) idx = cur->arr->size();
+				if (mode == 2 && idx >= cur->arr->size()) return false;
+				if (mode == 1 && idx < cur->arr->size()) {
+					// RFC 6902 4.1: "add" at an EXISTING index inserts and shifts
+					// the tail right (the raw API replaces in place).
+					if (!asvJSONValue::checkArraySize(cur->arr->size() + 1)) return false;
+					cur->arr->insert(cur->arr->begin() + static_cast<ptrdiff_t>(idx), std::move(value));
+					dirty_ = true;
+					return true;
+				}
 				if (idx >= cur->arr->size()) {
+					if (mode != 0 || idx == cur->arr->size()) {
+						if (!asvJSONValue::checkArraySize(cur->arr->size() + 1)) return false;
+						cur->arr->push_back(std::move(value));
+						dirty_ = true;
+						return true;
+					}
 					if (idx >= asvJSONValue::MAX_ARRAY_SIZE) return false;
 					// Growing an array via a JSON Pointer leaves a gap that JSON
 					// cannot represent; pad the missing slots with real null values
@@ -3407,6 +3445,25 @@ inline bool asvJSON::setByPointer(std::string_view ptr, std::unique_ptr<asvJSONV
 			cur = (*cur->arr)[idx].get();
 		} else return false;
 		start = (slash == std::string_view::npos) ? ptr.size() : slash + 1;
+	}
+	// The loop ended WITHOUT writing: the pointer's last segment is the EMPTY
+	// token (trailing '/'). getByPointer reads "/x/" as member "" of x (RFC
+	// 6901); the writers used to disagree - set returned false (a member the
+	// reader could see but nobody could create) and remove claimed success
+	// without erasing anything. The empty token adds no container level, so
+	// the depth accounting stays at `levels`.
+	if (cur->type == asvJSONValue::OBJECT && cur->obj) {
+		int cap = static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH) - levels;
+		if (cap < 0 || valueContainerDepth(value.get(), cap) > cap) return false;
+		std::string emptyKey;
+		auto it2 = mapFind(*cur->obj, std::string_view(emptyKey));
+		if (it2 == cur->obj->end()) {
+			if (mode == 2) return false;
+			if (!asvJSONValue::checkObjectSize(cur->obj->size() + 1)) return false;
+		}
+		cur->obj->insert_or_assign(std::move(emptyKey), std::move(value));
+		dirty_ = true;
+		return true;
 	}
 	return false;
 }
@@ -3448,7 +3505,19 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 		} else return false;
 		start = (slash == std::string_view::npos) ? ptr.size() : slash + 1;
 	}
-	return true;
+	// Trailing '/' (RFC 6901 empty final token): "/x/" names member "" of x,
+	// matching getByPointer. This used to `return true` WITHOUT removing
+	// anything, so {"op":"remove","path":"/arr/"} made applyPatch() report
+	// success and silently change nothing. Arrays have no empty index: reject.
+	if (cur && cur->type == asvJSONValue::OBJECT && cur->obj) {
+		auto it = mapFind(*cur->obj, std::string_view());
+		if (it != cur->obj->end()) {
+			cur->obj->erase(it);
+			dirty_ = true;
+			return true;
+		}
+	}
+	return false;
 }
 
 // Merge & Patch
@@ -3602,7 +3671,10 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 		if (op == "add" || op == "replace") {
 			auto valIt = mapFind(*elem->obj, std::string_view("value"));
 			if (valIt == elem->obj->end()) return false;
-			if (!setByPointer(path, cloneValue(valIt->second.get()))) return false;
+			// RFC 6902 semantics, not the raw setByPointer ones: "add" at an
+			// array index past the end appends (no null padding), "replace"
+			// requires the target to exist.
+			if (!setByPointerRFC(path, cloneValue(valIt->second.get()), op == "add" ? 1 : 2)) return false;
 		} else if (op == "remove") {
 			if (!removeByPointer(path)) return false;
 		} else if (op == "move" || op == "copy") {
@@ -3629,9 +3701,11 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			if (op == "move") {
 				auto fromClone = cloneValue(fromVal);
 				if (!removeByPointer(fromIt->second->str_data)) return false;
-				if (!setByPointer(path, std::move(fromClone))) return false;
+				// "move"/"copy" ride RFC 6902 "add" semantics at the destination
+				// (append past the end, no null padding).
+				if (!setByPointerRFC(path, std::move(fromClone), 1)) return false;
 			} else {
-				if (!setByPointer(path, cloneValue(fromVal))) return false;
+				if (!setByPointerRFC(path, cloneValue(fromVal), 1)) return false;
 			}
 		} else if (op == "test") {
 			auto valIt = mapFind(*elem->obj, std::string_view("value"));
