@@ -128,14 +128,35 @@ inline bool yamlNeedQuoteOpt(std::string_view s, const YamlWriteOptions& o) {
 	return yamlNeedsQuotes(s);
 }
 
+// CUSTOM_TAG tag spelling. The bare form `!name` is only safe when `name` is a
+// single token that the tag scan cannot dispatch elsewhere: a name holding a
+// space made `v: !a b 7` decode as the tag `a` with value `b 7` (the KEY and
+// the VALUE both changed), the empty name collapsed into the non-specific `!`
+// and the tag was lost, and `regex` / `objectid` / `ext` were re-dispatched as
+// the built-in tagged forms. Such names use the VERBATIM form `!<name>`, which
+// yamlTryParseTag reads back as a CUSTOM_TAG with exactly this name - the same
+// rule ADE uses for its tags.
+inline bool yamlTagNeedsVerbatim(std::string_view nm) {
+	if (nm.empty()) return true;
+	for (unsigned char c : nm)
+		if (c <= 0x20 || c == 0x7F || c == '"' || c == '\'' || c == '[' || c == ']' ||
+		    c == '{' || c == '}' || c == ',' || c == '!') return true;
+	return nm == "regex" || nm == "objectid" || nm == "ext";
+}
+inline std::string yamlTagText(const std::string& name) {
+	std::string nm = name;
+	if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
+	if (yamlTagNeedsVerbatim(nm)) return "!<" + nm + ">";
+	return "!" + nm;
+}
+
 inline std::string yamlKeyOpt(const std::string& k, const YamlWriteOptions& o) {
 	if (o.alwaysQuoteKeys) return yamlQuoteStr(k, o);
 	if (o.doubleQuotes && yamlNeedsQuotes(k)) return yamlDQuote(k);
 	return yamlQuoteKey(k);
 }
 
-inline int yamlIndentWidth(const YamlWriteOptions& o) {
-	return o.indentWidth >= 1 ? o.indentWidth : 1;
+inline int yamlIndentWidth(const YamlWriteOptions& o) {	return o.indentWidth >= 1 ? o.indentWidth : 1;
 }
 
 inline void asvJSONValue::toYAML(std::string& out, bool pretty) const {
@@ -248,7 +269,14 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 		}
 		case T::DATETIME: {
 			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
-			out += dt; return true;
+			// An unconvertible timestamp renders as the literal text "null";
+			// writing it BARE made the value re-read as the NULL node, so
+			// toYAML() of such a tree was not a fixed point (second encode gave
+			// `~`) and the DATETIME silently became null. Quote it instead - the
+			// INI/TOML/CSV/dotenv/plist convention: it re-reads as STRING.
+			if (dt == "null") out += yamlQuoteStr(dt, o);
+			else out += dt;
+			return true;
 		}
 		case T::BINARY: {
 			out += "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size());
@@ -276,9 +304,7 @@ inline bool yamlTryFlowVal(const asvJSONValue* v, std::string& out, const YamlWr
 			// single-line tagged form reparses through yamlParseTaggedValue.
 			std::string childOut;
 			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true, depth + 1)) {
-				std::string nm(v->str_data);
-				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += "!" + nm + " " + childOut;
+				out += yamlTagText(v->str_data) + " " + childOut;
 				return true;
 			}
 			return false;
@@ -465,7 +491,12 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 		}
 		case T::DATETIME: {
 			std::string dt; fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
-			out += prefix() + dt + yamlTrail(v, wc) + "\n"; break;
+			// Same rule as the flow path above: an unconvertible DATETIME is a
+			// QUOTED "null" string, never a bare null (which re-reads as the
+			// NULL node and makes the encoding unstable).
+			if (dt == "null") out += prefix() + yamlQuoteStr(dt, o) + yamlTrail(v, wc) + "\n";
+			else out += prefix() + dt + yamlTrail(v, wc) + "\n";
+			break;
 		}
 		case T::BINARY:
 			out += prefix() + "!!binary " + encodeBase64(v->bin_data.data(), v->bin_data.size()) + yamlTrail(v, wc) + "\n"; break;
@@ -491,13 +522,9 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			// tagged form returns to a single line.
 			std::string childOut;
 			if (v->custom_value && yamlTryFlowVal(v->custom_value.get(), childOut, o, true, depth + 1)) {
-				std::string nm(v->str_data);
-				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + " " + childOut + yamlTrail(v, wc) + "\n";
+				out += prefix() + yamlTagText(v->str_data) + " " + childOut + yamlTrail(v, wc) + "\n";
 			} else {
-				std::string nm(v->str_data);
-				if (!nm.empty() && nm[0] == '!') nm = nm.substr(1);
-				out += prefix() + "!" + nm + yamlTrail(v, wc) + "\n";
+				out += prefix() + yamlTagText(v->str_data) + yamlTrail(v, wc) + "\n";
 			}
 			break;
 		}

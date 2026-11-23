@@ -19266,6 +19266,76 @@ TEST(testYAMLLeadingBlankTrimLinear) {
   ASSERT_MSG(ms < 1000.0, "quadratic front-trim: " + std::to_string((int)ms) + " ms");
 }
 
+TEST(testSpecialTypeEdgeRoundTrips) {
+  // Wave 57: three encoder sites emitted text their own decoder refused or
+  // re-read differently. Sweep = 18 special-type edge values x 16 text formats.
+  // 1) YAML: a DATETIME whose timestamp gmtimeSafe cannot convert renders as
+  //    the literal text "null". Written BARE it re-read as the null node, so
+  //    the second encode differed (`null` -> `~`) and the type was lost. It is
+  //    now a QUOTED string (the INI/TOML/CSV/dotenv/plist convention).
+  for (int64_t ts : { int64_t(0x7FFFFFFFFFFFFFFFLL), -int64_t(0x7FFFFFFFFFFFFFFFLL) }) {
+    asvJSON j;
+    auto root = asvJSONValue::makeObject();
+    root->obj->emplace("v", asvJSONValue::makeDateTime(ts, 999, 0));
+    j.setRoot(std::move(root));
+    std::string a = j.toYAML(true);
+    ASSERT(a.find("'null'") != std::string::npos || a.find("\"null\"") != std::string::npos);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromYAML(std::string_view(a)), j2.getLastError());
+    ASSERT_EQ(j2.toYAML(true), a);                       // fixed point
+    auto* v = j2.getRoot()->get("v");
+    ASSERT_MSG(v->type == asvJSONValue::STRING, "degraded type must be STRING");
+    ASSERT_EQ(std::string(v->getString()), "null");
+    // Block and flow styles agree.
+    YamlWriteOptions fo;
+    fo.style = YamlWriteOptions::Style::Flow;
+    asvJSON j3;
+    j3.setRoot(cloneValue(j.getRoot()));
+    std::string fa = j3.toYAML(fo);
+    asvJSON j4;
+    ASSERT_MSG(j4.fromYAML(std::string_view(fa)), j4.getLastError());
+    ASSERT_EQ(j4.toYAML(fo), fa);
+  }
+  // 2) ADE: the same value used to be written as `!datetime "null"`, and
+  //    fromADE() rejected the WHOLE document ("ADE: invalid datetime: null").
+  for (int64_t ts : { int64_t(0x7FFFFFFFFFFFFFFFLL), -int64_t(0x7FFFFFFFFFFFFFFFLL) }) {
+    asvJSON j;
+    auto root = asvJSONValue::makeObject();
+    root->obj->emplace("v", asvJSONValue::makeDateTime(ts, 0, 0));
+    root->obj->emplace("keep", asvJSONValue::makeInt(5));
+    j.setRoot(std::move(root));
+    std::string a = j.toADE();
+    ASSERT(a.find("!datetime") == std::string::npos);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromADE(std::string_view(a)), "ADE must accept its own output: " + a);
+    ASSERT_EQ(j2.toADE(), a);
+    ASSERT_EQ(j2.getRoot()->get("keep")->getInt(), int64_t(5));   // sibling survives
+    ASSERT(j2.getRoot()->get("v")->type == asvJSONValue::STRING);
+  }
+  // 3) YAML CUSTOM_TAG: the bare `!name` form is only safe for a single-token
+  //    name that is not one of the built-in tags. `{"name":"a b"}` used to
+  //    encode as `v: !a b 7`, which decoded as tag "a" with value "b 7" (BOTH
+  //    the key and the value changed); the empty name collapsed into the
+  //    non-specific `!` and the tag vanished; a name like `regex` was
+  //    re-dispatched as the built-in `!regex` tagged form. Such names now use
+  //    the verbatim `!<name>` form, which the YAML decoder reads back exactly.
+  const std::vector<std::string> names = { "a b", "", "regex", "objectid", "ext", "a,b",
+                                           "a{b}", std::string("a\x01" "b"), "plain-tag", "a:b" };
+  for (const std::string& nm : names) {
+    std::string esc; appendJsonEscaped(esc, nm);
+    asvJSON j;
+    ASSERT_MSG(j.parse(std::string_view(std::string("{\"v\":{\"$customTag\":{\"name\":\"") + esc +
+                                         "\",\"value\":7}}}")), nm);
+    std::string a = j.toYAML(true);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromYAML(std::string_view(a)), nm + " decode: " + j2.getLastError());
+    ASSERT_MSG(j2.serialize() == j.serialize(), "tag lost or altered: " + nm + " |" + a + "|");
+    asvJSON j3;
+    ASSERT_MSG(j3.fromYAML(std::string_view(j2.toYAML(true))), nm);
+    ASSERT_EQ(j3.serialize(), j.serialize());
+  }
+}
+
 TEST(testYAMLAnchorExpansionGuard) {
   // "Billion laughs": a doubling anchor chain (&a2: [*a1,*a1], ...) expands
   // the intermediate JSON exponentially while the 10 MB input cap bounds the
@@ -40856,6 +40926,7 @@ RUN(testTOONReviewFixes);
 	RUN(testYAMLNestedAnchors);
 	RUN(testADEAnchorExpansionGuard);
 	RUN(testYAMLSeqNormalizeLinear);
+RUN(testSpecialTypeEdgeRoundTrips);
 RUN(testYAMLLeadingBlankTrimLinear);
 RUN(testYAMLAnchorExpansionGuard);
 

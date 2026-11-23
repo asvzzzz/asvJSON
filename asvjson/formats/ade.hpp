@@ -2476,7 +2476,14 @@ inline void adeWriteValue(std::ostream& os, const asvJSONValue* v, int indent, b
     case T::DATETIME: {
       std::string dt;
       fmtDateTimeVal(v->timestamp, v->datetime_ms, dt, v->tz_offset_min);
-      os << "!datetime \"" << dt << '"';
+      // A timestamp gmtimeSafe cannot convert renders as the literal text
+      // "null". Emitting `!datetime "null"` produced a document the ADE decoder
+      // then REJECTED outright ("ADE: invalid datetime: null"), i.e. toADE()
+      // wrote output its own fromADE() refused. Degrade to a plain quoted
+      // string instead (the INI/TOML/CSV/dotenv/plist convention): the value
+      // re-reads as STRING, the rest of the document survives.
+      if (dt == "null") os << '"' << dt << '"';
+      else os << "!datetime \"" << dt << '"';
       break;
     }
     case T::BINARY:
