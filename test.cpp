@@ -19206,6 +19206,66 @@ TEST(testADEAnchorExpansionGuard) {
   }
 }
 
+TEST(testYAMLSeqNormalizeLinear) {
+  // Wave 55: yamlNormalizeSeqItems rewrote "- a: 1" into the two-line form by
+  // INSERTING the child line into the middle of the line vector. Each insert
+  // moved the whole tail, so L such lines cost O(L^2): 160k lines (1.1 MB)
+  // measured 39.3 s, and MAX_YAML_INPUT (10 MB) admits ~1.4M lines. The pass is
+  // now append-only (measured 294 ms for the same 160k lines, i.e. linear) and
+  // the semantics are unchanged - the 30-document dash/block-scalar/flow corpus
+  // in the audit probe diffs byte-for-byte against the old implementation.
+  const int N = 100000;
+  std::string doc;
+  doc.reserve((size_t)N * 8);
+  for (int i = 0; i < N; i++) doc += "- a: 1\n";
+  auto t0 = std::chrono::steady_clock::now();
+  asvJSON j;
+  ASSERT(j.fromYAML(std::string_view(doc)));
+  auto t1 = std::chrono::steady_clock::now();
+  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  ASSERT_EQ(j.getRoot()->size(), size_t(N));
+  std::string want = "[";
+  for (int i = 0; i < N; i++) { if (i) want += ','; want += "{\"a\":1}"; }
+  want += ']';
+  ASSERT_EQ(j.serialize(), want);
+  ASSERT_MSG(ms < 3000.0, "quadratic sequence normalization: " + std::to_string((int)ms) + " ms");
+
+  // Cascading rewrite ("- - a: 1") still nests correctly: the appended child
+  // line is normalized in the same order the old in-place insert produced.
+  asvJSON k;
+  ASSERT(k.fromYAML(std::string_view("- - a: 1\n- - - b: 2\n")));
+  ASSERT_EQ(k.serialize(), std::string("[[{\"a\":1}],[[{\"b\":2}]]]"));
+}
+
+TEST(testYAMLLeadingBlankTrimLinear) {
+  // Wave 55: the line handlers trimmed leading blanks ONE character at a time
+  // (`while (!s.empty() && s[0] == ' ') s.erase(0, 1);`). Every erase(0,1)
+  // moves the whole tail, so a single line with N leading blanks cost O(N^2):
+  // 400k spaces = 3.5 s, 800k = 16.2 s, and MAX_YAML_INPUT (10 MB) lets one
+  // line hold 10M spaces -> a CPU DoS from a tiny document. The prefix is now
+  // located and erased in one step. All five trimmed sites are exercised; the
+  // whole group must stay in the linear range.
+  const size_t N = 400000;
+  const std::string S(N, ' ');
+  struct Case { std::string doc; std::string want; };
+  Case cases[] = {
+    { "k:" + S + "1\n",                "{\"k\":1}" },
+    { "-" + S + "1\n",                 "[1]" },
+    { "?" + S + "a\n: 2\n",            "{\"a\":2}" },
+    { "? a\n:" + S + "2\n",            "{\"a\":2}" },
+    { "k: !!set\n  -" + S + "x\n",     "{\"k\":{\"$set\":[\"x\"]}}" },
+  };
+  auto t0 = std::chrono::steady_clock::now();
+  for (const Case& c : cases) {
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view(c.doc)), c.want);
+    ASSERT_MSG(j.serialize() == c.want, c.want);
+  }
+  auto t1 = std::chrono::steady_clock::now();
+  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  ASSERT_MSG(ms < 1000.0, "quadratic front-trim: " + std::to_string((int)ms) + " ms");
+}
+
 TEST(testYAMLAnchorExpansionGuard) {
   // "Billion laughs": a doubling anchor chain (&a2: [*a1,*a1], ...) expands
   // the intermediate JSON exponentially while the 10 MB input cap bounds the
@@ -40703,7 +40763,9 @@ RUN(testTOONReviewFixes);
 	RUN(testEncoderDepthGuards);
 	RUN(testYAMLNestedAnchors);
 	RUN(testADEAnchorExpansionGuard);
-	RUN(testYAMLAnchorExpansionGuard);
+	RUN(testYAMLSeqNormalizeLinear);
+RUN(testYAMLLeadingBlankTrimLinear);
+RUN(testYAMLAnchorExpansionGuard);
 
 	std::cout << "\n--- TRON Serialization Tests ---\n";
 	RUN(testToTRON);

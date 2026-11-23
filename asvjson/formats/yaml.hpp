@@ -67,6 +67,22 @@ inline constexpr size_t MAX_YAML_DEPTH = 64;
 // Input size limit — symmetric with GOON/TOON/JSON5's MAX_*_INPUT.
 inline constexpr size_t MAX_YAML_INPUT = 10u * 1024u * 1024u;
 
+// Front-trim helpers. The handlers used to strip leading blanks one character
+// at a time (`while (s[0] == ' ') s.erase(0, 1);`): every erase(0,1) moves the
+// whole tail, so a SINGLE line holding N leading blanks cost O(N^2) - measured
+// 400k spaces = 3.5 s, 800k = 16.2 s, and MAX_YAML_INPUT (10 MB) is a single
+// line of 10M spaces. Find the prefix, erase it once.
+inline void yamlTrimLeftWS(std::string& s) {
+  size_t k = 0;
+  while (k < s.size() && (s[k] == ' ' || s[k] == '\t')) k++;
+  if (k) s.erase(0, k);
+}
+inline void yamlTrimLeftSpaces(std::string& s) {
+  size_t k = 0;
+  while (k < s.size() && s[k] == ' ') k++;
+  if (k) s.erase(0, k);
+}
+
 // Forward declarations for block/flow encoders
 inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
                          const std::string& key, bool isArrayItem, const YamlWriteOptions& o, bool wc,
@@ -1753,7 +1769,7 @@ inline std::string yamlParseBlockSet(const std::vector<std::string>& lines, size
 		} else {
 			break; // mapping entry / flow / scalar -- ends the set
 		}
-		while (!body.empty() && (body[0] == ' ' || body[0] == '\t')) body.erase(0, 1);
+		yamlTrimLeftWS(body);
 		body = yamlStripComment(body);
 		while (!body.empty() && (body.back() == ' ' || body.back() == '\t')) body.pop_back();
 
@@ -2912,54 +2928,70 @@ inline void yamlNormalizeSeqItems(std::vector<std::string>& lines) {
 			else if (c == '}' || c == ']') flowDepth--;
 		}
 	};
-	size_t i = 0;
-	while (i < lines.size()) {
-		std::string& line = lines[i];
+	// Append-only rewrite. This loop used to insert the synthesized child line
+	// into the MIDDLE of `lines` (`lines.insert(begin() + i + 1, ...)`) and keep
+	// scanning that same vector, so every rewrite shifted the whole tail: a
+	// document of L lines of `- a: 1` cost O(L^2) - measured 160k lines (1.1 MB)
+	// = 39.9 s, and MAX_YAML_INPUT (10 MB) allows ~1.4M such lines. Source lines
+	// are now consumed in order into an output vector and the child line is
+	// APPENDED, which preserves the exact old processing order (the rewritten
+	// bare-dash line is re-examined first, then the child line) at O(L).
+	std::vector<std::string> out;
+	out.reserve(lines.size());
+	size_t i = 0; // next source line
+	size_t j = 0; // cursor inside `out`
+	while (i < lines.size() || j < out.size()) {
+		if (j >= out.size()) out.push_back(lines[i++]);
+		std::string& line = out[j];
 		int indent = countIndent(line);
 		std::string_view content = stripIndent(line);
 		if (bsHeaderIndent >= 0) {
 			// Skip the body of a block scalar; body text is not structure.
-			if (content.empty() || content[0] == '#') { i++; continue; }
-			if (indent > bsHeaderIndent) { i++; continue; }
+			if (content.empty() || content[0] == '#') { j++; continue; }
+			if (indent > bsHeaderIndent) { j++; continue; }
 			bsHeaderIndent = -1; // scalar ended; process this line normally
 		}
-		if (content.empty() || content[0] == '#') { i++; continue; }
+		if (content.empty() || content[0] == '#') { j++; continue; }
 
 		if (flowDepth > 0) {
 			// Inside a multi-line flow collection: no block sequence here.
 			scanFlow(content);
-			i++;
+			j++;
 			continue;
 		}
 		scanFlow(content);
-		if (flowDepth > 0) { i++; continue; }
+		if (flowDepth > 0) { j++; continue; }
 
 		if (content[0] == '-' && content.size() >= 2 && content[1] == ' ') {
 			std::string_view rest = content.substr(2);
 			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
 			if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
 				bsHeaderIndent = indent;
-				i++;
+				j++;
 				continue;
 			}
 			if (!rest.empty()) {
 				bool nested = yamlIsDashStart(rest);
 				bool mapping = !nested && yamlIsBlockMappingStart(rest);
 				if (nested || mapping) {
+					// restCopy is taken BEFORE the append: push_back may
+					// reallocate `out` and invalidate the views into out[j].
 					std::string restCopy(rest);
-					line = std::string(indent, ' ') + "-";
-					lines.insert(lines.begin() + (std::ptrdiff_t)(i + 1),
-					             std::string(indent + 2, ' ') + restCopy);
-					continue; // reprocess the inserted line in place
+					std::string dashLine(static_cast<size_t>(indent), ' ');
+					dashLine += '-';
+					out.push_back(std::string(static_cast<size_t>(indent) + 2, ' ') + restCopy);
+					out[j] = std::move(dashLine);
+					continue; // re-examine the bare dash at j, then the child line
 				}
 			}
-			i++;
+			j++;
 			continue;
 		}
 
-		if (yamlIsBlockScalarHeader(content)) { bsHeaderIndent = indent; i++; continue; }
-		i++;
+		if (yamlIsBlockScalarHeader(content)) { bsHeaderIndent = indent; j++; continue; }
+		j++;
 	}
+	lines.swap(out);
 }
 
 // Parse a single YAML document (no multi-doc handling)
@@ -3314,7 +3346,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 
 			std::string rest;
 			if (content.size() > 1) rest = content.substr(1);
-			while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.erase(0, 1);
+			yamlTrimLeftWS(rest);
 
 			// "?" with no inline key: the explicit key is a node on the
 			// following (deeper) block lines, e.g.
@@ -3394,7 +3426,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 				keyBody = rest.substr(0, kc);
 				while (!keyBody.empty() && (keyBody.back() == ' ' || keyBody.back() == '\t')) keyBody.pop_back();
 				inlineVal = rest.substr(kc + 1);
-				while (!inlineVal.empty() && (inlineVal[0] == ' ' || inlineVal[0] == '\t')) inlineVal.erase(0, 1);
+				yamlTrimLeftWS(inlineVal);
 			}
 
 			// Compound (flow-collection) key. An unbalanced key body spans
@@ -3509,7 +3541,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 
 			std::string rest;
 			if (content.size() >= 2) rest = content.substr(2);
-			while (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+			yamlTrimLeftSpaces(rest);
 
 			if (!rest.empty() && rest[0] == ':' &&
 			    (rest.size() == 1 || rest[1] == ' ' || rest[1] == '\t')) {
@@ -3624,7 +3656,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 
 			std::string valPart;
 			if (colonPos + 1 < content.size()) valPart = content.substr(colonPos + 1);
-			while (!valPart.empty() && (valPart[0] == ' ' || valPart[0] == '\t')) valPart.erase(0, 1);
+			yamlTrimLeftWS(valPart);
 
 			// A ": value" line after an explicit "? key" carries the pending key.
 			bool pendingMerged = false;
