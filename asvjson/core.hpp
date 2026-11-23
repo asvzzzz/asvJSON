@@ -549,6 +549,31 @@ struct asvJSONValue {
 	static constexpr int MAX_DOUBLE_SIG_DIGITS = 17; // DBL_DECIMAL_DIG
 
 	static bool checkStringLen(size_t len) noexcept { return len <= MAX_STRING_LEN; }
+
+// Significant mantissa digits of a decimal literal: everything after the
+// optional sign up to 'e'/'E', ignoring the '.' and leading zeros. The
+// inline parser uses this to decide whether a double literal round-trips
+// exactly (<= 17 digits, DBL_DECIMAL_DIG) or must be kept as a raw_number
+// STRING. Counting the EXPONENT digits was wrong: DBL_MAX's shortest repr
+// "1.7976931348623157e+308" has 17 mantissa digits + 3 exponent digits = 20,
+// so every exactly-representable 17-digit double degraded to STRING and its
+// type never survived a parse round-trip. Leading zeros were wrong the other
+// way ("0.000123" counted 6).
+static size_t countSigDigits(const char* buf, size_t numLen) noexcept {
+	size_t i = 0;
+	while (i < numLen && (buf[i] == '-' || buf[i] == '+')) i++;
+	size_t n = 0;            // mantissa digits seen so far
+	size_t first = 0;        // index (in digit stream) of the first nonzero digit
+	size_t last = 0;         // index of the last nonzero digit
+	bool any = false;
+	for (; i < numLen && buf[i] != 'e' && buf[i] != 'E'; i++) {
+		char c = buf[i];
+		if (c < '0' || c > '9') continue;   // '.' and anything else are not digits
+		if (c != '0') { if (!any) first = n; last = n; any = true; }
+		n++;
+	}
+	return any ? (last - first + 1) : 1;    // "0", "0.0", "0e9" -> one significant digit
+}
 	static bool checkArraySize(size_t n) noexcept { return n <= MAX_ARRAY_SIZE; }
 	static bool checkObjectSize(size_t n) noexcept { return n <= MAX_OBJECT_SIZE; }
 	static bool checkNestingDepth(int depth) noexcept { return depth <= static_cast<int>(MAX_NESTING_DEPTH); }
@@ -1629,11 +1654,8 @@ private:
 		#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
 			auto [ptr, ec] = std::from_chars(buf, buf + numLen, d);
 			if (ec == std::errc() && ptr == buf + numLen) {
-				// Check if precision is lost: count significant digits in the integer+fractional parts
-				size_t sigDigits = 0;
-				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
-					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
-				}
+				// Check if precision is lost: count significant digits in the MANTISSA
+				size_t sigDigits = asvJSONValue::countSigDigits(buf, numLen);
 				// Also check if exponent shifts digits beyond double precision
 				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					// Precision would be lost - store as raw number string
@@ -1669,10 +1691,7 @@ private:
 			}
 			if (endptr != numStr.c_str() + numLen) throw asvJSONError("Invalid number");
 			{
-				size_t sigDigits = 0;
-				for (size_t i = (buf[0] == '-' ? 1 : 0); i < numLen; i++) {
-					if (buf[i] != '.' && buf[i] != 'e' && buf[i] != 'E' && buf[i] != '+' && buf[i] != '-') sigDigits++;
-				}
+				size_t sigDigits = asvJSONValue::countSigDigits(buf, numLen);
 				if (sigDigits > asvJSONValue::MAX_DOUBLE_SIG_DIGITS) {
 					auto v = asvJSONValue::makeString(buf, numLen);
 					if (!v) throw asvJSONError("Number literal too large");

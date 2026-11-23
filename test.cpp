@@ -29797,22 +29797,100 @@ TEST(testADEAnchors) {
   }
 }
 
+TEST(testDoubleLiteralIdentity) {
+	// Wave 63: the parser's significant-digit guard counted the EXPONENT
+	// digits - "1.7976931348623157e+308" = 17 mantissa + 3 = 20 > 17 - so
+	// EVERY double whose shortest round-trip repr has a 2-3 digit exponent
+	// (DBL_MAX, min normal, DBL_TRUE_MIN...) decoded as STRING+raw_number:
+	// the DOUBLE type never survived its own round trip. Leading zeros were
+	// inflated the same way ("0.000123" counted 6). Now only the mantissa's
+	// first..last nonzero digit span counts.
+	const char* exact[] = {
+		"1.7976931348623157e+308", "2.2250738585072014e-308",
+		"4.9406564584124654e-324", "1.2345678901234568e+29",
+		"-1.7976931348623157e+308", "1.0000000000000002e+0",
+	};
+	for (const char* lit : exact) {
+		asvJSON j;
+		std::string doc = std::string("{\"v\":") + lit + "}";
+		ASSERT_MSG(j.parse(std::string_view(doc)), lit);
+		auto* v = j.getRoot()->get("v");
+		ASSERT_MSG(v->type == asvJSONValue::DOUBLE, std::string("degraded to STRING: ") + lit);
+		std::string s = j.serialize();
+		asvJSON r;
+		ASSERT_MSG(r.parse(std::string_view(s)), lit);
+		auto* v2 = r.getRoot()->get("v");
+		ASSERT(v2->type == asvJSONValue::DOUBLE);
+		ASSERT(v2->dbl == v->dbl);
+	}
+	// 17 significant digits in plain notation: still a DOUBLE
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"v\":1234567890123456.7}"));
+		ASSERT(j.getRoot()->get("v")->type == asvJSONValue::DOUBLE);
+	}
+	// leading zeros no longer inflate the count
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"v\":0.000123}"));
+		ASSERT(j.getRoot()->get("v")->type == asvJSONValue::DOUBLE);
+	}
+	// genuinely inconvertible literals (>17 mantissa digits) STILL stay raw
+	{
+		asvJSON j;
+		ASSERT(j.parse("{\"v\":1.23456789012345678901234567890}"));
+		auto* v = j.getRoot()->get("v");
+		ASSERT(v->type == asvJSONValue::STRING);
+		ASSERT(v->raw_number);
+	}
+	// -0.0 keeps its sign through parse (the ".0" convention)
+	{
+		asvJSON j;
+		j.setRoot(asvJSONValue::makeObject());
+		j.getRoot()->obj->emplace("v", asvJSONValue::makeDouble(-0.0));
+		std::string s = j.serialize();
+		ASSERT(s.find("-0.0") != std::string::npos);
+		asvJSON r;
+		ASSERT(r.parse(std::string_view(s)));
+		auto* v = r.getRoot()->get("v");
+		ASSERT(v->type == asvJSONValue::DOUBLE);
+		ASSERT(std::signbit(v->dbl));
+	}
+}
+
 TEST(testADERawNumberRoundTrip) {
-  // High-precision decimal stored as raw_number string by JSON parser
+  // An INCONVERTIBLE high-precision decimal (> MAX_DOUBLE_SIG_DIGITS = 17
+  // mantissa digits) is stored as a raw_number string by the JSON parser and
   // must round-trip through ADE as a string, not a double.
+  // (Wave 63 note: this test used to assert 0.42857142857142855 - exactly 17
+  // mantissa digits, the shortest round-trip repr of 3/7 - degraded to raw.
+  // That was the exponent/leading-zero counting bug: 17 significant digits
+  // round-trip through double EXACTLY (DBL_DECIMAL_DIG), so it must stay
+  // DOUBLE. See testDoubleLiteralIdentity.)
   {
     asvJSON j;
-    ASSERT(j.parse("{\"d\":0.42857142857142855}"));
+    ASSERT(j.parse("{\"d\":0.428571428571428554}"));   // 18 significant digits
     auto* v = j.getRoot()->get("d");
     ASSERT(v != nullptr);
     ASSERT(v->type == asvJSONValue::STRING);
     ASSERT(v->raw_number);
-    std::string ude = j.toADE();
+    std::string ade = j.toADE();
     asvJSON j2;
-    ASSERT(j2.fromADE(ude));
+    ASSERT(j2.fromADE(ade));
     ASSERT(*j.getRoot() == *j2.getRoot());
     auto* v2 = j2.getRoot()->get("d");
     ASSERT(v2->type == asvJSONValue::STRING);
+  }
+  // exactly 17 significant digits: representable, stays DOUBLE through ADE
+  {
+    asvJSON j;
+    ASSERT(j.parse("{\"d\":0.42857142857142855}"));
+    auto* v = j.getRoot()->get("d");
+    ASSERT_MSG(v->type == asvJSONValue::DOUBLE, "17-digit literal must not degrade");
+    std::string ade = j.toADE();
+    asvJSON j2;
+    ASSERT(j2.fromADE(ade));
+    ASSERT(*j.getRoot() == *j2.getRoot());
   }
   // Big integer (int64 overflow) stays bare and round-trips
   {
@@ -29820,9 +29898,9 @@ TEST(testADERawNumberRoundTrip) {
     ASSERT(j.parse("{\"n\":12345678901234567890}"));
     auto* v = j.getRoot()->get("n");
     ASSERT(v->raw_number);
-    std::string ude = j.toADE();
+    std::string ade = j.toADE();
     asvJSON j2;
-    ASSERT(j2.fromADE(ude));
+    ASSERT(j2.fromADE(ade));
     ASSERT(*j.getRoot() == *j2.getRoot());
   }
 }
@@ -41380,6 +41458,7 @@ RUN(testPlistAuditRegressions);
 	RUN(testADEStrict);
 	RUN(testADEAnchors);
 	RUN(testADERawNumberRoundTrip);
+	RUN(testDoubleLiteralIdentity);
 	RUN(testADECommentPrefixStrings);
 RUN(testADEBlockScalarKeepChomping);
 

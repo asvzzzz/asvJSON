@@ -384,12 +384,12 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
     if (!end || *end != 0 || errno == ERANGE || !std::isfinite(d)) return nullptr;
     // Mirror the JSON parser: a literal with more significant digits than a
     // double can hold exactly is stored as a raw_number STRING so the value
-    // round-trips losslessly instead of silently losing precision.
-    size_t sigDigits = 0;
-    for (size_t q = neg ? 1 : 0; q < t.size(); q++) {
-      char c = t[q];
-      if (c != '.' && c != 'e' && c != 'E' && c != '+' && c != '-') sigDigits++;
-    }
+    // round-trips losslessly instead of silently losing precision. Same
+    // mantissa-only count as core (asvJSONValue::countSigDigits) - the old
+    // local copy counted exponent digits and leading zeros, so ADE degraded
+    // exactly-representable 17-digit doubles (0.42857142857142855) to STRING
+    // while parse() kept them DOUBLE.
+    size_t sigDigits = asvJSONValue::countSigDigits(t.c_str(), t.size());
     if (sigDigits > static_cast<size_t>(asvJSONValue::MAX_DOUBLE_SIG_DIGITS)) {
       auto s = adeNonNull(asvJSONValue::makeStringView(tok));
       s->raw_number = true;
