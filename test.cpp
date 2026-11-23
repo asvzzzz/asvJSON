@@ -21416,6 +21416,41 @@ TEST(testCommentRoundTripDegrade) {
   }
 }
 
+TEST(testSchemaVsCoreNumericEquality) {
+  // Wave 67 (documented asymmetry pinned): the CORE valuesEqual/applyPatch/
+  // diff side is STRICTLY TYPED (INT 2 != DOUBLE 2.0, JSON Patch compares
+  // stored node types), while the SCHEMA validator normalizes numbers per
+  // draft-07 (all JSON numbers are one type). The two verdicts on the same
+  // pair must stay as follows - do not "unify" them silently.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":2}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string_view("[{\"op\":\"test\",\"path\":\"/a\",\"value\":2.0}]")));
+    ASSERT(!j.applyPatch(p));   // strictly typed: INT 2 vs DOUBLE 2.0 fails
+  }
+  {
+    asvJSON inst; ASSERT(inst.parse(std::string_view("2")));
+    asvJSON sch;  ASSERT(sch.parse(std::string_view("{\"const\":2.0}")));
+    SchemaValidator sv;
+    ASSERT(sv.validate(inst.getRoot(), sch.getRoot()));  // schema normalizes numbers
+  }
+  {
+    asvJSON inst; ASSERT(inst.parse(std::string_view("[2,2.0]")));
+    asvJSON sch;  ASSERT(sch.parse(std::string_view("{\"uniqueItems\":true}")));
+    SchemaValidator sv;
+    ASSERT(!sv.validate(inst.getRoot(), sch.getRoot()));  // 2 == 2.0 -> duplicate
+    asvJSON inst2; ASSERT(inst2.parse(std::string_view("[0,-0.0]")));
+    ASSERT(!sv.validate(inst2.getRoot(), sch.getRoot())); // 0 == -0.0 -> duplicate
+  }
+  {
+    asvJSON a; ASSERT(a.parse(std::string_view("{\"a\":2}")));
+    asvJSON b; ASSERT(b.parse(std::string_view("{\"a\":2.0}")));
+    std::string d = a.diff(b).serialize(false);
+    ASSERT(d.find("replace") != std::string::npos);  // core diff is typed too
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41605,6 +41640,7 @@ RUN(testSexprReviewFixes);
 RUN(testRONReviewFixes);
 RUN(testRONCommentOrderAndPendants);
 RUN(testCommentRoundTripDegrade);
+RUN(testSchemaVsCoreNumericEquality);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
