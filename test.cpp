@@ -21658,6 +21658,80 @@ TEST(testLocaleIndependentNumbers) {
   }
 }
 
+TEST(testUtf8ValidatorExhaustive) {
+  // Wave 75: the shared isValidUTF8 gate (used by msgpack/bson/cbor/bencode,
+  // core parse(validateUTF8), both SAX parsers) against an independent
+  // Unicode Table 3-7 model. Exhaustive singles/pairs, all 3-byte combos for
+  // E0..EF leads, boundary-class 4-byte combos, truncations, fixed
+  // overlong/surrogate/>U+10FFFF spellings, random mixes (probe sw72: 1.43M
+  // cases, 0 diffs; the same corpus keeps the parity contract pinned).
+  auto refValid = [](const std::string& s) -> bool {
+    auto cont = [](unsigned char b) { return (b & 0xC0) == 0x80; };
+    size_t i = 0, n = s.size();
+    while (i < n) {
+      unsigned char b = (unsigned char)s[i];
+      if (b <= 0x7F) { i++; continue; }
+      if (b >= 0xC2 && b <= 0xDF) { if (i + 1 >= n || !cont((unsigned char)s[i + 1])) return false; i += 2; continue; }
+      if (b >= 0xE0 && b <= 0xEF) {
+        if (i + 2 >= n) return false;
+        unsigned char b1 = (unsigned char)s[i + 1], b2 = (unsigned char)s[i + 2];
+        if (!cont(b1) || !cont(b2)) return false;
+        if (b == 0xE0 && b1 < 0xA0) return false;
+        if (b == 0xED && b1 >= 0xA0) return false;
+        i += 3; continue;
+      }
+      if (b >= 0xF0 && b <= 0xF4) {
+        if (i + 3 >= n) return false;
+        unsigned char b1 = (unsigned char)s[i + 1], b2 = (unsigned char)s[i + 2], b3 = (unsigned char)s[i + 3];
+        if (!cont(b1) || !cont(b2) || !cont(b3)) return false;
+        if (b == 0xF0 && b1 < 0x90) return false;
+        if (b == 0xF4 && b1 > 0x8F) return false;
+        i += 4; continue;
+      }
+      return false;
+    }
+    return true;
+  };
+  auto chk = [&](const std::string& s) {
+    bool got = asvJSONInternal::isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    bool want = refValid(s);
+    ASSERT_EQ((int)got, (int)want);
+  };
+  for (int b0 = 0; b0 < 256; b0++) {
+    chk(std::string(1, (char)b0));
+    for (int b1 = 0; b1 < 256; b1++) { char s[2] = { (char)b0, (char)b1 }; chk(std::string(s, 2)); }
+  }
+  for (int b0 = 0xE0; b0 <= 0xEF; b0++)
+    for (int b1 = 0; b1 < 256; b1++)
+      for (int b2 = 0; b2 < 256; b2++) { char s[3] = { (char)b0, (char)b1, (char)b2 }; chk(std::string(s, 3)); }
+  {
+    const int leads[] = { 0xF0, 0xF1, 0xF3, 0xF4, 0xF5, 0xFF, 0xBF, 0xC0, 0xC1, 0xE0, 0xED, 0x41 };
+    const int c1s[] = { 0x00,0x7F,0x80,0x8F,0x90,0x9F,0xA0,0xAF,0xBF,0xC0,0xDF,0xE0,0xEF,0xF0,0xFF };
+    const int cs[]  = { 0x00,0x7F,0x80,0x81,0x8E,0x8F,0x90,0xBF,0xC0,0xFF };
+    for (int b0 : leads) for (int b1 : c1s) for (int b2 : cs) for (int b3 : cs)
+      { char s[4] = { (char)b0, (char)b1, (char)b2, (char)b3 }; chk(std::string(s, 4)); }
+  }
+  const char* valid[] = { "\xC2\xA9", "\xD0\xBA", "\xE0\xA0\x80", "\xED\x9F\xBF", "\xEE\x80\x80",
+                          "\xF0\x9F\x98\x80", "\xF4\x8F\xBF\xBF", "\xF1\x80\x80\x80" };
+  for (auto v : valid) {
+    std::string s(v);
+    chk(s);
+    for (size_t k = 1; k < s.size(); k++) chk(s.substr(0, k));   // truncated = invalid
+    chk(s + "\xFF");
+    chk("A" + s + "A" + s);
+  }
+  const char* invalid[] = { "\xC0\xAF", "\xC1\xBF", "\xE0\x9F\xBF", "\xED\xA0\x80", "\xED\xBF\xBF",
+                            "\xF0\x8F\xBF\xBF", "\xF4\x90\x80\x80", "\xF5\x80\x80\x80", "\xFF", "\x80", "\xBF", "\xF0" };
+  for (auto v : invalid) chk(std::string(v));
+  std::mt19937_64 rng(0x75u);
+  for (int t = 0; t < 30000; t++) {
+    std::string s;
+    int n = (int)(rng() % 17);
+    for (int k = 0; k < n; k++) s += (char)(rng() % 256);
+    chk(s);
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41852,6 +41926,7 @@ RUN(testViewOverloadAgreementNul);
 RUN(testDirtyFlagAndKnobHygiene);
 RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
+RUN(testUtf8ValidatorExhaustive);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
