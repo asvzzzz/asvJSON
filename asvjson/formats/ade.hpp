@@ -422,25 +422,16 @@ inline std::unique_ptr<asvJSONValue> adeTryParseNumber(const std::string& tok) {
 inline bool adeTryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int* tz_out = nullptr) {
   if (ms_out) *ms_out = 0;
   if (tz_out) *tz_out = 0;
-  // Date-only form: YYYY-MM-DD exactly.
+  // Date-only form: YYYY-MM-DD exactly. Routed through tryParseDateTime
+  // (midnight UTC) instead of hand-rolling timegm: that reuses the
+  // days-in-month/leap-year validation and the (time_t)-1 failure-sentinel
+  // guard (wave 76 - the old branch accepted "2024-02-30" normalized to
+  // March, and silently stored the -1 sentinel for years the platform's
+  // timegm cannot convert).
   if (sv.size() == 10 && sv[4] == '-' && sv[7] == '-') {
-    auto parse2 = [](const char* p, int& v) -> bool {
-      if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return false;
-      v = (p[0] - '0') * 10 + (p[1] - '0');
-      return true;
-    };
-    int year, month, day;
-    if (!parse2(sv.data(), year)) return false;
-    year = year * 100 + (sv[2] - '0') * 10 + (sv[3] - '0');
-    if (!parse2(sv.data() + 5, month) || month < 1 || month > 12) return false;
-    if (!parse2(sv.data() + 8, day) || day < 1 || day > 31) return false;
-    std::tm tm = {};
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    tm.tm_isdst = 0;
-    out = asvjson_timegm(&tm);
-    return true;
+    std::string full(sv);
+    full += "T00:00:00Z";
+    return tryParseDateTime(std::string_view(full), out, ms_out, tz_out);
   }
   return tryParseDateTime(sv, out, ms_out, tz_out);
 }

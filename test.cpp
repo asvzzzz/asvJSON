@@ -21732,6 +21732,92 @@ TEST(testUtf8ValidatorExhaustive) {
   }
 }
 
+TEST(testDateTimeSentinelGuard) {
+  // Wave 76: timegm's (time_t)-1 FAILURE SENTINEL. tryParseDateTime used to
+  // accept every grammatically valid ISO string and store whatever timegm
+  // returned - on platforms whose broken-time range excludes the year
+  // (MSVC: 1970..3000) that was the -1 sentinel, silently corrupted with
+  // the timezone shift ("7112-06-16T20:13:54Z" -> DATETIME(-1-0),
+  // "0080-...-18:12" -> DATETIME(65519)). The parser now re-decomposes the
+  // result: an unrepresentable instant is REJECTED (value stays a plain
+  // STRING - text preserved), a representable one (-1 == 1969-12-31 on
+  // platforms that render it) is accepted with the exact value.
+  // Assertions are platform-independent: either STRING with the original
+  // text, or a DATETIME whose own rendering re-parses to the SAME triple.
+  struct Case { const char* ini; const char* text; };
+  const Case cases[] = {
+    { "k = 7112-06-16T20:13:54Z\n", "7112-06-16T20:13:54Z" },     // above ceiling
+    { "k = 9584-02-15T11:33:50.716Z\n", "9584-02-15T11:33:50.716Z" },
+    { "k = 0080-07-13T12:29:08.874-18:12\n", "0080-07-13T12:29:08.874-18:12" }, // pre-epoch
+    { "k = 1969-12-31T23:59:59Z\n", "1969-12-31T23:59:59Z" },     // the -1 value itself
+    { "k = 2024-02-29T23:59:60Z\n", "2024-02-29T23:59:60Z" },     // leap second normalizes
+    { "k = 2024-03-02T04:00:00.999-08:00\n", "2024-03-02T04:00:00.999-08:00" }, // control
+  };
+  for (auto& c : cases) {
+    asvJSON j;
+    ASSERT_MSG(j.fromINI(c.ini), c.ini);
+    asvJSONValue* v = j.getNested("k");
+    ASSERT(v != nullptr);
+    if (v->type == asvJSONValue::DATETIME) {
+      // self-consistency: the rendered text must re-parse to the SAME triple.
+      // Exception: some libc strftime renderings of tiny years are not 4
+      // digits ("80-..." on glibc), which is the platform's format quirk,
+      // not a false sentinel - there only the no-garbage check applies.
+      std::string iso; fmtDateTimeVal(v->timestamp, v->datetime_ms, iso, v->tz_offset_min);
+      ASSERT_MSG(iso != "null", "DATETIME accepted but not renderable");
+      if (iso.size() >= 11 && iso[4] == '-' && iso[10] == 'T') {
+        time_t t2 = 0; int m2 = -1, z2 = -9999;
+        ASSERT_MSG(tryParseDateTime(iso, t2, &m2, &z2), iso.c_str());
+        ASSERT_MSG(t2 == v->timestamp, iso.c_str());
+        ASSERT_MSG(m2 == v->datetime_ms, iso.c_str());
+        ASSERT_MSG(z2 == v->tz_offset_min, iso.c_str());
+      }
+      // never the old corruption: sentinel-derived garbage
+      if (v->timestamp != 0) ASSERT(v->timestamp != (time_t)-1 || iso == std::string("1969-12-31T23:59:59Z"));
+    } else {
+      ASSERT_MSG(v->type == asvJSONValue::STRING, c.text);
+      ASSERT_EQ(std::string(v->getString()), std::string(c.text));
+    }
+  }
+  // non-existent days never type as DATETIME (grammar day table)
+  {
+    asvJSON j;
+    ASSERT(j.fromINI("k = 2024-02-30T00:00:00Z\n"));
+    asvJSONValue* v = j.getNested("k");
+    ASSERT_MSG(v && v->type == asvJSONValue::STRING, "Feb 30 must stay STRING");
+  }
+  // ADE date-only form (tagged !datetime) shares the guarded path: real
+  // dates type, fake dates (the old branch normalized them via timegm!)
+  // and sentinel failures are rejected. Out-of-range years are platform
+  // dependent (glibc converts them, MSVC does not) - there the value must
+  // at least stay self-consistent, never the -1 garbage.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE("a: !datetime \"2024-02-29\"\n"));
+    asvJSONValue* v = j.getNested("a");
+    ASSERT_MSG(v && v->type == asvJSONValue::DATETIME, "valid date-only must type as DATETIME");
+    if (v) {
+      std::string iso; fmtDateTimeVal(v->timestamp, v->datetime_ms, iso, v->tz_offset_min);
+      ASSERT_EQ(iso, std::string("2024-02-29T00:00:00Z"));
+    }
+    asvJSON k;
+    ASSERT_MSG(!k.fromADE("a: !datetime \"2024-02-30\"\n"), "Feb 30 must be an error (was: normalized to Mar 1)");
+    asvJSON m;
+    if (m.fromADE("b: !datetime \"7112-06-16T20:13:54Z\"\n")) {
+      // platform converts the year: the stored value must survive its own rendering
+      asvJSONValue* w = m.getNested("b");
+      ASSERT_MSG(w && w->type == asvJSONValue::DATETIME, "typed value expected");
+      if (w && w->type == asvJSONValue::DATETIME) {
+        std::string iso2; fmtDateTimeVal(w->timestamp, w->datetime_ms, iso2, w->tz_offset_min);
+        ASSERT_MSG(iso2 != "null", "accepted DATETIME not renderable");
+        time_t t2 = 0; int m2 = -1, z2 = -9999;
+        ASSERT_MSG(tryParseDateTime(iso2, t2, &m2, &z2), iso2.c_str());
+        ASSERT_MSG(t2 == w->timestamp, iso2.c_str());
+      }
+    }
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41927,6 +42013,7 @@ RUN(testDirtyFlagAndKnobHygiene);
 RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
+RUN(testDateTimeSentinelGuard);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);

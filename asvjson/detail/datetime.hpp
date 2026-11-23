@@ -116,6 +116,22 @@ inline bool tryParseDateTime(std::string_view sv, time_t& out, int* ms_out, int*
 	tm.tm_sec = sec;
 	tm.tm_isdst = 0;
 	out = asvjson_timegm(&tm);
+	// (time_t)-1 is the FAILURE sentinel of timegm/_mkgmtime64 on platforms
+	// whose broken-time range excludes the value (MSVC: 1970..3000 only).
+	// Without this check "7112-06-16T20:13:54Z" parsed "OK" and stored the
+	// garbage -1 (+ tz shift below), silently corrupting the tree (probe
+	// sw73, wave 76). Disambiguate by de-composing the result: -1 is only
+	// accepted when the platform can also RENDER it as exactly this broken
+	// time (a genuine 1969-12-31T23:59:59Z on glibc; gmtimeSafe(-1) fails
+	// or returns a different time on MSVC, so every unrepresentable year is
+	// rejected and stays a plain STRING - text preserved, no false DATETIME).
+	if (out == static_cast<time_t>(-1)) {
+		std::tm back{};
+		if (!gmtimeSafe(&back, &out) ||
+			back.tm_year != tm.tm_year || back.tm_mon != tm.tm_mon || back.tm_mday != tm.tm_mday ||
+			back.tm_hour != tm.tm_hour || back.tm_min != tm.tm_min || back.tm_sec != tm.tm_sec)
+			return false;
+	}
 
 	if (sign == '+') out -= tzH * 3600 + tzM * 60;
 	else if (sign == '-') out += tzH * 3600 + tzM * 60;
