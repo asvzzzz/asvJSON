@@ -19144,7 +19144,7 @@ TEST(testADEAnchorExpansionGuard) {
   // doubling chain grows the tree to 2^N nodes from a tiny document, and
   // the 32 MB input cap bounds neither copies nor their size. The parser
   // now charges every clone (registration AND alias) to a cumulative
-  // node budget (proportional to the source: 16 nodes/byte, 500k floor,
+  // node budget (proportional to the source: 64 nodes/byte, 500k floor,
   // 8M ceiling).
   {
     std::string y = "l0: &a0 \"01234567890123456789012345678901234567890123456789012345678901234567890123456789\"\n";
@@ -19175,17 +19175,31 @@ TEST(testADEAnchorExpansionGuard) {
     ASSERT(!j.fromADE(std::string_view(y)));
     ASSERT(j.getLastError().find("node budget") != std::string::npos);
   }
-  // Wave 53: the budget scales with the source (16 nodes per input byte,
+  // Wave 53: the budget scales with the source (64 nodes per input byte,
   // floored at 500k, capped at 8M). The old flat 8M ceiling let a 1.2 KB
   // document reach ~900 MB of live tree before the guard fired (measured
-  // peak RSS 867 MB -> 57 MB after the change). A 65 KB document therefore
-  // gets ~1.04M nodes: 200 aliases of the 10000-element anchor (2M nodes)
-  // is rejected, while the 50-alias case above still parses.
+  // peak RSS 867 MB; the 26-level bomb now stops at ~57 MB). The floor keeps
+  // a legitimate small-document fan-out alive: a 9-level doubling chain
+  // (100-element anchor, ~309k clone nodes charged from 471 bytes) parses,
+  // while the 15-level chain (~5M nodes from ~1.4 KB) is rejected - the flat
+  // 8M ceiling used to accept the latter and allocate ~2.5M live nodes.
   {
-    std::string y = "big: &b [";
-    for (int i = 0; i < 10000; i++) { if (i) y += ","; y += std::to_string(i); }
+    std::string y = "a0: &a0 [";
+    for (int i = 0; i < 100; i++) { if (i) y += ","; y += std::to_string(i); }
     y += "]\n";
-    for (int i = 0; i < 200; i++) y += "k" + std::to_string(i) + ": *b\n";
+    for (int i = 1; i <= 9; i++)
+      y += "a" + std::to_string(i) + ": &a" + std::to_string(i) + " [*a" + std::to_string(i - 1) + ", *a" + std::to_string(i - 1) + "]\n";
+    asvJSON j;
+    ASSERT_MSG(j.fromADE(std::string_view(y)), j.getLastError());
+    ASSERT(j.getRoot()->size() == size_t(10));
+  }
+  {
+    std::string y = "a0: &a0 [";
+    for (int i = 0; i < 100; i++) { if (i) y += ","; y += std::to_string(i); }
+    y += "]\n";
+    for (int i = 1; i <= 15; i++)
+      y += "a" + std::to_string(i) + ": &a" + std::to_string(i) + " [*a" + std::to_string(i - 1) + ", *a" + std::to_string(i - 1) + "]\n";
+    y += "root: *a15\n";
     asvJSON j;
     ASSERT(!j.fromADE(std::string_view(y)));
     ASSERT(j.getLastError().find("node budget") != std::string::npos);

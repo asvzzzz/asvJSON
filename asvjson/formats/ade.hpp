@@ -474,13 +474,17 @@ private:
   //
   // The ceiling alone was not enough: 8M nodes is ~900 MB of live tree, so a
   // 1.2 KB document could still exhaust memory before the guard fired. The
-  // budget now scales with the source (16 nodes per input byte) between a
-  // floor and the ceiling, mirroring how YAML bounds expansion by bytes:
+  // budget now scales with the source between a floor and the ceiling:
   // tiny documents cannot buy a huge tree, and a real 32 MB document still
-  // gets the full ceiling.
+  // gets the full ceiling. The floor (500k nodes, ~150 MB of live tree) is
+  // deliberately the same order as the core's MAX_ARRAY_SIZE/MAX_OBJECT_SIZE
+  // allowance for a document of any size, so a small but legitimate alias
+  // fan-out (a 12-level doubling chain is 409k nodes from 915 bytes) keeps
+  // working; the multiplier (64 nodes per source byte) is what stops the
+  // 30-level bomb, which wants ~10^9 nodes from 1.2 KB.
   static constexpr size_t kMaxAliasNodes = 8000000;
   static constexpr size_t kMinAliasNodes = 500000;
-  static constexpr size_t kAliasNodesPerByte = 16;
+  static constexpr size_t kAliasNodesPerByte = 64;
   size_t aliasBudget() const {
     size_t b = text_.size() * kAliasNodesPerByte;
     if (b < kMinAliasNodes) b = kMinAliasNodes;
