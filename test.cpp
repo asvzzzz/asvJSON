@@ -21576,6 +21576,38 @@ TEST(testDirtyFlagAndKnobHygiene) {
   }
 }
 
+TEST(testGetNestedEscapeForms) {
+  // Wave 70: the dotted-path scanner of getNested recognizes exactly the two
+  // escape pairs "\." and "\\"; every other backslash stays literal. Keys
+  // holding a dot / backslash / brackets must be reachable; the EMPTY key has
+  // no dotted spelling (documented gap) but works through getByPointer.
+  asvJSON j;
+  j.setRoot(asvJSONValue::makeObject());
+  auto add = [](asvJSONValue* node, const std::string& key) {
+    auto child = asvJSONValue::makeObject();
+    asvJSONValue* cp = child.get();
+    node->obj->emplace(key, std::move(child));
+    return cp;
+  };
+  asvJSONValue* root = j.getRoot();
+  asvJSONValue* n1 = add(root, "a.b"); n1->obj->emplace("leaf", asvJSONValue::makeInt(1));
+  asvJSONValue* n2 = add(root, "a\\b"); n2->obj->emplace("leaf", asvJSONValue::makeInt(2));
+  asvJSONValue* n3 = add(root, "x\\c"); n3->obj->emplace("leaf", asvJSONValue::makeInt(3));
+  asvJSONValue* n4 = add(root, "k[0]"); n4->obj->emplace("leaf", asvJSONValue::makeInt(4));
+  asvJSONValue* n5 = add(root, "");     n5->obj->emplace("leaf", asvJSONValue::makeInt(5));
+  (void)n1; (void)n2; (void)n3; (void)n4; (void)n5;
+  #define LEAF(expr) ((expr) && (expr)->type == asvJSONValue::INT ? (int)(expr)->getInt() : -1)
+  ASSERT_EQ(LEAF(j.getNested("a\\.b.leaf")), 1);      // \. = literal dot in a key
+  ASSERT_EQ(LEAF(j.getNested("a\\\\b.leaf")), 2);     // \\  = literal backslash
+  ASSERT_EQ(LEAF(j.getNested("x\\c.leaf")), 3);       // lone backslash stays literal
+  ASSERT_EQ(LEAF(j.getNested("k[0].leaf")), 4);
+  // empty key: no dotted spelling for the empty segment (documented)...
+  ASSERT_EQ(LEAF(j.getNested(".leaf")), -1);
+  // ...while RFC-6901 style pointers reach it
+  ASSERT_EQ(LEAF(j.getByPointer("//leaf")), 5);
+  #undef LEAF
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41768,6 +41800,7 @@ RUN(testCommentRoundTripDegrade);
 RUN(testSchemaVsCoreNumericEquality);
 RUN(testViewOverloadAgreementNul);
 RUN(testDirtyFlagAndKnobHygiene);
+RUN(testGetNestedEscapeForms);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
