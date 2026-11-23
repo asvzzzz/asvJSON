@@ -37073,6 +37073,44 @@ TEST(testFilePathNulReject) {
 	std::remove("nulprobe_plain.json");
 }
 
+TEST(testWriterKeyLengthCaps) {
+	// Wave 62: the public writers (setValue/put*, arrayAddValue(key),
+	// putBinChunked, setByPointer) now cap the KEY length at MAX_STRING_LEN,
+	// mirroring the string VALUE factory - a key past the cap can never be
+	// read back by any decoder, so writing it is refused rather than yielding
+	// a non-round-trippable document. The raw-node map emplace remains the
+	// documented uncapped escape hatch.
+	const size_t over = asvJSONValue::MAX_STRING_LEN + 1000;
+	const std::string bigKey(over, 'h');
+	const std::string okKey(asvJSONValue::MAX_STRING_LEN, 'k');
+	asvJSON j;
+	ASSERT(j.putInt(bigKey, 1) == nullptr);
+	j.putString(bigKey, "v");                          // void: no-ops past the cap
+	ASSERT(!j.hasKey(bigKey));
+	if (j.getRoot()) ASSERT(j.getRoot()->get(bigKey) == nullptr);
+	ASSERT(j.arrayAddInt(bigKey, 1) == nullptr);
+	std::vector<uint8_t> blob(6, 'B');
+	ASSERT(!j.putBinChunked(bigKey, blob.data(), blob.size()));
+	ASSERT(!j.setByPointer(std::string_view("/" + bigKey), asvJSONValue::makeInt(1)));
+	if (j.getRoot()) ASSERT(j.getRoot()->obj->empty());           // nothing half-written
+	// a legal maximal key round-trips through parse
+	asvJSON g;
+	g.putString(okKey, "v");
+	std::string s = g.serialize();
+	asvJSON r;
+	ASSERT_MSG(r.parse(std::string_view(s)), r.getLastError());
+	ASSERT(r.hasKey(okKey));
+	// raw-node escape hatch: still possible, serialize emits it, the parser
+	// refuses it - the documented asymmetry, never silently truncated.
+	asvJSON w;
+	w.parse(R"({"a":1})");
+	w.getRoot()->emplace(bigKey, asvJSONValue::makeInt(2));       // uncapped raw API
+	std::string ws = w.serialize();
+	asvJSON wr;
+	ASSERT(!wr.parse(std::string_view(ws)));
+	ASSERT(wr.getLastError().find("String too long") != std::string::npos);
+}
+
 TEST(testPutFamilyGrowthCaps) {
 	// Wave 60: setValue/put* and the key-taking arrayAdd* were the last write
 	// paths without the MAX_OBJECT_SIZE cap - a loop of putInt("k"+N,1) grew
@@ -41427,6 +41465,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testMergeRFC7396Semantics);
 	RUN(testValuesEqualFlagStrictness);
 	RUN(testFilePathNulReject);
+	RUN(testWriterKeyLengthCaps);
 	RUN(testPutFamilyGrowthCaps);
 	RUN(testApplyPatchRFCArrayOps);
 

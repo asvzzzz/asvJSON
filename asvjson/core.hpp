@@ -1985,6 +1985,12 @@ public:
 	// succeeded, hence the bool.
 	template<typename F>
 	bool setValue(std::string_view key, F&& factory) {
+		// Key length joins the public-writer caps (values are capped by the
+		// string factory, object growth since ba1d5a9/f0f5c2d and this wave):
+		// a key past MAX_STRING_LEN can never be read back by ANY decoder, so
+		// writing it is refused instead of yielding a non-round-trippable
+		// document. (The raw-node map emplace stays the uncapped escape hatch.)
+		if (!asvJSONValue::checkStringLen(key.size())) return false;
 		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return false;
 		auto v = factory();
@@ -2066,6 +2072,7 @@ public:
 
 	// Returns true on success, false if memory allocation fails (no partial state).
 	bool putBinChunked(std::string_view key, const uint8_t* data, size_t size, size_t chunk_size = 76) {
+		if (!asvJSONValue::checkStringLen(key.size())) return false;   // key cap mirrors setValue
 		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
 		if (!root) return false;
 		auto arr = asvJSONValue::makeArray();
@@ -2611,6 +2618,7 @@ public:
 		// must not enter the array: every serializer walks elements without a
 		// null guard. Symmetric with the root-level overload above.
 		if (!val) return nullptr;
+		if (!asvJSONValue::checkStringLen(key.size())) return nullptr;   // key cap mirrors setValue
 		// Only an EMPTY document may be turned into an object here. An existing
 		// non-object root is NOT replaced - the root-level overload above
 		// documents exactly that rule ("the existing root is NOT replaced ...
@@ -3382,6 +3390,9 @@ inline bool asvJSON::setByPointerRFC(std::string_view ptr, std::unique_ptr<asvJS
 		}
 		if (cur->type == asvJSONValue::OBJECT && cur->obj) {
 			std::string key = decodeJSONPointerKey(seg);
+			// public-writer key cap (mirrors setValue): a decoded segment past
+			// MAX_STRING_LEN can never be read back by any decoder
+			if (!asvJSONValue::checkStringLen(key.size())) return false;
 			if (isLast) {
 				auto it2 = mapFind(*cur->obj, key);
 				if (it2 == cur->obj->end()) {
