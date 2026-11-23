@@ -21451,6 +21451,77 @@ TEST(testSchemaVsCoreNumericEquality) {
   }
 }
 
+TEST(testViewOverloadAgreementNul) {
+  // Wave 68: string_view entry points are LENGTH-AWARE. The same bytes
+  // (including embedded NULs) fed via a std::string and via an explicit
+  // (data, size) view must accept/reject identically and build the same
+  // tree. A decoder that scans c_str() early-stops at the NUL and its two
+  // overloads disagree. (Guard-page probe sw63 additionally shows no read
+  // past size(); this test pins the agreement half portably.)
+  auto cmp = [&](const char* what,
+                 bool (*viaView)(asvJSON&, std::string_view),
+                 bool (*viaStr)(asvJSON&, const std::string&),
+                 const char* d, size_t n) {
+    std::string_view view(d, n);
+    std::string copy(d, n);
+    asvJSON a, b;
+    bool ra = viaView(a, view);
+    bool rb = viaStr(b, copy);
+    std::string reason = std::string(what) + ": accept differs (view=" + (ra ? "1" : "0") + " str=" + (rb ? "1" : "0") + ")";
+    ASSERT_MSG(ra == rb, reason.c_str());
+    if (ra && rb) {
+      std::string sa, sb;
+      if (a.getRoot()) a.getRoot()->serialize(sa, false, 0);
+      if (b.getRoot()) b.getRoot()->serialize(sb, false, 0);
+      std::string reason2 = std::string(what) + ": trees differ";
+      ASSERT_MSG(sa == sb, reason2.c_str());
+    }
+  };
+
+  auto parseV  = [](asvJSON& j, std::string_view s)  { return j.parse(s); };
+  auto parseS  = [](asvJSON& j, const std::string& s){ return j.parse(s); };
+  auto json5V  = [](asvJSON& j, std::string_view s)  { return j.fromJSON5(s); };
+  auto json5S  = [](asvJSON& j, const std::string& s){ return j.fromJSON5(s); };
+  auto yamlV   = [](asvJSON& j, std::string_view s)  { return j.fromYAML(s); };
+  auto yamlS   = [](asvJSON& j, const std::string& s){ return j.fromYAML(s); };
+  auto iniV    = [](asvJSON& j, std::string_view s)  { return j.fromINI(s); };
+  auto iniS    = [](asvJSON& j, const std::string& s){ return j.fromINI(s); };
+  auto anyV    = [](asvJSON& j, std::string_view s)  { return j.fromAny(s); };
+  auto anyS    = [](asvJSON& j, const std::string& s){ return j.fromAny(s); };
+  (void)json5V; (void)json5S;
+
+  const char n1[] = { '{', '"', 'a', '"', ':', '1', '}', '\0', 'J', 'U', 'N', 'K' };
+  const char n2[] = { '[', '1', ',', '2', ']', '\0', 'g' };
+  const char n3[] = { 'a', '\0', 'b', '\n' };
+  const char n4[] = { 'k', '=', '\0', 'v', '\n' };
+
+  cmp("json/NULtail", parseV, parseS, n1, sizeof n1);
+  cmp("json/arr-NUL", parseV, parseS, n2, sizeof n2);
+  cmp("json5/NULtail", json5V, json5S, n1, sizeof n1);
+  cmp("yaml/NULline", yamlV, yamlS, n3, sizeof n3);
+  cmp("ini/NULvalue", iniV, iniS, n4, sizeof n4);
+  cmp("any/obj-NULtail", anyV, anyS, n1, sizeof n1);
+  cmp("any/arr-NULtail", anyV, anyS, n2, sizeof n2);
+
+  // Binary entry points: (const void*, size_t) with a trailing NUL byte must
+  // not treat it as a terminator either.
+  {
+    asvJSON src; ASSERT(src.parse(std::string_view("{\"a\":1}")));
+    auto mp = src.toMessagePack();
+    mp.push_back(0);   // garbage after the complete document
+    asvJSON k1, k2;
+    bool r1 = k1.fromMessagePack(mp.data(), mp.size());
+    bool r2 = k2.fromMessagePack(std::string((const char*)mp.data(), mp.size()));
+    ASSERT_EQ(r1, r2);
+    if (r1 && r2) {
+      std::string s1, s2;
+      if (k1.getRoot()) k1.getRoot()->serialize(s1, false, 0);
+      if (k2.getRoot()) k2.getRoot()->serialize(s2, false, 0);
+      ASSERT_EQ(s1, s2);
+    }
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41641,6 +41712,7 @@ RUN(testRONReviewFixes);
 RUN(testRONCommentOrderAndPendants);
 RUN(testCommentRoundTripDegrade);
 RUN(testSchemaVsCoreNumericEquality);
+RUN(testViewOverloadAgreementNul);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
