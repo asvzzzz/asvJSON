@@ -41,15 +41,6 @@
 //   parseable RON (the decoder itself can never produce one).
 //
 //   Known limitations:
-//   - Object keys that look like array indices (`"[0]"`, `"[42]"`) collide with
-//     the path `[N]` syntax used internally for comment attachment. Such keys
-//     round-trip correctly (the encoder quotes them), but comments on those
-//     nodes are silently dropped because ronFindPath cannot distinguish a
-//     literal key from an array index segment. Avoid using bracket-enclosed
-//     numeric keys if you need per-node comments.
-//   - The internal comment path uses `\x1F` as segment separator; a JSON key
-//     containing that byte is ambiguous and breaks comment resolution. This
-//     byte is a control character that is exceptionally rare in practice.
 //   - Map objects with all-ident keys are emitted in struct form on encode
 //     (`{"a":1,"b":2}` -> `(a: 1, b: 2)`). The value round-trips but the text
 //     differs; this is intentional (struct form is the RON idiom for ident-key
@@ -152,8 +143,8 @@ inline std::string ronJsonStr(std::string_view s) {
 }
 
 // A comment (or group of comments) collected during RON parsing, keyed by the
-// JSON path of the node it belongs to. Path format matches yamlFindPath:
-// "" root, "a\x1Fb\x1F[2]" nested keys / array indices.
+// JSON path of the node it belongs to. Path format: length-prefixed segments
+// ("<len>:<bytes>" concatenated, no separator), see ronPathSeg. "" is the root.
 struct RonCommentEntry {
   std::string path;
   std::vector<Comment> leading;
@@ -162,29 +153,46 @@ struct RonCommentEntry {
   bool footing = false;
 };
 
-// Append a path segment ('\x1F'-separated) with no leading separator for the
-// first segment (matches yamlFindPath convention: ""->"key"->"key\x1F[2]").
-inline std::string ronJoinPath(const std::string& path, const std::string& seg) {
-  if (path.empty()) return seg;
-  return path + std::string("\x1F") + seg;
+// Comment addresses used to be joined with a raw 0x1F separator byte, and the
+// segment's FIRST BYTE decided the lookup ("[N]" -> array index). Both collide
+// with data: RON map keys are ordinary strings, so {"a\u001fb": 1} put a real
+// 0x1F into the path (split into "a" + "b", neither found, the comment dropped),
+// {"[0]": 1} was routed into the array branch (returned nullptr, comment
+// dropped), and {"": 1} produced an empty segment that resolved to the ROOT, so
+// its comment was mis-attached there. Length prefixes reserve no byte and the
+// lookup dispatches on the NODE'S type, so every key survives byte for byte --
+// the same fix INI (iniPathSeg) and JSON5 (json5PathSeg) already made.
+inline std::string ronPathSeg(std::string_view s) {
+  return std::to_string(s.size()) + ":" + std::string(s);
+}
+inline std::string ronJoinPath(const std::string& base, const std::string& seg) {
+  return base + ronPathSeg(seg);
 }
 
-// Resolve a comment path against the parsed tree (mirrors yamlFindPath so ron.hpp
-// does not depend on the YAML format being enabled).
+// Resolve a comment path against the parsed tree (mirrors json5FindPath so
+// ron.hpp does not depend on the JSON5 format being enabled).
 inline asvJSONValue* ronFindPath(asvJSONValue* root, std::string_view path) {
   if (path.empty()) return root;
   asvJSONValue* cur = root;
   size_t pos = 0;
-  while (pos <= path.size()) {
-    size_t sep = path.find_first_of("\x1F", pos);
-    std::string_view seg = path.substr(pos, sep == std::string_view::npos ? std::string_view::npos : sep - pos);
-    if (seg.empty()) return nullptr;
-    if (seg[0] == '[') {
-      if (cur->type != asvJSONValue::ARRAY || !cur->arr || seg.size() < 3 || seg.back() != ']') return nullptr;
+  while (pos < path.size()) {
+    size_t colon = path.find(':', pos);
+    if (colon == std::string_view::npos) return nullptr;
+    size_t len = 0;
+    for (size_t k = pos; k < colon; k++) {
+      char d = path[k];
+      if (d < '0' || d > '9' || len > (SIZE_MAX - 9) / 10) return nullptr;
+      len = len * 10 + static_cast<size_t>(d - '0');
+    }
+    if (colon + 1 + len > path.size()) return nullptr;
+    std::string_view seg = path.substr(colon + 1, len);
+    if (cur->type == asvJSONValue::ARRAY) {
+      if (!cur->arr || seg.size() < 3 || seg.front() != '[' || seg.back() != ']') return nullptr;
       size_t idx = 0;
       for (size_t k = 1; k + 1 < seg.size(); k++) {
         char d = seg[k];
         if (d < '0' || d > '9') return nullptr;
+        if (idx > (SIZE_MAX - static_cast<size_t>(d - '0')) / 10) return nullptr;
         idx = idx * 10 + static_cast<size_t>(d - '0');
       }
       if (idx >= cur->arr->size()) return nullptr;
@@ -195,8 +203,7 @@ inline asvJSONValue* ronFindPath(asvJSONValue* root, std::string_view path) {
       if (it == cur->obj->end()) return nullptr;
       cur = it->second.get();
     }
-    if (sep == std::string_view::npos) break;
-    pos = sep + 1;
+    pos = colon + 1 + len;
   }
   return cur;
 }

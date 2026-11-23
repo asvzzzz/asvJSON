@@ -20851,6 +20851,42 @@ TEST(testRONReviewFixes) {
   }
 }
 
+TEST(testRonCommentPathKeys) {
+  // Wave 55: comment addresses are length-prefixed segments ("<len>:<bytes>").
+  // The old encoding joined segments with a raw 0x1F byte and decided the
+  // lookup from the segment's first byte ("[N]" -> array index), which
+  // collided with data. Three documented limitations are closed by this:
+  // a key containing 0x1F, a key that looks like an array index, and the EMPTY
+  // key (whose comment used to be hoisted onto the document root).
+  struct Case { const char* name; const char* src; const char* needle; };
+  Case cases[] = {
+    { "0x1F in key", "{\n  // c1\n  \"a\\u001fb\": 1,\n  \"c\": 2\n}\n", "c1" },
+    { "bracket key", "{\n  // c2\n  \"[0]\": 1,\n  \"x\": 2\n}\n", "c2" },
+    { "empty key",   "{\n  // c3\n  \"\": 1,\n  \"y\": 2\n}\n", "c3" },
+    { "colon key",   "{\n  // c4\n  \"12:ab\": 1,\n  \"z\": 2\n}\n", "c4" },
+    { "deep 0x1F",   "{\n  inner: {\n    // c5\n    \"k\\u001Fl\": 1,\n    m: 2\n  }\n}\n", "c5" },
+  };
+  for (const Case& cse : cases) {
+    asvJSON j;
+    ASSERT_MSG(j.fromRON(std::string_view(cse.src)), cse.name);
+    std::string out = j.toRON(true);
+    size_t at = out.find(cse.needle);
+    ASSERT_MSG(at != std::string::npos, cse.name);   // not dropped
+    ASSERT_MSG(at != 0, cse.name);                   // not hoisted to the root
+    // Re-parsing reproduces the text byte for byte (comment placement stable).
+    asvJSON j2;
+    ASSERT_MSG(j2.fromRON(std::string_view(out)), cse.name);
+    ASSERT_MSG(j2.toRON(true) == out, cse.name);
+  }
+  // Array element comments still resolve through the "[N]" segment form.
+  {
+    asvJSON j;
+    ASSERT(j.fromRON(std::string_view("{\n  v: [\n    1,\n    // c6\n    2\n  ]\n}\n")));
+    std::string out = j.toRON(true);
+    ASSERT(out.find("c6") != std::string::npos);
+  }
+}
+
 TEST(testRONCommentOrderAndPendants) {
   // 1. A same-line comment after a value at the very bottom of the document used
   // to be dropped whenever an own-line comment followed it: ronToJson's
@@ -40727,6 +40763,7 @@ RUN(testSexprReviewFixes);
 	RUN(testRONComments);
 RUN(testRONReviewFixes);
 RUN(testRONCommentOrderAndPendants);
+RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
 RUN(testCppReviewRound2);
