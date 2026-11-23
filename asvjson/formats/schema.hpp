@@ -451,7 +451,11 @@ private:
       // Same-type DOUBLE is handled by the switch; NaN != NaN is already the
       // IEEE result of the == below, so no extra guard needed here.
       case asvJSONValue::DOUBLE: return a->dbl == b->dbl;
-      case asvJSONValue::STRING: return a->str_data == b->str_data;
+      // raw_number distinguishes an un-representable numeric LITERAL (a JSON
+      // number kept verbatim as text) from a quoted string of the same text;
+      // draft-07 equality is JSON-typed, and identityHash only needs equal =>
+      // same hash, so a coarser hash merely costs one extra exact compare.
+      case asvJSONValue::STRING: return a->raw_number == b->raw_number && a->str_data == b->str_data;
       case asvJSONValue::DATETIME: return a->timestamp == b->timestamp &&
                                           a->datetime_ms == b->datetime_ms &&
                                           a->tz_offset_min == b->tz_offset_min;
@@ -474,6 +478,7 @@ private:
       }
       case asvJSONValue::OBJECT: {
         if (!a->obj || !b->obj) return a->obj == b->obj;
+        if (a->yaml_set != b->yaml_set) return false;   // a set != a plain map (operator== rule)
         if (a->obj->size() != b->obj->size()) return false;
         for (auto& kv : *a->obj) {
           auto it = b->obj->find(kv.first);
@@ -1536,7 +1541,11 @@ private:
               }
               case asvJSONValue::STRING:
                 token.reserve(nodePtr->str_data.size() + 1);
-                token += 's';
+                // 'r' for an out-of-range numeric LITERAL (raw_number), 's'
+                // for a quoted string: draft-07 never equates a number with a
+                // string, and this must agree with the bucketed compare
+                // (valuesEqual now requires the flag to match as well).
+                token += nodePtr->raw_number ? 'r' : 's';
                 token += nodePtr->str_data;
                 break;
               default: break;

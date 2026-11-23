@@ -36995,6 +36995,84 @@ TEST(testMergeRFC7396Semantics) {
 	}
 }
 
+TEST(testValuesEqualFlagStrictness) {
+	// Wave 61: the two tree-equality relations must respect the identity
+	// flags. operator== already compared raw_number (and yaml_set), but the
+	// core valuesEqual (applyPatch "test") and the schema valuesEqual
+	// (const/enum/uniqueItems) ignored them: a quoted string was equal to an
+	// out-of-range numeric LITERAL of the same text (JSON number != string),
+	// and a YAML set was equal to a plain map. The uniqueItems scalar fast
+	// path shared the bug: it keyed raw numbers and strings on the same
+	// 's'-prefixed token.
+	asvJSON j;
+	ASSERT(j.parse(R"({"x":18446744073709551615})"));   // int64-overflow literal -> STRING+raw_number
+	ASSERT(j.getRoot()->get("x")->raw_number);
+	asvJSON p1;
+	p1.parse(R"([{"op":"test","path":"/x","value":"18446744073709551615"}])");
+	asvJSON a1 = j;
+	ASSERT(!a1.applyPatch(p1));                          // number != string (RFC 6902)
+	asvJSON p2;
+	p2.parse(R"([{"op":"test","path":"/x","value":18446744073709551615}])");
+	asvJSON a2 = j;
+	ASSERT(a2.applyPatch(p2));                           // same literal: equal
+	// YAML set vs plain map with the same members.
+	asvJSON y;
+	ASSERT_MSG(y.fromYAML("s: !!set\n- a\n"), y.getLastError());
+	ASSERT(y.getRoot()->get("s")->yaml_set);
+	asvJSON p3;
+	p3.parse(R"([{"op":"test","path":"/s","value":{"a":null}}])");
+	asvJSON a3 = y;
+	ASSERT(!a3.applyPatch(p3));                          // set != map (operator== rule)
+	// schema: const and uniqueItems must not cross the number/string line.
+	{
+		asvJSON S, I;
+		std::string err;
+		SchemaValidator sv;
+		S.parse(R"({"const":"18446744073709551615"})");
+		I.parse(R"(18446744073709551615)");
+		ASSERT(!sv.validate(I.getRoot(), S.getRoot(), err));    // string const vs raw number
+		S.parse(R"({"uniqueItems":true})");
+		I.parse(R"([18446744073709551615, "18446744073709551615"])");
+		ASSERT_MSG(sv.validate(I.getRoot(), S.getRoot(), err), err);   // distinct types -> unique
+		I.parse(R"([18446744073709551615, 18446744073709551615])");
+		ASSERT(!sv.validate(I.getRoot(), S.getRoot(), err));    // two identical literals -> duplicate
+		I.parse(R"(["18446744073709551615", "18446744073709551615"])");
+		ASSERT(!sv.validate(I.getRoot(), S.getRoot(), err));    // two identical strings -> duplicate
+		I.parse(R"([[18446744073709551615], ["18446744073709551615"]])");
+		ASSERT_MSG(sv.validate(I.getRoot(), S.getRoot(), err), err);  // deep path agrees with the fast path
+	}
+}
+
+TEST(testFilePathNulReject) {
+	// Wave 61: all four file entry points must reject an embedded NUL instead
+	// of letting the CRT truncate the path while the extension dispatch (and
+	// the caller's intent) uses the bytes beyond it ("evil\0.json" used to
+	// write JSON-format content into a file literally named "evil").
+	const std::string withNul = std::string("nulprobe_a.json\0evil", 20);
+	const std::string truncated = "nulprobe_a.json";
+	std::remove(truncated.c_str());
+	asvJSON j;
+	j.parse(R"({"a":1})");
+	ASSERT(!j.writeToFile(withNul));
+	ASSERT_EQ(j.getLastError(), "Invalid file name: embedded NUL");
+	ASSERT(!j.writeToFileAny(withNul));
+	ASSERT_EQ(j.getLastError(), "Invalid file name: embedded NUL");
+	std::ifstream probe(truncated);
+	ASSERT(!probe.is_open());   // nothing was written to the truncated path
+	asvJSON r;
+	ASSERT(!r.readFromFile(withNul));
+	ASSERT(!r.readFromFileAny(withNul));
+	std::remove("nulprobe_plain.json");
+	// sanity: a normal path still works through both writers and readers
+	ASSERT(j.writeToFile("nulprobe_plain.json"));
+	asvJSON r2;
+	ASSERT(r2.readFromFile("nulprobe_plain.json"));
+	ASSERT_EQ(r2.serialize(), j.serialize());
+	asvJSON r3;
+	ASSERT(r3.readFromFileAny("nulprobe_plain.json"));
+	std::remove("nulprobe_plain.json");
+}
+
 TEST(testPutFamilyGrowthCaps) {
 	// Wave 60: setValue/put* and the key-taking arrayAdd* were the last write
 	// paths without the MAX_OBJECT_SIZE cap - a loop of putInt("k"+N,1) grew
@@ -41347,6 +41425,8 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testDiffAppliesAsPatch);
 	RUN(testSetByPointerArrayGapSerialize);
 	RUN(testMergeRFC7396Semantics);
+	RUN(testValuesEqualFlagStrictness);
+	RUN(testFilePathNulReject);
 	RUN(testPutFamilyGrowthCaps);
 	RUN(testApplyPatchRFCArrayOps);
 

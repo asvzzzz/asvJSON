@@ -1852,6 +1852,15 @@ public:
 
 	bool writeToFile(const std::string& filename, bool pretty = false) const {
 		lastError.clear();
+		// An embedded NUL is not a character a file name can carry: the CRT
+		// truncates the path there, so "report.json\0.txt" silently writes to
+		// "report.json" while writeToFileAny's extension dispatch reads the
+		// bytes BEYOND the NUL - the caller's intended path and the file that
+		// actually appears diverge. Reject instead.
+		if (filename.find('\0') != std::string::npos) {
+			lastError = "Invalid file name: embedded NUL";
+			return false;
+		}
 		try {
 			std::ofstream out(filename);
 			if (!out.is_open()) { lastError = "Failed to open file: " + filename; return false; }
@@ -1867,6 +1876,10 @@ public:
 
 	bool readFromFile(const std::string& filename) {
 		lastError.clear();
+		if (filename.find('\0') != std::string::npos) {   // see writeToFile
+			lastError = "Invalid file name: embedded NUL";
+			return false;
+		}
 		try {
 			// Size cap BEFORE reading: the format decoders reject oversized
 			// inputs anyway (MAX_*_INPUT <= 32 MB), so slurping a multi-GB
@@ -3677,7 +3690,12 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth 
 		case asvJSONValue::BOOL_VAL: return a->flag == b->flag;
 		case asvJSONValue::INT: return a->num == b->num;
 		case asvJSONValue::DOUBLE: return a->dbl == b->dbl;
-		case asvJSONValue::STRING: return a->str_data == b->str_data;
+		// raw_number is part of the JSON identity here, matching operator==:
+		// a STRING holding an out-of-range numeric LITERAL ("18446744073709551615")
+		// is a NUMBER in the document, and "test"/"const" must not report it
+		// equal to a quoted string of the same text (RFC 6902 compares JSON
+		// values; number != string).
+		case asvJSONValue::STRING: return a->raw_number == b->raw_number && a->str_data == b->str_data;
 		case asvJSONValue::DATETIME: return a->timestamp == b->timestamp && a->datetime_ms == b->datetime_ms && a->tz_offset_min == b->tz_offset_min;
 		case asvJSONValue::BINARY: return a->bin_data == b->bin_data;
 		case asvJSONValue::OBJECTID: return a->str_data == b->str_data;
@@ -3701,6 +3719,9 @@ inline bool valuesEqual(const asvJSONValue* a, const asvJSONValue* b, int depth 
 		}
 		case asvJSONValue::OBJECT: {
 			if (static_cast<bool>(a->obj) != static_cast<bool>(b->obj)) return false;
+			// A YAML set and a plain object with the same members are NOT equal
+			// (same rule as operator== and cloneValue fidelity).
+			if (a->yaml_set != b->yaml_set) return false;
 			if (a->obj && b->obj) {
 				if (a->obj->size() != b->obj->size()) return false;
 				for (const auto& [k, v] : *a->obj) {

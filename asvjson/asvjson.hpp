@@ -483,6 +483,10 @@ static inline std::string asvjsonExtractExt(const std::string& filename) {
 
 inline bool asvJSON::readFromFileAny(const std::string& filename) {
   lastError.clear();
+  if (filename.find('\0') != std::string::npos) {   // embedded NUL truncates the
+    lastError = "Invalid file name: embedded NUL";  // CRT path but not the
+    return false;                                   // extension dispatch below
+  }
   // The bool + lastError contract: std::string building here (content,
   // ext, the lastError concat) must never escape as an exception.
   try {
@@ -611,6 +615,10 @@ inline bool asvJSON::readFromFileAny(const std::string& filename) {
 
 inline bool asvJSON::writeToFileAny(const std::string& filename, bool pretty) const {
   lastError.clear();
+  if (filename.find('\0') != std::string::npos) {   // see readFromFileAny: the
+    lastError = "Invalid file name: embedded NUL";  // extension comes from the
+    return false;                                   // bytes past the NUL
+  }
   // The bool + lastError contract: encoders (toBencode nesting, toXML NaN
   // attributes, ...) and the std::string building below must never escape
   // as an exception past this API.
