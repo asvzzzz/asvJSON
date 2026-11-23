@@ -1964,20 +1964,30 @@ public:
 		return v->bin_data;
 	}
 
+	// Returns false when a limit refused the write: MAX_OBJECT_SIZE on a NEW
+	// key (a putInt("k"+N) loop used to grow the root past the documented cap
+	// - same class as the setByPointer cap ba1d5a9 and the dotenv cap f0f5c2d),
+	// or a null factory result (OOM / oversize value). put* wrappers translate
+	// this into nullptr; NOTE the returned pointer is only valid when setValue
+	// succeeded, hence the bool.
 	template<typename F>
-	void setValue(std::string_view key, F&& factory) {
+	bool setValue(std::string_view key, F&& factory) {
 		if (!root || root->type != asvJSONValue::OBJECT) { root = asvJSONValue::makeObject(); }
-		if (!root) return;
+		if (!root) return false;
 		auto v = factory();
-		if (!v) return;
+		if (!v) return false;
 		auto it = mapFind(*root->obj, key);
 		if (it != root->obj->end()) { it->second = std::move(v); }
-		else { root->obj->emplace(std::string(key), std::move(v)); }
+		else {
+			if (!asvJSONValue::checkObjectSize(root->obj->size() + 1)) return false;
+			root->obj->emplace(std::string(key), std::move(v));
+		}
 		dirty_ = true;
+		return true;
 	}
 
-	void setValue(std::string_view key, std::unique_ptr<asvJSONValue> val) {
-		setValue(key, [v = std::move(val)]() mutable { return std::move(v); });
+	bool setValue(std::string_view key, std::unique_ptr<asvJSONValue> val) {
+		return setValue(key, [v = std::move(val)]() mutable { return std::move(v); });
 	}
 
 	void putString(std::string_view key, std::string_view value) {
@@ -1988,7 +1998,7 @@ public:
 		auto v = asvJSONValue::makeInt(n);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -1996,7 +2006,7 @@ public:
 		auto v = asvJSONValue::makeDouble(d);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2005,7 +2015,7 @@ public:
 		if (!v) return nullptr;
 		v->is_float32 = true;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2013,7 +2023,7 @@ public:
 		auto v = asvJSONValue::makeBool(b);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2021,7 +2031,7 @@ public:
 		auto v = asvJSONValue::makeDateTime(ts, ms);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2029,7 +2039,7 @@ public:
 		auto v = asvJSONValue::makeNull();
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2037,7 +2047,7 @@ public:
 		auto v = asvJSONValue::makeBinary(data, len);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2051,6 +2061,7 @@ public:
 		size_t bytes_per_chunk = (chunk_size / 4) * 3;
 		for (size_t i = 0; i < size; i += bytes_per_chunk) {
 			size_t chunk = std::min(bytes_per_chunk, size - i);
+			if (!asvJSONValue::checkArraySize(arr->arr->size() + 1)) return false;
 			std::string encoded = encodeBase64(data + i, chunk);
 			auto v = asvJSONValue::makeString(encoded.c_str(), encoded.length());
 			if (!v) return false;
@@ -2060,6 +2071,8 @@ public:
 		// entry (std::map semantics), so a second putBinChunked("k", ...) used to
 		// return true while silently DROPPING the new payload - every other put*()
 		// (putString/putInt/putBinary -> setValue) replaces the value in place.
+		if (mapFind(*root->obj, key) == root->obj->end() &&
+		    !asvJSONValue::checkObjectSize(root->obj->size() + 1)) return false;
 		root->obj->insert_or_assign(std::string(key), std::move(arr));
 		dirty_ = true;
 		return true;
@@ -2087,7 +2100,7 @@ public:
 		auto v = asvJSONValue::makeObjectId(oid);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2095,7 +2108,7 @@ public:
 		auto v = asvJSONValue::makeTimestamp(ts);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2103,7 +2116,7 @@ public:
 		auto v = asvJSONValue::makeRegex(pattern, options);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2111,7 +2124,7 @@ public:
 		auto v = asvJSONValue::makeExtension(extType, data, len);
 		if (!v) return nullptr;
 		auto* ptr = v.get();
-		setValue(key, std::move(v));
+		if (!setValue(key, std::move(v))) return nullptr;
 		return ptr;
 	}
 
@@ -2603,6 +2616,9 @@ public:
 		if (it != root->obj->end() && it->second->type == asvJSONValue::ARRAY) {
 			arrPtr = it->second.get();
 		} else {
+			// NEW key creates a member: same MAX_OBJECT_SIZE cap as setValue/
+			// setByPointer (replacing an existing non-array value does not grow).
+			if (it == root->obj->end() && !asvJSONValue::checkObjectSize(root->obj->size() + 1)) return nullptr;
 			auto newArr = asvJSONValue::makeArray();
 			if (!newArr) return nullptr;
 			arrPtr = newArr.get();

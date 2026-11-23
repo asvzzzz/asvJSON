@@ -36995,6 +36995,55 @@ TEST(testMergeRFC7396Semantics) {
 	}
 }
 
+TEST(testPutFamilyGrowthCaps) {
+	// Wave 60: setValue/put* and the key-taking arrayAdd* were the last write
+	// paths without the MAX_OBJECT_SIZE cap - a loop of putInt("k"+N,1) grew
+	// the root unbounded (the setByPointer analog ba1d5a9, the dotenv analog
+	// f0f5c2d). put* now returns nullptr when a NEW key would cross the cap.
+	asvJSON j;
+	for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE; i++) {
+		asvJSONValue* r = j.putInt("k" + std::to_string(i), 1);
+		ASSERT_MSG(r != nullptr, "legal put rejected at i=" + std::to_string(i));
+	}
+	// one past the cap: refused, document unchanged
+	ASSERT(j.putInt("overflow", 1) == nullptr);
+	ASSERT_EQ(j.getRoot()->obj->size(), asvJSONValue::MAX_OBJECT_SIZE);
+	// update-in-place of an existing key stays legal at the cap
+	asvJSONValue* up = j.putInt("k0", 2);
+	ASSERT(up != nullptr);
+	ASSERT_EQ(j.getInt("k0"), int64_t(2));
+	// putString/putNull share the setValue cap (void putString silently no-ops
+	// past the cap; the non-void overloads report nullptr)
+	j.putString("str-overflow", "x");
+	ASSERT(j.getNested("str-overflow") == nullptr);
+	// key-taking arrayAdd*: new key capped, existing array keeps its own cap
+	asvJSON a;
+	for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE; i++)
+		ASSERT_MSG(a.arrayAddInt("a" + std::to_string(i), 1) != nullptr, "legal arrayAdd rejected");
+	ASSERT(a.arrayAddInt("more", 1) == nullptr);
+	ASSERT_EQ(a.getRoot()->obj->size(), asvJSONValue::MAX_OBJECT_SIZE);
+	// existing key with a NON-array value: replacing it into an array does not
+	// grow the map - still legal at the cap
+	a.putString("a1", "scalar");                       // update in place, stays one member
+	ASSERT(a.arrayAddInt("a1", 2) != nullptr);         // scalar -> fresh array, no growth
+	// putBinChunked: new key capped, and the chunk array itself capped
+	asvJSON b;
+	b.parse(R"({"x":1})");
+	std::vector<uint8_t> payload(3u * 1024u * 1024u, 'A');   // ~45k chunks, under the array cap
+	ASSERT(b.putBinChunked("big", payload.data(), payload.size()));
+	// filling the map to MAX then adding another chunked key is refused
+	asvJSON c;
+	auto cr = asvJSONValue::makeObject();
+	for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE - 1; i++)
+		cr->obj->emplace("c" + std::to_string(i), asvJSONValue::makeInt(1));
+	c.setRoot(std::move(cr));
+	std::vector<uint8_t> small(6, 'B');
+	ASSERT(c.putBinChunked("cap-ok", small.data(), small.size()));      // reaches exactly MAX
+	ASSERT(!c.putBinChunked("cap-no", small.data(), small.size()));     // MAX+1 refused
+	// the rejected insert must not have created a partial member
+	ASSERT(c.getNested("cap-no") == nullptr);
+}
+
 TEST(testApplyPatchRFCArrayOps) {
 	// RFC 6902 4.1: an "add" array index >= the size means APPEND at the end
 	// (there is no null padding - the old behavior turned a 40-byte patch into
@@ -41298,6 +41347,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testDiffAppliesAsPatch);
 	RUN(testSetByPointerArrayGapSerialize);
 	RUN(testMergeRFC7396Semantics);
+	RUN(testPutFamilyGrowthCaps);
 	RUN(testApplyPatchRFCArrayOps);
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
