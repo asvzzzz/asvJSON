@@ -3426,6 +3426,12 @@ inline bool asvJSON::setByPointerRFC(std::string_view ptr, std::unique_ptr<asvJS
 			auto it = mapFind(*cur->obj, key);
 			if (it != cur->obj->end()) {
 				cur = it->second.get();
+			} else if (mode != 0) {
+				// RFC 6902: the target location's PARENT must exist. The raw
+				// setByPointer creates intermediate containers (its documented
+				// convenience), applyPatch must not silently build a chain of
+				// containers the patch never named (mode 1/2 land here).
+				return false;
 			} else {
 				size_t nextSlash = ptr.find('/', slash + 1);
 				std::string_view nextSeg = (nextSlash == std::string_view::npos)
@@ -3531,7 +3537,13 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 	if (ptr.empty() || ptr == "/") { clear(); return true; }
 	if (ptr[0] != '/') return false;
 	if (!root) return false;
-	if (ptr == "/-") return false;
+	// NOTE: no blanket `ptr == "/-"` rejection here. RFC 6901 makes "-" special
+	// only as an ARRAY index; for an OBJECT root, member "-" is an ordinary key
+	// that getByPointer reads and setByPointerRFC writes - removeByPointer used
+	// to refuse it (a member that could be seen and replaced but never removed;
+	// applyPatch "remove"/"move" on "/-" failed). Nested "/a/-" was never
+	// blocked, so the guard was also depth-inconsistent. The loop below rejects
+	// "-" on arrays via isArrayIndex, which is the correct place.
 	asvJSONValue* cur = root.get();
 	size_t start = 1;
 	while (start < ptr.size()) {
@@ -3811,10 +3823,19 @@ inline bool asvJSON::applyPatch(const asvJSON& patch) {
 			if (cap < 0 || valueContainerDepth(fromVal, cap) > cap) return false;
 			if (op == "move") {
 				auto fromClone = cloneValue(fromVal);
+				auto restoreClone = cloneValue(fromVal);
 				if (!removeByPointer(fromIt->second->str_data)) return false;
 				// "move"/"copy" ride RFC 6902 "add" semantics at the destination
-				// (append past the end, no null padding).
-				if (!setByPointerRFC(path, std::move(fromClone), 1)) return false;
+				// (append past the end, no null padding). If the destination is
+				// rejected (missing parent since wave 65, container cap), put
+				// the source back - applyPatch must never leave the document
+				// half-written by a failed op. Insertion order of an object
+				// member may shift (operator== is order-insensitive); an array
+				// index is restored exactly.
+				if (!setByPointerRFC(path, std::move(fromClone), 1)) {
+					setByPointerRFC(fromIt->second->str_data, std::move(restoreClone), 1);
+					return false;
+				}
 			} else {
 				if (!setByPointerRFC(path, cloneValue(fromVal), 1)) return false;
 			}

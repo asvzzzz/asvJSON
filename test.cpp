@@ -1253,6 +1253,88 @@ TEST(testSetByPointerDepthGuard) {
 	}
 }
 
+TEST(testApplyPatchRFCParentAndDash) {
+  // Wave 65 #1: RFC 6902 "add" requires the destination PARENT to exist.
+  // setByPointerRFC (modes 1/2, i.e. applyPatch) used to silently create a
+  // chain of intermediate containers that the patch never named - the raw
+  // setByPointer keeps that convenience (mode 0), applyPatch must not.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":1}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"add\",\"path\":\"/x/y\",\"value\":2}]")));
+    ASSERT(!j.applyPatch(p));
+    ASSERT(!j.getRoot()->hasKey("x"));           // nothing was created
+    std::string txt = j.serialize(false);
+    asvJSON back; ASSERT(back.parse(txt));
+    ASSERT(*back.getRoot() == *j.getRoot());
+  }
+  // existing parent, new member: legal
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"a\":{\"b\":1}}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"add\",\"path\":\"/a/c\",\"value\":2}]")));
+    ASSERT(j.applyPatch(p));
+    ASSERT(j.getRoot()->get("a")->hasKey("c"));
+  }
+  // move into a missing parent is rejected BEFORE the source is removed
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"keep\":1}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"move\",\"from\":\"/keep\",\"path\":\"/nope/deep\"}]")));
+    ASSERT(!j.applyPatch(p));
+    ASSERT(j.getRoot()->hasKey("keep"));
+  }
+  // raw setByPointer still creates intermediates (documented mode-0 behavior)
+  {
+    asvJSON j;
+    j.setRoot(asvJSONValue::makeObject());
+    ASSERT(j.setByPointer("/x/y", asvJSONValue::makeInt(3)));
+    ASSERT(j.getRoot()->get("x")->get("y")->num == 3);
+  }
+  // Wave 65 #2: "-" is special ONLY as an array index (RFC 6901). For an
+  // OBJECT it is an ordinary member name: readable, replaceable, removable.
+  // removeByPointer used to refuse the exact string "/-" at the root while
+  // nested "/a/-" worked - a member that could be seen but never removed.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"-\":1}")));
+    ASSERT(j.getByPointer("/-") != nullptr);      // reader always saw it
+    ASSERT(j.removeByPointer("/-"));              // now the writer agrees
+    ASSERT(j.getRoot()->obj->empty());
+  }
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"-\":1}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"remove\",\"path\":\"/-\"}]")));
+    ASSERT(j.applyPatch(p));
+    ASSERT(!j.getRoot()->hasKey("-"));
+  }
+  // move FROM object member "-" works now
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"-\":{\"k\":1},\"t\":{}}")));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"move\",\"from\":\"/-\",\"path\":\"/t/m\"}]")));
+    ASSERT(j.applyPatch(p));
+    ASSERT(!j.getRoot()->hasKey("-"));
+    ASSERT(j.getByPointer("/t/m") != nullptr);
+  }
+  // arrays still reject "-" as a removable/replacable index at ANY depth
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"arr\":[1,2]}")));
+    ASSERT(!j.removeByPointer("/arr/-"));
+    asvJSON p;
+    ASSERT(p.parse(std::string("[{\"op\":\"remove\",\"path\":\"/arr/-\"}]")));
+    ASSERT(!j.applyPatch(p));
+    ASSERT(j.getRoot()->get("arr")->arr->size() == 2);
+  }
+}
+
 TEST(testApplyPatchDepthBomb) {
 	// The setByPointer segment cap above counts PATH segments only, not the
 	// container chain of the attached value. A chain of individually-legal
@@ -41064,6 +41146,7 @@ int main() {
 	RUN(testJSONPointerArrayAppend);
 	RUN(testSetByPointerDepthGuard);
 	RUN(testApplyPatchDepthBomb);
+	RUN(testApplyPatchRFCParentAndDash);
 	
 	std::cout << "\n--- JSON Patch Extended Tests ---\n";
 	RUN(testJSONPatchCopyMove);
