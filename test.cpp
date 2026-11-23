@@ -39208,6 +39208,63 @@ TEST(testGoonInlineListHeaderLookalike) {
 // used a plain find('}'), so t[1]{"a}b"}: closed the field list inside the
 // quote and the header was not recognized ("unrecognized line 2 in object
 // context"). The header probe was already quote-aware; the extraction was not.
+TEST(testGoonTabularFieldNames) {
+  // Wave 56: the tabular header (`key[N]{f1,f2}:`) wrote each column name with
+  // a bare appendJsonEscaped - escaped but UNQUOTED. The decoder takes a bare
+  // field name verbatim (only surrounding spaces are trimmed) and unescapes
+  // only a fully quoted one, so a column name holding a TAB or a control byte
+  // decoded as the literal escape text: {"rows":[{"a<TAB>b":1}]} came back as
+  // {"rows":[{"a\\tb":1}]} - a silently different key, and the re-encode then
+  // chose the list form (enc(dec(enc(t))) != enc(t)). Column names now go
+  // through goonWriteKey, which quotes exactly when escaping was needed.
+  const char* keys[] = { "a\tb", "a\x01" "b", "a\x7F" "b", "a]b", "a[b]", "a:b", "a*b",
+                         "a b", "^", "$1", "1st", "__X__", "T", "null", "\xC3\xA9" };
+  for (const char* kc : keys) {
+    const std::string key(kc);
+    auto root = asvJSONValue::makeObject();
+    auto arr = asvJSONValue::makeArray();
+    for (int i = 1; i <= 2; i++) {
+      auto o = asvJSONValue::makeObject();
+      o->obj->emplace(key, asvJSONValue::makeInt(i));
+      arr->arr->push_back(std::move(o));
+    }
+    root->obj->emplace("rows", std::move(arr));
+    asvJSON j;
+    j.setRoot(std::move(root));
+    std::string orig = j.serialize();
+    std::string a = j.toGOON();
+    asvJSON j2;
+    ASSERT_MSG(j2.fromGOON(std::string_view(a)), key + " decode: " + j2.getLastError());
+    // The KEY must survive byte for byte (the old bug changed it), and the
+    // document must be at a fixed point after one round.
+    ASSERT_MSG(j2.serialize() == orig, "key changed: " + orig + " -> " + j2.serialize());
+    std::string b = j2.toGOON();
+    ASSERT_EQ(b, a);
+  }
+  // Names that cannot be written bare in a header fall back to the list form
+  // (pre-existing behavior, pinned so the fallback is not lost): they must
+  // still round-trip.
+  for (const std::string& key : { std::string("a}b"), std::string("a{b}"), std::string("a,b"),
+                                  std::string("a\"b"), std::string(""), std::string(" lead") }) {
+    auto root = asvJSONValue::makeObject();
+    auto arr = asvJSONValue::makeArray();
+    for (int i = 1; i <= 2; i++) {
+      auto o = asvJSONValue::makeObject();
+      o->obj->emplace(key, asvJSONValue::makeInt(i));
+      arr->arr->push_back(std::move(o));
+    }
+    root->obj->emplace("rows", std::move(arr));
+    asvJSON j;
+    j.setRoot(std::move(root));
+    std::string a = j.toGOON();
+    ASSERT(a.find("]{") == std::string::npos);   // no tabular header (]{f1,f2}:)
+    asvJSON j2;
+    ASSERT_MSG(j2.fromGOON(std::string_view(a)), j2.getLastError());
+    ASSERT_EQ(j2.serialize(), j.serialize());
+    ASSERT_EQ(j2.toGOON(), a);
+  }
+}
+
 TEST(testGoonQuotedFieldBrace) {
 	{
 		asvJSON j;
@@ -41091,7 +41148,8 @@ RUN(testYamlAuditReview);
 	RUN(testGoonKeyWithInteriorQuote);
 	RUN(testGoonInlineListHeaderLookalike);
 	RUN(testGoonISODateNotQuoted);
-	RUN(testGoonQuotedFieldBrace);
+	RUN(testGoonTabularFieldNames);
+RUN(testGoonQuotedFieldBrace);
 	RUN(testYamlRegexPipeSeparator);
 	RUN(testJSONPathQuotedNameShorthand);
 	RUN(testBomStrippedByDecoders);

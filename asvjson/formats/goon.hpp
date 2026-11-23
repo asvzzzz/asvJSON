@@ -631,13 +631,19 @@ inline void goonSerializeArray(const asvJSONValue* arr, std::string& out, int in
       out += pad;
       goonWriteKey(key, out, opts);
     }
-    out += "[" + std::to_string(arr->size()) + "]{" + [](const std::string& x) {
-      std::string r; appendJsonEscaped(r, x); return r;
-    }(cols[0]);
-    for (size_t i = 1; i < cols.size(); i++)
-      out += "," + [](const std::string& x) {
-        std::string r; appendJsonEscaped(r, x); return r;
-      }(cols[i]);
+    // Field names go through goonWriteKey, NOT a bare appendJsonEscaped: the
+    // decoder reads a BARE field name verbatim (only surrounding spaces are
+    // trimmed) and unescapes only a fully QUOTED name. Writing `a\tb` escaped
+    // but unquoted made the key come back as the literal 4 chars `a\tb`, and a
+    // key holding a comma split into two columns - so a table whose column name
+    // contained a TAB, a control byte, a quote, a comma or a '}' silently
+    // changed the key and enc(dec(enc(t))) != enc(t).
+    out += "[" + std::to_string(arr->size()) + "]{";
+    goonWriteKey(cols[0], out, opts);
+    for (size_t i = 1; i < cols.size(); i++) {
+      out += ",";
+      goonWriteKey(cols[i], out, opts);
+    }
     out += "}:\n";
     // RLE (all modes): consecutive identical rows become a single `row*N`;
     // otherwise each column uses `^` for a repeated previous cell. Runs longer
