@@ -470,7 +470,7 @@ Convenience methods combining dot-path lookup with type extraction.
 
 | Method | Description |
 |--------|-------------|
-| `void merge(const asvJSON& other)` | Shallow merge of object keys. |
+| `void merge(const asvJSON& other)` | Deep merge per RFC 7396 (same semantics as `applyMergePatch`): `null` patch members delete at every level, a null inside an ARRAY is data, new members beyond `MAX_OBJECT_SIZE` are refused with `lastError = "merge: object too large"`. |
 | `bool applyPatch(const asvJSON& patch)` | JSON Patch (RFC 6902) - array of operations. |
 | `asvJSON applyMergePatch(const asvJSON& patch) const` | JSON Merge Patch (RFC 7396) - returns new document. |
 

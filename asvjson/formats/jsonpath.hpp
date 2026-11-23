@@ -97,6 +97,17 @@
 //     quantifiers at your boundary before passing them in when the pattern
 //     source is untrusted. Invalid or otherwise rejected patterns simply
 //     yield false (no exception escapes).
+//   - Filter evaluation re-parses the expression for EVERY candidate element
+//     (JPFilterEval runs per element - that is what lets the syntax-error
+//     rollback in jpExpandBracket work, and AND/OR deliberately evaluate all
+//     terms). The measured cost is exactly O(terms x elements) (~0.33 us per
+//     term per element, re-tokenization dominating; probe sw45b: 5k..40k term
+//     chains x 500..4000 elements all land on the same per-eval constant),
+//     i.e. no hidden quadratic - but there is NO cap on query length, so the
+//     QUERY must be treated as trusted input, the same threat model as the
+//     schema patterns above: a 100k-term && chain costs ~33 s on a
+//     1000-element document. If your app builds JSONPath queries from
+//     user-controlled fragments, cap their size at your boundary.
 //   - query()/queryFirst() are lenient: malformed, unterminated, or otherwise
 //     invalid path segments select nothing rather than throwing; however they do
 //     not guard against out-of-memory conditions - std::bad_alloc (or similar)

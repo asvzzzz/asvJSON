@@ -3522,15 +3522,44 @@ inline bool asvJSON::removeByPointer(std::string_view ptr) {
 
 // Merge & Patch
 
-inline void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch, int depth) {
-	if (!target || !patch) return;
-	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return;
+// RFC 7396 insert semantics: Target[k] = MergePatch(undefined, v). A patch
+// OBJECT materializes recursively with EVERY null-valued member removed at
+// every level (the old plain clone kept them: {"a":{"b":null}} inserted into
+// {} produced {"a":{"b":null}}, not the RFC's {"a":{}}). Non-object values
+// (arrays included) are copied verbatim - a null inside an ARRAY is data.
+// Depth past MAX_NESTING_DEPTH drops the subtree (cloneValue returns null,
+// the same silent-degradation style as the OOM skips).
+inline std::unique_ptr<asvJSONValue> mergePatchInsert(const asvJSONValue* v, int depth) {
+	if (!v) return nullptr;
+	if (v->type != asvJSONValue::OBJECT || !v->obj || depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+		return cloneValue(v);
+	auto o = asvJSONValue::makeObject();
+	if (!o) return nullptr;
+	for (const auto& [k, x] : *v->obj) {
+		if (!x || x->type == asvJSONValue::NULL_VAL) continue;
+		if (!asvJSONValue::checkObjectSize(o->obj->size() + 1)) break;
+		auto c = mergePatchInsert(x.get(), depth + 1);
+		if (c) o->obj->insert_or_assign(k, std::move(c));
+	}
+	return o;
+}
+
+// Returns false when a growth cap refused a NEW member (the caller records
+// lastError). Every other write path (parse, applyPatch, setByPointer, the
+// decoders) enforces MAX_OBJECT_SIZE; merge was the outlier - a document
+// merged key-by-key could grow a target past MAX_OBJECT_SIZE with no error.
+// A subtree past MAX_NESTING_DEPTH is still a silent drop (an over-deep
+// cloneValue returns null, same style as the OOM `if (c)` skips).
+inline bool mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch, int depth) {
+	if (!target || !patch) return true;
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH)) return true;
 	if (patch->type != asvJSONValue::OBJECT || !patch->obj) {
-		return;
+		return true;
 	}
 	if (target->type != asvJSONValue::OBJECT || !target->obj) {
-		return;
+		return true;
 	}
+	bool ok = true;
 	for (const auto& [k, v] : *patch->obj) {
 		if (v->type == asvJSONValue::NULL_VAL) {
 			target->obj->erase(k);
@@ -3538,19 +3567,26 @@ inline void mergePatchRecursive(asvJSONValue* target, const asvJSONValue* patch,
 		}
 		auto it = mapFind(*target->obj, k);
 		if (it != target->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-			mergePatchRecursive(it->second.get(), v.get(), depth + 1);
+			if (!mergePatchRecursive(it->second.get(), v.get(), depth + 1)) ok = false;
 		} else {
-			auto c = cloneValue(v.get());
+			if (it == target->obj->end() && !asvJSONValue::checkObjectSize(target->obj->size() + 1)) { ok = false; continue; }
+			auto c = mergePatchInsert(v.get(), depth + 1);
 			if (c) target->obj->insert_or_assign(k, std::move(c));
 		}
 	}
+	return ok;
 }
 
 
 inline void asvJSON::merge(const asvJSON& other) {
+	lastError.clear();
 	if (!other.root) return;
 	if (!root || root->type != asvJSONValue::OBJECT) {
-		auto c = cloneValue(other.root.get());
+		// RFC 7396: a non-object target is REPLACED by the merge result - for
+		// an OBJECT patch that is MergePatch({}, patch), i.e. with every
+		// null-valued member stripped at every level (a raw clone used to keep
+		// them, diverging from applyMergePatch on the same input).
+		auto c = mergePatchInsert(other.root.get(), 0);
 		if (c) { root = std::move(c); dirty_ = true; }
 		return;
 	}
@@ -3567,9 +3603,13 @@ inline void asvJSON::merge(const asvJSON& other) {
 		}
 		auto it = mapFind(*root->obj, k);
 		if (it != root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-			mergePatchRecursive(it->second.get(), v.get(), 0);
+			if (!mergePatchRecursive(it->second.get(), v.get(), 0)) lastError = "merge: object too large";
 		} else {
-			auto c = cloneValue(v.get());
+			if (it == root->obj->end() && !asvJSONValue::checkObjectSize(root->obj->size() + 1)) {
+				lastError = "merge: object too large";
+				continue;
+			}
+			auto c = mergePatchInsert(v.get(), 1);
 			if (c) root->obj->insert_or_assign(k, std::move(c));
 		}
 	}
@@ -3595,11 +3635,15 @@ inline asvJSON asvJSON::applyMergePatch(const asvJSON& patch, int depth) const {
 		if (v->type == asvJSONValue::NULL_VAL) {
 			if (result.root->obj) result.root->obj->erase(k);
 		} else {
-			auto it = result.root->obj ? mapFind(*result.root->obj, k) : result.root->obj->end();
+			auto it = mapFind(*result.root->obj, k);
 			if (it != result.root->obj->end() && it->second->type == asvJSONValue::OBJECT && v->type == asvJSONValue::OBJECT) {
-				mergePatchRecursive(it->second.get(), v.get(), depth + 1);
+				if (!mergePatchRecursive(it->second.get(), v.get(), depth + 1)) result.lastError = "merge: object too large";
 			} else {
-				auto c = cloneValue(v.get());
+				if (it == result.root->obj->end() && !asvJSONValue::checkObjectSize(result.root->obj->size() + 1)) {
+					result.lastError = "merge: object too large";
+					continue;
+				}
+				auto c = mergePatchInsert(v.get(), depth + 1);
 				if (c) result.root->obj->insert_or_assign(k, std::move(c));
 			}
 		}

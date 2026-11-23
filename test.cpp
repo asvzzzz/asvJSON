@@ -36919,6 +36919,82 @@ TEST(testSetByPointerArrayGapSerialize) {
 	ASSERT(j.getRoot() && k.getRoot() && *j.getRoot() == *k.getRoot());
 }
 
+TEST(testMergeRFC7396Semantics) {
+	// Wave 59: merge() and applyMergePatch() must implement RFC 7396
+	// identically. Two divergences were fixed: (a) an inserted patch subtree
+	// was cloned VERBATIM, keeping null-valued members at every level (the
+	// RFC recursion Target[k] = MergePatch(undefined, v) strips them);
+	// (b) a non-object target replaced by an OBJECT patch kept the patch's
+	// top-level nulls in merge() while applyMergePatch() stripped them.
+	// Growth caps (MAX_OBJECT_SIZE) were also missing on every merge path.
+	asvJSON A, P;
+	A.parse(R"({})");
+	P.parse(R"({"a":{"b":null,"c":{"d":null,"e":1}}})");
+	{
+		asvJSON B = A;
+		B.merge(P);
+		ASSERT_EQ(B.serialize(), R"({"a":{"c":{"e":1}}})");
+		asvJSON C = A.applyMergePatch(P);
+		ASSERT_EQ(C.serialize(), B.serialize());
+	}
+	// A null INSIDE an array is data, not a delete marker.
+	A.parse(R"({})");
+	P.parse(R"({"a":[1,null,2]})");
+	{
+		asvJSON B = A;
+		B.merge(P);
+		ASSERT_EQ(B.serialize(), R"({"a":[1,null,2]})");
+	}
+	// Nulls already PRESENT in an untouched target member stay (the RFC
+	// iterates the PATCH's members only).
+	A.parse(R"({"keep":{"x":null}})");
+	P.parse(R"({"add":1})");
+	{
+		asvJSON B = A;
+		B.merge(P);
+		ASSERT_EQ(B.serialize(), R"({"keep":{"x":null},"add":1})");
+	}
+	// Non-object target + OBJECT patch with top-level nulls: both entry
+	// points agree on MergePatch({}, patch).
+	A.parse(R"(null)");
+	P.parse(R"({"k4":null,"k5":7})");
+	{
+		asvJSON B = A;
+		B.merge(P);
+		ASSERT_EQ(B.serialize(), R"({"k5":7})");
+		asvJSON C = A.applyMergePatch(P);
+		ASSERT_EQ(C.serialize(), R"({"k5":7})");
+	}
+	// Growth cap: a target at MAX_OBJECT_SIZE-1 takes exactly one new key;
+	// further new keys are refused with lastError, in-place updates stay legal.
+	{
+		asvJSON T;
+		auto root = asvJSONValue::makeObject();
+		for (size_t i = 0; i < asvJSONValue::MAX_OBJECT_SIZE - 1; i++)
+			root->obj->emplace("t" + std::to_string(i), asvJSONValue::makeInt(1));
+		T.setRoot(std::move(root));
+		asvJSON Q;
+		auto q = asvJSONValue::makeObject();
+		for (size_t i = 0; i < 5; i++)
+			q->obj->emplace("n" + std::to_string(i), asvJSONValue::makeInt(2));
+		Q.setRoot(std::move(q));
+		T.merge(Q);
+		ASSERT_EQ(T.getRoot()->obj->size(), asvJSONValue::MAX_OBJECT_SIZE);  // +1 legal, rest refused
+		ASSERT_EQ(T.lastError, "merge: object too large");
+		asvJSON U;
+		auto u = asvJSONValue::makeObject();
+		u->obj->emplace("t0", asvJSONValue::makeInt(99));                   // existing key: no growth
+		U.setRoot(std::move(u));
+		T.lastError.clear();
+		T.merge(U);
+		ASSERT(T.lastError.empty());
+		ASSERT_EQ(T.optInt("t0"), 99);
+		asvJSON R = T.applyMergePatch(Q);
+		ASSERT_EQ(R.getRoot()->obj->size(), asvJSONValue::MAX_OBJECT_SIZE);
+		ASSERT_EQ(R.lastError, "merge: object too large");
+	}
+}
+
 TEST(testApplyPatchRFCArrayOps) {
 	// RFC 6902 4.1: an "add" array index >= the size means APPEND at the end
 	// (there is no null padding - the old behavior turned a 40-byte patch into
@@ -41221,6 +41297,7 @@ RUN(testSchemaJsonPointerRefs);
 	RUN(testDiff);
 	RUN(testDiffAppliesAsPatch);
 	RUN(testSetByPointerArrayGapSerialize);
+	RUN(testMergeRFC7396Semantics);
 	RUN(testApplyPatchRFCArrayOps);
 
 	std::cout << "\n--- Pretty-Print Tests ---\n";
