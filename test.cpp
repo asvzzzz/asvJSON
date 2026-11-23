@@ -21522,6 +21522,60 @@ TEST(testViewOverloadAgreementNul) {
   }
 }
 
+TEST(testDirtyFlagAndKnobHygiene) {
+  // Wave 69: the isChanged() state machine and parser-knob non-leakage.
+  //  successful parse/fromX -> clean; failed parse -> clean;
+  //  successful mutation -> dirty; REJECTED mutation / remove-miss -> UNCHANGED;
+  //  clear()/releaseRoot() -> clean.
+  {
+    asvJSON j;
+    ASSERT(!j.isChanged());
+    ASSERT(j.parse(std::string_view("{\"a\":1}")));
+    ASSERT(!j.isChanged());
+    ASSERT(j.putInt("b", 2) != nullptr);
+    ASSERT(j.isChanged());
+    j.clear();
+    ASSERT(!j.isChanged());
+    auto r = j.releaseRoot();
+    ASSERT(r == nullptr);
+    ASSERT(j.parse("[1]"));
+    auto released = j.releaseRoot();
+    ASSERT(released != nullptr);
+    released.reset();
+    ASSERT(!j.isChanged());
+  }
+  {
+    asvJSON j; j.parse(std::string_view("{\"a\":1}"));
+    std::string deep;
+    for (int i = 0; i < 60; i++) deep += "/s" + std::to_string(i);
+    ASSERT(!j.setByPointer(deep, asvJSONValue::makeInt(1)));  // over-cap: rejected
+    ASSERT(!j.isChanged());                                    // flag UNCHANGED
+    j.remove("does-not-exist");                                // miss: no change
+    ASSERT(!j.isChanged());
+    j.remove("a");
+    ASSERT(j.isChanged());
+  }
+  {
+    asvJSON j;
+    ASSERT(!j.parse(std::string_view("{bad")));
+    ASSERT(!j.isChanged());
+    ASSERT(j.fromINI(std::string_view("")));   // contract: empty INI -> empty object
+    ASSERT(!j.isChanged());
+  }
+  // Knob hygiene: a permissive YAML run must not leak allowNaNInfinity into
+  // the core parser on the SAME instance; ADE strict must not leak either.
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("a: .inf")));   // YAML is permissive natively
+    ASSERT(!j.parse(std::string_view("[NaN]")));       // core still strict
+    ASSERT(j.fromGOON(std::string_view("a: F")));       // GOON roundtrip stays clean
+    ASSERT(!j.parse(std::string_view("[Infinity]")));
+    asvJSON k;
+    ASSERT(!k.fromADE(std::string_view("a: 1" + std::string(1,'\n') + "a: 2"), true));  // strict dup
+    ASSERT(k.fromADE(std::string_view("a: 1" + std::string(1,'\n') + "a: 2"), false));  // lenient param
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41713,6 +41767,7 @@ RUN(testRONCommentOrderAndPendants);
 RUN(testCommentRoundTripDegrade);
 RUN(testSchemaVsCoreNumericEquality);
 RUN(testViewOverloadAgreementNul);
+RUN(testDirtyFlagAndKnobHygiene);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);
