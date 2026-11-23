@@ -1198,14 +1198,34 @@ inline void iniWriteRepeatedLines(std::string& out, const std::string& keyEq, co
   if (!arr || arr->empty()) return;
   if (v->comments) iniWriteCommentLines(out, v->comments->leading);
   for (size_t i = 0; i < arr->size(); i++) {
+    // Element comments: on re-parse every occurrence of the repeated key
+    // merges into this ONE array node (the collector records all of them),
+    // so per-element leading lines and inline trailings survive as the
+    // array's own comments - the text is never dropped.
+    if ((*arr)[i]->comments) iniWriteCommentLines(out, (*arr)[i]->comments->leading);
     out += keyEq;
     out += " = ";
     iniFormatVal((*arr)[i].get(), out);
-    if (i + 1 == arr->size() && v->comments && !v->comments->trailing.empty())
-      iniWriteTrailingComments(out, v->comments->trailing);
-    else
+    bool wroteTrail = false;
+    if (i + 1 == arr->size()) {
+      std::vector<Comment> merged;
+      if (v->comments)
+        merged.insert(merged.end(), v->comments->trailing.begin(), v->comments->trailing.end());
+      if ((*arr)[i]->comments)
+        merged.insert(merged.end(), (*arr)[i]->comments->trailing.begin(), (*arr)[i]->comments->trailing.end());
+      if (!merged.empty()) { iniWriteTrailingComments(out, merged); wroteTrail = true; }
+    } else if ((*arr)[i]->comments && !(*arr)[i]->comments->trailing.empty()) {
+      iniWriteTrailingComments(out, (*arr)[i]->comments->trailing);
+      wroteTrail = true;
+    }
+    if (!wroteTrail)
       out += '\n';
   }
+  // Closing comments of the array node: as ';' lines after the last repeated
+  // line (they re-bind as the next node's leading / root footing at EOF -
+  // the text survives; there is no inline slot for them).
+  if (v->comments && !v->comments->closing.empty())
+    iniWriteCommentLines(out, v->comments->closing);
 }
 
 inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std::string& prefix, int depth = 1);
@@ -1258,8 +1278,17 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
   auto writeLeading = [&]() {
     if (wroteLeading) return;
     wroteLeading = true;
-    if (obj->comments && !obj->comments->leading.empty())
+    if (obj->comments) {
       iniWriteCommentLines(out, obj->comments->leading);
+      // This level's trailing/closing have no line of their own once the
+      // header is written... or when no header is written at all. Emit them
+      // as comment lines in the very place leading is written: on re-parse
+      // they re-bind as leading comments of the section (position changes,
+      // the TEXT survives - dropping them outright contradicted the "the
+      // text is never dropped" promise above).
+      iniWriteCommentLines(out, obj->comments->trailing);
+      iniWriteCommentLines(out, obj->comments->closing);
+    }
   };
 
   if (headerEmitted) {
@@ -1313,6 +1342,10 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
       }
       if (isObj && !val->arr->empty()) {
         std::string escKey = iniEscapeSectionKey(key);
+        // The array node's own leading comments: written once above the first
+        // [[...]] header (they re-parse as leading of the first element -
+        // INI has no line for the array itself - but the TEXT survives).
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& elem : *val->arr) {
           std::string newPrefix = prefix.empty() ? escKey : prefix + "." + escKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
@@ -1320,6 +1353,10 @@ inline void iniEmitObject(const asvJSONValue* obj, std::string& out, const std::
           if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
           out += "[[" + newPrefix + "]]\n";
           if (elem->type == asvJSONValue::OBJECT) iniEmitElement(elem.get(), out, newPrefix, depth + 1);
+          if (elem->comments) {
+            iniWriteCommentLines(out, elem->comments->closing);
+            iniWriteCommentLines(out, elem->comments->trailing);
+          }
         }
       }
     }
@@ -1343,6 +1380,19 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
   if (!asvJSONValue::checkNestingDepth(depth)) {
     throw asvJSONError("INI: nesting too deep");
   }
+  // This node is written as FLAT dotted keys (no header of its own), but its
+  // own comments still need a home: leading lines go immediately before its
+  // first key line, closing/trailing as comment lines right after its last.
+  // On re-parse they re-bind to a neighbouring path (the dotted key has no
+  // node of its own in the comment index) - the TEXT survives, only the
+  // placement normalizes.
+  bool nodeLeadWritten = false;
+  if (obj->comments && !obj->comments->leading.empty()) {
+    if (!out.empty() && out.back() != '\n') out += '\n';
+    iniWriteCommentLines(out, obj->comments->leading);
+    nodeLeadWritten = true;
+  }
+  (void)nodeLeadWritten;
   // Pass 1: bare-line producers
   for (const auto& [key, val] : *obj->obj) {
     std::string flatKey = iniEscapeFlatKey(key);
@@ -1372,15 +1422,28 @@ inline void iniEmitElementFlat(const asvJSONValue* obj, const std::string& dk, s
       bool allObjects = true;
       for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
       if (allObjects && !val->arr->empty()) {
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& e : *val->arr) {
           std::string np = prefix.empty() ? full : prefix + "." + full;
           if (!out.empty() && out.back() != '\n') out += '\n';
           if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np, depth + 1);
+          if (e->comments) {
+            iniWriteCommentLines(out, e->comments->closing);
+            iniWriteCommentLines(out, e->comments->trailing);
+          }
         }
       }
     }
+  }
+  // The node's own closing/trailing comments after its last emitted line
+  // (see the leading block at the top: dotted-key levels have no closer, so
+  // the comments become comment lines; the text survives, placement moves).
+  if (obj->comments && (!obj->comments->closing.empty() || !obj->comments->trailing.empty())) {
+    if (!out.empty() && out.back() != '\n') out += '\n';
+    iniWriteCommentLines(out, obj->comments->closing);
+    iniWriteCommentLines(out, obj->comments->trailing);
   }
 }
 
@@ -1417,12 +1480,17 @@ inline void iniEmitElement(const asvJSONValue* elem, std::string& out, const std
       bool allObjects = true;
       for (const auto& e : *val->arr) if (e->type != asvJSONValue::OBJECT) { allObjects = false; break; }
       if (allObjects && !val->arr->empty()) {
+        if (val->comments) iniWriteCommentLines(out, val->comments->leading);
         for (const auto& e : *val->arr) {
           std::string np = prefix.empty() ? flatKey : prefix + "." + flatKey;
           if (!out.empty() && out.back() != '\n') out += '\n';
           if (e->comments) iniWriteCommentLines(out, e->comments->leading);
           out += "[[" + np + "]]\n";
           iniEmitElement(e.get(), out, np, depth + 1);
+          if (e->comments) {
+            iniWriteCommentLines(out, e->comments->closing);
+            iniWriteCommentLines(out, e->comments->trailing);
+          }
         }
       }
     }
@@ -1466,12 +1534,17 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
               if (elem->type != T::OBJECT) { allObjects = false; break; }
             if (allObjects && !val->arr->empty()) {
               std::string escKey = iniEscapeSectionKey(key);
+              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
               for (const auto& elem : *val->arr) {
                 if (!out.empty() && out.back() != '\n') out += '\n';
                 if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
                 out += "[[" + escKey + "]]\n";
                 if (elem->type == T::OBJECT)
                   iniEmitElement(elem.get(), out, escKey, 2);
+                if (elem->comments) {
+                  iniWriteCommentLines(out, elem->comments->closing);
+                  iniWriteCommentLines(out, elem->comments->trailing);
+                }
               }
             }
           }
@@ -1512,6 +1585,7 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
             }
             if (allObjects && !val->arr->empty()) {
               std::string escKey = iniEscapeSectionKey(key);
+              if (val->comments) iniWriteCommentLines(out, val->comments->leading);
               for (const auto& elem : *val->arr) {
                 if (!out.empty() && out.back() != '\n') out += '\n';
                 if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
@@ -1519,12 +1593,23 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
                 if (elem->type == T::OBJECT) {
                   iniEmitElement(elem.get(), out, escKey, 2);
                 }
+                if (elem->comments) {
+                  iniWriteCommentLines(out, elem->comments->closing);
+                  iniWriteCommentLines(out, elem->comments->trailing);
+                }
               }
             }
           }
         }
       }
-      if (comments) iniWriteCommentLines(out, comments->footing);
+      // Object root: trailing/closing have no line of their own either; write
+      // them as comment lines before the footing so their TEXT survives (they
+      // re-parse as extra footing comments at EOF).
+      if (comments) {
+        iniWriteCommentLines(out, comments->trailing);
+        iniWriteCommentLines(out, comments->closing);
+        iniWriteCommentLines(out, comments->footing);
+      }
     }
   } else if (type == T::ARRAY && arr) {
     // INI always decodes to an OBJECT root, so a bare array cannot survive as
@@ -1562,7 +1647,18 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
       else
         out += '\n';
     } else if (iniIsBareChild(this)) {
+      // Leading comments of the array: as ';' lines before the repeated key
+      // lines (iniWriteRepeatedLines writes them; the caller must not).
       iniWriteRepeatedLines(out, "value", this);
+      // The array node's trailing/closing: written as comment LINES after the
+      // last repeated line. A line already carrying an inline comment cannot
+      // take another one, and an own-line comment here re-binds as the next
+      // node's leading (or root footing at EOF) - the text survives, only the
+      // slot moves (documented normalization).
+      if (comments) {
+        iniWriteCommentLines(out, comments->closing);
+        iniWriteCommentLines(out, comments->trailing);
+      }
     } else {
       if (comments) iniWriteCommentLines(out, comments->leading);
       for (const auto& elem : *arr) {
@@ -1570,8 +1666,17 @@ inline void asvJSONValue::toINI(std::string& out, bool pretty) const {
         if (elem->comments) iniWriteCommentLines(out, elem->comments->leading);
         out += "[[value]]\n";
         if (elem->type == T::OBJECT) iniEmitElement(elem.get(), out, "value", 2);
+        // The element's closing/trailing have no inline slot here; written as
+        // ';' lines they re-parse as leading/footing - text survives.
+        if (elem->comments) {
+          iniWriteCommentLines(out, elem->comments->closing);
+          iniWriteCommentLines(out, elem->comments->trailing);
+        }
       }
     }
+    // The object-array ROOT's own trailing/closing: documented API-only state
+    // (no line of its own; after the last element they would re-bind to that
+    // element, which is worse than dropping - see the KNOWN LIMITATIONS).
     if (comments) iniWriteCommentLines(out, comments->footing);
   } else {
     // A scalar root likewise cannot be represented (the decoder always builds

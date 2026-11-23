@@ -819,6 +819,12 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
       if (c == 0xA0 && j >= 1 && static_cast<unsigned char>(input[j - 1]) == 0xC2) { j -= 1; continue; }
       if (c == 0xBF && j >= 2 && static_cast<unsigned char>(input[j - 1]) == 0xBB &&
           static_cast<unsigned char>(input[j - 2]) == 0xEF) { j -= 2; continue; }
+      // An opening bracket has no value the comment could trail: compact
+      // output writes `[//~\n6.0`, and reading that as same-line made the
+      // comment bind as a TRAILING of the value that follows it - placement
+      // oscillated leading->trailing->trailing across encode rounds. Comments
+      // preceded only by whitespace/openers are own-line (leading candidates).
+      if (c == '{' || c == '[') continue;
       if (c != ' ' && c != '\t' && c != '\v' && c != '\f') return false;
     }
     return true;
@@ -1046,8 +1052,19 @@ inline std::vector<Json5CommentEntry> json5CollectComments(std::string_view inpu
 
 inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth = 0, bool pretty = false);
 
+// Append a line-comment BODY after the caller has written the "//" marker:
+// text containing newlines (only reachable from a programmatically built
+// Comment - the collector never stores one) gets a fresh "//" per line, or
+// the remainder would read back as document content.
+inline void json5AppendLineText(std::string& out, const std::string& text) {
+  for (size_t i = 0; i < text.size(); i++) {
+    out += text[i];
+    if (text[i] == '\n' && i + 1 < text.size()) out += "//";
+  }
+}
+
 // Serialize a value plus its same-line trailing comment. When `commaNeeded`
-// and the trailing is a `//` comment (which swallows everything to end-of-line),
+// is set and the trailing is a `//` comment (which swallows everything to end-of-line),
 // the separating comma is emitted BEFORE the comment so the next entry starts
 // fresh on its own line with no leading comma. Mirrors the RON encoder.
 // Returns true when the output ended with a newline.
@@ -1058,7 +1075,7 @@ inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, 
   bool sawLine = false;
   for (size_t i = 0; i < list.size(); i++) {
     const Comment& c = list[i];
-    if (c.block) {
+    if (!commentLineForm(c)) {
       out += " /*";
       out += c.text;
       out += "*/";
@@ -1077,7 +1094,7 @@ inline bool json5EmitValueWithTrailing(const asvJSONValue* v, std::string& out, 
     // there is no next member), so the text survives and only its placement is
     // normalized.
     out += sawLine ? "//" : " //";
-    out += c.text;
+    json5AppendLineText(out, c.text);
     out += '\n';
     sawLine = true;
     if (i + 1 < list.size() && pretty)
@@ -1130,11 +1147,15 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
           out += (pretty || leadCmt) ? ",\n" : ",";
         }
         prevNl = false;
-        if (child && child->comments) {
+        if (child && child->comments && !child->comments->leading.empty()) {
+          // A comment right after '{' on the SAME line is not "own-line" to
+          // the collector, so it would re-bind as a trailing of this member
+          // and oscillate. Force the break-line form (compact too).
+          if (!pretty) out += '\n';
           for (const auto& c : child->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-            else { out += "//"; out += c.text; }
+            if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+            else { out += "//"; json5AppendLineText(out, c.text); }
             out += '\n';
           }
         }
@@ -1149,14 +1170,18 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
         i++;
       }
       if (v->comments && !v->comments->closing.empty()) {
-        if (pretty) out += '\n';
+        // Closing comments must be OWN-LINE: the collector classifies a
+        // comment as closing only by that rule. The old compact form wrote
+        // `, /*c*/` - the comma made the comment same-line, so it re-read as
+        // a TRAILING of the preceding entry, and trailing->closing->trailing
+        // oscillated between encode rounds. Break the line instead (never a
+        // comma: JSON5 allows one before the closer, but it buys nothing).
+        if (pretty || (!out.empty() && out.back() != '\n')) out += '\n';
         for (const auto& c : v->comments->closing) {
           if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-          else out += ", ";
-          if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-          else { out += "//"; out += c.text; }
-          if (pretty) out += '\n';
-          else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
+          if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+          else { out += "//"; json5AppendLineText(out, c.text); }
+          out += '\n';
         }
       }
       if (pretty && v->obj && !v->obj->empty()) {
@@ -1179,11 +1204,12 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
         }
         prevNl = false;
         if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-        if (elem && elem->comments) {
+        if (elem && elem->comments && !elem->comments->leading.empty()) {
+          if (!pretty) out += '\n';   // own-line rule, see the OBJECT case
           for (const auto& c : elem->comments->leading) {
             if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-            else { out += "//"; out += c.text; }
+            if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+            else { out += "//"; json5AppendLineText(out, c.text); }
             out += '\n';
           }
         }
@@ -1191,15 +1217,14 @@ inline void json5SerializeVal(const asvJSONValue* v, std::string& out, int depth
           prevNl = true;
       }
       if (v->comments && !v->comments->closing.empty()) {
-        if (pretty) out += '\n';
-          for (const auto& c : v->comments->closing) {
-            if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
-            else out += ", ";
-            if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-            else { out += "//"; out += c.text; }
-            if (pretty) out += '\n';
-            else if (!c.block) out += '\n'; // non-pretty //-comment must not swallow the closing ']'
-          }
+        // Same own-line rule as the OBJECT closing block above.
+        if (pretty || (!out.empty() && out.back() != '\n')) out += '\n';
+        for (const auto& c : v->comments->closing) {
+          if (pretty) out += std::string(static_cast<size_t>(depth + 1) * 2, ' ');
+          if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+          else { out += "//"; json5AppendLineText(out, c.text); }
+          out += '\n';
+        }
       }
       if (pretty && v->arr && !v->arr->empty()) {
         if (out.back() != '\n') out += '\n';
@@ -1303,24 +1328,32 @@ inline std::string asvJSON::toJSON5(bool pretty) const {
   std::string out;
   if (root->comments) {
     for (const auto& c : root->comments->leading) {
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; json5AppendLineText(out, c.text); }
       out += '\n';
     }
   }
   json5SerializeVal(root.get(), out, 0, pretty);
   if (root->comments) {
     if (!root->comments->trailing.empty()) {
-      const auto& c = root->comments->trailing.front();
-      out += ' ';
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
-      if (commentNeedsEol(c)) out += '\n';
+      // EVERY trailing comment: only the first shares the value's line,
+      // later line-form ones go on their own lines (front() alone used to be
+      // emitted and the rest silently dropped - programmatic trees only).
+      bool prevEndedLine = false;
+      const auto& tl = root->comments->trailing;
+      for (size_t ci = 0; ci < tl.size(); ci++) {
+        const Comment& c = tl[ci];
+        if (ci == 0) out += ' ';
+        else if (!prevEndedLine) out += ' ';   // block form did not end the line: stay on it
+        // (when prevEndedLine the cursor already starts a fresh line)
+        if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; prevEndedLine = false; }
+        else { out += "//"; json5AppendLineText(out, c.text); out += '\n'; prevEndedLine = true; }
+      }
     }
     for (const auto& c : root->comments->footing) {
       out += '\n';
-      if (c.block) { out += "/*"; out += c.text; out += "*/"; }
-      else { out += "//"; out += c.text; }
+      if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; }
+      else { out += "//"; json5AppendLineText(out, c.text); }
       out += '\n';
     }
   }

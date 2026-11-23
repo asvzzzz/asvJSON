@@ -191,8 +191,19 @@ inline std::string asvJSON::toYAML(const YamlWriteOptions& opts) const {
 			out += "---\n";
 		}
 		root->toYAML(out, opts);
-		if (opts.style == YamlWriteOptions::Style::Block && root->comments)
+		if (opts.style == YamlWriteOptions::Style::Block && root->comments) {
+			// A root OBJECT/ARRAY has no line of its own to carry trailing
+			// comments (scalar roots and empty containers write "key: v #c"
+			// / "{} #c" inline via yamlTrail). Write them as own-line
+			// comments after the document body: on re-read the collector
+			// re-binds them (trailing/footing of the root), so the text
+			// survives even though the slot normalizes.
+			bool ownLineTrail =
+				(root->type == asvJSONValue::OBJECT && root->obj && !root->obj->empty()) ||
+				(root->type == asvJSONValue::ARRAY && root->arr && !root->arr->empty());
+			if (ownLineTrail) emitCommentLines(out, root->comments->trailing, "#");
 			emitCommentLines(out, root->comments->footing, "#");
+		}
 	}
 	return out;
 }
@@ -369,6 +380,14 @@ inline void yamlBlockVal(const asvJSONValue* v, std::string& out, int indent,
 	    depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
 		throw asvJSONError("YAML: nesting too deep");
 	const int iw = yamlIndentWidth(o);
+	// The ARRAY root writes its own document marker (the document-level entry
+	// point skips it for arrays). Emit it BEFORE the node's leading comments:
+	// comments placed above "---" fall into the multi-document boundary region
+	// and the collector (safety-first) drops pending comments there, so the
+	// root's leading comments silently vanished on re-read.
+	const bool arrayRootMarker = isRoot && v->type == T::ARRAY &&
+	                             v->arr && !v->arr->empty();
+	if (arrayRootMarker) out += "---\n";
 	auto prefix = [&]() -> std::string {
 		if (isArrayItem && key.empty()) return std::string(indent * iw, ' ') + "- ";
 		// An empty OBJECT key needs the quoted "'': " form, but the ROOT scalar
@@ -555,7 +574,7 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 		case T::ARRAY: {
 			if (!v->arr || v->arr->empty()) { out += prefix() + "[]" + yamlTrail(v, wc) + "\n"; break; }
 			if (isRoot) {
-				out += "---\n";
+				if (!arrayRootMarker) out += "---\n";
 				for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, 0, "", true, o, wc, false, depth + 1);
 				break;
 			}
@@ -2648,6 +2667,13 @@ inline std::string_view::size_type yamlFindKeyColon(std::string_view s) {
 		if (sq) { if (c == '\'' && i + 1 < s.size() && s[i + 1] == '\'') i++; else if (c == '\'') sq = false; continue; }
 		if (c == '"') { dq = true; continue; }
 		if (c == '\'') { sq = true; continue; }
+		// A '#' at line start or after white space opens a comment (YAML
+		// plain/flow rule): everything after it is comment text, never a
+		// mapping separator. Without this, "x #c: 1" (a trailing comment on
+		// a bare value or a sequence item) found the colon INSIDE the comment
+		// and the line was rewritten as a "- key: value" mapping.
+		if (c == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t'))
+			return std::string_view::npos;
 		if (c == '[' || c == '{') { depth++; continue; }
 		if (c == ']' || c == '}') { depth--; continue; }
 		if (c == ':' && depth == 0) return i;
@@ -3527,14 +3553,42 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 					yamlFoldPlainScalar(lines, li, indent + 1, out, inlineValStart, inlineVal);
 				}
 			} else {
-				pendingKey = isCompoundKey ? compoundKey : yamlEscKey(rawKey);
-				pendingIndent = indent;
+				// Empty value. If the line carried only a trailing comment
+				// ("a.b:  #c"), emit the key now (with no value): the old
+				// pendingKey parking lost it when the value turned out to be
+				// a block sequence at the SAME indent.
+				if (!inlineVal.empty() && inlineVal[0] == '#' && !stack.empty() &&
+				    stack.back().type == 'O' && stack.back().align == indent) {
+					addComma(stack, out);
+					stack.back().first = false;
+					out += jsonKey + ":";
+				} else {
+					pendingKey = isCompoundKey ? compoundKey : yamlEscKey(rawKey);
+					pendingIndent = indent;
+				}
 			}
 			continue;
 		}
 
 		if (yamlIsDashStart(content)) {
 			// --- Array item ---
+			// A key still pending from this same indent ("a:" with the value
+			// to come) owns this sequence: emit "key": and open the array now,
+			// instead of closing the mapping and re-homing the sequence at the
+			// parent. The block encoder writes exactly "key:" + a same-indent
+			// sequence (and "key:  #comment" when the key carries a trailing
+			// comment), so this is the encoder's own shape on re-read.
+			if (!pendingKey.empty() && pendingIndent == indent && !stack.empty() &&
+			    stack.back().type == 'O' && stack.back().align == indent) {
+				addComma(stack, out);
+				stack.back().first = false;
+				out += "\"" + pendingKey + "\":[";
+				pendingKey.clear();
+				if (stack.size() >= asvJSONValue::MAX_NESTING_DEPTH)
+					throw asvJSONError("YAML: maximum nesting depth exceeded");
+				FormatFrame f; f.type = 'A'; f.align = indent; f.first = true; f.hasVal = true; f.isRoot = false;
+				stack.push_back(f);
+			}
 			while (!stack.empty()) {
 				auto& top = stack.back();
 				if (top.isRoot && indent <= top.align) break;
@@ -3741,7 +3795,9 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 				throw asvJSONError("YAML: expected value after ':'");
 			}
 
-			if (!valPart.empty() && valPart[0] != '#') {
+			if (!valPart.empty() && valPart[0] != '#' &&
+			    !(valPart.find_first_not_of(" \t") != std::string::npos &&
+			        valPart[valPart.find_first_not_of(" \t")] == '#')) {
 				addComma(stack, out);
 				if (!stack.empty()) stack.back().first = false;
 				out += "\"" + jsonKey + "\":";
@@ -4106,20 +4162,36 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 			for (char ch : valuePart) {
 				if (ch != ' ' && ch != '\t') { hasVal = ch != '#'; break; }
 			}
+			// (valuePart here is already comment-stripped content: a "key:  #c"
+			// line has an EMPTY valuePart - the trailing comment lives on the
+			// raw line and does NOT make the key valued.)
 			top.open = (bindable && !hasVal) ? entryPath : std::string();
 		}
 
 		if (bindable) {
 			Comment trail;
-			if (!valuePart.empty()) {
+			bool trailFound = false;
+			if (!valuePart.empty() && valuePart[0] == '#') {
+				// The "value" of this line is itself a comment ("k: #c" -
+				// the encoder writes exactly that for a trailing comment on
+				// an empty-valued key). Bind the whole text as the trailing.
+				std::string raw(valuePart);
+				while (!raw.empty() && (raw.back() == ' ' || raw.back() == '	')) raw.pop_back();
+				trail = yamlCommentFromRaw(raw); trailFound = true;
+			} else if (!valuePart.empty()) {
 				std::string raw = yamlTrailingComment(valuePart);
-				if (!raw.empty()) trail = yamlCommentFromRaw(raw);
+				// "k: 1 #" carries a real (empty-text) comment: raw == "#" is
+				// non-empty while the stored text is empty. Testing trail.text
+				// used to drop it, so a programmatically attached empty
+				// trailing comment vanished (the encoder wrote " #", the
+				// collector kept nothing).
+				if (!raw.empty()) { trail = yamlCommentFromRaw(raw); trailFound = true; }
 			}
 			if (!pending.empty()) {
 				YamlCommentEntry e; e.path = entryPath; e.leading = std::move(pending);
 				out.push_back(std::move(e));
 			}
-			if (!trail.text.empty()) {
+			if (trailFound) {
 				// Merge with a just-created leading-only entry for the same node.
 				if (!out.empty() && out.back().path == entryPath && out.back().trailing.empty())
 					out.back().trailing.push_back(std::move(trail));
@@ -4129,13 +4201,44 @@ inline std::vector<YamlCommentEntry> yamlCollectComments(std::string_view input)
 				}
 			}
 		} else {
+			// Root-scalar documents ("22", "false", 'a: 1', "[0]"-style JSON
+			// scalars): the content line names no entry, but the document root
+			// does exist. The old unconditional clear() silently dropped every
+			// leading/trailing comment the encoder writes around a scalar root
+			// (and around an empty-name single-key map). Bind them to the root
+			// (path "") when the line is a plain scalar-ish line at the frame
+			// indent with no entries recorded yet; every other unbindable
+			// construct keeps dropping (safety-first, as documented).
+			bool rootScalar = !dash && indent == st.back().indent && st.size() == 1 &&
+			                  top.kind == 'm' && top.seqIdx == 0 && top.lastEntry.empty() &&
+			                  !rest.empty() &&
+			                  rest[0] != '{' && rest[0] != '[' && rest[0] != '?' &&
+			                  rest[0] != '&' && rest[0] != '*' && rest[0] != '|' &&
+			                  rest[0] != '>' && rest[0] != '!';
+			if (rootScalar) {
+				std::string raw = yamlTrailingComment(rest);
+				if (!pending.empty()) {
+					YamlCommentEntry e; e.leading = std::move(pending);
+					out.push_back(std::move(e));
+				}
+				if (!raw.empty()) {
+					YamlCommentEntry e; e.trailing.push_back(yamlCommentFromRaw(raw));
+					out.push_back(std::move(e));
+				}
+			}
 			pending.clear();
 		}
 
 		if (yamlIsBlockScalarHeader(c)) blockBody = indent;
 	}
 	if (!disabled && !pending.empty()) {
-		YamlCommentEntry e; e.path = "\x01"; e.leading = std::move(pending);
+		// No entry ever seen: the whole document was comment lines (or the
+		// comments precede a construct that binds nothing) - keep the text on
+		// the ROOT leading rather than dropping.
+		YamlCommentEntry e;
+		if (out.empty()) e.path = std::string();
+		else e.path = "\x01";
+		e.leading = std::move(pending);
 		out.push_back(std::move(e));
 	}
 	return out;

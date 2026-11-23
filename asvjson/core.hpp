@@ -499,10 +499,22 @@ struct Comments {
 	std::vector<Comment> footing;   // trailing comments after the whole document (root only)
 };
 
+// True when a comment must be (or already is) emitted in LINE form. A block
+// comment whose text contains "*/" would terminate itself early, and one whose
+// text contains "/*" opens a nested comment in the RON-family scanners (the
+// parser counts nesting and then reports "unterminated block comment") - so
+// every encoder with native block syntax (JSON5/RON/ADE) degrades such texts
+// to line comment(s); emitting `/*a*/b*/` verbatim produced a document that
+// the format's own parser rejected (encoder/decoder self-consistency rule).
+inline bool commentLineForm(const Comment& c) noexcept {
+	return !c.block || c.text.find("*/") != std::string::npos || c.text.find("/*") != std::string::npos;
+}
+
 // True when a trailing comment's final line is a line comment (not ending
 // `*/`), meaning any separator/closer on the next line would be swallowed
-// and a line break must follow.
-inline bool commentNeedsEol(const Comment& c) noexcept { return !c.block; }
+// and a line break must follow. A block comment degraded to line form by
+// commentLineForm counts as a line comment here.
+inline bool commentNeedsEol(const Comment& c) noexcept { return commentLineForm(c); }
 
 // Emit a list of comments as own-line entries with the given line-marker
 // prefix ('//', '#', ';'). Block comments are split into lines.
@@ -521,7 +533,10 @@ inline void emitCommentLines(std::string& out, const std::vector<Comment>& list,
 					if (!first) out += '\n';
 					first = false;
 					out += lineMarker;
-					if (lineMarker[0] != '/' && lineMarker[1] == '\0') out += ' ';
+					// NO cosmetic space after the marker: the YAML collector
+					// keeps everything after '#' verbatim, so `# text` would
+					// read back as " text" (a spurious leading space grew into
+					// the comment text on every round).
 					out.append(line.data() + b, e - b);
 				}
 				if (nl == std::string_view::npos) break;
@@ -4064,8 +4079,17 @@ inline std::string asvJSON::toYAML(bool pretty) const {
 			out += "---\n";
 		}
 		root->toYAML(out, pretty);
-		if (pretty && root->comments)
+		if (pretty && root->comments) {
+			// Root OBJECT/ARRAY trailing comments have no inline slot (the
+			// body ends with the last member/item): write them as own-line
+			// comments after the body so the text survives the round-trip
+			// (same rule as the YamlWriteOptions entry point above).
+			bool ownLineTrail =
+				(root->type == asvJSONValue::OBJECT && root->obj && !root->obj->empty()) ||
+				(root->type == asvJSONValue::ARRAY && root->arr && !root->arr->empty());
+			if (ownLineTrail) emitCommentLines(out, root->comments->trailing, "#");
 			emitCommentLines(out, root->comments->footing, "#");
+		}
 	}
 	return out;
 }

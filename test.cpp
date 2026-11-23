@@ -21251,6 +21251,171 @@ TEST(testRONCommentOrderAndPendants) {
   }
 }
 
+TEST(testCommentRoundTripDegrade) {
+  // Wave 66: comment pipeline self-consistency for the comment formats
+  // (json5/ron/ade/ini/yaml). The encoder must never emit a document its own
+  // decoder rejects, and comment TEXT is never dropped - only its placement
+  // may normalize (leading <-> trailing <-> footing).
+  auto allTexts = [](const asvJSONValue* root) {
+    std::vector<std::string> out;
+    std::function<void(const asvJSONValue*)> walk = [&](const asvJSONValue* x) {
+      if (x->comments) {
+        for (const auto& c : x->comments->leading) out.push_back(c.text);
+        for (const auto& c : x->comments->trailing) out.push_back(c.text);
+        for (const auto& c : x->comments->closing) out.push_back(c.text);
+        for (const auto& c : x->comments->footing) out.push_back(c.text);
+      }
+      if (x->type == asvJSONValue::OBJECT && x->obj)
+        for (const auto& kv : *x->obj) walk(kv.second.get());
+      if (x->type == asvJSONValue::ARRAY && x->arr)
+        for (const auto& e : *x->arr) walk(e.get());
+    };
+    if (root) walk(root);
+    return out;
+  };
+  auto hasText = [&allTexts](const asvJSON& j, const std::string& needle) {
+    for (const auto& s : allTexts(j.getRoot()))
+      if (s == needle || s.find(needle) != std::string::npos) return true;
+    return false;
+  };
+
+  // 1. JSON5: a block comment whose text re-opens a block comment ("/*") must
+  // degrade to the line form; written verbatim it left an unterminated comment
+  // and the format\'s own parser rejected the output.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":1}")));
+    auto* kid = j.getRoot()->get("a");
+    kid->comments = std::make_unique<Comments>();
+    Comment c; c.text = "x /*y"; c.block = true;
+    kid->comments->leading.push_back(c);
+    std::string s = j.toJSON5(true);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromJSON5(std::string_view(s)), s.c_str());
+    ASSERT(hasText(j2, "/*y"));
+    ASSERT_EQ(j2.toJSON5(true), s);
+  }
+
+  // 2. RON: same */-text rule - written as a block comment ("/*a*/b*/") the
+  // scanner reported "unterminated block comment".
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":1}")));
+    auto* kid = j.getRoot()->get("a");
+    kid->comments = std::make_unique<Comments>();
+    Comment c; c.text = "a*/b"; c.block = true;
+    kid->comments->leading.push_back(c);
+    std::string s = j.toRON(true);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromRON(std::string_view(s)), s.c_str());
+    ASSERT(hasText(j2, "a*/b"));
+    ASSERT_EQ(j2.toRON(true), s);
+  }
+
+  // 3. RON: a trailing comment on a GROUP-WRAPPED single-key object may not
+  // share the separator-comma line (the collector matches no entry there and
+  // dropped the text). It goes below and re-binds as the next field\'s leading.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"0\":{\"k1\":[30,50]},\"x y\":\"v\"}")));
+    auto* w = j.getRoot()->get("0");
+    w->comments = std::make_unique<Comments>();
+    Comment c; c.text = "a: 1"; c.block = false;
+    w->comments->trailing.push_back(c);
+    std::string s = j.toRON(true);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromRON(std::string_view(s)), s.c_str());
+    ASSERT(hasText(j2, "a: 1"));
+  }
+
+  // 4. ADE: a multi-line comment TEXT is written as one line per text line
+  // (raw text after a marker truncated at the first break and corrupted the
+  // document); every line survives the round trip as its own comment.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":1}")));
+    j.getRoot()->comments = std::make_unique<Comments>();
+    Comment c; c.text = "l1\nl2"; c.block = false;
+    j.getRoot()->comments->leading.push_back(c);
+    std::string s = j.toADE();
+    // The multi-line text must become REAL comment lines (a raw newline
+    // after one marker truncated the comment and corrupted the file).
+    ASSERT(s.find("//l1") != std::string::npos);
+    ASSERT(s.find("//l2") != std::string::npos);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromADE(std::string_view(s)), s.c_str());
+    ASSERT(*j2.getRoot() == *j.getRoot());
+  }
+
+  // 5. INI: a nested object inside a [[...]] table is written as FLAT dotted
+  // keys and has no header of its own - its leading/trailing comments used to
+  // vanish. Now they go above/below the dotted block as comment lines.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[{\"k1\":{\"k0\":1}}]")));
+    auto* elem = (*j.getRoot()->arr)[0].get();
+    auto* k1 = elem->get("k1");
+    k1->comments = std::make_unique<Comments>();
+    Comment lc; lc.text = "note"; lc.block = false;
+    k1->comments->leading.push_back(lc);
+    Comment tc; tc.text = "tail"; tc.block = false;
+    k1->comments->trailing.push_back(tc);
+    std::string s = j.toINI();
+    asvJSON j2;
+    ASSERT_MSG(j2.fromINI(std::string_view(s)), s.c_str());
+    ASSERT(hasText(j2, "note"));
+    ASSERT(hasText(j2, "tail"));
+  }
+
+  // 6. YAML: an inline comment on an EMPTY-valued key ("k:  #c") must not
+  // poison the following same-indent block sequence (the pending key was lost
+  // and the sequence re-homed to the parent: "Expected ':'" on re-read).
+  {
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view("k:  #c\n- 1\n- 2\n")), j.getLastError().c_str());
+    ASSERT(j.getRoot()->get("k") != nullptr);
+    ASSERT_EQ(j.getRoot()->get("k")->type, asvJSONValue::ARRAY);
+    ASSERT_EQ(j.getRoot()->get("k")->arr->size(), 2u);
+  }
+
+  // 7. YAML: the mapping-colon scan is comment-aware now. A ":" inside a
+  // trailing comment is NOT a mapping separator ("x #c: 1" is a plain scalar,
+  // "- 24.0 #a: 1" a scalar item - the old scanner rewrote such lines into a
+  // mapping and the intermediate JSON failed to parse).
+  {
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view("x #c: 1\n")), j.getLastError().c_str());
+    ASSERT_EQ(j.getRoot()->type, asvJSONValue::STRING);
+    ASSERT_EQ(std::string(j.getRoot()->getString()), std::string("x"));
+    asvJSON k;
+    ASSERT_MSG(k.fromYAML(std::string_view("- 24.0 #a: 1\n")), k.getLastError().c_str());
+    ASSERT_EQ(k.getRoot()->type, asvJSONValue::ARRAY);
+    ASSERT_EQ((*k.getRoot()->arr)[0]->type, asvJSONValue::DOUBLE);
+  }
+
+  // 8. YAML: comments attached to a root ARRAY / root OBJECT. The array\'s
+  // leading must be written AFTER the "---" marker (above it the comments fall
+  // into the multi-document boundary and the collector drops them); the
+  // containers have no inline slot, so their trailing goes as own-line comments.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("[20.0]")));
+    j.getRoot()->comments = std::make_unique<Comments>();
+    Comment lc; lc.text = "hd"; lc.block = false;
+    j.getRoot()->comments->leading.push_back(lc);
+    Comment tc; tc.text = "tl"; tc.block = false;
+    j.getRoot()->comments->trailing.push_back(tc);
+    std::string s = j.toYAML(true);
+    asvJSON j2;
+    ASSERT_MSG(j2.fromYAML(std::string_view(s)), s.c_str());
+    ASSERT(hasText(j2, "hd"));
+    ASSERT(hasText(j2, "tl"));
+    asvJSON j3;
+    ASSERT(j3.fromYAML(std::string_view(j2.toYAML(true))));
+    ASSERT_EQ(j3.toYAML(true), j2.toYAML(true));
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -41439,6 +41604,7 @@ RUN(testSexprReviewFixes);
 	RUN(testRONComments);
 RUN(testRONReviewFixes);
 RUN(testRONCommentOrderAndPendants);
+RUN(testCommentRoundTripDegrade);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);

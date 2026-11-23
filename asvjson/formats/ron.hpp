@@ -1163,8 +1163,16 @@ inline void ronEmitClosing(std::string& out, const asvJSONValue* v, int depth, b
 // produces such a text (it stops at the newline) but Comment.text is public, so a
 // programmatically built comment is split into one line comment per line. Block
 // comments keep their text: newlines are legal there.
+// Append the comment in the format's native comment syntax. Block comments
+// whose text contains "*/" close early in the parser (the RON-family scanner
+// reports "unterminated block comment" for `/*a*/b*/`), and multi-line text
+// truncates a line comment - so both degrade to line comment(s); the parser
+// restores the text on the next round-trip.
 inline void ronAppendComment(std::string& out, const Comment& c) {
-  if (c.block) { out += "/*"; out += c.text; out += "*/"; return; }
+  // Block form only when the text cannot close it early ("*/"): `/*a*/b*/`
+  // ended the comment at the inner "*/" and the remainder broke the document
+  // (its own parser rejected it). Such comments degrade to the line split.
+  if (!commentLineForm(c)) { out += "/*"; out += c.text; out += "*/"; return; }
   size_t start = 0;
   while (start < c.text.size()) {
     size_t nl = c.text.find('\n', start);
@@ -1197,13 +1205,40 @@ inline bool ronEmitValueWithTrailing(const asvJSONValue* v, std::string& out, in
   for (const auto& c : v->comments->trailing) {
     if (commentNeedsEol(c)) { needEol = true; break; }
   }
-  if (commaNeeded && needEol) out += ',';
-  for (const auto& c : v->comments->trailing) {
-    out += ' ';
-    ronAppendComment(out, c);
+  // The end-of-line comma may not share its line with a comment when the
+  // VALUE line is already closed (a named-group closer whose child trailing
+  // comments ended it: "...)\n, //c" - the collector sees a comment on a
+  // comma-only line, matches no entry, and drops the text). Push such a
+  // comment onto its own line below: it re-binds as the next field's leading
+  // (text survives, position normalizes - the accepted rule).
+  bool loneComma = false;
+  if (commaNeeded && needEol) {
+    loneComma = out.empty() || out.back() == '\n';
+    out += ',';
   }
-  if (needEol) { out += '\n'; return true; }
-  return false;
+  // Only the FIRST trailing comment may share the value's line: a `//`
+  // comment eats everything to the end of the line, so a second line-form
+  // one written beside it re-parses as ONE merged comment ("c1 //c2"), and
+  // a block comment behind a line one vanished entirely. Further comments
+  // go on their own lines below (the text stays separate).
+  bool prevEndedLine = false;
+  const auto& tl = v->comments->trailing;
+  for (size_t ci = 0; ci < tl.size(); ci++) {
+    const Comment& c = tl[ci];
+    // Stay on the value's line unless the previous comment already consumed
+    // it: block comments do not end the line, so `800 /*a*/ /*b*/` reads all
+    // of them back as trailing. Breaking to a fresh line after a BLOCK
+    // comment would move the next one into the FOLLOWING value's leading.
+    if (ci > 0 && prevEndedLine) { if (pretty) ronIndent(out, depth + 1); }
+    else if (ci == 0 && loneComma) { out += '\n'; if (pretty) ronIndent(out, depth + 1); }
+    else out += ' ';
+    ronAppendComment(out, c);
+    bool lineForm = commentNeedsEol(c);
+    if (lineForm) out += '\n';
+    prevEndedLine = lineForm;
+  }
+  if (needEol && !prevEndedLine) out += '\n';
+  return needEol;
 }
 
 // Serializes the field list of an object between wrapper delimiters
@@ -1430,6 +1465,7 @@ inline void ronSerializeVal(const asvJSONValue* v, std::string& out, int depth, 
           // trailing after the last field, or closings before `)`) belong to
           // the `Name(...)` form and are emitted here around the closer.
           if (child->comments && !child->comments->trailing.empty()) {
+            bool prevEndedLine = false;
             for (const auto& c : child->comments->trailing) {
               out += ' ';
               ronAppendComment(out, c);
@@ -1595,10 +1631,16 @@ inline std::string asvJSON::toRON(bool pretty) const {
   }
   ronSerializeVal(root.get(), out, 0, pretty);
   if (root->comments) {
+    bool prevEndedLine = false;
     for (const auto& c : root->comments->trailing) {
-      out += ' ';
+      // Line-form comments cannot share a line (the collector would merge
+      // their texts); a block comment keeps the line open for the next one.
+      if (!prevEndedLine) out += ' ';
+      else if (commentNeedsEol(c)) out += '\n';
+      else out += ' ';
       ronAppendComment(out, c);
-      if (commentNeedsEol(c)) out += '\n';
+      prevEndedLine = commentNeedsEol(c);
+      if (prevEndedLine) out += '\n';
     }
     for (const auto& c : root->comments->footing) {
       out += '\n';
@@ -1621,10 +1663,12 @@ inline void asvJSONValue::toRON(std::string& out, bool pretty) const {
   }
   ronSerializeVal(this, out, 0, pretty);
   if (comments && !comments->trailing.empty()) {
+    bool prevEndedLine = false;
     for (const auto& c : comments->trailing) {
-      out += ' ';
+      if (prevEndedLine) out += '\n';
+      else out += ' ';
       ronAppendComment(out, c);
-      if (commentNeedsEol(c)) out += '\n';
+      prevEndedLine = commentNeedsEol(c);
     }
   }
 }

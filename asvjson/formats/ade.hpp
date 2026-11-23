@@ -5,7 +5,13 @@
 // Features:
 //   - Optional "# ADE vX.Y" header
 //   - Multiple documents separated by "// --- End of Document ---" lines
-//   - Comments: #, //, /* ... */ (outside strings)
+//   - Comments: #, //, /* ... */ (outside strings). NOTE: asymmetric by
+//     design - the ENCODER writes the per-node Comments metadata (leading/
+//     trailing/closing/footing) so a tree imported from another format keeps
+//     its comments in the output, but the DECODER only skips comment tokens:
+//     fromADE does NOT collect them back into node metadata (unlike
+//     YAML/INI/JSON5/RON). An ADE -> ADE cycle therefore does not preserve
+//     comments; comment fidelity is a one-way (write) feature here.
 //   - Keys: identifiers, quoted strings, dotted keys (a.b.c => nested objects)
 //   - Values: quoted/unquoted strings, decimal/hex/octal/binary numbers,
 //     booleans (case-insensitive), null, inline or multi-line arrays/objects,
@@ -2233,7 +2239,11 @@ inline bool adeHasComments(const asvJSONValue* v) {
 
 inline void adeWriteCommentLines(std::ostream& os, const std::vector<Comment>& list, int indent) {
   for (const auto& c : list) {
-    if (c.block) {
+    // Block form only when the text cannot close it early ("*/"): a text like
+    // "a*/b" produced `/* a*/b */` and the document no longer parsed (the
+    // encoder emitted output its own decoder rejected). Such comments, and any
+    // line-form text holding newlines, degrade to one "//" comment per line.
+    if (!commentLineForm(c)) {
       auto nl = c.text.find('\n');
       if (nl != std::string_view::npos) {
         adeWriteIndent(os, indent);
@@ -2257,8 +2267,16 @@ inline void adeWriteCommentLines(std::ostream& os, const std::vector<Comment>& l
         os << "/* " << c.text << " */\n";
       }
     } else {
-      adeWriteIndent(os, indent);
-      os << "//" << c.text << '\n';
+      // Line form: one "//" per text line (a programmatic line comment may
+      // hold newlines; the block form is also degraded here - see above).
+      size_t start = 0;
+      while (true) {
+        size_t nl2 = c.text.find('\n', start);
+        adeWriteIndent(os, indent);
+        os << "//" << std::string_view(c.text).substr(start, nl2 == std::string_view::npos ? std::string_view::npos : nl2 - start) << '\n';
+        if (nl2 == std::string_view::npos) break;
+        start = nl2 + 1;
+      }
     }
   }
 }
@@ -2268,15 +2286,32 @@ inline void adeWriteCommentLines(std::ostream& os, const std::vector<Comment>& l
 // same line, so ADE separators/closers must start on a fresh line).
 inline bool adeWriteTrailing(std::ostream& os, const asvJSONValue* v) {
   if (!v->comments || v->comments->trailing.empty()) return false;
+  bool prevLine = false;
   for (const auto& c : v->comments->trailing) {
-    if (c.block) {
+    // A line-form comment opened here must be closed with a newline before
+    // the NEXT trailing comment is written (a "//" swallows the rest of the
+    // line); the first line shares the value's line, the rest are own-line.
+    if (!commentLineForm(c)) {
+      if (prevLine) os << '\n';
       os << " /* " << c.text << " */";
-    } else {
-      os << " //" << c.text;
+      prevLine = false;
+      continue;
     }
+    if (prevLine) os << '\n';
+    size_t start = 0;
+    bool first = true;
+    while (true) {
+      size_t nl = c.text.find('\n', start);
+      std::string_view line = std::string_view(c.text).substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
+      os << (first ? " //" : "\n//") << line;
+      first = false;
+      if (nl == std::string_view::npos) break;
+      start = nl + 1;
+    }
+    prevLine = true;
   }
   const auto& last = v->comments->trailing.back();
-  bool needNl = !last.block;
+  bool needNl = commentNeedsEol(last);
   if (needNl) os << '\n';
   return needNl;
 }
