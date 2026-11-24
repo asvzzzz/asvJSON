@@ -12657,6 +12657,49 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testPointerLenientTilde) {
+  // Probe sw93: the raw pointer API models RFC 6901 exactly EXCEPT one
+  // documented leniency: a lone '~' in a token stays LITERAL (the RFC calls
+  // it invalid). get/remove/set must agree on it, and the strict "~0" form
+  // still resolves the same key; diff() must emit proper ~0/~1 escapes so
+  // its patches re-apply through the strict path.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    ASSERT(j.setByPointer("/~", asvJSONValue::makeInt(42)));
+    std::string s1; j.getRoot()->serialize(s1, false, 0);
+    ASSERT_EQ(s1, std::string("{\"~\":42}"));
+    ASSERT(j.getByPointer("/~") != nullptr);
+    ASSERT(j.getByPointer("/~0") != nullptr);
+    ASSERT(j.removeByPointer("/~0"));
+    std::string s2; j.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s2, std::string("{}"));
+  }
+  // ~1 -> "/" and ~0 -> "~" compose left-to-right per the RFC
+  {
+    asvJSON k;
+    ASSERT(k.parse(std::string_view("{\"a/b\":1,\"x~1y\":2}")));
+    ASSERT(k.getByPointer("/a~1b") != nullptr);
+    ASSERT(k.getByPointer("/x~01y") != nullptr);   // ~0 -> '~', then literal '1'
+    ASSERT(k.getByPointer("/x~1y") == nullptr);    // decodes to "x/y": absent
+  }
+  // diff/applyPatch round trip through properly escaped paths
+  {
+    asvJSON A, B;
+    ASSERT(A.parse(std::string_view("{\"~\":1,\"a/b\":2}")));
+    ASSERT(B.parse(std::string_view("{\"~\":9,\"a/b\":8}")));
+    asvJSON P = A.diff(B);
+    std::string pt; P.getRoot()->serialize(pt, false, 0);
+    ASSERT(pt.find("/~0") != std::string::npos);
+    ASSERT(pt.find("/a~1b") != std::string::npos);
+    asvJSON D;
+    ASSERT(D.parse(std::string_view("{\"~\":1,\"a/b\":2}")));
+    ASSERT(D.applyPatch(P));
+    std::string dt; D.getRoot()->serialize(dt, false, 0);
+    ASSERT_EQ(dt, std::string("{\"~\":9,\"a/b\":8}"));
+  }
+}
+
 TEST(testYamlTaggedFoldAndRecursionBudget) {
   // Probe sw92: tagged inline PLAIN values fold their continuation lines like
   // untagged ones (the old code leaked the next line into the structure:
@@ -42941,7 +42984,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testYamlTaggedFoldAndRecursionBudget);
+	RUN(testPointerLenientTilde);
+RUN(testYamlTaggedFoldAndRecursionBudget);
 RUN(testSaxEntryContracts);
 RUN(testProtobufSchemaWireMatrix);
 RUN(testBSONUtf8DecoderSymmetry);
