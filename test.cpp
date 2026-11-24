@@ -12657,6 +12657,79 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testADEFeatureMatrix) {
+  // Probe sw88: the ADE feature set pinned end-to-end. Every accepted
+  // document must reach an encode->parse->encode fixed point.
+  struct Ad { const char* doc; bool strict; const char* want; };
+  const Ad ads[] = {
+    // block scalars: clip / strip / keep / explicit indent / folded
+    {"v: |\n  line1\n  line2\n", false, "{\"v\":\"line1\\nline2\\n\"}"},
+    {"v: |-\n  line1\n  line2\n", false, "{\"v\":\"line1\\nline2\"}"},
+    {"v: |+\n  l1\n\n\n", false, "{\"v\":\"l1\\n\\n\\n\"}"},
+    {"v: |2\n    deep\n", false, "{\"v\":\"  deep\\n\"}"},  // indicator strips 2, the rest is content
+    {"v: >\n  a\n  b\n", false, "{\"v\":\"a b\\n\"}"},
+    {"v: >-\n  a\n  b\n", false, "{\"v\":\"a b\"}"},
+    {"v: |\n", false, "{\"v\":\"\"}"},
+    {"v: |\n  a \n  b\n", false, "{\"v\":\"a \\nb\\n\"}"},   // trailing spaces kept
+    {"v: |\n  x\nw: 1\n", false, "{\"v\":\"x\\n\",\"w\":1}"},
+    // tags (serialize() renders the special types as their Extended-JSON envelopes)
+    {"v: !base64 \"aGVsbG8=\"\n", false, "{\"v\":{\"$binary\":{\"base64\":\"aGVsbG8=\",\"subType\":\"00\"}}}"},
+    {"v: !ext \"5:aGVsbG8=\"\n", false, "{\"v\":{\"$binary\":{\"base64\":\"aGVsbG8=\",\"subType\":\"05\"}}}"},
+    {"v: !regex \"a.c|i\"\n", false, "{\"v\":{\"$regex\":\"a.c\",\"$options\":\"i\"}}"},
+    {"v: !objectid \"507f1f77bcf86cd799439011\"\n", false, "{\"v\":{\"$oid\":\"507f1f77bcf86cd799439011\"}}"},
+    {"v: !timestamp 1700000000\n", false, "{\"v\":{\"$timestamp\":{\"t\":1700000000}}}"},
+    {"v: !datetime \"2024-01-15T10:30:00Z\"\n", false, "{\"v\":\"2024-01-15T10:30:00Z\"}"},
+    {"v: !mytag hello\n", false, "{\"v\":{\"$customTag\":{\"name\":\"mytag\",\"value\":\"hello\"}}}"},
+    {"v: !<regex> \"x|y\"\n", false, "{\"v\":{\"$customTag\":{\"name\":\"regex\",\"value\":\"x|y\"}}}"}, // verbatim tag name
+    // anchors / aliases / dotted keys / quoted keys
+    {"a: &n 5\nb: *n\n", false, "{\"a\":5,\"b\":5}"},
+    {"a: &l [1,2]\nb: *l\n", false, "{\"a\":[1,2],\"b\":[1,2]}"},
+    {"a.b.c: 1\n", false, "{\"a\":{\"b\":{\"c\":1}}}"},
+    {"a.b: 1\na.c: 2\n", false, "{\"a\":{\"b\":1,\"c\":2}}"},
+    {"\"a b\": 1\n", false, "{\"a b\":1}"},
+    // header versioning (major must be 1) and multi-document markers
+    {"# ADE v1.1\na: 1\n", false, "{\"a\":1}"},
+    {"a: 1\n// --- End of Document ---\nb: 2\n", false, "[{\"a\":1},{\"b\":2}]"},
+    // marker-looking keys are quoted by the encoder and survive
+    {"\"---\": 1\n\"...\": 2\n", false, "{\"---\":1,\"...\":2}"},
+    // strict mode: duplicate quoted keys rejected, bare keys rejected
+    {"\"a\": 1\n\"a\": 1\n", true, nullptr},
+    {"a: 1\n", true, nullptr},
+    // malformed tagged values rejected with named errors
+    {"v: !datetime \"not-a-date\"\n", false, nullptr},
+    {"v: !objectid \"zz\"\n", false, nullptr},
+    {"v: !bin \"hi\"\n", false, nullptr},      // !bin payload is hex
+    // aliases: undefined / forward / self all rejected
+    {"b: *nope\n", false, nullptr},
+    {"b: *n\na: &n 5\n", false, nullptr},
+    {"a: &n [1, *n]\n", false, nullptr},
+  };
+  for (auto& ad : ads) {
+    asvJSON j;
+    bool ok = j.fromADE(std::string_view(ad.doc), ad.strict);
+    if (!ad.want) { ASSERT_MSG(!ok, ad.doc); continue; }   // expected-reject rows
+    ASSERT_MSG(ok, ad.doc);
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_MSG(s == ad.want, ad.doc);
+    // encode -> parse -> encode fixed point with tree preservation
+    std::string e1 = j.toADE();
+    asvJSON k;
+    ASSERT_MSG(k.fromADE(std::string_view(e1), ad.strict), e1.c_str());
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_MSG(s == s2, ad.doc);
+    ASSERT_EQ(e1, k.toADE());
+  }
+  // the header version error is named
+  {
+    asvJSON j;
+    ASSERT(!j.fromADE(std::string_view("# ADE v2.0\na: 1\n")));
+    ASSERT(j.getLastError().find("unsupported ADE version") != std::string::npos);
+    asvJSON d;
+    ASSERT(!d.fromADE(std::string_view("\"a\": 1\n\"a\": 2\n"), true));
+    ASSERT(d.getLastError().find("duplicate key") != std::string::npos);
+  }
+}
+
 TEST(testDiffSpecialTypeTransport) {
   // Probe sw87: special-typed values riding diff()/applyPatch JSON transport.
   // Every patch value must survive serialize->parse TYPE-exactly and applying
@@ -42553,7 +42626,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testDiffSpecialTypeTransport);
+	RUN(testADEFeatureMatrix);
+RUN(testDiffSpecialTypeTransport);
 RUN(testLineEndingPolicy);
 RUN(testProtobufTextRootGuards);
 RUN(testSexprHeuristicTable);
