@@ -1271,6 +1271,15 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
               ltype < -128 || ltype > 127)
             throw GoonDecodeError("GOON: extension type out of range [-128, 127]");
           std::string b64 = rest.substr(us + 1);
+          // The prefix declares a typed extension: an UNDECODABLE payload must
+          // error like an out-of-range type does, not build an envelope whose
+          // base64 the JSON layer (strict since the $binary hardening) would
+          // silently refuse - the old path fabricated EXTENSION(type, EMPTY).
+          {
+            bool berr = false;
+            decodeBase64Fast(b64.data(), b64.size(), &berr);
+            if (berr) throw GoonDecodeError("GOON: extension payload is not valid base64");
+          }
           char hbuf[3];
           snprintf(hbuf, sizeof(hbuf), "%02x", static_cast<unsigned>(static_cast<int>(ltype)) & 0xFF);
           return "{\"$binary\":{\"base64\":\"" + b64 + "\",\"subType\":\"" + hbuf + "\"}}";

@@ -1523,12 +1523,23 @@ private:
 			{
 				auto oidIt = obj->obj->find("$oid");
 				if (oidIt != obj->obj->end() && oidIt->second->type == asvJSONValue::STRING && oidIt->second->str_data.size() == 24 && obj->obj->size() == 1) {
-					uint8_t bytes[12];
-					for (int i = 0; i < 12; i++) {
-						char buf[3] = {oidIt->second->str_data[i*2], oidIt->second->str_data[i*2+1], 0};
-						bytes[i] = static_cast<uint8_t>(std::strtol(buf, nullptr, 16));
+					// Recognize ONLY 24 hex digits: the raw strtol-per-pair silently
+					// turned "NNNN..." (or "++++...") into OBJECTID(00...) and
+					// REWRITE the text on the next encode (data corruption at
+					// recognition, probe sw76 micro). A malformed envelope stays a
+					// plain object - byte-exact through serialize/re-parse, the
+					// $set/$regex recognition-strictness family.
+					bool hexOk = true;
+					for (char c : oidIt->second->str_data)
+						if (!std::isxdigit(static_cast<unsigned char>(c))) { hexOk = false; break; }
+					if (hexOk) {
+						uint8_t bytes[12];
+						for (int i = 0; i < 12; i++) {
+							char buf[3] = {oidIt->second->str_data[i*2], oidIt->second->str_data[i*2+1], 0};
+							bytes[i] = static_cast<uint8_t>(std::strtol(buf, nullptr, 16));
+						}
+						return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
 					}
-					return asvJSONValue::makeObjectId(std::string_view(reinterpret_cast<char*>(bytes), 12));
 				}
 			}
 			{
@@ -1546,16 +1557,30 @@ private:
 					auto base64It = binIt->second->obj->find("base64");
 					auto subIt = binIt->second->obj->find("subType");
 					if (base64It != binIt->second->obj->end() && base64It->second->type == asvJSONValue::STRING) {
-						auto data = decodeBase64Fast(base64It->second->str_data.data(), base64It->second->str_data.size());
-						if (subIt != binIt->second->obj->end() && subIt->second->type == asvJSONValue::STRING) {
-							int subType = static_cast<int>(std::strtol(subIt->second->str_data.c_str(), nullptr, 16));
-							if (subType == 0) {
+						// Strict envelope recognition (probe sw76 micro): an
+						// UNDECODABLE base64 used to become an empty BINARY
+						// (payload silently lost), a subType of the wrong shape
+						// ("123456" -> 0x56 truncation, "zz" -> 0, INT 7 -> BINARY)
+						// used to be coerced. Now: only a decodable base64 and an
+						// absent-or-well-formed 2-hex-digit subType recognize; a
+						// malformed envelope stays a plain object, byte-exact.
+						bool b64err = false;
+						auto data = decodeBase64Fast(base64It->second->str_data.data(), base64It->second->str_data.size(), &b64err);
+						if (!b64err) {
+							if (subIt == binIt->second->obj->end()) {
 								return asvJSONValue::makeBinary(data.data(), data.size());
-							} else {
-								return asvJSONValue::makeExtension(static_cast<int8_t>(subType), data.data(), data.size());
 							}
-						} else {
-							return asvJSONValue::makeBinary(data.data(), data.size());
+							const auto* sv = (subIt->second->type == asvJSONValue::STRING) ? &subIt->second->str_data : nullptr;
+							if (sv && sv->size() == 2 &&
+								std::isxdigit(static_cast<unsigned char>((*sv)[0])) &&
+								std::isxdigit(static_cast<unsigned char>((*sv)[1]))) {
+								int subType = static_cast<int>(std::strtol(sv->c_str(), nullptr, 16));
+								if (subType == 0) {
+									return asvJSONValue::makeBinary(data.data(), data.size());
+								} else {
+									return asvJSONValue::makeExtension(static_cast<int8_t>(subType), data.data(), data.size());
+								}
+							}
 						}
 					}
 				}

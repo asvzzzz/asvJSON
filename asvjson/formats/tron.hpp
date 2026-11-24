@@ -800,10 +800,15 @@ asvJSONValue* TronParseState::parseValue(int depth) {
       }
       // Check __BASE64__ prefix (payload may be empty)
       if (raw.size() >= 10 && raw.compare(0, 10, "__BASE64__") == 0) {
-        auto data = decodeBase64Fast(s.data() + 10, s.size() - 10);
-        auto v = asvJSONValue::makeBinary(data.data(), data.size());
-        if (!v) throw asvJSONError("out of memory");
-        return v.release();
+        bool berr = false;
+        auto data = decodeBase64Fast(s.data() + 10, s.size() - 10, &berr);
+        if (!berr) {
+          auto v = asvJSONValue::makeBinary(data.data(), data.size());
+          if (!v) throw asvJSONError("out of memory");
+          return v.release();
+        }
+        // undecodable payload: fall through, the token stays a plain STRING
+        // (the old path fabricated BINARY(empty) and the bytes were gone)
       }
       // Check __EXT__ prefix: "__EXT__<type>__<base64>". An unparsable type
       // falls through to a plain string instead of rejecting the whole doc.
@@ -818,10 +823,15 @@ asvJSONValue* TronParseState::parseValue(int depth) {
             // static_cast<int8_t>. Reject it instead (same guard as ADE).
             if (extType < -128 || extType > 127)
               throw asvJSONError("TRON: extension type out of range [-128, 127]");
-            auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2);
-            auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
-            if (!v) throw asvJSONError("out of memory");
-            return v.release();
+            bool berr = false;
+            auto data = decodeBase64Fast(s.data() + sep + 2, s.size() - sep - 2, &berr);
+            if (!berr) {
+              auto v = asvJSONValue::makeExtension(static_cast<int8_t>(extType), data.data(), data.size());
+              if (!v) throw asvJSONError("out of memory");
+              return v.release();
+            }
+            // undecodable payload: fall through to a plain STRING (never
+            // fabricate EXTENSION(type, EMPTY))
           }
         }
       }

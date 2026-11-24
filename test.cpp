@@ -13316,21 +13316,28 @@ TEST(testGOONSpecialValues) {
 	}
 	// An out-of-range or overflowing __EXT__ type is rejected instead of being
 	// silently wrapped via `& 0xFF` (hand-written input; the encoder always
-	// writes an int8_t). Same no-silent-data-loss rule as TRON/ADE.
+	// writes an int8_t). Same no-silent-data-loss rule as TRON/ADE. The
+	// payload is likewise validated: an undecodable base64 after the separator
+	// errors (it used to fabricate EXTENSION(type, EMPTY) - the bytes gone),
+	// and the well-formed `__EXT__<type>_<base64>` form (the encoder's exact
+	// separator: a single '_') keeps the payload byte-exact.
 	{
 		asvJSON j;
-		ASSERT(!j.fromGOON(std::string_view("a: __EXT__300__AAAA\n")));
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__300_AAAA\n")));
 		ASSERT(j.getLastError().find("extension type out of range") != std::string::npos);
-		ASSERT(!j.fromGOON(std::string_view("a: __EXT__-200__AAAA\n")));
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__-200_AAAA\n")));
 		ASSERT(j.getLastError().find("extension type out of range") != std::string::npos);
-		ASSERT(!j.fromGOON(std::string_view("a: __EXT__99999999999999999999__AAAA\n")));
-		// The representable boundary values still decode.
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__99999999999999999999_AAAA\n")));
+		ASSERT(!j.fromGOON(std::string_view("a: __EXT__5_!!!\n")));
+		ASSERT(j.getLastError().find("not valid base64") != std::string::npos);
+		// The representable boundary values still decode, payload preserved.
 		asvJSON lo;
-		ASSERT(lo.fromGOON(std::string_view("a: __EXT__-128__AAAA\n")));
+		ASSERT(lo.fromGOON(std::string_view("a: __EXT__-128_AAAA\n")));
 		ASSERT_EQ(lo.get("a")->type, asvJSONValue::EXTENSION);
 		ASSERT_EQ(static_cast<int>(lo.get("a")->ext_type), -128);
+		ASSERT_EQ(lo.get("a")->bin_data.size(), size_t(3));
 		asvJSON hi;
-		ASSERT(hi.fromGOON(std::string_view("a: __EXT__127__AAAA\n")));
+		ASSERT(hi.fromGOON(std::string_view("a: __EXT__127_AAAA\n")));
 		ASSERT_EQ(static_cast<int>(hi.get("a")->ext_type), 127);
 	}
 	// A separator-less line inside an ARRAY frame reports the array context,
@@ -21818,6 +21825,81 @@ TEST(testDateTimeSentinelGuard) {
   }
 }
 
+TEST(testSpecialTypeEnvelopeStrictness) {
+  // Malformed special-type envelopes/markers must NEVER fabricate a typed
+  // value that rewrites the data (the old core $oid site turned "NNNN..."
+  // into OBJECTID(00..) via per-pair strtol; $binary turned undecodable
+  // base64 into an EMPTY BINARY and coerced junk subTypes). Recognition is
+  // strict now; a malformed envelope stays a plain object, byte-exact.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"$oid":"NNNNNNNNNNNNNNNNNNNNNNNN"})")));
+    ASSERT_MSG(j.getRoot()->type == asvJSONValue::OBJECT, "non-hex $oid must stay OBJECT");
+    std::string s1; j.getRoot()->serialize(s1, false, 0);
+    ASSERT_EQ(s1, std::string(R"({"$oid":"NNNNNNNNNNNNNNNNNNNNNNNN"})"));
+    asvJSON k;
+    ASSERT(k.parse(std::string_view(s1)));
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s1, s2);
+    // control: 24 hex (upper or lower) recognizes
+    asvJSON c;
+    ASSERT(c.parse(std::string_view(R"({"$oid":"0123456789ABCDEF01234567"})")));
+    ASSERT_MSG(c.getRoot()->type == asvJSONValue::OBJECTID, "hex $oid must recognize");
+  }
+  {
+    struct Bad { const char* doc; };
+    const char* bad[] = {
+      R"({"$binary":{"base64":"!!!"}})",                        // undecodable payload
+      R"({"$binary":{"base64":"QQ==","subType":"123456"}})",    // truncation to 0x56
+      R"({"$binary":{"base64":"QQ==","subType":"zz"}})",        // strtol junk -> 0
+      R"({"$binary":{"base64":"QQ==","subType":7}})",           // non-string subType
+      R"({"$binary":{"base64":"QQ"}})",                         // bad length
+    };
+    for (auto& d : bad) {
+      asvJSON j;
+      ASSERT_MSG(j.parse(std::string_view(d)), d);
+      ASSERT_MSG(j.getRoot()->type == asvJSONValue::OBJECT, "malformed $binary must stay OBJECT");
+      std::string s1; j.getRoot()->serialize(s1, false, 0);
+      ASSERT_EQ(s1, std::string(d));
+    }
+    // controls: well-formed envelope recognizes with exact subType
+    asvJSON e;
+    ASSERT(e.parse(std::string_view(R"({"$binary":{"base64":"QQ==","subType":"FF"}})")));
+    ASSERT_MSG(e.getRoot()->type == asvJSONValue::EXTENSION, "FF subType -> EXTENSION");
+    ASSERT_EQ(static_cast<int>(e.getRoot()->ext_type), -1);
+    ASSERT_EQ(e.getRoot()->bin_data.size(), size_t(1));
+  }
+  {
+    // GOON: a typed __EXT__ prefix with an undecodable payload errors
+    // (it used to fabricate EXTENSION(type, EMPTY) - the bytes gone).
+    asvJSON j;
+    ASSERT_MSG(!j.fromGOON(std::string_view("v: __EXT__5_!!!\n")), "GOON bad ext payload must error");
+    ASSERT(j.getLastError().find("not valid base64") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromGOON(std::string_view("v: __EXT__7_QQ==\n")));
+    asvJSONValue* v = k.getNested("v");
+    ASSERT_MSG(v && v->type == asvJSONValue::EXTENSION, "GOON ext control");
+    ASSERT_EQ(static_cast<int>(v->ext_type), 7);
+    ASSERT_EQ(v->bin_data.size(), size_t(1));
+  }
+  {
+    // TRON: undecodable payloads fall through to the literal STRING
+    // (never BINARY(empty) / EXTENSION(type, EMPTY)).
+    asvJSON j;
+    ASSERT(j.fromTRON(std::string_view("{\"v\":\"__BASE64__!!!\"}")));
+    asvJSONValue* v = j.getNested("v");
+    ASSERT_MSG(v && v->type == asvJSONValue::STRING, "TRON bad base64 stays STRING");
+    asvJSON k;
+    ASSERT(k.fromTRON(std::string_view("{\"v\":\"__EXT__5__!!!\"}")));
+    asvJSONValue* w = k.getNested("v");
+    ASSERT_MSG(w && w->type == asvJSONValue::STRING, "TRON bad ext stays STRING");
+    asvJSON c;
+    ASSERT(c.fromTRON(std::string_view("{\"v\":\"__BASE64__QQ==\"}")));
+    asvJSONValue* x = c.getNested("v");
+    ASSERT_MSG(x && x->type == asvJSONValue::BINARY, "TRON base64 control");
+  }
+}
+
 TEST(testRegexNulGuard) {
   // REGEX recognition must NEVER truncate: makeRegex's strlen API silently
   // cut "a\0b" to "a" at every recognition site (JSON $regex envelope,
@@ -27554,7 +27636,7 @@ TEST(testJavaPropReviewFixes) {
   {
     asvJSON j;
     ASSERT(j.parse(std::string("{\"ts\":{\"$timestamp\":{\"t\":1700000000}},"
-                               "\"oid\":{\"$oid\":\"ABCDEFGHIJKLMNOPQRSTUVWX\"},"
+                               "\"oid\":{\"$oid\":\"abcdef0123456789abcdef01\"},"
                                "\"rx\":{\"$regex\":\"^a$\",\"$options\":\"i\"},"
                                "\"ct\":{\"$customTag\":{\"name\":\"mytag\",\"value\":42}}}")));
     ASSERT(j.get("ts") != nullptr && j.get("ts")->type == asvJSONValue::TIMESTAMP);
@@ -42086,6 +42168,7 @@ RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
 RUN(testDateTimeSentinelGuard);
+RUN(testSpecialTypeEnvelopeStrictness);
 RUN(testRegexNulGuard);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
