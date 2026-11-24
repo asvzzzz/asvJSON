@@ -12657,6 +12657,72 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testDiffSpecialTypeTransport) {
+  // Probe sw87: special-typed values riding diff()/applyPatch JSON transport.
+  // Every patch value must survive serialize->parse TYPE-exactly and applying
+  // it must reproduce the target tree (both directions).
+  struct Pr { const char* a; const char* b; };
+  const Pr prs[] = {
+    {"{\"v\":null}", "{\"v\":\"2024-01-15T10:30:00.123Z\"}"},
+    {"{\"v\":null}", "{\"v\":\"2024-01-15T10:30:00+05:30\"}"},
+    {"{\"v\":null}", "{\"v\":{\"$binary\":{\"base64\":\"aGVsbG8=\",\"subType\":\"00\"}}}"},
+    {"{\"v\":null}", "{\"v\":{\"$binary\":{\"base64\":\"aGVsbG8=\",\"subType\":\"05\"}}}"},
+    {"{\"v\":null}", "{\"v\":{\"$binary\":{\"base64\":\"\",\"subType\":\"00\"}}}"},
+    {"{\"v\":null}", "{\"v\":{\"$oid\":\"507f1f77bcf86cd799439011\"}}"},
+    {"{\"v\":null}", "{\"v\":{\"$timestamp\":{\"t\":1700000000}}}"},
+    {"{\"v\":null}", "{\"v\":{\"$regex\":\"a.c\",\"$options\":\"i\"}}"},
+    {"{\"v\":null}", "{\"v\":{\"$customTag\":{\"name\":\"!money\",\"value\":{\"cents\":999}}}}"},
+    {"{\"v\":null}", "{\"v\":{\"$set\":[\"a\",\"b\"]}}"},
+    {"{\"v\":null}", "{\"v\":18446744073709551615}"},
+    {"{\"a\":{\"b\":{}}}", "{\"a\":{\"b\":{\"dt\":\"2024-01-15T10:30:00.000Z\",\"re\":{\"$regex\":\"x\",\"$options\":\"\"}}}}"},
+    {"{\"v\":{\"$timestamp\":{\"t\":1}}}", "{}"},
+  };
+  for (auto& pr : prs) {
+    asvJSON A, B;
+    ASSERT_MSG(A.parse(std::string_view(pr.a)), pr.a);
+    ASSERT_MSG(B.parse(std::string_view(pr.b)), pr.b);
+    asvJSON P = A.diff(B);
+    std::string ptxt; P.getRoot()->serialize(ptxt, false, 1);
+    asvJSON P2;
+    ASSERT_MSG(P2.parse(std::string_view(ptxt)), ptxt.c_str());
+    ASSERT_MSG(*P.getRoot() == *P2.getRoot(), ptxt.c_str());   // transport is type-exact
+    asvJSON D;
+    ASSERT(D.parse(std::string_view(pr.a)));
+    ASSERT_MSG(D.applyPatch(P2), ptxt.c_str());
+    ASSERT_MSG(*D.getRoot() == *B.getRoot(), ptxt.c_str());
+    asvJSON R = B.diff(A);
+    std::string rtxt; R.getRoot()->serialize(rtxt, false, 1);
+    asvJSON R2;
+    ASSERT_MSG(R2.parse(std::string_view(rtxt)), rtxt.c_str());
+    asvJSON D2;
+    ASSERT(D2.parse(std::string_view(pr.b)));
+    ASSERT_MSG(D2.applyPatch(R2), rtxt.c_str());
+    ASSERT_MSG(*D2.getRoot() == *A.getRoot(), rtxt.c_str());
+  }
+  // NaN in a patch value: the in-memory patch node is exact (applyPatch
+  // clones the DOUBLE NaN); TEXT transport follows the encoder contract -
+  // flag=false degrades to null, flag=true on BOTH ends carries the literal.
+  {
+    asvJSON A, B;
+    A.allowNaNInfinity = true; B.allowNaNInfinity = true;
+    ASSERT(A.parse(std::string_view("{\"v\":1}")));
+    ASSERT(B.parse(std::string_view("{\"v\":NaN}")));
+    asvJSON P = A.diff(B);
+    ASSERT_EQ((int)P.getRoot()->get(0)->get("value")->type, (int)asvJSONValue::DOUBLE);
+    asvJSON Dm; ASSERT(Dm.parse(std::string_view("{\"v\":1}")));
+    ASSERT(Dm.applyPatch(P));
+    ASSERT_EQ((int)Dm.getRoot()->get("v")->type, (int)asvJSONValue::DOUBLE);
+    std::string ptxt0; P.getRoot()->serialize(ptxt0, false, 1);
+    ASSERT_EQ(ptxt0, std::string("[{\"op\":\"replace\",\"path\":\"/v\",\"value\":null}]"));
+    std::string ptxt1; P.getRoot()->serialize(ptxt1, true, 1);
+    asvJSON P1; P1.allowNaNInfinity = true;
+    ASSERT_MSG(P1.parse(std::string_view(ptxt1)), ptxt1.c_str());
+    asvJSON D1; ASSERT(D1.parse(std::string_view("{\"v\":1}")));
+    ASSERT(D1.applyPatch(P1));
+    ASSERT_EQ((int)D1.getRoot()->get("v")->type, (int)asvJSONValue::DOUBLE);
+  }
+}
+
 TEST(testLineEndingPolicy) {
   // Probe sw86: the library line model. splitLines splits LF only and strips
   // ONE trailing CR, so CRLF documents read EXACTLY like their LF form in
@@ -42487,7 +42553,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testLineEndingPolicy);
+	RUN(testDiffSpecialTypeTransport);
+RUN(testLineEndingPolicy);
 RUN(testProtobufTextRootGuards);
 RUN(testSexprHeuristicTable);
 RUN(testGoonTabularHeaderConsistency);
