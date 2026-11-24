@@ -12657,6 +12657,32 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testSexprHeuristicTable) {
+  // Probe sw82 verdicts: the object/list heuristic pinned per rule
+  // (odd -> list; 2-item object ONLY for a bare symbol key; 4+ even
+  // groups accept every key type incl numbers; symbol-start fallback
+  // {key:[values]} needs >=3 items; NIL/true keys stringify).
+  struct H { const char* doc; const char* want; };
+  const H hs[] = {
+    {"(a)",            "[\"a\"]"},
+    {"(1 2)",          "[1,2]"},
+    {"(true 1)",       "[true,1]"},
+    {"(1 2 3 4)",      "{\"1\":2,\"3\":4}"},
+    {"(a 1 b)",        "{\"a\":[1,\"b\"]}"},
+    {"(nil 1 nil 2)",  "{\"null\":2}"},
+    {"(() {})",        "{}"},
+    {"(\"a\" \"b\")",  "[\"a\",\"b\"]"},
+    {"(\"a\" \"b\" \"c\" \"d\")", "{\"a\":\"b\",\"c\":\"d\"}"},
+  };
+  for (auto& h : hs) {
+    asvJSON j;
+    ASSERT_MSG(j.fromSexpr(std::string_view(h.doc)), h.doc);
+    std::string s;
+    j.getRoot()->serialize(s, false, 0);
+    ASSERT_MSG(s == h.want, h.doc);
+  }
+}
+
 TEST(testGoonTabularHeaderConsistency) {
   // The [N] in a GOON header is enforced (TOON parity, probe sw81): the old
   // decoder ignored it, so a table could claim any length, and a row with
@@ -42337,7 +42363,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testGoonTabularHeaderConsistency);
+	RUN(testSexprHeuristicTable);
+RUN(testGoonTabularHeaderConsistency);
 RUN(testGOONExtras);
 RUN(testGOONSpecialValues);
 	
