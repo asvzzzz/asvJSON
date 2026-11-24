@@ -21825,6 +21825,51 @@ TEST(testDateTimeSentinelGuard) {
   }
 }
 
+TEST(testYamlIndentWidthOne) {
+  // indentWidth==1 used to emit "- " + a child at ONE column, a shape the
+  // block parser itself rejected ("sequence and mapping mixed at the same
+  // level"): closeFrames() pops a frame on a line at its own column, and the
+  // bare-dash lookahead opens the item's frame at dashColumn+1. The encoder
+  // now gives dash-item children a >=2-column shift (childOff=2 at iw=1).
+  auto build = [](asvJSON& j){
+    j.parse(std::string_view(R"({"list":[{"k":"v1","j":2},{"k":"v2"}],"deep":[[1,2],[3]],"mix":[1,{"a":{"b":1}}]})"));
+  };
+  for (int iw : { 1, 2, 4 }) {
+    asvJSON j;
+    build(j);
+    YamlWriteOptions o;
+    o.style = YamlWriteOptions::Style::Block;
+    o.indentWidth = iw;
+    std::string y = j.toYAML(o);
+    asvJSON k;
+    ASSERT_MSG(k.fromYAML(std::string_view(y)), y.c_str());
+    ASSERT_MSG(*j.getRoot() == *k.getRoot(), "tree must survive indentWidth round-trip");
+    std::string y2 = k.toYAML(o);
+    ASSERT_EQ(y, y2);
+    // flow style block-fallback at iw=1 must re-read too
+    YamlWriteOptions a;
+    a.style = YamlWriteOptions::Style::Auto;
+    a.indentWidth = iw;
+    a.flowMaxLen = 0;  // force the block fallback everywhere
+    std::string ya = j.toYAML(a);
+    asvJSON m;
+    ASSERT_MSG(m.fromYAML(std::string_view(ya)), ya.c_str());
+    ASSERT(*j.getRoot() == *m.getRoot());
+  }
+  // array root with object items at iw=1
+  {
+    asvJSON j;
+    j.parse(std::string_view(R"([{"k":1},{"k":2}])"));
+    YamlWriteOptions o;
+    o.style = YamlWriteOptions::Style::Block;
+    o.indentWidth = 1;
+    std::string y = j.toYAML(o);
+    asvJSON k;
+    ASSERT_MSG(k.fromYAML(std::string_view(y)), y.c_str());
+    ASSERT(*j.getRoot() == *k.getRoot());
+  }
+}
+
 TEST(testSpecialTypeEnvelopeStrictness) {
   // Malformed special-type envelopes/markers must NEVER fabricate a typed
   // value that rewrites the data (the old core $oid site turned "NNNN..."
@@ -42168,6 +42213,7 @@ RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
 RUN(testDateTimeSentinelGuard);
+RUN(testYamlIndentWidthOne);
 RUN(testSpecialTypeEnvelopeStrictness);
 RUN(testRegexNulGuard);
 RUN(testRonCommentPathKeys);

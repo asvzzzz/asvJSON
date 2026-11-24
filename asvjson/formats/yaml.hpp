@@ -567,7 +567,16 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent, k, false, o, wc, false, depth + 1);
 			} else {
 				out += prefix() + yamlTrail(v, wc) + "\n";
-				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + 1, k, false, o, wc, false, depth + 1);
+				// A dash-item's mapping children MUST start at least 2 columns
+				// right of the dash: the parser opens the item's frame at
+				// dashColumn+1 and closeFrames() pops a frame on a line at its
+				// OWN column, so the "+1 column" layout an indentWidth==1
+				// encoder used to emit closed the item's own frame before the
+				// first key was read ("YAML: sequence and mapping mixed at the
+				// same level" on the format's own output). For any other role
+				// (a keyed value) one level is enough.
+				const int childOff = (isArrayItem && iw < 2) ? 2 : 1;
+				for (const auto& [k, val] : *v->obj) yamlBlockVal(val.get(), out, indent + childOff, k, false, o, wc, false, depth + 1);
 			}
 			break;
 		}
@@ -582,7 +591,11 @@ if (j > 0 && j < frag.size() && frag[0] == ' ') hasLeadSpace = true;
 			// A nested sequence used as a sequence item must indent its own
 			// items one level deeper than its dash, otherwise the block parser
 			// cannot tell parent items from child items ("m: [[1],[2]]").
-			int childIndent = isArrayItem ? indent + 1 : indent;
+			// With indentWidth==1 that one level is only ONE column, which the
+			// block parser also cannot re-read (its dash-item child frame lives
+			// at dashColumn+1, and closeFrames() pops on column equality) - so
+			// the child dash goes two levels down (>= 2 columns, see OBJECT).
+			int childIndent = isArrayItem ? indent + (iw < 2 ? 2 : 1) : indent;
 			for (const auto& item : *v->arr) yamlBlockVal(item.get(), out, childIndent, "", true, o, wc, false, depth + 1);
 			break;
 		}
@@ -639,7 +652,13 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent, k, false, o, forceFlow, false, depth + 1);
 			} else {
 				out += prefix() + "\n";
-				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + 1, k, false, o, forceFlow, false, depth + 1);
+				// Same rule as yamlBlockVal: a dash-item's mapping children must
+				// land at least 2 columns right of the dash (indentWidth==1
+				// would otherwise emit +1 column, which the block parser
+				// cannot re-read - its dash-item frame lives at dashColumn+1
+				// and closeFrames() pops on column equality).
+				const int childOff = (isArrayItem && iw < 2) ? 2 : 1;
+				for (const auto& [k, val] : *v->obj) yamlFlowVal(val.get(), out, indent + childOff, k, false, o, forceFlow, false, depth + 1);
 			}
 		}
 	} else if (v->type == T::ARRAY && v->arr && !v->arr->empty()) {
@@ -650,7 +669,13 @@ inline void yamlFlowVal(const asvJSONValue* v, std::string& out, int indent,
 			else out += trial + inner + "\n";
 		} else {
 			out += prefix() + "\n";
-			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, indent, "", true, o, forceFlow, false, depth + 1);
+			// Mirror yamlBlockVal: a nested sequence used as a sequence ITEM
+			// must indent its own items deeper than its dash, or the block
+			// parser cannot tell parent items from child items (the Auto
+			// fallback used to put both dashes in one column, silently
+			// flattening [[1,2],[3]] into [null,1,2,null,3]).
+			const int itemIndent = isArrayItem ? indent + (iw < 2 ? 2 : 1) : indent;
+			for (const auto& item : *v->arr) yamlFlowVal(item.get(), out, itemIndent, "", true, o, forceFlow, false, depth + 1);
 		}
 	} else {
 		// The fallback handles scalars (including root ones) and empty
