@@ -1539,6 +1539,16 @@ inline void protoTextParseBody(const std::string& text, size_t& pos, asvJSONValu
       }
     } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || (c >= '0' && c <= '9')) {
       fname = protoTextParseIdent(text, pos);
+      // Dotted field paths ("a.b: 1") are NOT part of this grammar (names are
+      // bare identifiers or bracketed "[ext.name]" forms). The old fall-through
+      // dropped the "a" segment and produced {"b":1} from "{ a.b: 1 }" -
+      // garbage acceptance. Reject the shape with a named error instead.
+      {
+        size_t dp = pos;
+        protoTextSkipWS(text, dp);
+        if (dp < text.size() && text[dp] == '.')
+          throw asvJSONError("Protobuf text: dotted field names are not supported");
+      }
     } else break;
 
     // The field name becomes an object key: bound it by MAX_STRING_LEN like
@@ -1872,7 +1882,22 @@ inline bool asvJSON::fromProtobufText(const std::string& text) {
         if (val) root = std::move(val);
       }
     }
-    if (root) { formatType = FormatType::ProtobufText; return true; }
+    if (root) {
+      // Nothing may follow the root value: `o { x: 1 }` (a nested-message
+      // form at the root, which toProtobufText only writes INSIDE the
+      // top-level braces) used to parse as the bare string "o" and silently
+      // discard the rest of the document - a garbage accept that lost data.
+      size_t tail = pos;
+      protoTextSkipWS(text, tail);
+      if (tail < text.size()) {
+        root = nullptr;
+        dirty_ = false;
+        lastError = "protobuf text: trailing content after value";
+        return false;
+      }
+      formatType = FormatType::ProtobufText;
+      return true;
+    }
     lastError = "protobuf text: no value";
     return false;
   } catch (const std::exception& e) { lastError = e.what(); root = nullptr; dirty_ = false; return false; }

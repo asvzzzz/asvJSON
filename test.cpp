@@ -12657,6 +12657,48 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testProtobufTextRootGuards) {
+  // Probe sw83: the text parser accepted garbage roots.
+  // 1. A bare `name { ... }` at the ROOT (the nested form the encoder only
+  // writes INSIDE the top-level braces) parsed as the string "name" and the
+  // rest of the document was silently discarded.
+  {
+    asvJSON j;
+    ASSERT(!j.fromProtobufText("o { x: 1 }\n"));
+    ASSERT(j.getLastError().find("trailing content") != std::string::npos);
+    asvJSON k;
+    ASSERT(!k.fromProtobufText("key with space: 1\n"));
+  }
+  // 2. Trailing content after a braced root is an error, not a truncation.
+  {
+    asvJSON j;
+    ASSERT(!j.fromProtobufText("{ a: 1 } trailing\n"));
+  }
+  // 3. Dotted field names are not in this grammar: "{ a.b: 1 }" used to drop
+  // the prefix and return {"b":1}.
+  {
+    asvJSON j;
+    ASSERT(!j.fromProtobufText("{ a.b: 1 }\n"));
+    ASSERT(j.getLastError().find("dotted field names") != std::string::npos);
+  }
+  // 4. The forms the encoder emits (wrapped nested messages, scalar roots,
+  // top-level arrays) must all keep working and re-read exactly.
+  {
+    asvJSON e;
+    ASSERT(e.parse(std::string_view(R"({"o":{"a":1},"p":{"b":2}})")));
+    std::string txt = e.toProtobufText();
+    asvJSON back;
+    ASSERT_MSG(back.fromProtobufText(txt), txt.c_str());
+    ASSERT(*e.getRoot() == *back.getRoot());
+    asvJSON s1; ASSERT(s1.fromProtobufText("123\n"));
+    ASSERT_EQ(s1.getRoot()->type, asvJSONValue::INT);
+    asvJSON s2; ASSERT(s2.fromProtobufText("[1,2,3]\n"));
+    ASSERT_EQ(s2.getRoot()->size(), size_t(3));
+    asvJSON s3; ASSERT(s3.fromProtobufText("a: 1 b: { c: 2 }\n"));   // in-body message form stays fine
+    ASSERT(s3.get("b") != nullptr);
+  }
+}
+
 TEST(testSexprHeuristicTable) {
   // Probe sw82 verdicts: the object/list heuristic pinned per rule
   // (odd -> list; 2-item object ONLY for a bare symbol key; 4+ even
@@ -42363,7 +42405,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testSexprHeuristicTable);
+	RUN(testProtobufTextRootGuards);
+RUN(testSexprHeuristicTable);
 RUN(testGoonTabularHeaderConsistency);
 RUN(testGOONExtras);
 RUN(testGOONSpecialValues);
