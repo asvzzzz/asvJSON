@@ -319,13 +319,15 @@ inline std::unique_ptr<asvJSONValue> ubjParseValue(const uint8_t* data, size_t& 
 inline std::unique_ptr<asvJSONValue> ubjParseScalar(const uint8_t* data, size_t& pos,
                                                     size_t dataLen, int depth, char m) {
   switch (m) {
-    // 'N' is a no-op and never yields a value. Believed UNREACHABLE: the
-    // container loops skip no-ops before recursing, fromUBJSON skips leading /
-    // trailing no-ops at the top level, and ubjParseScalar's case '['/'{' is
-    // the only other caller path (m there is '[' or '{', never 'N'). The $N
-    // *type* position is handled by the container branch, not here. Kept as
-    // belt-and-braces: any future caller that forwards an 'N' past the skips
-    // must get a named error, not a silent fall-through to "unknown marker".
+    // 'N' is a no-op and never yields a value. REACHABLE (probe sw85): the
+    // container loops skip no-ops in ELEMENT / KEY position only (per the
+    // spec's formal grammar, a no-op is an element-level alternative, never
+    // a value), so an 'N' in an object's VALUE slot arrives here straight
+    // from ubjParseValue - "{a N 1}" and the counted "{#i1 U1 K N}" forms
+    // both throw this named error (pinned in the UBJSON no-op test). The
+    // top-level leading/trailing skips live in fromUBJSON, and the $N *type*
+    // position is handled by the container branch, not here. Do not delete
+    // this case as "dead code": it is the documented rejection point.
     case 'N': throw asvJSONError("UBJSON: no-op where a value is required");
     case 'Z': { auto v = asvJSONValue::makeNull(); if (!v) throw asvJSONError("UBJSON: null alloc failed"); return v; }
     case 'T': { auto v = asvJSONValue::makeBool(true); if (!v) throw asvJSONError("UBJSON: bool alloc failed"); return v; }

@@ -29266,6 +29266,16 @@ TEST(testUBJSONReviewFixes) {
     asvJSON nr;
     ASSERT(!nr.fromUBJSON(std::string("[#i\x03", 4) + "NNN"));
     ASSERT(nr.lastError.find("unterminated counted array") != std::string::npos);
+    // Unbounded OBJECT (probe sw85): the no-op skip covers ELEMENT/KEY
+    // position (per the spec grammar N is an element-level alternative), but
+    // an 'N' in an object's VALUE slot reaches ubjParseScalar's case 'N' -
+    // this site is reachable and the "believed unreachable" note was false.
+    asvJSON ub;
+    ASSERT(ub.fromUBJSON(std::string("{N") + "i\x01" "a" + std::string("i\x01", 2) + "N}"));
+    ASSERT_EQ(ub.serialize(), std::string("{\"a\":1}"));
+    asvJSON uv;
+    ASSERT(!uv.fromUBJSON(std::string("{") + "i\x01" "a" "N" + std::string("i\x01", 2) + "}"));
+    ASSERT(uv.lastError.find("no-op where a value is required") != std::string::npos);
   }
   // Round-trip is untouched by all of the above.
   {
