@@ -21818,6 +21818,78 @@ TEST(testDateTimeSentinelGuard) {
   }
 }
 
+TEST(testRegexNulGuard) {
+  // REGEX recognition must NEVER truncate: makeRegex's strlen API silently
+  // cut "a\0b" to "a" at every recognition site (JSON $regex envelope,
+  // CBOR tag 35, YAML !regex via the envelope, TRON __REGEX__, XML text
+  // form) and cloneValue re-truncated multi-NUL str_data. Now: NUL-bearing
+  // parts keep their lossless text form (plain OBJECT envelope / STRING /
+  // EXTENSION fallback; ADE's explicit tag errors), and clone is byte-exact.
+  {
+    // JSON: NUL in $regex pattern stays a plain object, text byte-exact
+    asvJSON j;
+    ASSERT(j.parse("{\"k\":{\"$regex\":\"a\\u0000b\",\"$options\":\"i\"}}"));
+    asvJSONValue* v = j.getNested("k");
+    ASSERT_MSG(v && v->type == asvJSONValue::OBJECT, "NUL envelope must stay OBJECT");
+    std::string s1; j.getRoot()->serialize(s1, false, 0);
+    asvJSON k; k.parse(s1);
+    std::string s2; if (k.getRoot()) k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s1, s2);
+    // NUL-free envelope still recognizes as REGEX (control)
+    asvJSON c;
+    ASSERT(c.parse("{\"k\":{\"$regex\":\"a|b\",\"$options\":\"i\"}}"));
+    asvJSONValue* cv = c.getNested("k");
+    ASSERT_MSG(cv && cv->type == asvJSONValue::REGEX, "plain envelope must recognize");
+  }
+  {
+    // CBOR tag 35: single NUL -> REGEX; multi-NUL -> STRING kept byte-exact,
+    // re-encode/re-parse is a fixed point.
+    std::string single("\xD8\x23\x63" "a\0b", 6);
+    std::string multi("\xD8\x23\x65" "a\0b\0c", 8);
+    asvJSON a;
+    ASSERT(a.fromCBOR(single.data(), single.size()));
+    ASSERT_MSG(a.getRoot() && a.getRoot()->type == asvJSONValue::REGEX, "single NUL tag35 -> REGEX");
+    asvJSON b;
+    ASSERT(b.fromCBOR(multi.data(), multi.size()));
+    ASSERT_MSG(b.getRoot() && b.getRoot()->type == asvJSONValue::STRING, "multi NUL tag35 -> STRING");
+    if (b.getRoot()) ASSERT_EQ(b.getRoot()->getStringView(), std::string_view("a\0b\0c", 5));
+    auto e2 = b.toCBOR();
+    asvJSON c2; ASSERT(c2.fromCBOR(e2.data(), e2.size()));
+    auto e3 = c2.toCBOR();
+    ASSERT(e2 == e3);
+  }
+  {
+    // YAML: !regex with escaped NUL keeps the envelope OBJECT (text survives)
+    asvJSON j;
+    ASSERT(j.fromYAML("k: !regex \"a\\u0000b|i\"\n"));
+    asvJSONValue* v = j.getNested("k");
+    ASSERT_MSG(v && v->type == asvJSONValue::OBJECT, "yaml NUL regex must degrade to OBJECT, not truncate");
+    std::string y = j.toYAML(true);
+    asvJSON k; ASSERT(k.fromYAML(y));
+    ASSERT_EQ(k.toYAML(true), y);
+  }
+  {
+    // ADE: explicit !regex tag with NUL is a reported error
+    asvJSON j;
+    ASSERT_MSG(!j.fromADE("k: !regex \"a\\u0000b|i\"\n"), "ADE tagged NUL regex must error");
+    ASSERT(j.fromADE("k: !regex \"abc|i\"\n"));   // control
+    asvJSONValue* v = j.getNested("k");
+    ASSERT_MSG(v && v->type == asvJSONValue::REGEX, "ADE plain regex control");
+  }
+  {
+    // cloneValue of a raw multi-NUL REGEX is byte-exact (the old rfind +
+    // makeRegex round trip truncated it).
+    auto node = asvJSONValue::makeRegex("x", nullptr);
+    ASSERT(node != nullptr);
+    node->str_data = std::string("a\0b\0c", 5);
+    auto cl = cloneValue(node.get());
+    ASSERT_MSG(cl != nullptr, "clone allocated");
+    ASSERT_EQ(cl->str_data, std::string("a\0b\0c", 5));
+    // and the equality invariant now holds (the old clone silently differed)
+    ASSERT_MSG(valuesEqual(node.get(), cl.get()), "clone == source");
+  }
+}
+
 TEST(testToCpp) {
   // Modern C++: named struct unwrapped from `{Name: {...}}`, field types and
   // defaults inferred, enum from an object map via enumPaths/enumNames.
@@ -42014,6 +42086,7 @@ RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
 RUN(testDateTimeSentinelGuard);
+RUN(testRegexNulGuard);
 RUN(testRonCommentPathKeys);
 RUN(testRootFootingComments);
   RUN(testToCpp);

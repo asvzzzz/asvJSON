@@ -777,16 +777,23 @@ asvJSONValue* TronParseState::parseValue(int depth) {
             size_t sep = content.find('|');
             std::string pat = tronUnescape(content.substr(0, sep));
             std::string opts = (sep != term) ? tronUnescape(content.substr(sep + 1, term - sep - 1)) : std::string();
-            auto v = asvJSONValue::makeRegex(pat.c_str(), opts.empty() ? nullptr : opts.c_str());
-            if (!v) throw asvJSONError("out of memory");
-            return v.release();
+            // NUL in either part cannot survive makeRegex (strlen truncation):
+            // fall through and keep the literal "__REGEX__..." as a STRING.
+            if (pat.find('\0') == std::string::npos && opts.find('\0') == std::string::npos) {
+              auto v = asvJSONValue::makeRegex(pat.c_str(), opts.empty() ? nullptr : opts.c_str());
+              if (!v) throw asvJSONError("out of memory");
+              return v.release();
+            }
+          } else {
+            // No terminator: legacy format -- the whole content is the pattern
+            // (the old encoder emitted no separator when options were empty).
+            std::string pat = tronUnescape(content);
+            if (pat.find('\0') == std::string::npos) {
+              auto v = asvJSONValue::makeRegex(pat.c_str(), nullptr);
+              if (!v) throw asvJSONError("out of memory");
+              return v.release();
+            }
           }
-          // No terminator: legacy format -- the whole content is the pattern
-          // (the old encoder emitted no separator when options were empty).
-          std::string pat = tronUnescape(content);
-          auto v = asvJSONValue::makeRegex(pat.c_str(), nullptr);
-          if (!v) throw asvJSONError("out of memory");
-          return v.release();
         }
         // An empty pattern cannot be a REGEX (makeRegex rejects it): fall
         // through so a literal "__REGEX__" string stays a plain STRING.

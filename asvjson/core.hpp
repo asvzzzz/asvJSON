@@ -1564,14 +1564,21 @@ private:
 				auto regexIt = obj->obj->find("$regex");
 				bool regexSolo = (obj->obj->size() == 1) ||
 					(obj->obj->size() == 2 && obj->obj->find("$options") != obj->obj->end());
-				if (regexIt != obj->obj->end() && regexIt->second->type == asvJSONValue::STRING && regexSolo) {
+				// A NUL inside pattern or options CANNOT become a REGEX:
+				// makeRegex's strlen API would silently truncate the value
+				// ("a\0b" -> "a"). Skip the recognition instead - the document
+				// keeps its plain {"$regex":...,"$options":...} OBJECT, text
+				// preserved byte-exact through every re-encode (probe sw75).
+				if (regexIt != obj->obj->end() && regexIt->second->type == asvJSONValue::STRING && regexSolo &&
+				    regexIt->second->str_data.find('\0') == std::string::npos) {
 					std::string pattern = regexIt->second->str_data;
 					std::string opts;
 					auto optsIt = obj->obj->find("$options");
 					if (optsIt != obj->obj->end() && optsIt->second->type == asvJSONValue::STRING) {
 						opts = optsIt->second->str_data;
 					}
-					return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
+					if (opts.find('\0') == std::string::npos)
+						return asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
 				}
 			}
 			{
@@ -3040,13 +3047,15 @@ inline std::unique_ptr<asvJSONValue> cloneValueImpl(const asvJSONValue* v, int d
 		case asvJSONValue::BINARY: return asvJSONValue::makeBinary(v->bin_data.data(), v->bin_data.size());
 		case asvJSONValue::OBJECTID: return asvJSONValue::makeObjectId(v->str_data);
 		case asvJSONValue::REGEX: {
-			size_t sep = v->str_data.rfind('\0');
-			if (sep != std::string_view::npos) {
-				auto pattern = v->str_data.substr(0, sep);
-				auto opts = v->str_data.substr(sep + 1);
-				return asvJSONValue::makeRegex(pattern.c_str(), opts.c_str());
-			}
-			return asvJSONValue::makeRegex(v->str_data.c_str(), "");
+			// Byte-exact str_data copy. The old split-at-rfind + makeRegex
+			// round trip silently truncated at the FIRST NUL of a multi-NUL
+			// str_data (reachable through the raw API), so cloneValue broke
+			// the "clone == source" invariant for exactly those trees
+			// (probe sw75; recognition paths now refuse NUL-bearing parts,
+			// but raw nodes keep arbitrary bytes and must clone losslessly).
+			auto c = asvJSONValue::makeRegex("x", nullptr);
+			if (c) c->str_data = v->str_data;
+			return c;
 		}
 		case asvJSONValue::TIMESTAMP: return asvJSONValue::makeTimestamp(v->num);
 		case asvJSONValue::EXTENSION: return asvJSONValue::makeExtension(v->ext_type, v->bin_data.data(), v->bin_data.size());

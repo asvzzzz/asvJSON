@@ -1266,7 +1266,10 @@ inline std::unique_ptr<asvJSONValue> xmlParseElement(std::string_view s, size_t&
 				std::string opt = (sep == std::string::npos) ? std::string() : body.substr(sep + 1);
 				pat = xmlUnescRegexText(pat);
 				opt = xmlUnescRegexText(opt);
-				if (!pat.empty()) {
+				// A NUL-decoded part cannot survive makeRegex (strlen would
+				// truncate it silently): skip the REGEX build and let the
+				// element fall through to its ordinary text/object handling.
+				if (!pat.empty() && pat.find('\0') == std::string::npos && opt.find('\0') == std::string::npos) {
 					auto rn = asvJSONValue::makeRegex(pat.c_str(), opt.empty() ? nullptr : opt.c_str());
 					return xmlNonNull(std::move(rn));
 				}

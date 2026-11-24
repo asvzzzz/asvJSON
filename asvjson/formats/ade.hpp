@@ -1476,6 +1476,12 @@ private:
         else
           adeSplitLegacyRegex(val->str_data, pattern, opts);
       }
+      // makeRegex's strlen API would silently truncate a NUL-bearing part,
+      // so an explicit !regex whose pattern or options contain NUL is a
+      // reported error (the tag is an explicit request; unlike YAML's plain
+      // scalars there is no lossless re-interpretation to fall back to).
+      if (pattern.find('\0') != std::string::npos || opts.find('\0') != std::string::npos)
+        throw asvJSONError("ADE: regex pattern/options may not contain NUL");
       auto r = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
       if (!r) throw asvJSONError("ADE: invalid regex");
       return r;

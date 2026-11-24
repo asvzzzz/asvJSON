@@ -540,15 +540,20 @@ inline std::unique_ptr<asvJSONValue> parseCBOR(const uint8_t* data, size_t& pos,
         // Regular expression: stored as "pattern\0options" (NUL-separated, see makeRegex)
         if (val->type == asvJSONValue::STRING) {
           const std::string& s = val->str_data;
-          size_t sep = s.find('\0');
-          if (sep != std::string::npos) {
-            std::string pattern = s.substr(0, sep);
-            std::string opts = s.substr(sep + 1);
+          size_t firstNul = s.find('\0');
+          // More than one NUL cannot form a REGEX (makeRegex would silently
+          // truncate at it, losing the tail): keep the text STRING exactly as
+          // stored - the lossless fallback, mirroring MsgPack's EXTENSION(2)
+          // path for the same payload shape.
+          if (firstNul != std::string::npos && s.find('\0', firstNul + 1) == std::string::npos) {
+            std::string pattern = s.substr(0, firstNul);
+            std::string opts = s.substr(firstNul + 1);
             auto re = asvJSONValue::makeRegex(pattern.c_str(), opts.empty() ? nullptr : opts.c_str());
             if (re) return re;
+          } else if (firstNul == std::string::npos) {
+            auto re = asvJSONValue::makeRegex(s.c_str(), nullptr);
+            if (re) return re;
           }
-          auto re = asvJSONValue::makeRegex(s.c_str(), nullptr);
-          if (re) return re;
         }
         return val;
       }
