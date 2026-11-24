@@ -12657,6 +12657,86 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testYamlTaggedFoldAndRecursionBudget) {
+  // Probe sw92: tagged inline PLAIN values fold their continuation lines like
+  // untagged ones (the old code leaked the next line into the structure:
+  // mapping -> "Expected ':'", sequence item -> a silent SECOND item).
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("x: !!str a\n  b\n")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"x\":\"a b\"}"));
+    asvJSON k;
+    ASSERT(k.fromYAML(std::string_view("- !!str a\n  b\n")));
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s2, std::string("[\"a b\"]"));
+    asvJSON m;
+    ASSERT(m.fromYAML(std::string_view("x: !!yaml plain\n  folded\n")));
+    std::string s3; m.getRoot()->serialize(s3, false, 0);
+    ASSERT_EQ(s3, std::string("{\"x\":\"plain folded\"}"));
+  }
+  // Tagged SCALAR documents at the root ("!!str 5", "!mytag x", "!!yaml 5"):
+  // they used to fall into structural guessing ("Expected ':'" / garbage).
+  {
+    asvJSON a;
+    ASSERT(a.fromYAML(std::string_view("!!str 5\n")));
+    std::string sa; a.getRoot()->serialize(sa, false, 0);
+    ASSERT_EQ(sa, std::string("\"5\""));
+    asvJSON b;
+    ASSERT(b.fromYAML(std::string_view("!!int 5\n")));
+    std::string sb; b.getRoot()->serialize(sb, false, 0);
+    ASSERT_EQ(sb, std::string("5"));
+    asvJSON c;
+    ASSERT(c.fromYAML(std::string_view("!mytag x\n")));
+    std::string sc; c.getRoot()->serialize(sc, false, 0);
+    ASSERT_EQ(sc, std::string("{\"$customTag\":{\"name\":\"mytag\",\"value\":\"x\"}}"));
+    asvJSON d;
+    ASSERT(d.fromYAML(std::string_view("!!yaml 5\n")));
+    std::string sd; d.getRoot()->serialize(sd, false, 0);
+    ASSERT_EQ(sd, std::string("5"));
+    // trailing content after a root tagged value stays the named boundary error
+    asvJSON e;
+    ASSERT(!e.fromYAML(std::string_view("!!int 5\nx: 1\n")));
+    ASSERT(e.getLastError().find("unexpected content after tagged value") != std::string::npos);
+  }
+  // !!yaml chain recursion: the guard is a STACK budget (24, probe sw92m:
+  // descent survived ~47 levels but the throw at ~36 crashed the unwind, and
+  // 48+ embeds cannot form a core-representable tree). 23 embeds legal,
+  // 25+ rejected by name, no crash up to 300.
+  auto chainDoc = [](int n) {
+    std::string doc = "a: !!yaml\n";
+    for (int i = 0; i < n; i++) doc += std::string(2 + 2 * i, ' ') + "a: !!yaml\n";
+    doc += std::string(2 + 2 * n, ' ') + "end: 1\n";
+    return doc;
+  };
+  {
+    std::string okDoc = chainDoc(23);
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view(okDoc)), j.getLastError().c_str());
+    std::string badDoc = chainDoc(25);
+    asvJSON k;
+    ASSERT(!k.fromYAML(std::string_view(badDoc)));
+    ASSERT(k.getLastError().find("maximum !!yaml nesting depth exceeded") != std::string::npos);
+    asvJSON m;
+    std::string hugeDoc = chainDoc(300);
+    ASSERT(!m.fromYAML(std::string_view(hugeDoc)));   // used to hard-crash (0xC00000FD)
+  }
+  // tagged-block (!map chain) recursion: parseDocImpl guard lowered to
+  // MAX_NESTING_DEPTH; the "(line N)" stamp must appear EXACTLY ONCE per
+  // error, not once per recursion level (the old catch re-wrapped at every
+  // level: 49 copies on a deep chain).
+  {
+    std::string doc = "a: !!map\n";
+    for (int i = 0; i < 100; i++) doc += std::string(2 + 2 * i, ' ') + "a: !!map\n";
+    doc += std::string(2 + 2 * 100, ' ') + "end: 1\n";
+    asvJSON j;
+    ASSERT(!j.fromYAML(std::string_view(doc)));
+    size_t first = j.getLastError().find(" (line ");
+    ASSERT(first != std::string::npos);
+    ASSERT(j.getLastError().find(" (line ", first + 1) == std::string::npos);
+  }
+}
+
 TEST(testSaxEntryContracts) {
   // Probe sw91: the documented SAX entry contracts.
   struct Cnt : public JsonSaxHandler {
@@ -42861,7 +42941,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testSaxEntryContracts);
+	RUN(testYamlTaggedFoldAndRecursionBudget);
+RUN(testSaxEntryContracts);
 RUN(testProtobufSchemaWireMatrix);
 RUN(testBSONUtf8DecoderSymmetry);
 RUN(testADEFeatureMatrix);

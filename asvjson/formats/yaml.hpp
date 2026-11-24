@@ -1062,8 +1062,18 @@ inline std::string yamlProcessYamlEmbed(std::string raw) {
 	bool isScalar = false;
 	std::string sv = yamlScalarDocValue(raw, isScalar);
 	if (isScalar) return sv;
+	// !!yaml recursion guard. The cap protects the STACK, not semantics (the
+	// same reasoning as the schema MAX_VALIDATION_DEPTH): a bare '!!yaml' chain
+	// nests yamlToJson/yamlParseDocImpl/gather frames per level (probe sw92m).
+	// Descent alone survived 47 embed levels, but the guard THROW at embed ~36
+	// died in the unwind machinery (0xC00000FD), and a chain of 48+ embeds
+	// cannot form a core-parse-representable tree anyway (each structure embed
+	// adds a container; core parse() caps at 48). The old MAX_YAML_DEPTH(64)
+	// cap never fired in time: chains 48..3000 were a hard crash with no error
+	// channel. The clean-reject zone measured at embed #<=33; 24 keeps a
+	// 12-level margin on the 1 MB /O2 stack.
 	static thread_local int yamlYamlDepth = 0;
-	if (yamlYamlDepth >= static_cast<int>(MAX_YAML_DEPTH))
+	if (yamlYamlDepth >= 24)
 		throw asvJSONError("YAML: maximum !!yaml nesting depth exceeded");
 	++yamlYamlDepth;
 	std::string nested;
@@ -3174,11 +3184,69 @@ inline bool yamlFoldPlainScalar(std::vector<std::string>& lines, size_t& li, int
 	return true;
 }
 
+// A tagged inline PLAIN value continues on deeper lines exactly like an
+// untagged one ("x: !!str a" + deeper "b" means the tag applies to the folded
+// "a b"). The old code handed the single-line remainder to
+// yamlParseTaggedValue and the continuation leaked into the structure: a
+// mapping key guess ("Expected ':'") or a SECOND sequence item (silent
+// [ "a", "b" ] reshaping). Fold the plain tail with the SAME stop rules as
+// yamlFoldPlainScalar, then re-apply the tag. Solo tags, block headers, flow
+// collections, quoted scalars and aliases keep their existing paths (their
+// continuation is handled there or is a documented error). (probe sw92)
+inline std::string yamlParseTaggedValueFolded(std::vector<std::string>& lines,
+                                              size_t& li, int contIndent,
+                                              std::string_view tagged) {
+	std::string s(tagged);
+	size_t p = 0;
+	while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) p++;
+	if (p >= s.size() || s[p] != '!') return yamlParseTaggedValue(tagged);
+	size_t tagEnd = p + 1;
+	if (tagEnd < s.size() && s[tagEnd] == '!') tagEnd++;
+	while (tagEnd < s.size() && s[tagEnd] != ' ' && s[tagEnd] != '\t') tagEnd++;
+	std::string_view val(s.data() + tagEnd, s.size() - tagEnd);
+	while (!val.empty() && (val[0] == ' ' || val[0] == '\t')) val.remove_prefix(1);
+	if (val.empty() || val[0] == '#' || val[0] == '|' || val[0] == '>' ||
+	    val[0] == '{' || val[0] == '[' || val[0] == '"' || val[0] == '\'' ||
+	    val[0] == '*')
+		return yamlParseTaggedValue(tagged);
+	size_t scan = li + 1;
+	std::string folded(val);
+	int breaks = 0;
+	size_t lastFolded = li;
+	bool any = false;
+	while (scan < lines.size()) {
+		std::string_view t = stripIndent(lines[scan]);
+		if (t.empty()) { breaks++; scan++; continue; }
+		if (countIndent(lines[scan]) < contIndent) break;
+		if (t[0] == '#') break;
+		if (yamlIsDashStart(t)) break;
+		if (yamlFindKeyColonSep(t) != std::string_view::npos) break;
+		if (t[0] == '{' || t[0] == '[' || t[0] == '?' || t[0] == '|' || t[0] == '>') break;
+		if (breaks == 0) folded += ' ';
+		else folded.append(static_cast<size_t>(breaks), '\n');
+		folded.append(t);
+		breaks = 0;
+		any = true;
+		lastFolded = scan;
+		scan++;
+	}
+	if (!any) return yamlParseTaggedValue(tagged);
+	li = lastFolded;
+	return yamlParseTaggedValue(std::string(std::string_view(s).substr(p, tagEnd - p)) + " " + folded);
+}
+
 inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
     const std::unordered_map<std::string, std::string>* seedAnchors) {
 	// Recursion guard: yamlParseDocImpl recurses via tagged block values,
 	// explicit keys, block sets and anchored blocks (each passing depth+1).
-	if (depth > static_cast<int>(MAX_YAML_DEPTH))
+	// The cap used to be MAX_YAML_DEPTH (64) - too high for the STACK: a
+	// 64-level "!!map" chain died with 0xC00000FD before the guard threw
+	// (probe sw92m). MAX_NESTING_DEPTH(48) rejects nothing whose tree core
+	// parse() would accept (each recursion level mirrors one container,
+	// with the exotic exception of >48-deep compound SET keys, which are
+	// now rejected as a documented stack-budget narrowing - same reasoning
+	// as the schema MAX_VALIDATION_DEPTH).
+	if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
 		throw asvJSONError("YAML: maximum nesting depth exceeded");
 	// Restore the previous tag-map state on exit (even on exception).
 	YamlDocTagMapGuard tagGuard;
@@ -3290,6 +3358,24 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 				}
 				return tagged;
 			}
+		}
+		// A tagged SCALAR document at the root ("!!str 5", "!!yaml 5",
+		// "!mytag x"): the tag applies to the inline node exactly like a
+		// tagged mapping value (yamlParseTaggedValue dispatches the same way).
+		// The old fall-through produced structural garbage ("Expected ':'" /
+		// "Expected string"). Trailing lines keep the "unexpected content"
+		// boundary contract of the other root shapes; a continuation of the
+		// plain scalar at root is NOT folded (named rejection instead). (probe sw92)
+		if (!fc.empty() && fc[0] == '!' && !yamlIsSoloTag(fc) &&
+		    yamlFlowAfterTag(fc) == std::string_view::npos &&
+		    !yamlIsSetBlockHeader(fc)) {
+			std::string tagged = yamlParseTaggedValue(fc);
+			for (size_t t = firstLine + 1; t < lines.size(); t++) {
+				std::string_view tc = stripIndent(lines[t]);
+				if (tc.empty() || tc[0] == '#') continue;
+				throw asvJSONError("YAML: unexpected content after tagged value");
+			}
+			return tagged;
 		}
 		// Block-style !!set at document root ("!!set\n- a\n- b")
 		if (yamlIsSetBlockHeader(fc)) {
@@ -3613,7 +3699,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 						else if (yamlIsSoloTag(inlineVal))
 							out += yamlTaggedBlockValue(inlineVal, lines, li, indent, depth);
 						else
-							out += yamlParseTaggedValue(inlineVal);
+							out += yamlParseTaggedValueFolded(lines, li, indent + 1, inlineVal);
 					}
 				} else if (inlineVal.size() > 1 && inlineVal[0] == '*') {
 					out += yamlResolveAlias(std::string_view(inlineVal).substr(1), anchors, resolving);
@@ -3745,7 +3831,10 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 					else if (yamlIsSoloTag(rest))
 						out += yamlTaggedBlockValue(rest, lines, li, indent, depth);
 					else
-						out += yamlParseInlineValue(rest);
+						// Tagged inline scalar item: fold the plain continuation
+						// lines like an untagged item, else the next line becomes
+						// a SECOND item (silent ["a","b"] reshaping, probe sw92).
+						out += yamlParseTaggedValueFolded(lines, li, indent + 1, rest);
 				}
 			} else if (!rest.empty() && (rest[0] == '|' || rest[0] == '>')) {
 				bool isFolded = (rest[0] == '>');
@@ -3907,7 +3996,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 						else if (yamlIsSoloTag(valPart))
 							out += yamlTaggedBlockValue(valPart, lines, li, indent, depth);
 						else
-							out += yamlParseTaggedValue(valPart);
+							out += yamlParseTaggedValueFolded(lines, li, indent + 1, valPart);
 					}
 				} else if (valPart.size() > 1 && valPart[0] == '*') {
 					out += yamlResolveAlias(std::string_view(valPart).substr(1), anchors, resolving);
@@ -3982,7 +4071,7 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 							if (yamlIsSoloTag(dc))
 								out += yamlTaggedBlockValue(dc, lines, scan, indent, depth);
 							else
-								out += yamlParseTaggedValue(dc);
+								out += yamlParseTaggedValueFolded(lines, scan, countIndent(lines[scan]), dc);
 						}
 						else {
 							const size_t dcStart = out.size();
@@ -4023,7 +4112,14 @@ inline std::string yamlParseDocImpl(std::vector<std::string>& lines, int depth,
 			out += yamlParseInlineValue(content);
 		}
 		} catch (const asvJSONError& e) {
-			throw asvJSONError(std::string(e.what()) + " (line " + std::to_string(yamlLineNum) + ")");
+			// Decorate with the line number ONCE: the error also passes
+			// through this catch at every recursive parseDocImpl level, so
+			// unguarded stamping produced 49 "(line 1)" copies on a deep
+			// tagged chain (probe sw92m). The innermost (first) stamp wins.
+			std::string w(e.what());
+			if (w.find(" (line ") == std::string::npos)
+				w += " (line " + std::to_string(yamlLineNum) + ")";
+			throw asvJSONError(w);
 		}
 	}
 
