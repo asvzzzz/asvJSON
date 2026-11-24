@@ -929,6 +929,45 @@ inline std::string yamlScalarToJson(std::string_view s) {
 				probe = asvStrtod(cstr, &end);
 				if (end == cstr + tmp.size() && !std::isfinite(probe)) return yamlQuoteJsonScalar(s);
 			}
+			// C++ accepts the dot-only float spellings ".5" and "5." (and their
+			// negative forms) and so does the YAML 1.2 core schema, but JSON has
+			// no such spelling: feeding the raw token through made the JSON layer
+			// reject the WHOLE document ("Unexpected: ." / "digit required after
+			// decimal point") instead of producing the float it denotes. Normalize
+			// any non-JSON-shaped valid number to JSON float form.
+			{
+				bool jsonForm = !s.empty();
+				size_t p = 0;
+				if (jsonForm && s[0] == '-') p = 1;
+				if (p >= s.size() || s[p] < '0' || s[p] > '9') jsonForm = false;
+				else {
+					while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+					if (p < s.size() && s[p] == '.') {
+						p++;
+						if (p >= s.size() || s[p] < '0' || s[p] > '9') jsonForm = false;
+						else while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+					}
+					if (jsonForm && p < s.size() && (s[p] == 'e' || s[p] == 'E')) {
+						p++;
+						if (p < s.size() && (s[p] == '+' || s[p] == '-')) p++;
+						if (p >= s.size() || s[p] < '0' || s[p] > '9') jsonForm = false;
+						else while (p < s.size() && s[p] >= '0' && s[p] <= '9') p++;
+					}
+					if (p != s.size()) jsonForm = false;
+				}
+				if (!jsonForm) {
+					double dv3 = 0.0;
+				#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
+					auto [p3, e3] = std::from_chars(s.data(), s.data() + s.size(), dv3);
+					if (e3 == std::errc() && p3 == s.data() + s.size()) return fmtDbl(dv3);
+				#else
+					std::string tmp3(s);
+					char* end3 = nullptr;
+					dv3 = asvStrtod(tmp3.c_str(), &end3);
+					if (end3 == tmp3.c_str() + tmp3.size()) return fmtDbl(dv3);
+				#endif
+				}
+			}
 			return std::string(s);
 		}
 	}

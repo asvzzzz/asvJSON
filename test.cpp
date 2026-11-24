@@ -21876,6 +21876,51 @@ TEST(testCppReaderEscapeSelfConsistency) {
   }
 }
 
+TEST(testYamlDotFormFloats) {
+  // YAML 1.2 core resolves ".5"/"5." as floats, and from_chars accepts them,
+  // but JSON has no such spelling: yamlScalarToJson used to pass the raw
+  // token through and the JSON layer rejected the WHOLE document
+  // ("Unexpected: ." / "digit required after decimal point"). Valid numbers
+  // in non-JSON form are normalized to JSON float form now.
+  {
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view("a: .5\nb: 5.\nc: -.5\nd: +.5\ne: .5e2\n")),
+               j.getLastError().c_str());
+    ASSERT_EQ(j.get("a")->type, asvJSONValue::DOUBLE);
+    ASSERT(j.get("a")->getDouble() == 0.5);
+    ASSERT(j.get("b")->getDouble() == 5.0);
+    ASSERT(j.get("c")->getDouble() == -0.5);
+    ASSERT(j.get("d")->getDouble() == 0.5);
+    ASSERT(j.get("e")->getDouble() == 50.0);
+    // re-encode is comment-free stable text and re-reads identically
+    std::string y = j.toYAML(true);
+    asvJSON k;
+    ASSERT(k.fromYAML(std::string_view(y)));
+    ASSERT(*j.getRoot() == *k.getRoot());
+    ASSERT_EQ(k.toYAML(true), y);
+  }
+  {
+    // flow context too
+    asvJSON j;
+    ASSERT_MSG(j.fromYAML(std::string_view("c: [.5, 5.]")), j.getLastError().c_str());
+    asvJSONValue* v = j.get("c");
+    ASSERT(v && v->type == asvJSONValue::ARRAY && v->size() == 2);
+    if (v && v->size() == 2) {
+      ASSERT(v->get(0)->getDouble() == 0.5);
+      ASSERT(v->get(1)->getDouble() == 5.0);
+    }
+  }
+  // the conservative spellings stay strings (documented): "1e999" (overflow)
+  // and bare "inf"/"nan" are NOT typed, only .inf/.NaN families are.
+  {
+    asvJSON j;
+    ASSERT(j.fromYAML(std::string_view("a: 1e999\nb: inf\nc: nan\n")));
+    ASSERT_EQ(j.get("a")->type, asvJSONValue::STRING);
+    ASSERT_EQ(j.get("b")->type, asvJSONValue::STRING);
+    ASSERT_EQ(j.get("c")->type, asvJSONValue::STRING);
+  }
+}
+
 TEST(testYamlIndentWidthOne) {
   // indentWidth==1 used to emit "- " + a child at ONE column, a shape the
   // block parser itself rejected ("sequence and mapping mixed at the same
@@ -42280,6 +42325,7 @@ RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
 RUN(testDateTimeSentinelGuard);
 RUN(testCppReaderEscapeSelfConsistency);
+RUN(testYamlDotFormFloats);
 RUN(testYamlIndentWidthOne);
 RUN(testSpecialTypeEnvelopeStrictness);
 RUN(testRegexNulGuard);
