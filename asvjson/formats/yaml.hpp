@@ -18,6 +18,15 @@
 //   STRING / INT / DOUBLE / BOOL / NULL / ARRAY / OBJECT / BINARY / OBJECTID /
 //   REGEX and for DATETIME values whose ISO text matches the JSON-layer
 //   auto-detect pattern.
+// * Line endings: the parser splits on LF only (shared splitLines). A CRLF
+//   document reads byte-identically to its LF form (splitLines strips one
+//   trailing CR per line). A lone CR is CONTENT, not a line break - unlike
+//   YAML 1.2 s5.4, which folds CR into a line break, so a legacy-Mac
+//   (CR-only) document decodes as ONE physical line, and a stray CR before a
+//   CRLF lands at the end of the previous line (plain scalars right-trim, so
+//   "b: 2\r\r\n" still types INT 2). Every such tree survives its own
+//   encoder (strings with control bytes are quoted), so the behavior is
+//   lossless and reaches a byte-stable fixed point (probe sw86).
 // * A root-level flow-collection document followed by a deeper plain line
 //   (`{a: 1}\nb: 2`) has its trailing line parsed as a separate implicit
 //   document; re-serialization concatenates the documents into a JSON array

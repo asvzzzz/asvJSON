@@ -12657,6 +12657,78 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testLineEndingPolicy) {
+  // Probe sw86: the library line model. splitLines splits LF only and strips
+  // ONE trailing CR, so CRLF documents read EXACTLY like their LF form in
+  // every line-based format.
+  struct L { const char* name; bool (*p)(asvJSON&, std::string_view); const char* lf; };
+  const L ls[] = {
+    {"ini",      [](asvJSON& j, std::string_view s) { return j.fromINI(s); },      "a=1\nb=2\n"},
+    {"toml",     [](asvJSON& j, std::string_view s) { return j.fromTOML(s); },     "a=1\nb=2\n"},
+    {"dotenv",   [](asvJSON& j, std::string_view s) { return j.fromDotenv(s); },   "A=1\nB=2\n"},
+    {"javaprop", [](asvJSON& j, std::string_view s) { return j.fromJavaProp(s); }, "a=1\nb=2\n"},
+    {"yaml",     [](asvJSON& j, std::string_view s) { return j.fromYAML(s); },     "a: 1\nb: 2\n"},
+    {"goon",     [](asvJSON& j, std::string_view s) { return j.fromGOON(s); },     "a: 1\nb: 2\n"},
+    {"toon",     [](asvJSON& j, std::string_view s) { return j.fromTOON(s); },     "a: 1\nb: 2\n"},
+    {"ade",      [](asvJSON& j, std::string_view s) { return j.fromADE(s); },      "a: 1\nb: 2\n"},
+    {"csv",      [](asvJSON& j, std::string_view s) { return j.fromCSV(s); },      "h1,h2\n1,2\n"},
+  };
+  for (auto& l : ls) {
+    std::string crlf;
+    for (const char* c = l.lf; *c; c++) { if (*c == '\n') crlf += "\r\n"; else crlf += *c; }
+    asvJSON jL, jC;
+    ASSERT_MSG(l.p(jL, std::string_view(l.lf)), l.name);
+    ASSERT_MSG(l.p(jC, std::string_view(crlf)), l.name);
+    std::string sL, sC;
+    jL.getRoot()->serialize(sL, false, 0);
+    jC.getRoot()->serialize(sC, false, 0);
+    ASSERT_MSG(sL == sC, l.name);
+  }
+  // CR-only (legacy Mac): a lone CR is CONTENT. Accepted shapes are lossless
+  // and reach their own encode/decode fixed point; strict formats reject.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string_view("a=1\rb=2\n")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":\"1\\rb=2\"}"));
+    std::string enc = j.toINI();
+    asvJSON k; ASSERT_MSG(k.fromINI(enc), enc.c_str());
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s, s2);
+    ASSERT_EQ(enc, k.toINI());
+  }
+  { asvJSON j; ASSERT(!j.fromTOML(std::string_view("a=1\rb=2\n"))); }
+  { asvJSON j; ASSERT(!j.fromCSV(std::string_view("h1,h2\r1,2\r"))); }
+  { asvJSON j; ASSERT(!j.fromJSONLines(std::string_view("{\"a\":1}\r{\"b\":2}\r"))); }
+  // ADE's own parser splits on CR - the library's SECOND line model, pinned.
+  {
+    asvJSON j;
+    ASSERT(j.fromADE(std::string_view("a: 1\rb: 2\r")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":1,\"b\":2}"));
+  }
+  // Mixed endings: a stray CR before a CRLF. INI-style trims trailing
+  // whitespace (the intended value survives); GOON keeps the CR IN the value
+  // - the retyping is documented drift: stable, fixed point after one round.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string_view("a=1\r\nb=2\r\r\nc=3\r\n")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":1,\"b\":2,\"c\":3}"));
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromGOON(std::string_view("a: 1\r\nb: 2\r\r\nc: 3\r\n")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":1,\"b\":\"2\\r\",\"c\":3}"));
+    std::string enc = j.toGOON();
+    asvJSON k; ASSERT_MSG(k.fromGOON(enc), enc.c_str());
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s, s2);
+    ASSERT_EQ(enc, k.toGOON());
+  }
+}
+
 TEST(testProtobufTextRootGuards) {
   // Probe sw83: the text parser accepted garbage roots.
   // 1. A bare `name { ... }` at the ROOT (the nested form the encoder only
@@ -42415,7 +42487,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testProtobufTextRootGuards);
+	RUN(testLineEndingPolicy);
+RUN(testProtobufTextRootGuards);
 RUN(testSexprHeuristicTable);
 RUN(testGoonTabularHeaderConsistency);
 RUN(testGOONExtras);
