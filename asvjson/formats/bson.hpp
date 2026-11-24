@@ -58,8 +58,10 @@ namespace asvJSONInternal {
 
 // UTF-8 validation helper for the encoder: BSON strings and keys MUST be valid
 // UTF-8 per the spec; an invalid sequence would produce a document the decoder
-// rejects, so we catch it at encode time. Binary payloads (BINARY, EXTENSION)
-// carry arbitrary bytes and are deliberately not checked.
+// rejects, so we catch it at encode time. The decoder validates the SAME bytes
+// (element names, 0x02 payloads, 0x0B regex parts), so a document never decodes
+// into a tree its own encoder refuses to re-emit. Binary payloads (BINARY,
+// EXTENSION) carry arbitrary bytes and are deliberately not checked.
 inline void bsonWriteText(std::vector<uint8_t>& out, const std::string& s) {
 	if (!isValidUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size()))
 		throw asvJSONError("BSON invalid UTF-8 in string");
@@ -343,6 +345,12 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 		size_t keyLen = pos - keyStart;
 		if (keyLen > asvJSONValue::MAX_STRING_LEN) throw asvJSONError("BSON key too long");
 		std::string key(reinterpret_cast<const char*>(data + keyStart), keyLen);
+		// Names are UTF-8 per the spec, and toBSON's TWO key sites validate
+		// ("BSON invalid UTF-8 in key") - a non-UTF-8 name would decode to a
+		// tree this format can never re-emit. Reject at parse, exactly like
+		// the MessagePack/CBOR DECODERS do for their text strings (probe sw89).
+		if (!isValidUTF8(reinterpret_cast<const uint8_t*>(data + keyStart), keyLen))
+			throw asvJSONError("BSON invalid UTF-8 in key");
 		pos++;
 		switch (elemType) {
 			case 0x01: { if (pos + 8 > docEnd) throw asvJSONError("BSON double: unexpected end"); double d; readLE64Double(data, pos, d); auto v1 = asvJSONValue::makeDouble(d); if (!v1) throw asvJSONError("BSON double alloc failed"); obj->obj->insert_or_assign(key, std::move(v1)); break; }
@@ -351,6 +359,11 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				uint32_t slen; readLE32(data, pos, slen);
 				if (slen < 1 || slen > docEnd - pos) throw asvJSONError("BSON string invalid");
 				if (data[pos + slen - 1] != 0) throw asvJSONError("BSON string not NUL-terminated");
+				// The 0x02 payload is a UTF-8 string per the spec (bsonWriteText
+				// refuses to encode otherwise): validate on the way in, so a
+				// decoded tree always survives its own toBSON (probe sw89).
+				if (!isValidUTF8(reinterpret_cast<const uint8_t*>(data + pos), slen - 1))
+					throw asvJSONError("BSON invalid UTF-8 in string");
 				auto val = asvJSONValue::makeString(reinterpret_cast<const char*>(data + pos), slen - 1);
 				pos += slen;
 				if (!val) throw asvJSONError("BSON string too long");
@@ -496,6 +509,12 @@ inline std::unique_ptr<asvJSONValue> parseBSON(const uint8_t* data, size_t& pos,
 				if (patLen + optLen > asvJSONValue::MAX_STRING_LEN - 2) throw asvJSONError("BSON regex too large");
 				std::string pattern(reinterpret_cast<const char*>(data + patStart), patLen);
 				std::string options(reinterpret_cast<const char*>(data + optStart), optLen);
+				// Same decode/encode symmetry as 0x02 and the keys: toBSON
+				// refuses non-UTF-8 regex parts, so the parser must too.
+				if (!isValidUTF8(reinterpret_cast<const uint8_t*>(pattern.data()), pattern.size()))
+					throw asvJSONError("BSON invalid UTF-8 in regex pattern");
+				if (!isValidUTF8(reinterpret_cast<const uint8_t*>(options.data()), options.size()))
+					throw asvJSONError("BSON invalid UTF-8 in regex options");
 				auto val = asvJSONValue::makeRegex(pattern.c_str(), options.c_str());
 				if (!val) throw asvJSONError("BSON regex invalid or too large");
 				obj->obj->insert_or_assign(key, std::move(val));

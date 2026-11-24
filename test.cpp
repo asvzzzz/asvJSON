@@ -12657,6 +12657,48 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testBSONUtf8DecoderSymmetry) {
+  // Probe sw89: toBSON() validates UTF-8 for strings/keys/regex parts, but
+  // parseBSON let invalid bytes through - a decoded tree the format could
+  // never re-emit (encode threw). The decoder now rejects the same bytes the
+  // encoder refuses, like the MessagePack/CBOR decoders already did.
+  auto i32s = [](int32_t v) { std::string s; for (int i = 0; i < 4; i++) s += char((v >> (8 * i)) & 0xFF); return s; };
+  auto el = [](char type, const std::string& name, const std::string& payload) {
+    return std::string(1, type) + name + char(0) + payload;
+  };
+  auto docOf = [&](const std::string& elems) { return i32s((int32_t)elems.size() + 5) + elems + char(0); };
+  {
+    std::string d = docOf(el(0x02, "v", i32s(4) + std::string("a\xC3\x28") + char(0)));
+    asvJSON j;
+    ASSERT(!j.fromBSON(d.data(), d.size()));
+    ASSERT(j.getLastError().find("invalid UTF-8 in string") != std::string::npos);
+  }
+  {
+    std::string d = docOf(el(0x10, std::string("k\xC3\x28"), i32s(1)));
+    asvJSON j;
+    ASSERT(!j.fromBSON(d.data(), d.size()));
+    ASSERT(j.getLastError().find("invalid UTF-8 in key") != std::string::npos);
+  }
+  {
+    std::string d = docOf(el(0x0B, "v", std::string("a\xE0\x80") + char(0) + std::string("i") + char(0)));
+    asvJSON j;
+    ASSERT(!j.fromBSON(d.data(), d.size()));
+    ASSERT(j.getLastError().find("invalid UTF-8 in regex") != std::string::npos);
+  }
+  // valid UTF-8 (Cyrillic + astral) still decodes and round-trips
+  {
+    std::string s = std::string("\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82");
+    s += std::string("\xF0\x9F\x98\x80");
+    std::string d = docOf(el(0x02, "v", i32s((int32_t)s.size() + 1) + s + char(0)));
+    asvJSON j;
+    ASSERT_MSG(j.fromBSON(d.data(), d.size()), j.getLastError().c_str());
+    auto v = j.toBSON();
+    asvJSON k;
+    ASSERT(k.fromBSON(v.data(), v.size()));
+    ASSERT(*j.getRoot() == *k.getRoot());
+  }
+}
+
 TEST(testADEFeatureMatrix) {
   // Probe sw88: the ADE feature set pinned end-to-end. Every accepted
   // document must reach an encode->parse->encode fixed point.
@@ -42626,7 +42668,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testADEFeatureMatrix);
+	RUN(testBSONUtf8DecoderSymmetry);
+RUN(testADEFeatureMatrix);
 RUN(testDiffSpecialTypeTransport);
 RUN(testLineEndingPolicy);
 RUN(testProtobufTextRootGuards);
