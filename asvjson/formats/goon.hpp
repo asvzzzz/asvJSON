@@ -37,7 +37,10 @@
 // (except when explicitly quoted) - the encoder never emits escaped bare
 // identifiers so this is a robustness-only gap for external input.  Column
 // sorting (`autoSort`) runs unconditionally in Compact mode; Balanced/LLM
-// preserve insertion order (already lost by unordered_map).
+// preserve insertion order (already lost by unordered_map).  Per-node
+// comment metadata is NOT emitted by any GoonWriteOptions::Mode - the GOON
+// writer has no comment support; '#' comments are a decoder-side construct
+// only (see also the corrected GoonWriteOptions documentation).
 //
 // Tabular row cells: the flat `cell1,cell2` row syntax has no escape, so the
 // decoder splits rows with a quote- AND brace-aware scan (commas inside a

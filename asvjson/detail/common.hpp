@@ -84,9 +84,17 @@ struct YamlWriteOptions {
 // GOON serialization options.
 struct GoonWriteOptions {
 	enum class Mode : int { LLM = 0, Compact = 1, Balanced = 2 };
-	// LLM: verbose, including all comments and extra whitespace for readability.
-	// Compact: minimal whitespace and no comments (matches toGOON(true)).
-	// Balanced: hybrid mode with indentation and standard spacing.
+	// mode changes the LAYOUT only (measured behavior, probe sw78):
+	// LLM:      tabular arrays capped at 5 rows (longer ones fall back to
+	//           list form), caret ('^' repeat) cell compression OFF.
+	// Compact:  every object array stays tabular, columns auto-sorted,
+	//           caret ON, minimal row whitespace.
+	// Balanced: 5-row tabular cap like LLM, caret ON, full row layout.
+	// NOTE: per-node comment metadata (asvJSONValue::comments) is NOT
+	// emitted by ANY mode - the GOON writer has no comment support (the
+	// old "LLM: including all comments" wording described unimplemented
+	// behavior and was corrected). GOON '#' comments are a decoder-side
+	// construct only.
 	Mode mode = Mode::LLM;
 	int indentWidth = 2;     // spaces per indentation level
 	bool alwaysQuoteStrings = false; // quote every string scalar
