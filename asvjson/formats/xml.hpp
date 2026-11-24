@@ -74,7 +74,14 @@
 //     DIRECT child is unpinned and its contents round-trip (use that form to
 //     keep a literal key); put them inside a normal (non-array-of-strings)
 //     object instead of at mixed-content top level, or quote the key so it is
-//     not confused with a marker on re-parse.
+//     not confused with a marker on re-parse.  The model keys "#text",
+//     "#content" and the "@name" attribute prefix are CONVENTION keys the same
+//     way: a JSON-sourced object carrying one of them as a direct data key is
+//     folded into that role on encode ({"e":{"#text":1}} -> <e>1</e> -> reads
+//     back as {"e":1}; {"e":{"@x":1}} becomes the x="1" ATTRIBUTE and re-reads
+//     as a STRING). The decoder itself emits exactly those keys for mixed
+//     content, so the encoder cannot reject them - pick a different key name
+//     when a literal "#text"/"#content"/"@..." must survive (probe sw84).
 //   - A stray '<' not starting a valid tag in skipped xsi:nil content scans
 //     as ordinary characters (malformed input is tolerated, never hangs).
 //   - xmlns declarations are element-scoped: a prefix bound inside one element
