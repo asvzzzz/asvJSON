@@ -1410,6 +1410,17 @@ private:
 	std::unique_ptr<asvJSONValue> parseValue() {
 		skip();
 		char c = cur();
+		// Never name a byte that does not exist (the wave-87 SAX principle,
+		// now applied to the DOM parser too): at EOF the cur() sentinel used
+		// to make an empty / whitespace-only / comment-only document fail with
+		// "Unexpected byte 0x00". parseDepth says WHICH failure it is - at the
+		// root nothing was ever started, inside a container a value was
+		// truncated (and the container loops reach parseValue with depth >= 1,
+		// so a truncated "[1," never claims to be "empty input").
+		if (c == 0 && pos >= json.size()) {
+			if (parseDepth == 0) throw asvJSONError("Empty input");
+			throw asvJSONError("Unexpected end of input");
+		}
 		if (c == '{') return parseObject();
 		if (c == '[') return parseArray();
 		if (c == '"') return parseStringOrSpecial();

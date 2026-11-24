@@ -2,7 +2,7 @@
 // JSON5 serialization/parsing for asvJSON++
 //
 // JSON5 is a superset of JSON that adds:
-//   - Unquoted object keys: {key: "value"}
+//   - Unquoted object keys: {key: "value"}, with ES \uXXXX escapes in them
 //   - Single-quoted strings: 'value'
 //   - Trailing commas: [1,2,3,]
 //   - Hex numbers: 0xFF
@@ -363,30 +363,71 @@ inline std::string json5ToJson(std::string_view input) {
     }
 
     // Unquoted key (supports Unicode identifiers)
-    if (isIdStart(c)) {
+    // Unquoted key (supports Unicode identifiers, and the JSON5/ES
+    // IdentifierName UnicodeEscapeSequence: \uXXXX at the START and in any
+    // CONTINUATION, so {\u0061:1} -- the json5.org example -- is {"a":1} and
+    // {a\u0062:1} is {"ab":1}). Decoded codepoints become UTF-8 key bytes;
+    // lone/unpaired surrogates cannot be stored as UTF-8 keys and are a named
+    // error. An ESCAPED identifier in VALUE position is rejected: ES lexes it
+    // as an IdentifierName, never as the true/null/NaN/Infinity keyword, and
+    // passing the decoded text through would fabricate a keyword out of an
+    // escape (the raw scanner below cannot see the backslash at all).
+    if (isIdStart(c) || (c == '\\' && i + 1 < input.size() && input[i + 1] == 'u')) {
       radixJustEnded = false;
-      size_t start = i;
-      while (i < input.size() && isIdCont(input[i])) {
-        auto uc = static_cast<unsigned char>(input[i]);
-        if (uc == 0xC2 && i + 1 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xA0) break;
-        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
-            (static_cast<unsigned char>(input[i + 2]) == 0xA8 || static_cast<unsigned char>(input[i + 2]) == 0xA9)) break;
-        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
-            static_cast<unsigned char>(input[i + 2]) >= 0x80 && static_cast<unsigned char>(input[i + 2]) <= 0x8A) break;
-        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x81 &&
-            static_cast<unsigned char>(input[i + 2]) == 0x9F) break;
-        if (uc == 0xE1 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x9A &&
-            static_cast<unsigned char>(input[i + 2]) == 0x80) break; // U+1680 OGHAM SPACE MARK
-        if (uc == 0xE2 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
-            static_cast<unsigned char>(input[i + 2]) == 0xAF) break; // U+202F NARROW NO-BREAK SPACE
-        if (uc == 0xE3 && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0x80 &&
-            static_cast<unsigned char>(input[i + 2]) == 0x80) break;
-        if (uc == 0xEF && i + 2 < input.size() && static_cast<unsigned char>(input[i + 1]) == 0xBB &&
-            static_cast<unsigned char>(input[i + 2]) == 0xBF) break;
-
+      std::string ident;
+      bool hadEsc = false;
+      auto wsRun = [&](size_t q) noexcept {   // Zs / line-break run ends an identifier
+        unsigned char u0 = static_cast<unsigned char>(input[q]);
+        if (u0 == 0xC2 && q + 1 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0xA0) return true;
+        if (u0 == 0xE1 && q + 2 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0x9A &&
+            static_cast<unsigned char>(input[q + 2]) == 0x80) return true;                     // U+1680
+        if (u0 == 0xE2 && q + 2 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0x80) {
+          unsigned char u2 = static_cast<unsigned char>(input[q + 2]);
+          if ((u2 >= 0x80 && u2 <= 0x8A) || u2 == 0xA8 || u2 == 0xA9 || u2 == 0xAF) return true; // U+2000..200A/2028/2029/202F
+        }
+        if (u0 == 0xE2 && q + 2 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0x81 &&
+            static_cast<unsigned char>(input[q + 2]) == 0x9F) return true;                      // U+205F
+        if (u0 == 0xE3 && q + 2 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0x80 &&
+            static_cast<unsigned char>(input[q + 2]) == 0x80) return true;                      // U+3000
+        if (u0 == 0xEF && q + 2 < input.size() && static_cast<unsigned char>(input[q + 1]) == 0xBB &&
+            static_cast<unsigned char>(input[q + 2]) == 0xBF) return true;                      // U+FEFF
+        return false;
+      };
+      auto readU = [&](size_t q, unsigned& cp) noexcept {   // exactly one \uXXXX at q
+        if (q + 5 >= input.size() || input[q] != '\\' || input[q + 1] != 'u' ||
+            !std::isxdigit(static_cast<unsigned char>(input[q + 2])) || !std::isxdigit(static_cast<unsigned char>(input[q + 3])) ||
+            !std::isxdigit(static_cast<unsigned char>(input[q + 4])) || !std::isxdigit(static_cast<unsigned char>(input[q + 5])))
+          return false;
+        cp = (static_cast<unsigned>(hexVal(input[q + 2])) << 12) | (static_cast<unsigned>(hexVal(input[q + 3])) << 8) |
+             (static_cast<unsigned>(hexVal(input[q + 4])) << 4) | static_cast<unsigned>(hexVal(input[q + 5]));
+        return true;
+      };
+      while (i < input.size()) {
+        if (input[i] == '\\' && i + 1 < input.size() && input[i + 1] == 'u') {
+          unsigned cp = 0;
+          if (!readU(i, cp)) throw asvJSONError("invalid \\u escape in JSON5 identifier");
+          i += 6;
+          hadEsc = true;
+          if (cp >= 0xD800 && cp <= 0xDBFF) {
+            unsigned lo = 0;
+            if (readU(i, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+              cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+              i += 6;
+            } else {
+              throw asvJSONError("lone surrogate escape in JSON5 identifier");
+            }
+          } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            throw asvJSONError("lone surrogate escape in JSON5 identifier");
+          }
+          appendUtf8Codepoint(ident, cp);
+          continue;
+        }
+        if (!isIdCont(input[i])) break;
+        if (wsRun(i)) break;
+        ident += input[i];
         i++;
       }
-      std::string_view ident(input.data() + start, i - start);
+      if (ident.empty()) throw asvJSONError("invalid character in JSON5 identifier");
       // Validate identifier characters
       for (size_t k = 0; k < ident.size(); k++) {
         auto uc = static_cast<unsigned char>(ident[k]);
@@ -431,6 +472,7 @@ inline std::string json5ToJson(std::string_view input) {
       if (isKey) {
         out += '"', out.append(ident.data(), ident.size()), out += '"';
       } else {
+        if (hadEsc) throw asvJSONError("escaped identifier is not a JSON5 value");
         out.append(ident.data(), ident.size());
       }
       continue;

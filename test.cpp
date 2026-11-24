@@ -12657,6 +12657,64 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testJson5SpecMatrixAndEmptyDiags) {
+  // Probe sw97: the JSON5 IdentifierName UnicodeEscapeSequence ({\u0061:1} is
+  // the json5.org spec's own example) was rejected - the identifier scan now
+  // decodes \uXXXX at the start AND in continuations. Lone surrogates (not
+  // storable as UTF-8 keys) and escaped identifiers in VALUE position (ES
+  // lexes them as IdentifierName, never as the true/null/Infinity keyword)
+  // are named errors.
+  {
+    asvJSON j;
+    ASSERT(j.fromJSON5(std::string_view("{\\u0061:1}")));
+    std::string s; j.getRoot()->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":1}"));
+    asvJSON k;
+    ASSERT(k.fromJSON5(std::string_view("{a\\u0062:1}")));
+    std::string s2; k.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s2, std::string("{\"ab\":1}"));
+    asvJSON m;   // astral key via a surrogate pair
+    ASSERT(m.fromJSON5(std::string_view("{\\uD83D\\uDE00:1}")));
+    std::string s3; m.getRoot()->serialize(s3, false, 0);
+    ASSERT_EQ(s3, std::string("{\"\xF0\x9F\x98\x80\":1}"));
+    asvJSON p;   // the escape bypasses ID_Start: {\u0035:1} is the key "5"
+    ASSERT(p.fromJSON5(std::string_view("{\\u0035:1}")));
+    std::string s4; p.getRoot()->serialize(s4, false, 0);
+    ASSERT_EQ(s4, std::string("{\"5\":1}"));
+    asvJSON q;
+    ASSERT(!q.fromJSON5(std::string_view("{\\uD800:1}")));
+    ASSERT(q.getLastError().find("lone surrogate") != std::string::npos);
+    asvJSON r;
+    ASSERT(!r.fromJSON5(std::string_view("{a:\\u0074rue}")));
+    ASSERT(r.getLastError().find("not a JSON5 value") != std::string::npos);
+    // the decoded key re-emits through toJSON5 and re-reads identically
+    std::string e1 = j.toJSON5();
+    asvJSON w;
+    ASSERT(w.fromJSON5(std::string_view(e1)));
+  }
+  // Probe sw97 (core parse side): EOF must never be named as the phantom
+  // "Unexpected byte 0x00" - the wave-87 SAX principle applied to the DOM
+  // parser. Depth says which failure it is. A REAL NUL byte in the input
+  // keeps the named-hex form.
+  {
+    asvJSON a;
+    ASSERT(!a.parse(std::string_view("")));
+    ASSERT_EQ(a.getLastError(), std::string("Empty input"));
+    asvJSON b;
+    ASSERT(!b.parse(std::string_view("  \t ")));
+    ASSERT_EQ(b.getLastError(), std::string("Empty input"));
+    asvJSON c;
+    ASSERT(!c.parse(std::string_view("// only a comment")));
+    ASSERT_EQ(c.getLastError(), std::string("Empty input"));
+    asvJSON d;
+    ASSERT(!d.parse(std::string_view("[1,")));
+    ASSERT_EQ(d.getLastError(), std::string("Unexpected end of input"));
+    asvJSON e;
+    ASSERT(!e.parse(std::string_view("\0x", 2)));
+    ASSERT_EQ(e.getLastError(), std::string("Unexpected byte 0x00"));
+  }
+}
+
 TEST(testFormatTypeOnEmptySuccess) {
   // Probe sw96 (writeToFileAny/readFromFileAny vs the in-memory path): the
   // empty-input early success returns of fromINI/fromTOML left
@@ -43147,7 +43205,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testFormatTypeOnEmptySuccess);
+	RUN(testJson5SpecMatrixAndEmptyDiags);
+RUN(testFormatTypeOnEmptySuccess);
 RUN(testCrossFormatSelfConsistency);
 RUN(testUBJSONTypedMatrix);
 RUN(testPointerLenientTilde);
