@@ -12657,6 +12657,64 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testGoonTabularHeaderConsistency) {
+  // The [N] in a GOON header is enforced (TOON parity, probe sw81): the old
+  // decoder ignored it, so a table could claim any length, and a row with
+  // MORE cells than columns silently DROPPED the extra values.
+  {
+    asvJSON a;
+    ASSERT(!a.fromGOON(std::string_view("items[3]{a,b}:\n1,2\n3,4\n")));   // short
+    ASSERT(a.getLastError().find("length mismatch") != std::string::npos);
+    asvJSON b;
+    ASSERT(!b.fromGOON(std::string_view("items[2]{a,b}:\n1,2\n3,4\n5,6\n"))); // long
+    asvJSON c;
+    ASSERT(!c.fromGOON(std::string_view("items[0]{a,b}:\n1,2\n")));       // zero vs rows
+    asvJSON d;                                                             // zero, honest
+    ASSERT(d.fromGOON(std::string_view("items[0]{a,b}:\n")));
+    ASSERT_EQ(d.get("items")->size(), size_t(0));
+  }
+  {
+    // extra cells cannot be dropped silently
+    asvJSON e;
+    ASSERT(!e.fromGOON(std::string_view("items[1]{a,b}:\n1,2,3\n")));
+    ASSERT(e.getLastError().find("3 values, expected 2") != std::string::npos);
+    // missing trailing cells stay the documented null padding
+    asvJSON f;
+    ASSERT(f.fromGOON(std::string_view("items[1]{a,b,c}:\n1,2\n")));
+    asvJSONValue* row = f.get("items")->get(0);
+    ASSERT(row->get("c") != nullptr && row->get("c")->type == asvJSONValue::NULL_VAL);
+  }
+  {
+    // RLE counts expand BEFORE the declared-count check
+    asvJSON g;
+    ASSERT(!g.fromGOON(std::string_view("t[3]{a,b}:\n1,2*5\n")));  // 5 rows
+    asvJSON h;
+    ASSERT(h.fromGOON(std::string_view("t[5]{a,b}:\n1,2*5\n")));   // honest
+    ASSERT_EQ(h.get("t")->size(), size_t(5));
+  }
+  {
+    // inline lists: [N]: v1,v2,... enforced including '-' continuation lines
+    asvJSON i2;
+    ASSERT(!i2.fromGOON(std::string_view("v[3]: 1,2\n")));
+    asvJSON j2;
+    ASSERT(j2.fromGOON(std::string_view("v[3]: 1,2\n  - 3\n")));
+    ASSERT_EQ(j2.get("v")->size(), size_t(3));
+    // an empty bracket header keeps the unchecked form the encoder emits
+    asvJSON k2;
+    ASSERT(k2.fromGOON(std::string_view("[]:\n  - 1\n  - 2\n")));
+    ASSERT_EQ(k2.getRoot()->size(), size_t(2));
+  }
+  // every tabular document the ENCODER writes must satisfy the check
+  {
+    asvJSON src;
+    src.parse(std::string_view(R"({"rows":[{"a":1,"b":2},{"a":1,"b":2},{"a":3,"b":4}]})"));
+    std::string g = src.toGOON();
+    asvJSON back;
+    ASSERT_MSG(back.fromGOON(std::string_view(g)), g.c_str());
+    ASSERT(*src.getRoot() == *back.getRoot());
+  }
+}
+
 TEST(testGOONExtras) {
 	// Caret cross-row RLE in Compact mode (numeric column)
 	{
@@ -12991,8 +13049,14 @@ TEST(testGOONExtras) {
 	}
 	{
 		asvJSON j;
-		ASSERT(j.fromGOON(std::string_view("r[2]{b}:\n  x*3\n")));
+		// (the header count now must match the expanded row count - the old
+		// fixture declared [2] and expanded to 3; the GOON header is enforced,
+		// matching TOON)
+		ASSERT(j.fromGOON(std::string_view("r[3]{b}:\n  x*3\n")));
 		ASSERT_EQ(j.getRoot()->getConst("r")->size(), size_t(3));
+		// a lying header is rejected
+		asvJSON l;
+		ASSERT(!l.fromGOON(std::string_view("r[2]{b}:\n  x*3\n")));
 	}
 	// The dictionary is capped (a huge document cannot grow an unbounded $:
 	// header); entries beyond the cap are emitted literally and still round-trip.
@@ -42273,7 +42337,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testGOONExtras);
+	RUN(testGoonTabularHeaderConsistency);
+RUN(testGOONExtras);
 RUN(testGOONSpecialValues);
 	
 	std::cout << "\n--- TOML Serialization Tests ---\n";

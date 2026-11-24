@@ -1406,6 +1406,31 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
         size_t closeB = (relClose == std::string_view::npos) ? std::string_view::npos : openB + relClose;
         if (closeB != std::string_view::npos) {
           size_t afterB = closeB + 1;
+          // The declared length in `[...]`: the encoder always writes the true
+          // count, and TOON enforces it; GOON used to ignore N entirely, so a
+          // header could lie about the array it introduces. -1 = no check
+          // (empty brackets or non-numeric content, which is not a count).
+          long long declLen = -1;
+          {
+            std::string_view ns = content.substr(openB + 1, closeB - openB - 1);
+            size_t qs = 0;
+            while (qs < ns.size() && ns[qs] == ' ') qs++;
+            size_t qe = qs;
+            while (qe < ns.size() && ns[qe] >= '0' && ns[qe] <= '9') qe++;
+            bool pureDigits = qe > qs;
+            for (size_t qi = qe; pureDigits && qi < ns.size(); qi++)
+              if (ns[qi] != ' ') pureDigits = false;
+            if (pureDigits) {
+              declLen = 0;
+              for (size_t qi = qs; qi < qe; qi++) {
+                declLen = declLen * 10 + (ns[qi] - '0');
+                if (declLen > static_cast<long long>(asvJSONValue::MAX_ARRAY_SIZE)) {
+                  declLen = static_cast<long long>(asvJSONValue::MAX_ARRAY_SIZE) + 1;
+                  break;
+                }
+              }
+            }
+          }
           bool isHeader = false;
           if (afterB < content.size() && content[afterB] == ':') isHeader = true;
           if (!isHeader && afterB < content.size() && content[afterB] == '{') {
@@ -1484,6 +1509,7 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
             std::vector<std::string> prevValues(fields.size(), "");
             std::vector<bool> hasPrev(fields.size(), false);  // tracks whether column has had any prior row
             size_t lastRl = li;
+            long long rowsOut = 0;
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
               auto& rline = lines[rl];
               if (rline.empty()) continue;
@@ -1606,6 +1632,9 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
               std::vector<std::string> vals = rawVals;
               for (size_t fi = 0; fi < vals.size(); fi++)
                 vals[fi] = expandCell(vals[fi]);
+              if (rawVals.size() > fields.size())
+                throw GoonDecodeError("GOON: row " + std::to_string(rl + 1) + " has " +
+                    std::to_string(rawVals.size()) + " values, expected " + std::to_string(fields.size()));
               // Pad vals (not rawVals) so missing trailing cells emit "null"
               // without setting hasPrev — a bare ^ in a later row for that
               // column must still error ("no previous value"), matching the
@@ -1645,7 +1674,11 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
                 out += '}';
                 checkOut("RLE row");
               }
+              rowsOut += repeat;
             }
+            if (declLen >= 0 && rowsOut != declLen)
+              throw GoonDecodeError("GOON: tabular array length mismatch (declared " +
+                  std::to_string(declLen) + ", got " + std::to_string(rowsOut) + ")");
             if (lastRl > li) li = lastRl;
             if (!rootArr) {
               out += ']';
@@ -1685,6 +1718,7 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
             }
             // Read subsequent list items from indented lines
             size_t lastConsumedRl = li;
+            long long inlineCnt = static_cast<long long>(inlineVals.size());
             for (size_t rl = li + 1; rl < lines.size(); rl++) {
               auto& rline2 = lines[rl];
               if (rline2.empty()) continue;
@@ -1695,10 +1729,14 @@ inline std::string goonToJson(std::string_view input, size_t maxOut = MAX_GOON_O
                 out += ',';
                 out += expandCell(rcont2.substr(2));
                 lastConsumedRl = rl;
+                inlineCnt++;
               }
             }
             // Advance past the consumed list items so the outer loop does not
             // re-emit them as list headers.
+            if (declLen >= 0 && inlineCnt != declLen)
+              throw GoonDecodeError("GOON: inline array length mismatch (declared " +
+                  std::to_string(declLen) + ", got " + std::to_string(inlineCnt) + ")");
             if (lastConsumedRl > li) li = lastConsumedRl;
             if (!rootArr) {
               out += ']';
