@@ -12657,6 +12657,45 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testUBJSONTypedMatrix) {
+  // Probe sw94: typed containers carry BARE payload elements (no per-element
+  // marker): scalar-typed bytes ARE values (0xFF int8 = -1), $Z#n is an ARRAY
+  // of n nulls, count may use U/L length types, and a container-typed element
+  // must open with the declared marker in objects too (not just arrays).
+  auto dec = [](std::initializer_list<int> bs, std::string& out) -> bool {
+    std::string b;
+    for (int x : bs) b += static_cast<char>(static_cast<unsigned char>(x));
+    asvJSON j;
+    if (!j.fromUBJSON(b.data(), b.size())) { out = j.getLastError(); return false; }
+    out.clear();   // serialize APPENDS: start every capture from an empty string
+    j.getRoot()->serialize(out, false, 0);
+    return true;
+  };
+  std::string s;
+  ASSERT(dec({0x5B,0x24,0x69,0x23,0x69,0x02, 0x05, 0x06}, s)); ASSERT_EQ(s, std::string("[5,6]"));
+  ASSERT(dec({0x5B,0x24,0x69,0x23,0x69,0x02, 0xFF, 0x01}, s)); ASSERT_EQ(s, std::string("[-1,1]"));
+  ASSERT(dec({0x5B,0x24,0x69,0x23,0x55,0x02, 0x01, 0x02}, s)); ASSERT_EQ(s, std::string("[1,2]"));
+  ASSERT(dec({0x5B,0x24,0x5A,0x23,0x69,0x02}, s)); ASSERT_EQ(s, std::string("[null,null]"));
+  ASSERT(dec({0x5B,0x23,0x69,0x02, 0x5B,0x24,0x69,0x23,0x69,0x01, 0x07, 0x5B,0x24,0x5A,0x23,0x69,0x01}, s));
+  ASSERT_EQ(s, std::string("[[7],[null]]"));
+  ASSERT(dec({0x7B,0x24,0x69,0x23,0x69,0x02, 0x69,0x01,'a', 0x05, 0x69,0x01,'b', 0x06}, s));
+  ASSERT_EQ(s, std::string("{\"a\":5,\"b\":6}"));
+  {
+    std::string b;
+    for (int x : {0x5B,0x24,0x5B,0x23,0x69,0x01, 0x69,0x01}) b += static_cast<char>((unsigned char)x);
+    asvJSON j;
+    ASSERT(!j.fromUBJSON(b.data(), b.size()));
+    ASSERT(j.getLastError().find("typed array element marker mismatch") != std::string::npos);
+  }
+  {
+    std::string b;
+    for (int x : {0x7B,0x24,0x7B,0x23,0x69,0x01, 0x69,0x01,0x61, 0x69,0x01}) b += static_cast<char>((unsigned char)x);
+    asvJSON j;
+    ASSERT(!j.fromUBJSON(b.data(), b.size()));
+    ASSERT(j.getLastError().find("typed object element marker mismatch") != std::string::npos);
+  }
+}
+
 TEST(testPointerLenientTilde) {
   // Probe sw93: the raw pointer API models RFC 6901 exactly EXCEPT one
   // documented leniency: a lone '~' in a token stays LITERAL (the RFC calls
@@ -42984,7 +43023,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testPointerLenientTilde);
+	RUN(testUBJSONTypedMatrix);
+RUN(testPointerLenientTilde);
 RUN(testYamlTaggedFoldAndRecursionBudget);
 RUN(testSaxEntryContracts);
 RUN(testProtobufSchemaWireMatrix);
