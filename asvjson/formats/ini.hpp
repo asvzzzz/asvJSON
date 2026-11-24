@@ -1708,8 +1708,9 @@ inline bool asvJSON::fromINI(std::string_view input) {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
       if (!root) throw asvJSONError("INI: out of memory");
-      return true;
-    }
+      formatType = FormatType::INI;   // a SUCCESS must name its format on every
+      return true;                    // path (probe sw96: the empty-input early
+    }                                 // return left getFormatType() Unknown)
 
     // Strip UTF-8 BOM (EF BB BF) if present (mirrors the JSON/CSV parsers).
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)

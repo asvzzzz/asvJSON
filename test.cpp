@@ -12657,6 +12657,41 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testFormatTypeOnEmptySuccess) {
+  // Probe sw96 (writeToFileAny/readFromFileAny vs the in-memory path): the
+  // empty-input early success returns of fromINI/fromTOML left
+  // getFormatType() Unknown while their main paths set the format.
+  {
+    asvJSON j;
+    ASSERT(j.fromINI(std::string_view("")));
+    ASSERT(j.getRoot() != nullptr);
+    ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ((int)j.getFormatType(), (int)FormatType::INI);
+  }
+  {
+    asvJSON j;
+    ASSERT(j.fromTOML(std::string_view("")));
+    ASSERT(j.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ((int)j.getFormatType(), (int)FormatType::TOML);
+    // BOM-only input reaches the SECOND early return in fromTOML
+    asvJSON k;
+    ASSERT(k.fromTOML(std::string_view("\xEF\xBB\xBF")));
+    ASSERT(k.getRoot()->type == asvJSONValue::OBJECT);
+    ASSERT_EQ((int)k.getFormatType(), (int)FormatType::TOML);
+  }
+  // file round trip of an empty-document INI keeps the declared format
+  {
+    asvJSON w;
+    ASSERT(w.fromINI(std::string_view("")));
+    std::string path = "formattype_empty.ini";
+    ASSERT(w.writeToFileAny(path));
+    asvJSON r;
+    ASSERT(r.readFromFileAny(path));
+    ASSERT_EQ((int)r.getFormatType(), (int)FormatType::INI);
+    std::remove(path.c_str());
+  }
+}
+
 TEST(testCrossFormatSelfConsistency) {
   // Probe sw95: four encoder/decoder self-consistency defects found by
   // random hostile trees through all 26 formats.
@@ -43112,7 +43147,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testCrossFormatSelfConsistency);
+	RUN(testFormatTypeOnEmptySuccess);
+RUN(testCrossFormatSelfConsistency);
 RUN(testUBJSONTypedMatrix);
 RUN(testPointerLenientTilde);
 RUN(testYamlTaggedFoldAndRecursionBudget);

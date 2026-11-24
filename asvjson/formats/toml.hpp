@@ -1480,8 +1480,10 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
       if (!root) throw asvJSONError("TOML: out of memory");
-      return true;
-    }
+      formatType = FormatType::TOML;   // success must name its format (probe sw96:
+      return true;                     // the file API reports getFormatType() after
+    }                                  // a successful read - the early returns kept
+                                       // it Unknown while the main path set TOML)
     // UTF-8 BOM, like every other from* decoder: without this the BOM became
     // the first key's leading bytes ("\xEF\xBB\xBFkey").
     if (input.size() >= 3 && (unsigned char)input[0] == 0xEF && (unsigned char)input[1] == 0xBB && (unsigned char)input[2] == 0xBF)
@@ -1489,6 +1491,7 @@ inline bool asvJSON::fromTOML(std::string_view input) {
     if (input.empty()) {
       root = asvJSONValue::makeObject();
       if (!root) throw asvJSONError("TOML: out of memory");
+      formatType = FormatType::TOML;
       return true;
     }
 
