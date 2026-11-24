@@ -818,15 +818,18 @@ inline std::string CppGenerator::run(const asvJSONValue* root) {
       const auto& kv = *root->obj->begin();
       const std::string& key = kv.first;
       const asvJSONValue* val = kv.second.get();
+      // Documented rule: root {Name: {...}} -> `struct Name`. The unwrap
+      // applies to OBJECT values ONLY. An ARRAY value used to be unwrapped
+      // into a bare type alias (using Items = ...; / typedef enum E Items[N];)
+      // which (a) dropped the member key on re-read and churned the type name
+      // every generation round, and (b) in C style emitted a typedef-array the
+      // reader itself rejects ("cpp: no type declarations found").
       if (val && val->type == asvJSONValue::OBJECT) {
         topName = registerStruct(val, key, key, root);
         top.kind = CppType::Struct;
         top.type = topName;
         top.structName = topName;
         topIsStruct = true;
-      } else if (val && val->type == asvJSONValue::ARRAY) {
-        top = inferType(val, key, key);
-        topName = uniqueName(cppPascal(key, opts_.rootName.c_str()));
       } else {
         topName = registerStruct(root, "", opts_.rootName);
         topIsStruct = true;
@@ -1389,6 +1392,16 @@ inline std::vector<Tok> cppRdLex(std::string_view in,
             case 'n': val += '\n'; break;
             case 't': val += '\t'; break;
             case 'r': val += '\r'; break;
+            // The full C++ simple-escape set. The encoder itself emits \b and
+            // \f for 0x08/0x0C (and \a where used); the old table lacked them,
+            // the default branch dropped the backslash and "a\bb" silently
+            // decoded to "abb" - data corruption of the format's own output
+            // (probe sw79).
+            case 'a': val += '\a'; break;
+            case 'b': val += '\b'; break;
+            case 'f': val += '\f'; break;
+            case 'v': val += '\v'; break;
+            case '?': val += '?'; break;
             case '0': case '1': case '2': case '3':
             case '4': case '5': case '6': case '7': {
               // Octal escape: up to three digits (\0 is NUL, \012 is LF, \101
@@ -3500,11 +3513,21 @@ struct Reader {
     if (rt.kind == TypeRef::Enum) {
       if (hasInit) {
         // An initializer names ONE variant (`e = A;`, `e = {A};`) - the value
-        // is that variant's name, not the whole variant list.
+        // is that variant's name, not the whole variant list. Build it through
+        // enumVariant so the enumerator comments survive: toCpp() emits the
+        // initializer in the struct-member form (`m = {M::a, M::b}`), and the
+        // bare-string path here silently dropped the comments on re-read.
         std::string v;
         if (!grp) v = cppRdLastIdent(init);
         else if (!groups.empty()) v = cppRdLastIdent(groups[0]);
-        if (!v.empty()) return cppRdString(std::move(v));
+        if (!v.empty()) {
+          const EnumDef* ed0 = findEnum(rt.name);
+          if (ed0) {
+            for (size_t i = 0; i < ed0->members.size(); i++)
+              if (ed0->members[i] == v) return enumVariant(ed0, i);
+          }
+          return cppRdString(std::move(v));
+        }
       }
       // Without an initializer the value is the enum's VARIANT LIST - the same
       // shape toCpp() emits an enum for (an array of identifier strings), so

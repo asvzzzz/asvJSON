@@ -21825,6 +21825,57 @@ TEST(testDateTimeSentinelGuard) {
   }
 }
 
+TEST(testCppReaderEscapeSelfConsistency) {
+  // 1. The reader's simple-escape table must cover the whole C++ set: the
+  // encoder emits \b and \f for 0x08/0x0C, and the old table lacked them -
+  // the default branch dropped the backslash, so "a\bb" read back as "abb"
+  // (silent data corruption of the format's own output).
+  {
+    asvJSON j;
+    ASSERT(j.fromCpp("int g = 1;\nstd::string s = \"a\\bb\\fc\\vd\\e\";"));
+    const asvJSONValue* v = j.get("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) {
+      std::string_view sv = v->getStringView();
+      // \b \f \v decode to 08 0C 0B; the unknown \e keeps the plain 'e'
+      // (the documented lenient default - backslash dropped).
+      const std::string want = "a\bb\f""c\vd" "e";
+      ASSERT_EQ(sv, std::string(want));
+    }
+  }
+  // 2. A single-key array root must generate a struct, NOT a bare type
+  // alias: the alias form re-read as a keyless root (and the C-style
+  // `typedef int M[2][2];` collapsed to a scalar 0, while typedef-enum
+  // arrays were rejected outright). ModernCpp round-trips exactly.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view(R"({"nums":[1,2,3]})")));
+    CppWriteOptions o;
+    std::string code = j.toCpp(o);
+    ASSERT(code.find("struct") != std::string::npos);
+    ASSERT(code.find("using Nums =") == std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromCpp(std::string_view(code)));
+    ASSERT(*j.getRoot() == *k.getRoot());
+    std::string code2 = k.toCpp(o);
+    ASSERT_EQ(code, code2);
+  }
+  // 3. A string carrying 0x08/0x0C survives toCpp -> fromCpp byte-exact and
+  // the generated code is a fixed point.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string("{\"s\":\"a\\bb\\fc\"}")));
+    CppWriteOptions o;
+    std::string code = j.toCpp(o);
+    asvJSON k;
+    ASSERT(k.fromCpp(std::string_view(code)));
+    const asvJSONValue* v = k.get("s");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    if (v) ASSERT_EQ(v->getStringView(), std::string_view("a\bb\fc", 5));
+    ASSERT_EQ(k.toCpp(o), code);
+  }
+}
+
 TEST(testYamlIndentWidthOne) {
   // indentWidth==1 used to emit "- " + a child at ONE column, a shape the
   // block parser itself rejected ("sequence and mapping mixed at the same
@@ -22364,14 +22415,22 @@ TEST(testCppLiteralAndDeclGaps) {
 // alias, the function-pointer parameter, the enum comments, the union and the
 // block-comment terminator.
 TEST(testCppReviewRound2) {
-  // -- 1. A C-style nested array keeps every dimension (outer count first) --
+  // -- 1. A C-style nested array keeps every dimension (outer count first).
+  // The single-key ARRAY root is NOT unwrapped into a bare typedef alias any
+  // more: `typedef int M[2][2];` re-parsed through fromCpp as a scalar 0 and
+  // `typedef enum E N[2];` was rejected outright, so the generator emitted
+  // code its own reader could not reproduce. The dimensions now live on the
+  // struct member (probe sw79). --
   {
     asvJSON j;
     ASSERT(j.parse(std::string_view(R"({"m":[[1,2],[3,4]]})")));
     CppWriteOptions o;
     o.style = CppWriteOptions::Style::C;
     std::string code = j.toCpp(o);
-    ASSERT(code.find("M[2][2]") != std::string::npos);
+    ASSERT(code.find("m[2][2]") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromCpp(std::string_view(code)));   // readable again (was: scalar 0 via alias)
+    ASSERT(k.get("m") != nullptr && k.get("m")->type == asvJSONValue::ARRAY);
   }
   {
     asvJSON j;
@@ -22379,7 +22438,10 @@ TEST(testCppReviewRound2) {
     CppWriteOptions o;
     o.style = CppWriteOptions::Style::C;
     std::string code = j.toCpp(o);
-    ASSERT(code.find("M[2][3]") != std::string::npos);
+    ASSERT(code.find("m[2][3]") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromCpp(std::string_view(code)));
+    ASSERT(k.get("m") != nullptr && k.get("m")->type == asvJSONValue::ARRAY);
   }
   // The C++ style is unaffected: the element type already carries the nesting.
   {
@@ -22389,6 +22451,9 @@ TEST(testCppReviewRound2) {
     o.useStdArray = true;
     std::string code = j.toCpp(o);
     ASSERT(code.find("std::array<std::array<int, 3>, 2>") != std::string::npos);
+    asvJSON k;
+    ASSERT(k.fromCpp(std::string_view(code)));
+    ASSERT(*j.getRoot() == *k.getRoot());
   }
 
   // -- 2. The macro name of #ifdef/#ifndef ends at the identifier --
@@ -22491,9 +22556,10 @@ TEST(testCppReviewRound2) {
 
     asvJSON back;
     ASSERT(back.fromCpp(code));
-    // The generated file has no struct - the root is the alias of the enum
-    // array, so the variants are the elements of the root array.
-    const asvJSONValue* r2 = back.getRoot();
+    // The single-key array root generates a struct (NOT a bare alias: the
+    // alias form re-read as a keyless root array/lost values, probe sw79),
+    // so the decoded root keeps the "m" member and the element comments.
+    const asvJSONValue* r2 = back.get("m");
     ASSERT(r2 != nullptr && r2->type == asvJSONValue::ARRAY && r2->size() == size_t(2));
     if (r2 && r2->type == asvJSONValue::ARRAY && r2->size() == size_t(2)) {
       const asvJSONValue* el = r2->get(0);
@@ -42213,6 +42279,7 @@ RUN(testGetNestedEscapeForms);
 RUN(testLocaleIndependentNumbers);
 RUN(testUtf8ValidatorExhaustive);
 RUN(testDateTimeSentinelGuard);
+RUN(testCppReaderEscapeSelfConsistency);
 RUN(testYamlIndentWidthOne);
 RUN(testSpecialTypeEnvelopeStrictness);
 RUN(testRegexNulGuard);
