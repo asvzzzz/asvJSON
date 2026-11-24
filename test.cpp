@@ -12657,6 +12657,100 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testSaxEntryContracts) {
+  // Probe sw91: the documented SAX entry contracts.
+  struct Cnt : public JsonSaxHandler {
+    int starts = 0, ends = 0, scalars = 0, errors = 0;
+    std::string lastErr;
+    void onStartObject() override { ++starts; }
+    void onEndObject() override { ++ends; }
+    void onStartArray() override { ++starts; }
+    void onEndArray() override { ++ends; }
+    void onKey(std::string_view) override { ++scalars; }
+    void onIntegerValue(int64_t) override { ++scalars; }
+    void onDoubleValue(double) override { ++scalars; }
+    void onStringValue(std::string_view) override { ++scalars; }
+    void onBoolValue(bool) override { ++scalars; }
+    void onNullValue() override { ++scalars; }
+    void onError(std::string_view m) override { ++errors; lastErr = std::string(m); }
+  };
+  struct Thrower : public JsonSaxHandler {
+    int errors = 0;
+    std::string lastErr;
+    void onError(std::string_view m) override { ++errors; lastErr = std::string(m); throw std::runtime_error("handler boom"); }
+  };
+  // asvJSON::parseSax is wrapped whole-body: an onError that throws does NOT
+  // escape and the catch NEVER re-invokes onError (the throw may have come
+  // from onError itself); lastError takes e.what().
+  {
+    asvJSON j; Thrower h;
+    ASSERT(!j.parseSax("{\"a\":}", h));
+    ASSERT_EQ(h.errors, 1);
+    ASSERT_EQ(std::string(j.getLastError()), std::string("handler boom"));
+  }
+  // BOM stripped, depth guard named, NaN rejected by default, comments accepted
+  {
+    asvJSON j; Cnt h;
+    ASSERT(j.parseSax("\xEF\xBB\xBF{\"a\":1}", h));
+    ASSERT_EQ(h.errors, 0);
+    ASSERT_EQ(h.scalars, 2);
+    asvJSON d; Cnt dh;
+    ASSERT(!d.parseSax(std::string_view(std::string(50, '[')), dh));
+    ASSERT(std::string(d.getLastError()).find("depth") != std::string::npos);
+    asvJSON n; Cnt nh;
+    ASSERT(!n.parseSax("NaN", nh));
+    asvJSON c; Cnt ch;
+    ASSERT(c.parseSax("// note\n{\"a\":1}", ch));
+  }
+  // JsonSaxParser direct (NOT wrapped): a parser-thrown error delivers onError
+  // once at the catch point; a throwing delivery escapes the entry.
+  {
+    JsonSaxParser p; Thrower h;
+    bool escaped = false;
+    try { p.parse("{\"a\":}", h); } catch (...) { escaped = true; }
+    ASSERT(escaped);
+    ASSERT_EQ(h.errors, 1);
+  }
+  // The "Trailing chars" delivery lives INSIDE the try: its throw unwinds to
+  // the catch, which calls onError AGAIN with e.what() - the documented
+  // second-onError path.
+  {
+    JsonSaxParser p; Thrower h;
+    try { p.parse("{\"a\":1} x", h); } catch (...) {}
+    ASSERT_EQ(h.errors, 2);
+    ASSERT_EQ(h.lastErr, std::string("handler boom"));
+  }
+  // empty input names its error (the one early return that fills lastError_)
+  {
+    JsonSaxParser p; Cnt h;
+    ASSERT(!p.parse("", h));
+    ASSERT(!h.lastErr.empty());
+  }
+  // JsonStreamParser finish(): Empty vs Incomplete
+  {
+    Cnt h; JsonStreamParser sp(h);
+    ASSERT(!sp.finish());
+    ASSERT_EQ(h.lastErr, std::string("Empty input"));
+    Cnt h2; JsonStreamParser sp2(h2);
+    sp2.allowNaNInfinity = true;
+    sp2.feed("N");
+    ASSERT(!sp2.finish());
+    ASSERT_EQ(h2.lastErr, std::string("Incomplete input"));
+  }
+  // JsonSaxToDom hand-driven: the 49th container is fatal, a legal stream builds
+  {
+    JsonSaxToDom d;
+    for (int i = 0; i < 49; i++) d.onStartArray();
+    ASSERT(!std::string(d.getError()).empty());
+    JsonSaxToDom ok;
+    ok.onStartObject(); ok.onKey("a"); ok.onIntegerValue(1); ok.onEndObject();
+    auto r = ok.getResult();
+    ASSERT(r != nullptr);
+    std::string s; if (r) r->serialize(s, false, 0);
+    ASSERT_EQ(s, std::string("{\"a\":1}"));
+  }
+}
+
 TEST(testProtobufSchemaWireMatrix) {
   // Probe sw90: the schema-driven wire path round-trips type-exactly for all
   // scalar widths (incl. extremes), repeated packed/unpacked and nested
@@ -42767,7 +42861,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testProtobufSchemaWireMatrix);
+	RUN(testSaxEntryContracts);
+RUN(testProtobufSchemaWireMatrix);
 RUN(testBSONUtf8DecoderSymmetry);
 RUN(testADEFeatureMatrix);
 RUN(testDiffSpecialTypeTransport);
