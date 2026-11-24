@@ -12657,6 +12657,105 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testProtobufSchemaWireMatrix) {
+  // Probe sw90: the schema-driven wire path round-trips type-exactly for all
+  // scalar widths (incl. extremes), repeated packed/unpacked and nested
+  // messages; lying schemas and absent fields get the documented readings.
+  const char* scalars =
+    "{\"a\":{\"id\":1,\"type\":\"int32\"},\"c\":{\"id\":3,\"type\":\"int64\"},"
+    "\"e\":{\"id\":5,\"type\":\"sint32\"},\"f\":{\"id\":6,\"type\":\"sint64\"},"
+    "\"g\":{\"id\":7,\"type\":\"fixed32\"},\"h\":{\"id\":8,\"type\":\"fixed64\"},"
+    "\"i\":{\"id\":9,\"type\":\"sfixed32\"},\"j\":{\"id\":10,\"type\":\"sfixed64\"},"
+    "\"k\":{\"id\":11,\"type\":\"float\"},\"l\":{\"id\":12,\"type\":\"double\"},"
+    "\"m\":{\"id\":13,\"type\":\"bool\"},\"n\":{\"id\":14,\"type\":\"string\"},"
+    "\"p\":{\"id\":16,\"type\":\"enum\"},\"d\":{\"id\":4,\"type\":\"uint64\"}}";
+  {
+    asvJSON A;
+    ASSERT(A.parse(std::string_view(
+      "{\"a\":-2147483648,\"c\":-9223372036854775808,\"e\":-2147483648,"
+      "\"f\":-9223372036854775808,\"g\":4294967295,\"h\":4294967296,"
+      "\"i\":-2147483648,\"j\":-9223372036854775808,\"k\":-0.5,\"l\":-1e300,"
+      "\"m\":false,\"n\":\"\",\"p\":-1,\"d\":9223372036854775807}")));
+    auto wire = A.toProtobuf(scalars);
+    asvJSON B;
+    ASSERT_MSG(B.fromProtobuf(wire.data(), wire.size(), scalars), B.getLastError().c_str());
+    ASSERT(*A.getRoot() == *B.getRoot());
+  }
+  // uint64 past INT64_MAX: rejected on encode (asvJSON INT is signed)
+  {
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{\"d\":18446744073709551615}")));   // raw_number STRING
+    bool threw = false;
+    try { A.toProtobuf(scalars); } catch (const asvJSONError&) { threw = true; }
+    ASSERT(threw);
+  }
+  // repeated packed + unpacked + strings, and the documented repeated-non-array
+  // leniency (single value encodes as one element, decodes as one-element array)
+  {
+    const char* rep = "{\"nums\":{\"id\":1,\"type\":\"int32\",\"repeated\":true,\"packed\":true},"
+                      "\"unp\":{\"id\":2,\"type\":\"fixed32\",\"repeated\":true,\"packed\":false},"
+                      "\"strs\":{\"id\":3,\"type\":\"string\",\"repeated\":true}}";
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{\"nums\":[1,2,3],\"unp\":[10,20],\"strs\":[\"a\",\"b\"]}")));
+    auto wire = A.toProtobuf(rep);
+    asvJSON B;
+    ASSERT(B.fromProtobuf(wire.data(), wire.size(), rep));
+    ASSERT(*A.getRoot() == *B.getRoot());
+    asvJSON S;
+    ASSERT(S.parse(std::string_view("{\"nums\":5}")));
+    auto sw = S.toProtobuf(rep);
+    asvJSON T;
+    ASSERT(T.fromProtobuf(sw.data(), sw.size(), rep));
+    std::string ts; T.getRoot()->serialize(ts, false, 0);
+    ASSERT_EQ(ts, std::string("{\"nums\":[5]}"));
+  }
+  // nested message + absent field
+  {
+    const char* nest = "{\"top\":{\"id\":1,\"type\":\"message\",\"fields\":"
+                       "{\"x\":{\"id\":1,\"type\":\"int32\"},\"sub\":{\"id\":2,\"type\":\"message\","
+                       "\"fields\":{\"y\":{\"id\":1,\"type\":\"string\"}}}}}}";
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{\"top\":{\"x\":1}}")));
+    auto wire = A.toProtobuf(nest);
+    asvJSON B;
+    ASSERT(B.fromProtobuf(wire.data(), wire.size(), nest));
+    ASSERT(*A.getRoot() == *B.getRoot());
+  }
+  // lying schema: a string payload on an int32 field is read as a PACKED ARRAY
+  // of the byte values (wire-type-driven reading, documented in the header)
+  {
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{\"n\":\"hello\"}")));
+    auto wire = A.toProtobuf("{\"n\":{\"id\":14,\"type\":\"string\"}}");
+    asvJSON B;
+    ASSERT(B.fromProtobuf(wire.data(), wire.size(), "{\"n\":{\"id\":14,\"type\":\"int32\"}}"));
+    std::string ts; B.getRoot()->serialize(ts, false, 0);
+    ASSERT_EQ(ts, std::string("{\"n\":[104,101,108,108,111]}"));
+  }
+  // a bytes field retypes STRING to BINARY on the way back (documented)
+  {
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{\"x\":\"raw\"}")));
+    auto wire = A.toProtobuf("{\"x\":{\"id\":1,\"type\":\"bytes\"}}");
+    asvJSON B;
+    ASSERT(B.fromProtobuf(wire.data(), wire.size(), "{\"x\":{\"id\":1,\"type\":\"bytes\"}}"));
+    std::string ts; B.getRoot()->serialize(ts, false, 0);
+    ASSERT_EQ(ts, std::string("{\"x\":{\"$binary\":{\"base64\":\"cmF3\",\"subType\":\"00\"}}}"));
+  }
+  // the documented inherent limitation: an all-absent message encodes to zero
+  // bytes and the wire decoder rejects empty input (with and without schema)
+  {
+    asvJSON A;
+    ASSERT(A.parse(std::string_view("{}")));
+    auto wire = A.toProtobuf(scalars);
+    ASSERT_EQ(wire.size(), size_t(0));
+    asvJSON B;
+    ASSERT(!B.fromProtobuf(wire.data(), wire.size(), scalars));
+    asvJSON C;
+    ASSERT(!C.fromProtobuf(wire.data(), wire.size()));
+  }
+}
+
 TEST(testBSONUtf8DecoderSymmetry) {
   // Probe sw89: toBSON() validates UTF-8 for strings/keys/regex parts, but
   // parseBSON let invalid bytes through - a decoded tree the format could
@@ -42668,7 +42767,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testBSONUtf8DecoderSymmetry);
+	RUN(testProtobufSchemaWireMatrix);
+RUN(testBSONUtf8DecoderSymmetry);
 RUN(testADEFeatureMatrix);
 RUN(testDiffSpecialTypeTransport);
 RUN(testLineEndingPolicy);

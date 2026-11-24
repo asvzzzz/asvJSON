@@ -63,6 +63,12 @@
 // - A schema field marked "repeated" whose JSON value is not an ARRAY is
 //   encoded as a single element and decodes as a one-element array, which
 //   round-trips in both directions.
+// - Schema-driven decoding types the payload by the WIRE, not by origin: a
+//   "bytes" field always comes back as BINARY even when toProtobuf() took a
+//   STRING for it (the bytes are preserved, the node type retypes), and a
+//   length-delimited block on a packable SCALAR field ("int32" and friends)
+//   is read as a PACKED ARRAY of its elements regardless of the "repeated"
+//   flag - both are the lying-schema readings measured by probe sw90.
 // - A tree deeper than MAX_NESTING_DEPTH (only reachable through the raw API)
 //   makes toProtobuf() THROW "Protobuf: nesting too deep". It used to stop
 //   encoding at the boundary and silently drop the tail, which broke the
