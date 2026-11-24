@@ -24,7 +24,10 @@
 // Known limitations:
 //   - Mixed content ordering: "#text" nodes are always emitted BEFORE child
 //     elements, not interleaved. Pure-text and pure-element parents are fine;
-//     true mixed-order round-trip is not supported.
+//     true mixed-order round-trip is not supported. A text+children parent is
+//     emitted FULLY INLINE (<a>x<f>1</f>...</a>) so the text value never
+//     swallows the layout whitespace (an indented text line made the decoder
+//     glue "\n    " into "#text" and every re-encode added another layer).
 //   - Single- or empty-element arrays lose their array-ness on round-trip: the
 //     encoder emits one <key> element (indistinguishable from an object value)
 //     and the SVG side has no asv:arr-style marker to recover it (only the top-level
@@ -241,31 +244,37 @@ inline void svgSerializeElement(std::string& out, std::string_view tag, const as
 			return;
 		}
 
-		// Close opening tag: with newline if element children exist, inline otherwise
-		if (hasElementChildren) {
+		// Close opening tag. When #text coexists with element children the
+		// content stays FULLY INLINE (like toXML): a text run followed by a
+		// newline and the child's indent line makes the shared XML decoder
+		// swallow that whitespace INTO the "#text" value, and every re-encode
+		// glued another layer of layout whitespace around the text - the
+		// document never reached a fixed point (probe sw95: unbounded growth
+		// across rounds).
+		bool mixedInline = hasElementChildren && !textContent.empty();
+		if (hasElementChildren && !mixedInline) {
 			out += ">\n";
 		} else {
 			out += '>';
 		}
 
-		// Emit text content: inline if no element children, indented line before them otherwise
-		if (!textContent.empty()) {
-			if (hasElementChildren) {
-				for (int i = 0; i < indent + 2; ++i) out += ' ';
-			}
-			xmlEscapeTextInto(out, textContent);
-			if (hasElementChildren) {
-				out += '\n';
-			}
-		}
+		if (!textContent.empty()) xmlEscapeTextInto(out, textContent);
 
 		// Second pass: emit child elements
+		bool firstChild = true;
 		for (const auto& [k, val] : *(v->obj)) {
 			if (!k.empty() && k[0] == '@') continue; // skip attributes
 			if (k == "#text") continue; // already emitted above
 
+			// Mixed content: the FIRST child starts immediately after the text
+			// (any leading whitespace would become part of the text run); its
+			// own closing tag ends with '\n', so later siblings may keep the
+			// normal indentation - a whitespace-only run between element
+			// boundaries is dropped by the decoder.
+			int childIndent = (mixedInline && firstChild) ? 0 : indent + 2;
+			firstChild = false;
 			// Recurse for child elements
-			svgSerializeElement(out, k, val.get(), indent + 2, depth + 1);
+			svgSerializeElement(out, k, val.get(), childIndent, depth + 1);
 		}
 
 		// Close tag (indented only when there are element children)

@@ -12657,6 +12657,95 @@ TEST(testGOONAudit) {
 	}
 }
 
+TEST(testCrossFormatSelfConsistency) {
+  // Probe sw95: four encoder/decoder self-consistency defects found by
+  // random hostile trees through all 26 formats.
+  // 1) GOON: an EMPTY key holding a special-typed value must still get its
+  //    quoted key - the special branch used a bare !key.empty() test and
+  //    emitted the marker as a root-scalar line ("unexpected trailing
+  //    content" / "unrecognized line").
+  {
+    auto obj = asvJSONValue::makeObject();
+    ASSERT(obj != nullptr);
+    obj->obj->emplace("", asvJSONValue::makeDateTime(3800000000LL, 123, 300));
+    obj->obj->emplace("end", asvJSONValue::makeBool(false));
+    asvJSON j; j.setRoot(std::move(obj));
+    std::string g = j.toGOON();
+    asvJSON d;
+    ASSERT_MSG(d.fromGOON(std::string_view(g)), d.getLastError().c_str());
+    std::string s1, s2;
+    j.getRoot()->serialize(s1, false, 0);
+    d.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s1, s2);
+    ASSERT(g.find("\"\":") == 0);
+  }
+  // 2) TRON: an out-of-range numeric LITERAL decodes to a raw_number STRING
+  //    (the core parse() convention) instead of throwing - the encoder
+  //    writes such a STRING's text bare, so throwing broke the format's own
+  //    round-trip. The re-encode is byte-identical.
+  {
+    asvJSON t;
+    ASSERT_MSG(t.fromTRON(std::string_view("{\"a\":18446744073709551615}")), t.getLastError().c_str());
+    const asvJSONValue* v = t.getByPointer("/a");
+    ASSERT(v != nullptr && v->type == asvJSONValue::STRING);
+    ASSERT_EQ(std::string(v->getString()), std::string("18446744073709551615"));
+    std::string e1 = t.toTRON();
+    asvJSON u;
+    ASSERT(u.fromTRON(std::string_view(e1)));
+    std::string e2 = u.toTRON();
+    ASSERT_EQ(e1, e2);
+    // grammatically fine huge DOUBLE too
+    asvJSON w;
+    ASSERT(w.fromTRON(std::string_view("1e999")));
+    ASSERT(w.getRoot()->type == asvJSONValue::STRING);
+  }
+  // 3) protobuf WIRE: the name map must not describe members that carry no
+  //    wire bytes (dropped special types) - a lying map made the decoded
+  //    tree re-encode to different bytes (27 -> 0) and then fail to decode.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":1,\"b\":{\"$timestamp\":{\"t\":1700000000}}}")));
+    std::vector<uint8_t> w = j.toProtobuf();
+    asvJSON d;
+    ASSERT_MSG(d.fromProtobuf(w.data(), w.size()), d.getLastError().c_str());
+    std::string tree; d.getRoot()->serialize(tree, false, 0);
+    ASSERT_EQ(tree, std::string("{\"a\":1}"));      // documented special-type drop
+    std::vector<uint8_t> w2 = d.toProtobuf();
+    ASSERT(w == w2);
+    asvJSON j2;
+    ASSERT(j2.parse(std::string_view("{\"b\":{\"$timestamp\":{\"t\":1}}}")));
+    std::vector<uint8_t> w3 = j2.toProtobuf();
+    ASSERT(w3.empty());   // fully-dropped document: zero bytes, decode fails (documented)
+  }
+  // 4a) SVG: empty content has ONE spelling - the document wrapper self-closes
+  //     like every value-level element, so the re-encode is byte-identical.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{}")));
+    std::string s = j.toSVG();
+    ASSERT(s.find("<svg xmlns=\"http://www.w3.org/2000/svg\"/>") != std::string::npos);
+    asvJSON d;
+    ASSERT(d.fromSVG(s));
+    ASSERT_EQ(d.toSVG(), s);
+  }
+  // 4b) SVG: mixed content (#text + children) is emitted INLINE (like toXML).
+  //     An indented text line let the decoder glue the layout whitespace into
+  //     the "#text" value, and every re-encode ADDED another layer - the text
+  //     never reached a fixed point.
+  {
+    asvJSON j;
+    ASSERT(j.parse(std::string_view("{\"a\":{\"#text\":\"x\",\"f\":1}}")));
+    std::string e1 = j.toSVG();
+    asvJSON d;
+    ASSERT(d.fromSVG(e1));
+    const asvJSONValue* tx = d.getByPointer("/svg/a/#text");
+    ASSERT(tx != nullptr);
+    ASSERT_EQ(std::string(tx->getString()), std::string("x"));   // no glued whitespace
+    std::string e2 = d.toSVG();
+    ASSERT_EQ(e1, e2);
+  }
+}
+
 TEST(testUBJSONTypedMatrix) {
   // Probe sw94: typed containers carry BARE payload elements (no per-element
   // marker): scalar-typed bytes ARE values (0xFF int8 = -1), $Z#n is an ARRAY
@@ -43023,7 +43112,8 @@ RUN(testYAMLAnchorExpansionGuard);
 RUN(testToGOON);
 RUN(testGOONCellSafety);
 RUN(testGOONAudit);
-	RUN(testUBJSONTypedMatrix);
+	RUN(testCrossFormatSelfConsistency);
+RUN(testUBJSONTypedMatrix);
 RUN(testPointerLenientTilde);
 RUN(testYamlTaggedFoldAndRecursionBudget);
 RUN(testSaxEntryContracts);

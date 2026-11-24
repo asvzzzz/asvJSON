@@ -856,16 +856,28 @@ asvJSONValue* TronParseState::parseValue(int depth) {
     case TronTokType::NUMBER: {
       std::string n = advance().text;
       bool isDbl = n.find('.') != std::string::npos || n.find('e') != std::string::npos || n.find('E') != std::string::npos;
+      // A grammatically valid but unrepresentable literal (out-of-range INT,
+      // ERANGE double) is kept as the exact text in a raw_number STRING - the
+      // core parse() convention ("overflow literals stay exact strings").
+      // Throwing here broke the round-trip: the encoder writes a raw_number
+      // STRING's text BARE, so the format rejected its own document
+      // (probe sw95: TRON: invalid number: 18446744073709551615).
+      auto rawNumString = [&n]() {
+        auto v = asvJSONValue::makeStringView(n);
+        if (!v) throw asvJSONError("out of memory");
+        v->raw_number = true;
+        return v.release();
+      };
       if (isDbl) {
         double d;
 #if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && (!defined(__GLIBCXX__) || (defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE >= 11))
         auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), d);
-        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
+        if (ec != std::errc() || ptr != n.data() + n.size()) return rawNumString();
 #else
         char* end;
         errno = 0;
         d = asvStrtod(n.c_str(), &end);
-        if (errno == ERANGE || end != n.c_str() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
+        if (errno == ERANGE || end != n.c_str() + n.size()) return rawNumString();
 #endif
         auto v = asvJSONValue::makeDouble(d);
         if (!v) throw asvJSONError("out of memory");
@@ -873,7 +885,7 @@ asvJSONValue* TronParseState::parseValue(int depth) {
       } else {
         long long l;
         auto [ptr, ec] = std::from_chars(n.data(), n.data() + n.size(), l);
-        if (ec != std::errc() || ptr != n.data() + n.size()) throw asvJSONError("TRON: invalid number: " + n);
+        if (ec != std::errc() || ptr != n.data() + n.size()) return rawNumString();
         auto v = asvJSONValue::makeInt(l);
         if (!v) throw asvJSONError("out of memory");
         return v.release();

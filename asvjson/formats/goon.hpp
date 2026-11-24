@@ -768,7 +768,11 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
   // the GOON null literal, so the key survives and the document parses.
   if ((v->type == asvJSONValue::OBJECT || v->type == asvJSONValue::ARRAY) &&
       !asvJSONValue::checkNestingDepth(depth + 1)) {
-    if (!key.empty()) {
+    // NOT just !key.empty(): a NESTED member can have the empty key (the
+    // decoder accepts "": value); at depth > 0 the key must be written
+    // (goonWriteKey quotes it) or the degrade form becomes a bare root
+    // scalar line (probe sw95: "unexpected trailing content").
+    if (!key.empty() || depth > 0) {
       out += pad;
       goonWriteKey(key, out, opts);
       out += ": _\n";
@@ -845,15 +849,18 @@ inline void goonSerializeVal(const asvJSONValue* v, std::string& out, int indent
       break;
     default: {
       std::string spec = goonFormatSpecial(v);
+      // Same rule as every scalar case above: a nested member (depth > 0)
+      // with the EMPTY key must still get its quoted key, or the special
+      // marker lands as a bare line the decoder cannot attach to anything.
       if (!spec.empty()) {
-        if (!key.empty()) {
+        if (!key.empty() || depth > 0) {
           out += pad;
           goonWriteKey(key, out, opts);
           out += ": " + spec + "\n";
         }
         else out += pad + spec + "\n";
       } else {
-        if (!key.empty()) {
+        if (!key.empty() || depth > 0) {
           out += pad;
           goonWriteKey(key, out, opts);
           out += ": _\n";

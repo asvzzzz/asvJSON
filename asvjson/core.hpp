@@ -4087,10 +4087,14 @@ inline std::string asvJSON::toSVG() const {
 	if (!root || root->type != asvJSONValue::OBJECT || !root->obj) {
 		// Non-OBJECT, null: wrap in minimal <svg> so output stays XML-well-formed.
 		// Data is silently lost (documented limitation - use an object root).
-		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
+		// EMPTY content has ONE spelling in this format (the value-level writers
+		// self-close): the wrapper must self-close too, or the re-encode of the
+		// decoded document differs from it (probe sw95: <svg></svg> -> {} ->
+		// <svg/>).
+		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n";
 	} else if (root->obj->empty()) {
 		// Empty object: valid minimal SVG document.
-		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n";
+		out += "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n";
 	} else if (root->obj->size() == 1) {
 		auto it = root->obj->begin();
 		if (it->first == "svg") {

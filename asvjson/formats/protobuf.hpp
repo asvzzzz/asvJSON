@@ -12,7 +12,10 @@
 //   whose trailing comma is placed between written elements only. A NULL root has
 //   no text representation at all: toProtobufText() returns an empty string for it
 //   (a bare newline would parse back as an empty document), which
-//   fromProtobufText() then rejects.
+//   fromProtobufText() then rejects. The same follows for a document whose EVERY
+//   member is dropped by the rule above (e.g. a root holding only special-type
+//   values): the encoding is empty and re-reading it reports "protobuf text:
+//   empty input".
 // - A JSON-driven schema must give every field an integer "id"; a field without
 //   one throws asvJSONError instead of being dropped from the schema silently.
 // - Protobuf groups (wire types 3/4) are deprecated and not supported; a
@@ -569,7 +572,17 @@ inline void protoEncodeMessage(std::vector<uint8_t>& out, const asvJSONValue* va
     std::vector<ProtoFieldEntry> fields;
     fields.reserve(val->obj->size());
     for (const auto& [k, v] : *val->obj) {
-      if (v) fields.push_back({k, v.get()});
+      if (!v) continue;
+      // A special type with no wire form (DATETIME/TIMESTAMP/OBJECTID/REGEX/
+      // CUSTOM_TAG - the type code "u" set) is DROPPED before it reaches the
+      // map: writing a name-map entry for a field that carries no wire bytes
+      // made the map describe a member the decoder can never rebuild, so the
+      // document was not its own fixed point (probe sw95: {"a":$timestamp}
+      // encoded to a 27-byte name map, decoded to {}, re-encoded to zero
+      // bytes). The member now simply vanishes, exactly the documented wire
+      // loss, and numbering stays monotone in member order.
+      if (protoSchemaLessTypeCode(v.get()) == "u") continue;
+      fields.push_back({k, v.get()});
     }
     // Build JSON name map at the reserved field number (19000-19999).
     // Each entry carries the field name and a compact type code so the decoder
