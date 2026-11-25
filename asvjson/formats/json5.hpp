@@ -2,7 +2,10 @@
 // JSON5 serialization/parsing for asvJSON++
 //
 // JSON5 is a superset of JSON that adds:
-//   - Unquoted object keys: {key: "value"}, with ES \uXXXX escapes in them
+//   - Unquoted object keys: {key: "value"}, with ES \uXXXX escapes in them --
+//     the escaped code point must itself be legal at its position (ID_Start /
+//     ID_Continue): {\u0061:1} is {"a":1}, but {\u0035:1} and {a\u202Fb:1} are
+//     errors, exactly like the raw-byte spellings of those characters
 //   - Single-quoted strings: 'value'
 //   - Trailing commas: [1,2,3,]
 //   - Hex numbers: 0xFF
@@ -18,7 +21,10 @@
 // Comments (`//`, `/* */`, `#`) round-trip: json5CollectComments walks the
 // ORIGINAL input text, binds each comment to a node by path, and toJSON5()
 // re-emits it in place (leading above a key/item, same-line trailing after a
-// value, closings before the `}`/`]`). The paths are length-prefixed
+// value, closings before the `}`/`]`). The `#` spelling is re-emitted as `//`
+// (text preserved, marker normalized). A line comment with no following LF
+// runs to end of input, so `{a:1 // c}` / `{a:1 # c}` are errors - the closer
+// sits inside the comment, which is exactly what the spec's grammar says. The paths are length-prefixed
 // ("<len>:<bytes>" segments, json5PathSeg) so a key containing ANY byte -- 0x1F
 // included -- is addressed exactly; the old 0x1F separator collided with such
 // keys and dropped their comments.
@@ -393,6 +399,26 @@ inline std::string json5ToJson(std::string_view input) {
             static_cast<unsigned char>(input[q + 2]) == 0xBF) return true;                      // U+FEFF
         return false;
       };
+      // ES/JSON5 static semantics (the UnicodeCodePointEscapeSequence check):
+      // an escaped code point must satisfy the SAME IdentifierStart /
+      // IdentifierPart production as the raw bytes -- \u0035 is not ID_Start,
+      // and every separator the format itself treats as whitespace (the wsRun
+      // set: NBSP, U+1680, U+2000..200A, U+2028/29, U+202F, U+205F, U+3000,
+      // U+FEFF) is never an identifier character. The raw spellings of all of
+      // these already fail ("Expected string"), so the escape spelling must not
+      // smuggle them into a key; without this {\u0035:1} keyed "5" and
+      // {a\u202Fb:1} keyed "a<U+202F>b" while the identical bytes were errors.
+      // Bytes >= 0x80 stay lenient exactly as isIdStart/isIdCont are lenient.
+      auto escIdOk = [&](unsigned cp, bool atStart) noexcept {
+        if (cp < 0x80) {
+          if (cp >= '0' && cp <= '9') return !atStart;   // digits: ID_Continue only
+          return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') || cp == '_' || cp == '$';
+        }
+        if (cp == 0x00A0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
+            cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
+            cp == 0x3000 || cp == 0xFEFF) return false;
+        return true;
+      };
       auto readU = [&](size_t q, unsigned& cp) noexcept {   // exactly one \uXXXX at q
         if (q + 5 >= input.size() || input[q] != '\\' || input[q + 1] != 'u' ||
             !std::isxdigit(static_cast<unsigned char>(input[q + 2])) || !std::isxdigit(static_cast<unsigned char>(input[q + 3])) ||
@@ -419,6 +445,8 @@ inline std::string json5ToJson(std::string_view input) {
           } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
             throw asvJSONError("lone surrogate escape in JSON5 identifier");
           }
+          if (!escIdOk(cp, ident.empty()))
+            throw asvJSONError("escaped code point is not an identifier character in JSON5");
           appendUtf8Codepoint(ident, cp);
           continue;
         }

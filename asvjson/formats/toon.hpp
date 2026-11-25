@@ -422,11 +422,33 @@ inline bool toonJsonStringIsComplete(std::string_view s) {
 // enough ({a: 1} is balanced but not JSON), and they are cold anyway -- the
 // encoder emits containers through the header/list forms, never inline, so these
 // only appear in hand-written input.
-inline std::string toonJsonQuoteBare(std::string_view s) {
+// Spec Sec. 7.4 quoted-token boundary: a token whose first character is '"'
+// MUST be a complete quoted token -- the closing '"' is its last character and
+// nothing but whitespace may follow; anything else MUST error (Sec. 14.2), and
+// that rule OVERRIDES Sec. 4's "otherwise -> string" fallback. So a value
+// `a: "oops` (unterminated) or `s: "abc"x` (trailing junk) is a parse error,
+// not a string containing a quote. `line` is the 1-based source line for the
+// diagnostic (<= 0 where unknown).
+inline std::string toonJsonQuoteBare(std::string_view s, int line = -1) {
+  auto qErr = [&](const char* why) -> void {
+    std::string m("TOON: ");
+    m += why;
+    if (line > 0) m += " at line " + std::to_string(line);
+    throw asvJSONError(m);
+  };
   if (toonIsJsonValue(s)) {
     const char f = s.front();
     if (f == '"') {
       if (toonJsonStringIsComplete(s)) return std::string(s);
+      // Distinguish the two spec failures: no closing quote at all vs. junk
+      // after the closing quote ("abc"x). Both are Sec. 14.2 errors.
+      bool sawClose = false;
+      for (size_t i = 1; i < s.size() && !sawClose; i++) {
+        if (s[i] == '\\') { i++; continue; }
+        if (s[i] == '"') sawClose = true;
+      }
+      qErr(sawClose ? "trailing content after quoted string"
+                    : "unterminated quoted string");
     } else if (f == '{' || f == '[') {
       asvJSON probe;
       if (probe.parse(s)) return std::string(s);
@@ -640,7 +662,7 @@ inline std::string toonToJson(std::string_view input) {
           headerShaped = (k < firstContent.size()) && (firstContent[k] == ':' || firstContent[k] == '{');
         }
       }
-      if (!headerShaped) return toonJsonQuoteBare(firstContent);
+      if (!headerShaped) return toonJsonQuoteBare(firstContent, static_cast<int>(firstNonEmpty) + 1);
     }
     // Any other single-token root line is a bare string. Do NOT also require
     // the absence of '[': a root STRING value may hold a '[' bare (the encoder
@@ -650,7 +672,7 @@ inline std::string toonToJson(std::string_view input) {
     // is consumed by the JSON-probe branch above. Requiring `lb == npos` here
     // made `toTOON()` of a root STRING "a[3]" re-read as "unrecognized line 1".
     if (onlyScalarLine && colon == std::string_view::npos && !listForm)
-      return toonJsonQuoteBare(firstContent);
+      return toonJsonQuoteBare(firstContent, static_cast<int>(firstNonEmpty) + 1);
   }
 
   std::string out;
@@ -691,13 +713,33 @@ inline std::string toonToJson(std::string_view input) {
       // Skip list items ("- [...]") here -- they hold their own "- [M]:" nested
       // header handling in the list-item branch below.
       bool isListItem = !content.empty() && content[0] == '-';
-      if (lb != std::string_view::npos && !isListItem && (firstColon == std::string_view::npos || lb < firstColon)) {
+      // Spec Sec. 5.2 class 4: a line with an unquoted ':' whose first unquoted
+      // '[' precedes it IS an array-header line and MUST match the Sec. 6
+      // grammar -- anything else is a header syntax error (Sec. 14.2). The old
+      // code silently degraded every malformed bracket segment into an ordinary
+      // key whose name was the whole mangled header: "v[-1]: 1" -> key "v[-1]",
+      // "v[abc]: 1" -> key "v[abc]", "foo [2]: x" -> key "foo", "a[1:" -> key
+      // "a[1", "a[2]extra:" -> key "a[2]extra". A line with NO unquoted colon is
+      // not a header (Sec. 6: "items[2]" alone is a scalar line) and keeps the
+      // old unrecognized-line path below.
+      if (lb != std::string_view::npos && !isListItem && firstColon != std::string_view::npos && lb < firstColon) {
+        auto headerErr = [&](const char* why) -> void {
+          throw asvJSONError(std::string("TOON: ") + why + " at line " + std::to_string(li + 1));
+        };
         std::string_view keyRaw = content.substr(0, lb);
-        while (!keyRaw.empty() && (keyRaw.back() == ' ' || keyRaw.back() == '\t')) keyRaw = keyRaw.substr(0, keyRaw.size() - 1);
-        size_t rb = content.find(']', lb + 1);
+        // Whitespace between the key and its bracket segment is a header syntax
+        // error (Sec. 6): "foo [2]: x" must not decode as the key "foo".
+        if (!keyRaw.empty() && (keyRaw.back() == ' ' || keyRaw.back() == '\t'))
+          headerErr("whitespace before '[' in array header");
+        // The ']' scan is quote-aware like the field-list scan below: a quoted
+        // ']' inside the bracket segment does not close it.
+        size_t rboff = toonFindFirstUnquoted(content.substr(lb + 1), ']');
+        if (rboff == std::string_view::npos)
+          headerErr("unterminated bracket segment");   // "a[1:"
+        size_t rb = lb + 1 + rboff;
         bool okArrLen = false;
         size_t arrLen = 0;
-        if (rb != std::string_view::npos && rb > lb + 1) {
+        {
           std::string_view num = content.substr(lb + 1, rb - lb - 1);
           bool digits = !num.empty() && !(num[0] == '0' && num.size() > 1);
           size_t acc = 0;
@@ -706,38 +748,60 @@ inline std::string toonToJson(std::string_view input) {
             if (c < '0' || c > '9') { digits = false; break; }
             // Past the cap keep SCANNING the rest of the token as digits: a huge
             // digit prefix must still let a later non-digit ("99999999999x")
-            // clear `digits` and keep the old degrade-to-key:value path.
+            // clear `digits`.
             if (acc > asvJSONValue::MAX_ARRAY_SIZE) { tooLarge = true; continue; }
             acc = acc * 10 + static_cast<size_t>(c - '0');
             if (acc > asvJSONValue::MAX_ARRAY_SIZE) tooLarge = true;
           }
-          // A pure all-digit header past the cap used to degrade silently into a
-          // "key:value" line whose key was the whole mangled header. Fail loudly.
-          // Non-digit tokens ("v[2000000000x]: 1") still keep the old degrade.
+          // A pure all-digit header past the cap fails loudly (Sec. 6 lets N be
+          // any non-negative integer, but this implementation's array domain is
+          // capped at MAX_ARRAY_SIZE).
           if (digits && tooLarge)
             throw asvJSONError("TOON: array too large (declared " + std::string(num) + ")");
-          if (digits) { arrLen = acc; okArrLen = true; }
+          // Sec. 6: length = "0" / (1-9 *DIGIT) -- no sign, no empty, no leading
+          // zero. "[-1]", "[]", "[abc]", "[03]" and the unsupported keyed form
+          // "[2:]" are header syntax errors (Sec. 14.2), never plain keys.
+          if (!digits) headerErr("invalid array length in header");
+          arrLen = acc; okArrLen = true;
         }
         if (okArrLen) {
           size_t afterB = rb + 1;
           bool hasFields = afterB < content.size() && content[afterB] == '{';
+          // ']' must be followed directly by '{' or ':' (Sec. 6): "a[2]extra:"
+          // and "a[2] :" are header syntax errors, not keys.
+          if (!hasFields && !(afterB < content.size() && content[afterB] == ':'))
+            headerErr("expected '{' or ':' after ']' in array header");
           std::vector<std::string> fields;
           if (hasFields) {
             // Quote-aware: a quoted field name may contain '}' (e.g.
             // t[1]{"a}b"}:), and a plain find('}') ended the field list early,
             // leaving the header unrecognized.
             size_t relBr = toonFindFirstUnquoted(content.substr(afterB), '}');
-            size_t closeBr = (relBr == std::string_view::npos) ? std::string_view::npos : afterB + relBr;
-            if (closeBr != std::string_view::npos) {
-              std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
-              auto fieldParts = toonSplitCommas(fc);
-              for (auto& f : fieldParts) {
-                size_t fs = 0; while (fs < f.size() && f[fs] == ' ') fs++;
-                size_t fe = f.size(); while (fe > fs && f[fe-1] == ' ') fe--;
-                fields.push_back(f.substr(fs, fe - fs));
-              }
-              afterB = closeBr + 1;
+            if (relBr == std::string_view::npos)
+              headerErr("unterminated field list");
+            size_t closeBr = afterB + relBr;
+            std::string_view fc = content.substr(afterB + 1, closeBr - afterB - 1);
+            // Nested field groups (Sec. 9.3) are not implemented by this
+            // decoder; an unquoted '{' inside the field list is rejected
+            // instead of being silently truncated at the first '}'.
+            if (toonFindFirstUnquoted(fc, '{') != std::string_view::npos)
+              headerErr("nested field groups are not supported");
+            auto fieldParts = toonSplitCommas(fc);
+            for (auto& f : fieldParts) {
+              size_t fs = 0; while (fs < f.size() && f[fs] == ' ') fs++;
+              size_t fe = f.size(); while (fe > fs && f[fe-1] == ' ') fe--;
+              // An empty field list ("{}") or empty entry ("{a,}") is a header
+              // syntax error (Sec. 6/14.2).
+              if (fe == fs) headerErr("empty field list entry");
+              fields.push_back(f.substr(fs, fe - fs));
             }
+            afterB = closeBr + 1;
+            // A fields-bearing header carries no inline content (Sec. 14.2:
+            // "items[2]{a,b}: 1,2"); rows follow on their own lines. The ':'
+            // itself must come directly after '}' (Sec. 6 ABNF: "}:" with no
+            // intervening whitespace) -- "t[1]{a} :" is a header syntax error.
+            if (!(afterB < content.size() && content[afterB] == ':'))
+              headerErr("expected ':' after field list");
           }
           if (afterB < content.size() && content[afterB] == ':') {
             // If this header is the already-open root array with an empty key,
@@ -777,7 +841,7 @@ inline std::string toonToJson(std::string_view input) {
                 out += '{';
                 for (size_t fi = 0; fi < fields.size() && fi < vals.size(); fi++) {
                   if (fi > 0) out += ',';
-                  out += '"' + toonDecodeKey(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi]);
+                  out += '"' + toonDecodeKey(fields[fi]) + "\":" + toonJsonQuoteBare(vals[fi], static_cast<int>(rl) + 1);
                 }
                 out += '}';
                 rowCount++;
@@ -797,7 +861,7 @@ inline std::string toonToJson(std::string_view input) {
                 if (vs == ve) continue;
                 if (!stack.empty() && !stack.back().first) out += ',';
                 if (!stack.empty()) stack.back().first = false;
-                out += toonJsonQuoteBare(v.substr(vs, ve - vs));
+                out += toonJsonQuoteBare(v.substr(vs, ve - vs), static_cast<int>(li) + 1);
                 cellCount++;
               }
               if (cellCount != arrLen)
@@ -867,7 +931,7 @@ inline std::string toonToJson(std::string_view input) {
             size_t ce = c.size(); while (ce > cs && c[ce-1] == ' ') ce--;
             if (cs == ce) continue;
             if (cellCount > 0) out += ',';
-            out += toonJsonQuoteBare(c.substr(cs, ce - cs));
+            out += toonJsonQuoteBare(c.substr(cs, ce - cs), static_cast<int>(li) + 1);
             cellCount++;
           }
           if (cellCount != arrLen)
@@ -887,7 +951,7 @@ inline std::string toonToJson(std::string_view input) {
         }
         continue;
       }
-      out += toonJsonQuoteBare(val);
+      out += toonJsonQuoteBare(val, static_cast<int>(li) + 1);
       continue;
     }
     // bare "-" means an inline object list item
@@ -940,7 +1004,7 @@ inline std::string toonToJson(std::string_view input) {
       } else if (valPart == "{}") {
         out += '"' + keyStr + "\":{}";
       } else {
-        out += '"' + keyStr + "\":" + toonJsonQuoteBare(valPart);
+        out += '"' + keyStr + "\":" + toonJsonQuoteBare(valPart, static_cast<int>(li) + 1);
       }
       continue;   // handled as a member -- skip the unrecognized-line guard below
     }

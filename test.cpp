@@ -11172,8 +11172,11 @@ TEST(testTOONReviewFixes) {
 	// toonIsJsonValue() only looked at the first character, so these were copied
 	// verbatim into the intermediate JSON and broke it.
 	{
-		// Unterminated / invalid shapes become TOON strings, not broken JSON.
-		const char* srcs[] = {"key: [1,2", "key: \"unterminated", "key: {a: 1", "key: {a: 1}",
+		// Unterminated / invalid NON-QUOTED shapes become TOON strings, not
+		// broken JSON. A '"'-leading value follows spec Sec. 7.4 instead: it
+		// MUST be a complete quoted token, so an unterminated one is a named
+		// Sec. 14.2 error, never a string -- asserted below.
+		const char* srcs[] = {"key: [1,2", "key: {a: 1", "key: {a: 1}",
 		                      "key: [1,2] junk", "key: {\"a\":1} x"};
 		for (const char* s : srcs) {
 			asvJSON j;
@@ -11185,6 +11188,15 @@ TEST(testTOONReviewFixes) {
 			asvJSON j2;
 			ASSERT(j2.fromTOON(std::string_view(j.toTOON())));
 			ASSERT_EQ(j2.serialize(), j.serialize());
+		}
+		// A '"'-leading value that is not a complete quoted token is rejected
+		// with a line-anchored error instead of degrading into a string that
+		// contains a raw quote (spec Sec. 7.4 overrides the Sec. 4 fallback).
+		{
+			asvJSON j;
+			ASSERT(!j.fromTOON("key: \"unterminated\n"));
+			ASSERT(j.lastError.find("unterminated quoted string") != std::string::npos);
+			ASSERT(j.lastError.find("line 1") != std::string::npos);
 		}
 		// Valid JSON values still pass through unquoted.
 		{
@@ -11248,8 +11260,10 @@ TEST(testTOONReviewFixes) {
 		ASSERT(!bad.fromTOON("[3]:\n"));
 	}
 	// 3c. Quoted inline values take the cheap escape-aware scan, not a parse:
-	// a complete quoted string passes through, an unterminated one (or one with
-	// trailing junk) is kept as a string.
+	// a complete quoted string passes through (trailing blanks allowed).
+	// Spec Sec. 7.4 overrides the Sec. 4 string fallback for a '"'-leading
+	// token: unterminated or with trailing junk it is a named Sec. 14.2
+	// error, not a string containing a raw quote.
 	{
 		asvJSON a;
 		ASSERT(a.fromTOON("s: \"a\\\"b\"\n"));
@@ -11261,11 +11275,13 @@ TEST(testTOONReviewFixes) {
 		ASSERT(c.fromTOON("s: \"a\\\\\"\n"));
 		ASSERT_EQ(std::string(c.getString("s")), std::string("a\\"));
 		asvJSON d;
-		ASSERT(d.fromTOON("s: \"unterminated\n"));
-		ASSERT_EQ(std::string(d.getString("s")), std::string("\"unterminated"));
+		ASSERT(!d.fromTOON("s: \"unterminated\n"));
+		ASSERT(d.lastError.find("unterminated quoted string") != std::string::npos);
+		ASSERT(d.lastError.find("line 1") != std::string::npos);
 		asvJSON e;
-		ASSERT(e.fromTOON("s: \"abc\"x\n"));
-		ASSERT_EQ(std::string(e.getString("s")), std::string("\"abc\"x"));
+		ASSERT(!e.fromTOON("s: \"abc\"x\n"));
+		ASSERT(e.lastError.find("trailing content after quoted string") != std::string::npos);
+		ASSERT(e.lastError.find("line 1") != std::string::npos);
 	}
 	// 4. Whitespace-only lines count as empty for the bare-root-scalar scan.
 	{
@@ -11591,17 +11607,20 @@ TEST(testTOONReviewFixes2) {
 		ASSERT(!j.fromTOON("key:\n  \"a:b\"\n"));
 		ASSERT(j.lastError.find("unrecognized line") != std::string::npos);
 	}
-	// 3. A pure all-digit declared array length past 1e9 used to degrade into a
-	// "key:value" line with the mangled header as its key. It now fails loudly;
-	// a non-digit trailing token still keeps the old degrade.
+	// 3. A declared array length that does not match the Sec. 6 grammar fails
+	// loudly instead of degrading into a "key:value" line whose key is the
+	// mangled header: an all-digit length past the cap is "array too large",
+	// and a non-digit inside the brackets ("v[2000000000x]") is a header
+	// syntax error (Sec. 6 length grammar, Sec. 14.2) -- never a plain key.
 	{
 		asvJSON j;
 		ASSERT(!j.fromTOON("v[2000000000]: x\n"));
 		ASSERT(j.lastError.find("array too large") != std::string::npos);
 		asvJSON k;
-		ASSERT(k.fromTOON("v[2000000000x]: 1\n"));
-		ASSERT(k.get("v[2000000000x]") != nullptr);
-		if (k.get("v[2000000000x]")) ASSERT_EQ(k.get("v[2000000000x]")->getInt(), int64_t(1));
+		ASSERT(!k.fromTOON("v[2000000000x]: 1\n"));
+		ASSERT(k.lastError.find("invalid array length in header") != std::string::npos);
+		ASSERT(k.lastError.find("array too large") == std::string::npos);
+		ASSERT(k.lastError.find("line 1") != std::string::npos);
 		// the in-range header is untouched
 		asvJSON ok;
 		ASSERT(ok.fromTOON("v[3]: 1,2,3\n"));
@@ -11611,7 +11630,8 @@ TEST(testTOONReviewFixes2) {
 		asvJSON jl;
 		ASSERT(!jl.fromTOON("- [2000000000]: x\n"));
 		ASSERT(jl.lastError.find("array too large") != std::string::npos);
-		// ...and a non-digit inside its brackets still degrades into a string element
+		// ...and a non-digit inside its brackets still degrades into a string
+		// element (spec Sec. 5.2 class 2, not a class-4 header line)
 		asvJSON kl;
 		ASSERT(kl.fromTOON("- [2000000000x]: 1\n"));
 		ASSERT(kl.getRoot() != nullptr && kl.getRoot()->size() == size_t(1));
@@ -11620,13 +11640,12 @@ TEST(testTOONReviewFixes2) {
 			ASSERT(e != nullptr && e->type == asvJSONValue::STRING);
 			if (e) ASSERT_EQ(std::string(e->str_data), "[2000000000x]: 1");
 		}
-		// a digit prefix longer than the cap still lets a later 'x' degrade:
-		// the scan past 1e9 keeps checking the remaining chars for non-digits
+		// a digit prefix longer than the cap with a trailing 'x' is still the
+		// non-digit grammar error, not the all-digit "array too large" one
 		asvJSON jh;
-		ASSERT(jh.fromTOON("v[99999999999x]: 1\n"));
+		ASSERT(!jh.fromTOON("v[99999999999x]: 1\n"));
+		ASSERT(jh.lastError.find("invalid array length in header") != std::string::npos);
 		ASSERT(jh.lastError.find("array too large") == std::string::npos);
-		ASSERT(jh.get("v[99999999999x]") != nullptr);
-		if (jh.get("v[99999999999x]")) ASSERT_EQ(jh.get("v[99999999999x]")->getInt(), int64_t(1));
 		// in-range list headers are untouched: "- [3]: 1,2,3" is one item whose
 		// value is the nested array [1,2,3], so the root holds a single element
 		asvJSON ok2;
@@ -12663,7 +12682,10 @@ TEST(testJson5SpecMatrixAndEmptyDiags) {
   // decodes \uXXXX at the start AND in continuations. Lone surrogates (not
   // storable as UTF-8 keys) and escaped identifiers in VALUE position (ES
   // lexes them as IdentifierName, never as the true/null/Infinity keyword)
-  // are named errors.
+  // are named errors. Wave 104 (probe sw105): the decoded code point must
+  // ALSO satisfy the ID_Start / ID_Continue production - the first pass let
+  // {\u0035:1} key "5" and {a\u202Fb:1} embed a space character while the
+  // raw spellings of both were errors.
   {
     asvJSON j;
     ASSERT(j.fromJSON5(std::string_view("{\\u0061:1}")));
@@ -12677,10 +12699,42 @@ TEST(testJson5SpecMatrixAndEmptyDiags) {
     ASSERT(m.fromJSON5(std::string_view("{\\uD83D\\uDE00:1}")));
     std::string s3; m.getRoot()->serialize(s3, false, 0);
     ASSERT_EQ(s3, std::string("{\"\xF0\x9F\x98\x80\":1}"));
-    asvJSON p;   // the escape bypasses ID_Start: {\u0035:1} is the key "5"
-    ASSERT(p.fromJSON5(std::string_view("{\\u0035:1}")));
-    std::string s4; p.getRoot()->serialize(s4, false, 0);
-    ASSERT_EQ(s4, std::string("{\"5\":1}"));
+    // The escape must still satisfy the IdentifierStart / IdentifierPart
+    // production (ES UnicodeCodePointEscapeSequence static semantics): the raw
+    // spellings below already failed, so the escape spelling may not smuggle
+    // the same code point into a key. A digit is ID_Continue only.
+    asvJSON p;
+    ASSERT(!p.fromJSON5(std::string_view("{\\u0035:1}")));
+    ASSERT(p.getLastError().find("not an identifier character") != std::string::npos);
+    asvJSON pc;   // digit in CONTINUATION is legal: {a\u0035b:1} is {"a5b":1}
+    ASSERT(pc.fromJSON5(std::string_view("{a\\u0035b:1}")));
+    std::string s4; pc.getRoot()->serialize(s4, false, 0);
+    ASSERT_EQ(s4, std::string("{\"a5b\":1}"));
+    // every separator the format treats as whitespace (the wsRun set) is never
+    // an identifier character, escaped or raw - raw NBSP / U+202F / U+2000 in a
+    // key already fail ("Expected string"), the escapes must agree.
+    const char* wsEsc[] = {
+      "{\\u00A0a:1}", "{a\\u00A0b:1}", "{\\u1680a:1}", "{a\\u202Fb:1}",
+      "{\\u2000a:1}", "{\\u2028a:1}", "{a\\u2029b:1}", "{\\u205Fa:1}",
+      "{\\u3000a:1}", "{\\uFEFFa:1}",
+    };
+    for (const char* src : wsEsc) {
+      asvJSON w;
+      ASSERT(!w.fromJSON5(std::string_view(src)));
+      ASSERT(w.getLastError().find("not an identifier character") != std::string::npos);
+    }
+    // raw-vs-escape parity for the pinned separators
+    {
+      asvJSON raw;   // {a<U+202F>b: 1} with raw bytes - the wave-101 pin
+      ASSERT(!raw.fromJSON5(std::string_view("{a\xE2\x80\xAF" "b: 1\n}")));
+    }
+    // other non-ID ASCII escapes rejected at the start, letters kept
+    asvJSON hy;
+    ASSERT(!hy.fromJSON5(std::string_view("{\\u002Da:1}")));
+    asvJSON dl;
+    ASSERT(!dl.fromJSON5(std::string_view("{\\u007Fa:1}")));
+    asvJSON nonascii;   // >= U+0080 keeps the raw byte-level leniency
+    ASSERT(nonascii.fromJSON5(std::string_view("{\\u00E9:1}")));
     asvJSON q;
     ASSERT(!q.fromJSON5(std::string_view("{\\uD800:1}")));
     ASSERT(q.getLastError().find("lone surrogate") != std::string::npos);

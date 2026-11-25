@@ -16,6 +16,12 @@
 // nesting depth past MAX_NESTING_DEPTH on a programmatically-built tree --
 // degrades to the sentinel `nil` rather than aborting the write; such a value
 // comes back as null on reparse.
+//
+// A yaml_set OBJECT is written as the Extended-JSON {"$set":[...]} envelope
+// (a key-marked "$set" token plus a nested group of member keys), so the set
+// flag survives the round trip; the plain key/value spelling would decode
+// back as an ordinary object and drop it. Keys only -- the same convention
+// as core's JSON envelope (appendJsonToken).
 
 #include "../core.hpp"
 
@@ -501,6 +507,35 @@ inline void sexprSerializeVal(const asvJSONValue* v, std::string& out, int depth
     }
     case asvJSONValue::OBJECT: {
       out += '(';
+      if (v->yaml_set) {
+        // A YAML set is the {key: null, ...} shape PLUS the yaml_set flag;
+        // the plain key/value spelling below re-reads as an ordinary object
+        // and silently drops the flag (operator== / cloneValue compare it,
+        // wave 61). Emit the Extended-JSON {"$set":[...]} envelope instead --
+        // the same convention CUSTOM_TAG/TIMESTAMP use here -- which the core
+        // parser recognizes and restores as a set. The member list rides in a
+        // nested group whose first item is a KEY-MARKED quoted string, so the
+        // 2-item heuristic decodes it as an array (never an object); an empty
+        // set's () group decodes to []. Keys only, exactly like the core JSON
+        // envelope (core.hpp's appendJsonToken), whose inline array is
+        // unguarded too -- so a set at the exact depth boundary behaves the
+        // same through both encoders.
+        out += '"';
+        out += SEXPR_KEY_MARK;
+        out += "$set\" (";
+        bool firstKey = true;
+        if (v->obj) {
+          for (const auto& kv : *(v->obj)) {
+            if (!firstKey) out += ' ';
+            firstKey = false;
+            out += '"';
+            appendJsonEscaped(out, kv.first);
+            out += '"';
+          }
+        }
+        out += "))";
+        break;
+      }
       if (!v->obj || v->obj->empty()) {
         // Empty object: encode as (() {}) so the decoder can tell it apart
         // from the empty array (). The bare {} symbol cannot be a quoted
