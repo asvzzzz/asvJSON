@@ -28,8 +28,11 @@
 // empty form here, so NULL, an empty STRING and an empty BINARY all encode as
 // `0:` and decode back as the empty STRING -- the empty-BINARY and NULL types
 // cannot survive a round-trip. Like the parser, the encoder bounds recursion at
-// MAX_NESTING_DEPTH: a deeper tree cannot be built by parsing, but one built
+// MAX_NESTING_DEPTH container LEVELS (48 on both sides, matching core parse(),
+// CBOR and MessagePack): parsing cannot build a deeper tree, and one built
 // programmatically throws "nesting too deep" instead of overflowing the stack.
+// The guard gates ARRAY/OBJECT and CUSTOM_TAG (a tag counts as one level);
+// scalars render at any depth, so the leaf of a legal 48-level chain survives.
 // Container sizes (ARRAY/OBJECT) are also enforced on encode; STRING/BINARY/
 // OBJECTID/REGEX/EXTENSION payloads are checked against MAX_STRING_LEN at their
 // respective emit sites - an oversized value is rejected at its own emit site
@@ -113,10 +116,20 @@ inline int64_t bencodeParseInt(std::string_view s, size_t& pos) {
 }
 
 inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_t& pos, int depth) {
-  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
-    throw asvJSONError("bencode: nesting too deep");
   if (pos >= s.size()) throw asvJSONError("bencode: unexpected end of input");
   char c = s[pos];
+  // Depth guard on the CONTAINER tokens only (the CBOR/MsgPack convention):
+  // exactly MAX_NESTING_DEPTH (48) container levels are accepted and the 49th
+  // is rejected, while a SCALAR may sit at ANY level - the INT leaf of a legal
+  // 48-deep chain arrives at depth 48 and must not trip the bound (wave-47:
+  // guard the creation site, do not clip the leaf). The old entry check
+  // `depth > MAX` accepted a 49th container; serialize() then null-degrades
+  // it, so a bencode -> JSON round trip silently lost the deepest level and
+  // the tree violated the library-wide MAX_NESTING_DEPTH contract
+  // (user review, 2026-11-25).
+  if ((c == 'l' || c == 'd') &&
+      depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+    throw asvJSONError("bencode: nesting too deep");
   if (c == 'i') {
     // makeInt uses new(std::nothrow): a bare `return` handed back the nullptr
     // it produces on OOM, which then landed in a list/dictionary as a null
@@ -175,11 +188,13 @@ inline std::unique_ptr<asvJSONValue> bencodeParseValue(std::string_view s, size_
 
 inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
   if (!v) throw asvJSONError("bencode: invalid null value");
-  // Mirror the parser's depth guard: parsing cannot build a tree this deep, but
-  // a programmatic one can -- deep recursion here is a stack overflow, not an
-  // error. Keep the bound identical on both sides.
-  if (depth > static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
-    throw asvJSONError("bencode: nesting too deep");
+  // Depth guard mirrored from the parser, at the RECURSION sites: ARRAY/OBJECT
+  // and CUSTOM_TAG (a tag owns a value, so it consumes one level like a
+  // container - the core appendJsonToken convention; a raw-API custom_value
+  // chain would otherwise recurse unbounded). Scalars render at any depth.
+  // Exactly MAX_NESTING_DEPTH (48) container levels encode; a programmatically
+  // deeper tree throws instead of overflowing the stack. A tree this deep
+  // cannot be built by parsing any more.
   using T = asvJSONValue::Type;
   switch (v->type) {
     case T::INT:
@@ -202,6 +217,8 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
       break;
     case T::ARRAY: {
+      if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("bencode: nesting too deep");
       if (v->arr->size() > asvJSONValue::MAX_ARRAY_SIZE)
         throw asvJSONError("bencode: list too large");
       out += 'l';
@@ -270,10 +287,14 @@ inline void bencodeEncode(const asvJSONValue* v, std::string& out, int depth) {
       out.append(reinterpret_cast<const char*>(v->bin_data.data()), v->bin_data.size());
       break;
     case T::CUSTOM_TAG:
+      if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("bencode: nesting too deep");
       if (v->custom_value) bencodeEncode(v->custom_value.get(), out, depth + 1);
       else out += "0:";
       break;
     case T::OBJECT: {
+      if (depth >= static_cast<int>(asvJSONValue::MAX_NESTING_DEPTH))
+        throw asvJSONError("bencode: nesting too deep");
       if (v->obj->size() > asvJSONValue::MAX_OBJECT_SIZE)
         throw asvJSONError("bencode: dictionary too large");
       std::vector<std::pair<std::string_view, const asvJSONValue*>> entries;

@@ -12839,6 +12839,83 @@ TEST(testCrossFormatSelfConsistency) {
   }
 }
 
+TEST(testBencodeDepthParity) {
+  // User review 2026-11-25: bencode's entry guard (`depth > MAX`) accepted 49
+  // container levels while core parse()/CBOR/MessagePack accept 48; the extra
+  // level was then null-degraded by serialize(), so bencode -> JSON silently
+  // lost the deepest container. The guard now sits on the container tokens /
+  // branches only (CBOR/MsgPack convention) and a tag consumes one level.
+  auto chain = [](int n) { return std::string(n, 'l') + "i1e" + std::string(n, 'e'); };
+  {
+    asvJSON ok48;
+    std::string c48 = chain(48);
+    ASSERT_MSG(ok48.fromBencode(std::string_view(c48)), ok48.getLastError().c_str());
+    std::string s1;
+    ok48.getRoot()->serialize(s1, false, 0);
+    ASSERT(s1.find("null") == std::string::npos);        // 48 containers + leaf survive
+    asvJSON back;                                        // parse() accepts the same tree
+    ASSERT_MSG(back.parse(std::string_view(s1)), back.getLastError().c_str());
+    asvJSON bad;
+    ASSERT(!bad.fromBencode(std::string_view(chain(49))));
+    ASSERT(bad.getLastError().find("nesting too deep") != std::string::npos);
+    ASSERT(bad.getRoot() == nullptr);
+  }
+  {
+    auto mkChain = [](int n) {
+      std::unique_ptr<asvJSONValue> inner = asvJSONValue::makeInt(7);
+      for (int i = 0; i < n; i++) {
+        auto a = asvJSONValue::makeArray();
+        if (!a) break;
+        a->arr->push_back(std::move(inner));
+        inner = std::move(a);
+      }
+      return inner;
+    };
+    asvJSON j;
+    j.setRoot(mkChain(48));
+    std::string w = j.toBencode();
+    asvJSON d;
+    ASSERT(d.fromBencode(std::string_view(w)));
+    std::string s1, s2;
+    j.getRoot()->serialize(s1, false, 0);
+    d.getRoot()->serialize(s2, false, 0);
+    ASSERT_EQ(s1, s2);
+    asvJSON k;
+    k.setRoot(mkChain(49));
+    bool threw = false;
+    try {
+      k.toBencode();
+    } catch (const asvJSONError& e) {
+      threw = true;
+      ASSERT(std::string(e.what()).find("nesting too deep") != std::string::npos);
+    }
+    ASSERT(threw);
+    // nested CUSTOM_TAG chain: the tag counts as one level (raw-API chains are
+    // not bounded by any parser, so the encoder must cap them too)
+    auto mkTags = [](int n) {
+      std::unique_ptr<asvJSONValue> cur = asvJSONValue::makeInt(1);
+      for (int i = 0; i < n; i++) {
+        auto tg = std::make_unique<asvJSONValue>();
+        tg->type = asvJSONValue::CUSTOM_TAG;
+        tg->str_data = "t";
+        tg->custom_value = std::move(cur);
+        cur = std::move(tg);
+      }
+      return cur;
+    };
+    asvJSON p;
+    p.setRoot(mkTags(48));
+    bool threwP = false;
+    try { p.toBencode(); } catch (const asvJSONError&) { threwP = true; }
+    ASSERT(!threwP);
+    asvJSON q;
+    q.setRoot(mkTags(49));
+    bool threwQ = false;
+    try { q.toBencode(); } catch (const asvJSONError&) { threwQ = true; }
+    ASSERT(threwQ);
+  }
+}
+
 TEST(testUBJSONTypedMatrix) {
   // Probe sw94: typed containers carry BARE payload elements (no per-element
   // marker): scalar-typed bytes ARE values (0xFF int8 = -1), $Z#n is an ARRAY
@@ -43208,6 +43285,7 @@ RUN(testGOONAudit);
 	RUN(testJson5SpecMatrixAndEmptyDiags);
 RUN(testFormatTypeOnEmptySuccess);
 RUN(testCrossFormatSelfConsistency);
+RUN(testBencodeDepthParity);
 RUN(testUBJSONTypedMatrix);
 RUN(testPointerLenientTilde);
 RUN(testYamlTaggedFoldAndRecursionBudget);
